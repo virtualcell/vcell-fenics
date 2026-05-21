@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.6 (boundary conditions), and §1.8 (coupling and expression vocabulary) have been drafted in detail; the surrounding sections are sketched as headings only.
+**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.6 (boundary conditions), §1.8 (coupling and expression vocabulary), and §1.10 (moving subdomains) have been drafted in detail; the surrounding sections are sketched as headings only.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -104,7 +104,15 @@ These three patterns from the user's experience with VCell and SBML Spatial are 
 
 **(2) Per-cell connected components within a subdomain class.** When a subdomain class (e.g. `membrane`) is realised as many topologically disconnected regions — one membrane per cell in a tissue patch — and a species on the class is supposed to diffuse *within each cell's membrane* but **not** *between cells*, the class-level equation as written would couple all components into one connected field. The checkerboard case makes this concrete: a single cell's membrane spans four boundary patches shared with its four neighbours; the species on that cell should diffuse across those four patches, but not onto a neighbour's four patches. Tier 3 (one subdomain class per cell) handles this but scales poorly with cell count. Cleaner mechanisms — per-region variable instancing where one class declaration generates one variable instance per region with independent value fields, or a topology-aware diffusion operator that respects connected components — are deferred to v2.
 
-**(3) Same-class-on-both-sides ambiguity for membrane expressions.** When a membrane subdomain is adjacent to two regions of the *same* subdomain class — both sides are the same cell type's cytoplasm, both compartments are extracellular space, etc. — variables on either side become ambiguous in expressions written on the membrane. A Na/Ca exchanger sitting in a membrane between two `cytoplasm` regions needs `Na` and `Ca` on each side separately to compute the exchange flux, but `trace(Na)` cannot distinguish them — both sides resolve to the same subdomain class. The v2 syntax `trace(u, from=<subdomain>)` anticipated in §1.8.7 does *not* solve this: the subdomain is the same on both sides; the *region* or *orientation* is what differs. A working v2 syntax would need a side-or-region specifier — e.g. `trace(Na, side=outward_n)` / `trace(Na, side=inward_n)` using the membrane's outward normal as the canonical orientation reference, or `trace(Na, region=<region_name>)` when a specific region is named. Either approach requires the geometry to provide enough orientation metadata for the formalism to resolve the reference unambiguously. v1 punts; cases that need this fall back to Tier 3 (declare distinct subdomain classes for each region — e.g. `cytoplasm_A` and `cytoplasm_B` — even when their physics is identical), trading some duplication for unambiguous addressability.
+**(3) Same-class-on-both-sides ambiguity for membrane expressions.** When a membrane subdomain is adjacent to two regions of the *same* subdomain class — both sides are the same cell type's cytoplasm, both compartments are extracellular space, etc. — variables on either side become ambiguous in expressions written on the membrane. A Na/Ca exchanger sitting in a membrane between two `cytoplasm` regions needs `Na` and `Ca` on each side separately to compute the exchange flux, but `trace(Na)` cannot distinguish them — both sides resolve to the same subdomain class. The v2 syntax `trace(u, from=<subdomain>)` anticipated in §1.8.7 does *not* solve this: the subdomain is the same on both sides; the *region* or *orientation* is what differs.
+
+The recommended v2 path is **intrinsic disambiguation by region index** — each region in the geometry carries a unique integer ID, and an internal interface between two regions inherits a deterministic ordering from those IDs. Syntax sketch: `trace(Na, side=a)` and `trace(Na, side=b)` (or `inside`/`outside`, naming-to-be-finalised) where one label refers to the lower-ID adjacent region and the other to the higher-ID. This aligns with how the FE level already distinguishes the two sides of an internal facet (UFL's `("+")` / `("-")` convention is precisely index-based), needs no geometric metadata beyond stable region IDs, and handles symmetric cases — Na/Ca on two identical cytoplasm regions — with no model-side naming overhead.
+
+The trade-off is that index-based labels carry no physical meaning: if the geometry is regenerated with a different region ordering, the model's "side a" and "side b" silently swap. The geometry is therefore expected to expose a readable region-ID-to-label mapping (e.g. `region_id 17 → cyto_left_cell`) for results interpretation and post-processing, even though the math description does not reference those labels.
+
+When physical names *must* appear in the math (because the cell biology depends on knowing which region is which — e.g. a polarised tissue where left and right cells genuinely differ in role even if their compartment classes match), the opt-in fallback is **explicit region naming**: `trace(Na, region=<region_name>)`, requiring the geometry to declare names for the regions in question. This trades some compactness for unambiguous physical meaning.
+
+v1 ships neither mechanism. Cases that need either fall back to Tier 3 (declare distinct subdomain classes for each region — `cytoplasm_left` and `cytoplasm_right` — even when their physics is identical), trading some duplication for unambiguous addressability.
 
 These three limitations are flagged here rather than buried in v2 roadmap notes because they are the most likely surprises to bite a modeller coming from a mature tool like VCell that has accumulated workarounds for all three.
 
@@ -206,7 +214,7 @@ The motion variable lives on the same subdomain whose motion it represents. The 
 When a variable's subdomain has `motion.kind` of `prescribed` or `unknown`, the value field is defined on the deforming manifold. The semantic conventions:
 
 - **Spatial coordinates and geometric helpers** (`x`, `n(x)`, `H(x)`, etc.) evaluate against the current (deformed) configuration at every time step.
-- **Time derivative `∂_t u`** in an operator template's `∂_t` slot is interpreted as the derivative *at a fixed material point* — i.e., the Lagrangian / material time derivative. The template's compression / dilution term (`u ∇·v` for T1, `ρ ∇_Γ·v_Γ` for T2 — both computed from `subdomain.motion`) reconciles this with an Eulerian observer's $\partial_t$ when needed.
+- **Time derivative `∂_t u`** in an operator template's `∂_t` slot is the partial-time derivative at fixed lab-frame coordinate (Eulerian convention). The template writes the equation in conservation form $\partial_t u + \nabla \cdot (u \mathbf{v}_\Omega) = \ldots$ where $\mathbf{v}_\Omega$ is the substrate velocity from `subdomain.motion`; expanding the flux divergence yields the compression / dilution term $u \nabla \cdot \mathbf{v}_\Omega$ automatically. Full discussion in §1.10.5.
 - **Initial conditions** are evaluated on the initial (t=0) configuration. For subdomains with `motion.kind = unknown`, the initial configuration is determined by the motion variable's initial condition (a displacement field at t=0).
 
 These conventions are imposed *by* the operator templates; the user writing a template's `source`, `diffusion`, or BC expression does not need to think about which frame they are working in. The escape-hatch weak form (§1.5) requires the user to be explicit about time-derivative conventions — that is a v1.5 problem.
@@ -595,7 +603,7 @@ The concrete syntactic carrier — parsable string, Python AST, SymPy expression
 
 **When required.** Whenever an expression evaluated on $\Sigma_{\text{low}}$ references a variable defined on a strictly higher-dimensional $\Sigma_{\text{high}}$. Variables defined on the *same* subdomain as the expression are referenced directly. Variables defined on a *strictly lower-dimensional* subdomain than the expression's evaluation domain are intentionally not referenceable inside an expression (§1.8.7): the surface → bulk direction is mathematically non-unique, and the cases that need it are better expressed as a named bulk variable with its own equation tied to the surface variable via a boundary condition.
 
-**Side specifier (deferred to v2).** When the higher-dim subdomain $\Sigma_{\text{high}}$ contributes exactly one connected region on one side of the lower-dim evaluation context, `trace(u)` is unambiguous. Two cases require a side specifier and are deferred (see §1.2.7): (a) a single variable defined on both sides of an internal interface where the two sides are *different* subdomain classes — resolved by `trace(u, from=<subdomain>)`; (b) an interface between two regions of the *same* subdomain class — resolved by a region-or-orientation specifier (syntax TBD). v1 rejects ambiguous traces at validation time and the modeller falls back to Tier 3 (separate subdomain classes) for unambiguous addressing.
+**Side specifier (deferred to v2).** When the higher-dim subdomain $\Sigma_{\text{high}}$ contributes exactly one connected region on one side of the lower-dim evaluation context, `trace(u)` is unambiguous. Two cases require a side specifier and are deferred (see §1.2.7): (a) a single variable defined on both sides of an internal interface where the two sides are *different* subdomain classes — resolved by `trace(u, from=<subdomain>)`; (b) an interface between two regions of the *same* subdomain class — resolved by intrinsic index-based disambiguation `trace(u, side=a)` / `trace(u, side=b)` (recommended path, mirrors UFL `+`/`-` semantics) or, when physical names matter, by explicit region naming `trace(u, region=<region_name>)`. v1 rejects ambiguous traces at validation time and the modeller falls back to Tier 3 (separate subdomain classes) for unambiguous addressing.
 
 **Implementation.** Trace evaluation is a backend concern. In FEniCSx 0.10, traces of bulk variables on internal facets are realised through native mixed-dimensional assembly (see `docs/research/2026-05-21-fenicsx-ecosystem.md`). The user-facing formalism does not commit to a particular evaluation strategy.
 
@@ -686,7 +694,178 @@ Type mismatches are validation errors. A scalar where a vector is expected is **
 
 ### 1.10 Moving subdomains
 
-*To be written.* `subdomain.motion ∈ {none, prescribed: <expr>, unknown: <motion_variable>}`. The unknown case requires an equation governing the motion variable. Variables on a moving subdomain are defined on the deforming manifold; the operator templates handle the time-derivative convention. ALE / mesh-motion algorithm choices are solver-side.
+#### 1.10.1 The three motion kinds
+
+Every subdomain carries a `motion` field whose `kind` is one of:
+
+| Kind | Meaning |
+|---|---|
+| `none` | Subdomain is static. Default when `motion` is omitted. Substrate velocity is zero everywhere; compression / dilution terms in operator templates vanish; geometric helpers (`n`, `H`, etc.) evaluate against the initial (and only) configuration. |
+| `prescribed` | Subdomain moves according to an expression the user supplies. The expression may be a velocity field or a displacement field (§1.10.2); the formalism converts internally. The substrate velocity feeds compression / dilution terms automatically. |
+| `unknown` | Subdomain moves according to a motion variable solved by an equation in the same MathDescription. The motion variable is a regular vector variable (§1.3.4); the equation governing it is any equation that produces a matching vector field on the right subdomain. This is the mechanics-driven-migration path; it is the central capability v1 builds toward even though v1's template library does not yet include mechanics templates (T5–T7). |
+
+The default is `none`. When `kind: prescribed` or `kind: unknown`, the substrate velocity at every point on the subdomain is the value of the relevant motion field at that point. All variables on the subdomain experience the same substrate velocity (memory decision 6); equation templates that have a substrate-velocity-dependent term (compression in T1, dilution in T2) handle it without per-equation user input.
+
+#### 1.10.2 Prescribed motion: velocity and displacement forms
+
+Either form may be used; not both at once:
+
+| Form | Schema | Meaning |
+|---|---|---|
+| Velocity | `motion: { kind: prescribed, velocity: <vector_expr> }` | The substrate velocity field $\mathbf{v}_\Omega(\mathbf{x}, t)$. The current configuration is obtained by integrating $\dot{\mathbf{x}} = \mathbf{v}_\Omega$ from the reference (initial) configuration. |
+| Displacement | `motion: { kind: prescribed, displacement: <vector_expr> }` | The displacement field $\mathbf{d}(\mathbf{X}, t)$ at reference point $\mathbf{X}$. The current position is $\mathbf{X} + \mathbf{d}$. The substrate velocity at a given current point is $\partial \mathbf{d}/\partial t$, computed by the backend. |
+
+The two forms are mathematically equivalent: a displacement field uniquely determines a velocity field (by time-differentiation along the reference point), and a velocity field uniquely determines a displacement field (by time-integration along the material point, given the reference configuration). The form a modeller picks should match the natural specification of the motion they intend:
+
+- **Velocity form is natural for**: radial expansion (`r_dot * x / |x|`), fluid-driven motion, prescribed steady flow.
+- **Displacement form is natural for**: rigid translations (`[v_x, v_y, v_z] * t`), oscillations (`A * sin(omega * t) * e_1`), prescribed wall deformations.
+
+The backend's job is to convert as needed for its assembly; the user does not need to do this conversion.
+
+**Type constraints.** For a `volume` subdomain, the velocity or displacement is a vector in the ambient dimension $\mathbb{R}^d$. For a `surface` subdomain, the velocity may include both tangential and normal components (memory decision 6a — tangential material flow is a real physical phenomenon, not an edge case). For a `point` subdomain, the velocity is a vector specifying how the point moves through space.
+
+#### 1.10.3 Unknown motion: motion variable and governing equation
+
+When `motion.kind: unknown`, the user provides the *name* of a motion variable; that variable is declared in the `variables:` block like any other vector variable, on the same subdomain whose motion it represents. An equation governing this motion variable must exist elsewhere in the MathDescription.
+
+```yaml
+subdomains:
+  - name: membrane
+    kind: surface
+    motion: { kind: unknown, variable: v_membrane }
+
+variables:
+  - { name: v_membrane, subdomain: membrane, type: vector }
+
+equations:
+  - template: <any template producing a vector field on `membrane`>
+    variable: v_membrane
+    subdomain: membrane
+    temporality: <as appropriate>
+    # ...slots / form / etc.
+```
+
+**Equation choice is open.** Any equation that produces a matching vector field on the motion variable's subdomain is acceptable: a mechanics template (T5 Stokes, T6/T7 elasticity — v2+); a T1-style steady Laplace equation for ALE harmonic mesh-velocity extension; a custom force balance via the weak-form escape hatch (§1.5). v1 validates only that *some* equation governs the variable, on the right subdomain, producing the right type.
+
+**Practical v1 caveat.** Because v1 does not ship mechanics templates, unknown-motion equations in v1 will typically use the weak-form escape hatch (§1.5). The schema and validator support unknown motion fully; the limitation is template-library coverage, not formalism design.
+
+**Temporality of the motion equation.** May be `time_dependent` (the motion variable evolves under, e.g., an inertia-bearing momentum equation) or `steady_state` (the motion is solved as a quasi-static balance at each time step — typical for low-Reynolds cell-mechanics where inertia is negligible). The choice belongs to the user and is independent of the temporality of other equations in the same MathDescription.
+
+#### 1.10.4 Reference configuration and initial conditions
+
+The **reference configuration** is the initial mesh as loaded from the geometry. The MathDescription does not provide a mechanism to specify a different reference configuration; if a model needs a non-mesh reference, the geometry is the right place to express that, not the math.
+
+**Initial conditions for unknown-motion variables** default to zero. The interpretation:
+
+- For a displacement-typed motion variable: $\mathbf{d}(\mathbf{X}, 0) = \mathbf{0}$ means "the initial configuration equals the reference configuration." This is the overwhelmingly common case — the cell starts where the mesh says it is.
+- For a velocity-typed motion variable: $\mathbf{v}(\mathbf{x}, 0) = \mathbf{0}$ means "starts at rest." Also the common case.
+
+Users may override the IC to specify a non-zero initial displacement (a deformed starting configuration) or initial velocity (an in-progress motion). The schema accepts this; the validator enforces type-compatibility (vector IC for vector variable, etc.).
+
+**ICs for other variables on the moving subdomain** are evaluated on the initial (t=0) configuration. For unknown-motion subdomains, that is the configuration produced by the motion variable's IC, which by default is the reference configuration. Composability is direct: writing `initial_condition: "1.0 + 0.5 * cos(2 * theta(x))"` for a receptor density refers to angular coordinate $\theta$ on the *initial* membrane — exactly what the modeller intends.
+
+#### 1.10.5 Material vs. Eulerian conventions in operator templates
+
+Operator templates write equations in **Eulerian conservation form**:
+
+$$\partial_t u \;+\; \nabla \cdot (u \, \mathbf{v}_\Omega) \;=\; \nabla \cdot (D \, \nabla u) \;+\; s$$
+
+with $\partial_t u$ the partial-time derivative at fixed lab-frame coordinate and $\mathbf{v}_\Omega$ the substrate velocity from `subdomain.motion`. Expanding the flux divergence,
+
+$$\nabla \cdot (u \, \mathbf{v}_\Omega) \;=\; \mathbf{v}_\Omega \cdot \nabla u \;+\; u \, \nabla \cdot \mathbf{v}_\Omega,$$
+
+gives two pieces: an advection-by-substrate-motion term $\mathbf{v}_\Omega \cdot \nabla u$, and a compression / dilution term $u \, \nabla \cdot \mathbf{v}_\Omega$. The template computes both from `subdomain.motion` and folds them into assembly. The user never writes them; the user never even needs to choose a frame.
+
+This convention applies uniformly across T1 (bulk, $u \, \nabla \cdot \mathbf{v}_\Omega$), T2 (surface, $\rho \, \nabla_\Gamma \cdot \mathbf{v}_\Gamma$), and any future template with a $\partial_t$ slot.
+
+**Connection to the material derivative.** If $\mathbf{v}_\Omega$ is the actual material velocity of the substrate, the conservation form is exactly equivalent to the Lagrangian form $D_t u + u \, \nabla \cdot \mathbf{v}_\Omega = \ldots$ where $D_t = \partial_t + \mathbf{v}_\Omega \cdot \nabla$ is the material derivative. The Eulerian form is preferred in the formalism because it matches the standard FE assembly pattern on a moving mesh (with ALE mapping handled by the backend) and because $\partial_t u$ is unambiguous at the user-expression level — it is the time derivative the FE solver computes.
+
+**The weak-form escape hatch (§1.5) is different.** When a user writes a UFL form directly, they pick the convention — they may write a Lagrangian D_t form, an Eulerian conservation form, or an ALE form with explicit mesh velocity. The user is responsible for consistency with the geometry's motion and with any other equation that interacts with the same variables.
+
+#### 1.10.6 Moving labelled boundaries
+
+A labelled boundary of a moving subdomain moves *with* the subdomain. Specifically:
+
+- The boundary's incidence — which subdomain class(es) it bounds — is invariant under motion. A `membrane` that bounds `cytoplasm` and `extracellular` continues to bound them at every $t$, no matter how it deforms.
+- The geometric position of the boundary at time $t$ is the image of its initial position under the subdomain's motion map.
+- BC expressions evaluated on the boundary use the boundary's current (deformed) position. Geometric helpers (`n(x)`, `H(x)`, etc.) on a moving boundary reflect the current configuration.
+
+The implication for BCs is mostly transparent: a Dirichlet BC `u = f(x, t)` on a moving boundary evaluates `f` at the current position $x$ on the deformed boundary. A Neumann BC's flux is the flux through the current boundary surface; the outward normal $\mathbf{n}$ is the current outward normal, not the reference one.
+
+#### 1.10.7 What is solver-side, not in the math description
+
+The following are explicitly *not* part of the MathDescription, even though they materially affect a moving-domain simulation:
+
+- **ALE mesh-motion algorithm.** Whether the bulk mesh follows the membrane motion exactly, follows a harmonic-extension velocity field, follows a fictitious elastic-extension, or uses a different recipe entirely — backend choice. Different backends may make different choices for the same MathDescription.
+- **Mesh remeshing for large deformations.** When the deformation is large enough that mesh quality degrades, some backends remesh adaptively. Triggering conditions, remeshing algorithms, and field-transfer schemes are solver-side concerns.
+- **Time-stepping for the motion variable.** Whether the motion variable's update is implicit or explicit, whether it is solved monolithically with field variables or in a partitioned manner — all backend choices.
+- **Numerical stabilisation for advection-dominated regimes.** SUPG, GLS, entropy-viscosity stabilisations are stabilisation choices; they do not change the math problem.
+
+The math description states the well-posed problem; the backend chooses how to solve it.
+
+#### 1.10.8 Worked sketch — mechanics-driven membrane motion with a surface species
+
+The first model that pushes beyond the §1.4.5 / §1.6.6 prescribed-motion examples: a closed membrane whose motion is solved by a simple viscous force balance, with a receptor density on the membrane that experiences the resulting motion via the standard T2 dilution.
+
+```yaml
+math_description:
+  geometry: cell_2d
+
+  subdomains:
+    - name: membrane
+      kind: surface
+      motion:
+        kind: unknown
+        variable: v_membrane
+
+  variables:
+    - { name: v_membrane, subdomain: membrane, type: vector }   # motion field, vector in R^2
+    - { name: rho,        subdomain: membrane, type: scalar }   # receptor density
+
+  equations:
+    # Motion equation: simple viscous force balance with prescribed active traction.
+    # In v1, this uses the weak-form escape hatch (§1.5) because mechanics templates
+    # (T5-T7) ship in v2. The form below is illustrative; full UFL is left to §1.5.
+    #
+    #   eta * v_membrane = -sigma_T * H(x) * n(x) + f_active(x, t)
+    #
+    # where eta is drag, sigma_T is surface tension, H is mean curvature,
+    # n is outward normal, f_active is a user-supplied driving traction.
+    - template: weak_form               # §1.5; placeholder syntax
+      variable: v_membrane
+      subdomain: membrane
+      temporality: steady_state          # quasi-static at each time step
+      form: |
+        ( eta * inner(v_membrane, w)
+          - sigma_T * H(x) * inner(n(x), w)
+          - inner(f_active(x, t), w) ) * dx_Gamma  # = 0
+      initial_condition: "0"              # zero default (memory decision 11c)
+
+    # Receptor density: standard T2 surface PDE. Dilution from v_membrane is automatic.
+    - template: surface_pde_with_dilution
+      variable: rho
+      subdomain: membrane
+      temporality: time_dependent
+      terms:
+        diffusion: 0.05
+        source: "-k_off * rho"
+      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"
+
+  parameters:
+    - { name: eta,     value: 1.0  }     # viscous drag coefficient
+    - { name: sigma_T, value: 0.10 }     # surface tension
+    - { name: k_off,   value: 0.02 }     # receptor decay rate
+```
+
+What this sketch demonstrates:
+
+- **`motion: { kind: unknown, variable: v_membrane }`** wires the membrane's substrate velocity to a vector unknown solved on the same subdomain.
+- **The motion equation uses the §1.5 weak-form escape hatch** — because v1 has no surface-mechanics template, the user writes a UFL form directly. v2 will replace this with a T5/T6/T7-style mechanics template.
+- **The receptor density equation is unchanged from §1.4.5** in shape — only `motion.kind` changed from `prescribed` to `unknown`. The T2 template picks up the dilution automatically from `membrane.motion`, whether prescribed or solved. The user does not edit the receptor equation when switching motion modes.
+- **`initial_condition: 0` for `v_membrane`** uses the zero default (memory decision 11c). The mesh starts at rest at t = 0; the force balance immediately produces a non-zero velocity in response to the initial curvature and traction.
+- **Geometric helpers `H(x)`, `n(x)`** evaluate against the current deformed membrane configuration (§1.10.6). At t = 0 that is the geometry's initial configuration.
+
+This sketch is intentionally minimal — a single membrane, one mechanics balance, one surface species. Real cell-migration models add bulk hydrodynamics, multiple surface species, intracellular signalling, and adhesion-with-slippage to substrates. Each of those is expressible in the formalism (the deferred constitutive templates from §1.4.3 and the mechanism for unknown motion + governing equation) once the matching templates and adhesion vocabulary ship.
 
 ### 1.11 Well-posedness checks
 
