@@ -122,3 +122,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Pixi
+.pixi/
+
+# Claude Code (per-user settings — committed settings live in settings.json)
+.claude/settings.local.json
+
+# JetBrains IDE
+.idea/

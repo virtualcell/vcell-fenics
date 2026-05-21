@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vcell-fenics"
+version = "0.0.0"
+description = "FEniCSx-based cell mechanics and migration modeling, in the context of Virtual Cell."
+readme = "README.md"
+license = { file = "LICENSE.md" }
+requires-python = ">=3.11"
+authors = [{ name = "Jim Schaff" }]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vcell_fenics"]
+
+# ---------------------------------------------------------------------------
+# Pixi configuration
+#   docs: https://pixi.sh/latest/
+#
+#   Source of truth for environments and tasks. After editing dependencies,
+#   run `pixi install` to refresh pixi.lock.
+# ---------------------------------------------------------------------------
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[tool.pixi.pypi-dependencies]
+vcell-fenics = { path = ".", editable = true }
+
+[tool.pixi.dependencies]
+# Core FEniCSx stack (conda-forge). Pin DOLFINx to 0.10.x — native
+# mixed-dimensional assembly (used by Approach B) landed in this release.
+# mpich is the recommended MPI variant on macOS arm64.
+fenics-dolfinx = "0.10.*"
+mpich = "*"
+petsc4py = "*"
+
+# DOLFINx ecosystem add-ons
+scifem = "*"                       # point sources, blocked Newton, real fn space
+dolfinx_mpc = "*"                  # multi-point constraints (periodic BCs, slip)
+
+# Meshing and I/O
+gmsh = "*"
+python-gmsh = "*"
+meshio = "*"
+
+# Visualization
+matplotlib = "*"
+pyvista = "*"
+
+# Numerics
+numpy = "*"
+scipy = "*"
+
+[tool.pixi.feature.dev.dependencies]
+pytest = "*"
+ipython = "*"
+
+# Approach D (cut/trace FEM via CutFEMx) is intentionally NOT defined here yet.
+# CutFEMx v0.1.0 targets DOLFINx 0.9 (not 0.10) and is source-only; it will
+# need its own pixi feature with a separate solve-group when we wire it up.
+#
+# dolfinx-external-operator (active-stress / nonstandard constitutive models
+# via JAX/Numba) is PyPI-only; add as a pypi-dependency under a new feature
+# when active-gel mechanics are actually being implemented.
+
+[tool.pixi.environments]
+default = { features = [], solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.tasks]
+test = "pytest"
