@@ -54,9 +54,7 @@ def create_disk_with_membrane(
     boundary_facets = data.facet_tags.find(2)
 
     tdim = bulk_mesh.topology.dim
-    submesh, entity_map, _vertex_map, _node_map = dmesh.create_submesh(
-        bulk_mesh, tdim - 1, boundary_facets
-    )
+    submesh, entity_map, _vertex_map, _node_map = dmesh.create_submesh(bulk_mesh, tdim - 1, boundary_facets)
 
     return DiskMembrane(
         bulk_mesh=bulk_mesh,

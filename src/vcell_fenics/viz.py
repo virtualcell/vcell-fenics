@@ -12,27 +12,21 @@ the package root for now to avoid creating ``core/`` for a single file.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
+import pyvista
 from dolfinx import fem, plot
 from dolfinx.io import XDMFFile
 from mpi4py import MPI
 
-try:
-    import pyvista
-except ImportError:  # pragma: no cover - pyvista is a hard dep
-    pyvista = None
 
-
-def _function_to_pyvista(field: fem.Function) -> "pyvista.UnstructuredGrid":
+def _function_to_pyvista(field: fem.Function) -> pyvista.UnstructuredGrid:
     """Wrap a Function's mesh and DOF values in a PyVista UnstructuredGrid.
 
     Uses ``dolfinx.plot.vtk_mesh`` so higher-order elements are linearized
     in a viz-only sense; values at the linear vertices are correct.
     """
-    if pyvista is None:
-        raise RuntimeError("pyvista not available")
     topology, cell_types, geometry = plot.vtk_mesh(field.function_space)
     grid = pyvista.UnstructuredGrid(topology, cell_types, geometry)
     grid.point_data[field.name or "field"] = field.x.array.real
@@ -50,7 +44,7 @@ def quick_plot(
     scalar_bar: bool = True,
     window_size: tuple[int, int] = (800, 600),
     cmap: str = "viridis",
-) -> "pyvista.Plotter":
+) -> pyvista.Plotter:
     """Render a scalar Function via PyVista.
 
     If ``screenshot`` is given, save a PNG to that path (off-screen render).
@@ -94,28 +88,27 @@ def write_snapshot(
     ParaView reads it without any plugins; use ``write_series`` (TBD) for
     long time series where ADIOS2/VTKHDF would scale better.
     """
-    path = Path(path)
-    if isinstance(fields, fem.Function):
-        fields = [fields]
-    if not fields:
+    out_path = Path(path)
+    field_list: list[fem.Function] = [fields] if isinstance(fields, fem.Function) else list(fields)
+    if not field_list:
         raise ValueError("write_snapshot requires at least one field")
 
-    mesh = fields[0].function_space.mesh
+    mesh = field_list[0].function_space.mesh
     if comm is None:
         comm = mesh.comm
 
-    with XDMFFile(comm, str(path), "w") as xf:
+    with XDMFFile(comm, str(out_path), "w") as xf:
         xf.write_mesh(mesh)
-        for f in fields:
+        for f in field_list:
             xf.write_function(f, t)
-    return path
+    return out_path
 
 
 def write_series(
     path: str | Path,
     fields: Sequence[fem.Function],
     times: Iterable[float],
-    step_fn,
+    step_fn: Callable[[float], None],
     *,
     comm: MPI.Comm | None = None,
 ) -> Path:
@@ -125,19 +118,19 @@ def write_series(
     are re-written with updated DOF values. Use this for actual runs;
     for one-off snapshots prefer ``write_snapshot``.
     """
-    path = Path(path)
-    fields = list(fields)
-    if not fields:
+    out_path = Path(path)
+    field_list = list(fields)
+    if not field_list:
         raise ValueError("write_series requires at least one field")
 
-    mesh = fields[0].function_space.mesh
+    mesh = field_list[0].function_space.mesh
     if comm is None:
         comm = mesh.comm
 
-    with XDMFFile(comm, str(path), "w") as xf:
+    with XDMFFile(comm, str(out_path), "w") as xf:
         xf.write_mesh(mesh)
         for t in times:
             step_fn(t)
-            for f in fields:
+            for f in field_list:
                 xf.write_function(f, t)
-    return path
+    return out_path

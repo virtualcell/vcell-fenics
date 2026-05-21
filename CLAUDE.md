@@ -46,13 +46,19 @@ Environments defined:
 ```bash
 pixi install                  # resolve and install (run after editing deps)
 pixi shell                    # activate the default env
-pixi shell -e dev             # activate the dev env (pytest, ipython available)
+pixi shell -e dev             # activate the dev env (pytest, ipython, ruff, mypy)
 pixi run -e dev test          # run pytest
 pixi run -e dev test path/to/test_x.py::test_y   # run a single test
+pixi run -e dev lint          # ruff lint
+pixi run -e dev format        # ruff format (writes)
+pixi run -e dev typecheck     # mypy --strict
+pixi run -e dev check         # lint + format-check + typecheck + test
 pixi add <pkg>                # add a conda dep (writes to pyproject.toml + pixi.lock)
 pixi add --pypi <pkg>         # add a PyPI dep
 pixi update                   # upgrade within version specs
 ```
+
+**Quality enforcement.** Ruff (lint+format) and mypy in `--strict` are required across both `src/` and `tests/`. `pixi run -e dev check` is the gate. Stub gaps in the FEniCSx stack are handled by `follow_imports = "skip"` overrides in `[tool.mypy]`, not blanket `Any` annotations in our code — if a third-party return leaks `Any`, use a targeted `cast()` at the boundary rather than weakening the function signature.
 
 To run Python directly in the env without going through `pixi shell`:
 

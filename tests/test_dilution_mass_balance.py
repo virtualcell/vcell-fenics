@@ -18,16 +18,16 @@ from __future__ import annotations
 
 from dolfinx import fem
 
-from vcell_fenics.approaches.submesh import create_disk_with_membrane, SurfacePDE
+from vcell_fenics.approaches.submesh import SurfacePDE, create_disk_with_membrane
 from vcell_fenics.approaches.submesh.geometry import scale_radially
 
 
-def _run_expansion(*, with_dilution: bool, h: float = 0.1, dt: float = 0.01):
+def _run_expansion(*, with_dilution: bool, h: float = 0.1, dt: float = 0.01) -> tuple[float, float, float]:
     dm = create_disk_with_membrane(radius=1.0, h=h)
     r0, r_dot, T = 1.0, 1.0, 1.0
-    n_steps = int(round(T / dt))
+    n_steps = round(T / dt)
 
-    div_v_fn = None
+    div_v_fn: fem.Function | None = None
     if with_dilution:
         V = fem.functionspace(dm.submesh, ("Lagrange", 1))
         div_v_fn = fem.Function(V, name="div_v_gamma")
@@ -40,7 +40,7 @@ def _run_expansion(*, with_dilution: bool, h: float = 0.1, dt: float = 0.01):
     for i in range(n_steps):
         r_new = r0 + r_dot * dt * (i + 1)
         scale_radially(dm.submesh, r_new / r)
-        if with_dilution:
+        if div_v_fn is not None:
             # Uniform radial expansion ⇒ ∇_Γ · v_Γ = ṙ / r everywhere on Γ.
             # Backward-Euler evaluates the dilution coefficient at t^{n+1}.
             div_v_fn.x.array[:] = r_dot / r_new
@@ -50,21 +50,19 @@ def _run_expansion(*, with_dilution: bool, h: float = 0.1, dt: float = 0.01):
     return M0, pde.total_mass(), pde.surface_length()
 
 
-def test_mass_conserved_with_dilution_under_uniform_stretch():
+def test_mass_conserved_with_dilution_under_uniform_stretch() -> None:
     M0, M, L = _run_expansion(with_dilution=True)
     # Membrane doubled in length; mass should stay put up to BE O(dt) error.
-    assert abs(L / (2 * 3.141592653589793 * 2.0) - 1.0) < 1e-3, (
-        f"sanity: expected L ≈ 2π·r(T)=4π, got {L}"
-    )
+    assert abs(L / (2 * 3.141592653589793 * 2.0) - 1.0) < 1e-3, f"sanity: expected L ≈ 2π·r(T)=4π, got {L}"
     assert abs(M - M0) / M0 < 0.02, f"M/M0 - 1 = {M / M0 - 1.0:.4f}"
 
 
-def test_omitting_dilution_corrupts_mass():
+def test_omitting_dilution_corrupts_mass() -> None:
     """Negative control: without ρ ∇_Γ · v_Γ, mass grows ∝ stretch.
 
     Confirms the test above is actually exercising the dilution term, not
     merely passing because the problem is trivially mass-conserving.
     """
-    M0, M, L = _run_expansion(with_dilution=False)
+    M0, M, _L = _run_expansion(with_dilution=False)
     # Without dilution, ρ is unchanged, so M = ρ_0 · L(T) = 2 · M0.
     assert abs(M / M0 - 2.0) < 1e-3

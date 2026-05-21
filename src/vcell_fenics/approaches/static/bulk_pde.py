@@ -7,11 +7,20 @@ Reaction is left for a follow-up increment.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
+import numpy.typing as npt
 import ufl
-from dolfinx import fem, mesh as dmesh
+from dolfinx import fem
+from dolfinx import mesh as dmesh
 from dolfinx.fem.petsc import LinearProblem
 from mpi4py import MPI
 from petsc4py import PETSc
+
+# Scalar field initializer in dolfinx style: (x: shape (gdim, n_points))
+# -> shape (n_points,). Used by fem.Function.interpolate.
+ScalarField = Callable[[npt.NDArray[Any]], npt.NDArray[Any]]
 
 
 class BulkPDE:
@@ -27,8 +36,10 @@ class BulkPDE:
         self.c = fem.Function(self.V, name="c")
         self.c_old = fem.Function(self.V, name="c_old")
 
-        self.D = fem.Constant(mesh, PETSc.ScalarType(D))
-        self.dt = fem.Constant(mesh, PETSc.ScalarType(dt))
+        # petsc4py stubs mark PETSc.ScalarType as a non-callable numpy.dtype;
+        # at runtime it's a callable scalar type alias.
+        self.D = fem.Constant(mesh, PETSc.ScalarType(D))  # type: ignore[operator]
+        self.dt = fem.Constant(mesh, PETSc.ScalarType(dt))  # type: ignore[operator]
 
         u = ufl.TrialFunction(self.V)
         w = ufl.TestFunction(self.V)
@@ -45,7 +56,7 @@ class BulkPDE:
             petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
         )
 
-    def set_initial(self, value) -> None:
+    def set_initial(self, value: float | ScalarField) -> None:
         if callable(value):
             self.c.interpolate(value)
         else:
@@ -74,10 +85,6 @@ class BulkPDE:
         Useful for measuring the amplitude of a single eigenmode in c.
         """
         dx = ufl.Measure("dx", domain=self.mesh)
-        num = self.mesh.comm.allreduce(
-            fem.assemble_scalar(fem.form(self.c * mode * dx)), op=MPI.SUM
-        )
-        den = self.mesh.comm.allreduce(
-            fem.assemble_scalar(fem.form(mode * mode * dx)), op=MPI.SUM
-        )
+        num = self.mesh.comm.allreduce(fem.assemble_scalar(fem.form(self.c * mode * dx)), op=MPI.SUM)
+        den = self.mesh.comm.allreduce(fem.assemble_scalar(fem.form(mode * mode * dx)), op=MPI.SUM)
         return float(num / den)

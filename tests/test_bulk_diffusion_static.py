@@ -11,14 +11,17 @@ Validates:
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
+import numpy.typing as npt
 from dolfinx import fem
 from scipy.special import j0, jn_zeros
 
 from vcell_fenics.approaches.static import BulkPDE, create_disk
 
 
-def test_constant_initial_condition_stays_constant():
+def test_constant_initial_condition_stays_constant() -> None:
     disk = create_disk(radius=1.0, h=0.2)
     pde = BulkPDE(disk.mesh, D=0.5, dt=0.05)
     pde.set_initial(3.0)
@@ -27,12 +30,14 @@ def test_constant_initial_condition_stays_constant():
     assert np.allclose(pde.c.x.array, 3.0, atol=1e-10)
 
 
-def test_mass_conserved_without_reaction():
+def test_mass_conserved_without_reaction() -> None:
     disk = create_disk(radius=1.0, h=0.1)
     pde = BulkPDE(disk.mesh, D=0.2, dt=0.01)
 
-    def ic(x):
-        return 1.0 + 0.3 * x[0]  # arbitrary smooth nonconstant IC
+    def ic(x: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        # cast: numpy indexing returns Any (stub limitation); arithmetic
+        # composition with floats produces an ndarray at runtime.
+        return cast(npt.NDArray[Any], 1.0 + 0.3 * x[0])
 
     pde.set_initial(ic)
     M0 = pde.total_mass()
@@ -42,7 +47,7 @@ def test_mass_conserved_without_reaction():
     assert abs(M1 - M0) / abs(M0) < 1e-10
 
 
-def test_bessel_eigenmode_decays_at_analytical_rate():
+def test_bessel_eigenmode_decays_at_analytical_rate() -> None:
     R, D, dt, n_steps = 1.0, 0.1, 0.01, 50
     T = dt * n_steps
 
@@ -54,9 +59,11 @@ def test_bessel_eigenmode_decays_at_analytical_rate():
     disk = create_disk(radius=R, h=0.05)
     pde = BulkPDE(disk.mesh, D=D, dt=dt)
 
-    def eigenmode(x):
+    def eigenmode(x: npt.NDArray[Any]) -> npt.NDArray[Any]:
         r = np.sqrt(x[0] ** 2 + x[1] ** 2)
-        return j0(lam * r)
+        # cast: scipy.special.j0 is opaque to mypy (follow_imports=skip);
+        # at runtime it returns an ndarray.
+        return cast(npt.NDArray[Any], j0(lam * r))
 
     # IC = eigenmode (mass-neutral, since ∫_disk J_0(λr) dΩ = 0 at this λ).
     pde.set_initial(eigenmode)
@@ -73,6 +80,4 @@ def test_bessel_eigenmode_decays_at_analytical_rate():
     expected = np.exp(-D * lam**2 * T)
     observed = amp1 / amp0
 
-    assert abs(observed - expected) / expected < 0.02, (
-        f"expected decay {expected:.4f}, observed {observed:.4f}"
-    )
+    assert abs(observed - expected) / expected < 0.02, f"expected decay {expected:.4f}, observed {observed:.4f}"

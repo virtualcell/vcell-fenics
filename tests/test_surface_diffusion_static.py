@@ -7,12 +7,15 @@ linear-solver tolerance) for ∂_t ρ = D Δ_Γ ρ.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
+import numpy.typing as npt
 
-from vcell_fenics.approaches.submesh import create_disk_with_membrane, SurfacePDE
+from vcell_fenics.approaches.submesh import SurfacePDE, create_disk_with_membrane
 
 
-def test_constant_rho_stays_constant():
+def test_constant_rho_stays_constant() -> None:
     dm = create_disk_with_membrane(radius=1.0, h=0.2)
     pde = SurfacePDE(dm.submesh, D=0.5, dt=0.05)
     pde.set_initial(2.5)
@@ -21,7 +24,7 @@ def test_constant_rho_stays_constant():
     assert np.allclose(pde.rho.x.array, 2.5, atol=1e-10)
 
 
-def test_diffusion_matches_analytical_decay_and_conserves_mass():
+def test_diffusion_matches_analytical_decay_and_conserves_mass() -> None:
     """A cos(kθ) mode on a circle of radius r decays as exp(-D k²/r² · t).
 
     This both verifies the surface-Laplacian assembly (eigenvalue is correct)
@@ -36,9 +39,11 @@ def test_diffusion_matches_analytical_decay_and_conserves_mass():
 
     amp0 = 0.5
 
-    def ic(x):
+    def ic(x: npt.NDArray[Any]) -> npt.NDArray[Any]:
         theta = np.arctan2(x[1], x[0])
-        return 1.0 + amp0 * np.cos(k * theta)
+        # cast: numpy indexing returns Any (stub limitation); arithmetic
+        # composition produces an ndarray at runtime.
+        return cast(npt.NDArray[Any], 1.0 + amp0 * np.cos(k * theta))
 
     pde.set_initial(ic)
     M0 = pde.total_mass()

@@ -13,7 +13,6 @@ from dolfinx import mesh as dmesh
 from dolfinx.io.gmsh import model_to_mesh
 from mpi4py import MPI
 
-
 BOUNDARY_TAG = 2
 
 

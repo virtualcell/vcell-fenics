@@ -13,11 +13,20 @@ zero on a moving mesh.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
+import numpy.typing as npt
 import ufl
-from dolfinx import fem, mesh as dmesh
+from dolfinx import fem
+from dolfinx import mesh as dmesh
 from dolfinx.fem.petsc import LinearProblem
 from mpi4py import MPI
 from petsc4py import PETSc
+
+# Scalar field initializer in dolfinx style: (x: shape (gdim, n_points))
+# -> shape (n_points,). Used by fem.Function.interpolate.
+ScalarField = Callable[[npt.NDArray[Any]], npt.NDArray[Any]]
 
 
 class SurfacePDE:
@@ -34,8 +43,10 @@ class SurfacePDE:
         self.rho = fem.Function(self.V, name="rho")
         self.rho_old = fem.Function(self.V, name="rho_old")
 
-        self.D = fem.Constant(submesh, PETSc.ScalarType(D))
-        self.dt = fem.Constant(submesh, PETSc.ScalarType(dt))
+        # petsc4py stubs mark PETSc.ScalarType as a non-callable numpy.dtype;
+        # at runtime it's a callable scalar type alias.
+        self.D = fem.Constant(submesh, PETSc.ScalarType(D))  # type: ignore[operator]
+        self.dt = fem.Constant(submesh, PETSc.ScalarType(dt))  # type: ignore[operator]
         self.div_v = div_v_gamma  # None ⇒ static membrane (no dilution)
 
         u = ufl.TrialFunction(self.V)
@@ -57,7 +68,7 @@ class SurfacePDE:
             petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
         )
 
-    def set_initial(self, value) -> None:
+    def set_initial(self, value: float | ScalarField) -> None:
         if callable(value):
             self.rho.interpolate(value)
         else:

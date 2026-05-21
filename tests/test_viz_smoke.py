@@ -11,8 +11,13 @@ test for the physics — that's covered by the other test files.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any, cast
+
 import numpy as np
+import numpy.typing as npt
 import pytest
+from dolfinx import fem
 from scipy.special import j0, jn_zeros
 
 from vcell_fenics.approaches.static import BulkPDE, create_disk
@@ -20,7 +25,7 @@ from vcell_fenics.viz import quick_plot, write_snapshot
 
 
 @pytest.fixture(scope="module")
-def bessel_solution():
+def bessel_solution() -> fem.Function:
     """A few BE steps on the Bessel eigenmode → a non-trivial Function."""
     R, D, dt, n_steps = 1.0, 0.1, 0.01, 10
     lam = jn_zeros(1, 1)[0] / R
@@ -28,9 +33,11 @@ def bessel_solution():
     disk = create_disk(radius=R, h=0.1)
     pde = BulkPDE(disk.mesh, D=D, dt=dt)
 
-    def eigenmode(x):
+    def eigenmode(x: npt.NDArray[Any]) -> npt.NDArray[Any]:
         r = np.sqrt(x[0] ** 2 + x[1] ** 2)
-        return j0(lam * r)
+        # cast: scipy.special.j0 is opaque to mypy (follow_imports=skip);
+        # at runtime it returns an ndarray.
+        return cast(npt.NDArray[Any], j0(lam * r))
 
     pde.set_initial(eigenmode)
     for _ in range(n_steps):
@@ -38,7 +45,7 @@ def bessel_solution():
     return pde.c
 
 
-def test_write_xdmf_snapshot(tmp_path, bessel_solution):
+def test_write_xdmf_snapshot(tmp_path: Path, bessel_solution: fem.Function) -> None:
     out = write_snapshot(tmp_path / "bessel.xdmf", bessel_solution, t=0.1)
     h5 = out.with_suffix(".h5")
     assert out.exists() and out.stat().st_size > 0
@@ -48,7 +55,7 @@ def test_write_xdmf_snapshot(tmp_path, bessel_solution):
     print(f"\n  XDMF: {out.resolve()}\n  HDF5: {h5.resolve()}")
 
 
-def test_pyvista_screenshot(tmp_path, bessel_solution):
+def test_pyvista_screenshot(tmp_path: Path, bessel_solution: fem.Function) -> None:
     png = tmp_path / "bessel.png"
     quick_plot(bessel_solution, screenshot=png, title="J₀ eigenmode")
     assert png.exists()
