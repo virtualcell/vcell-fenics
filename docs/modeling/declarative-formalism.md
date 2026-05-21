@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.4 (equation templates) and §1.6 (boundary conditions) have been drafted in detail; the surrounding sections are sketched as headings only.
+**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.4 (equation templates), §1.6 (boundary conditions), and §1.8 (coupling and expression vocabulary) have been drafted in detail; the surrounding sections are sketched as headings only.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -389,14 +389,116 @@ If the membrane were itself moving (replace `motion.velocity: "0"` with a real e
 
 ### 1.8 Coupling between subdomains and the expression vocabulary
 
-*To be written.* The full catalogue of operators usable in expressions for cross-dimensional reference:
+This section formalises the closed vocabulary that every right-hand-side expression in a MathDescription draws on — term-slot fillers in §1.4, BC expressions in §1.6, initial conditions in §1.7, motion-velocity expressions in §1.10, and constitutive expressions for unknown-motion subdomains. The escape-hatch weak forms in §1.5 use a strict superset of this vocabulary (full UFL); operator-template slots use the subset described here.
 
-- **`trace(u)`** — restriction of a higher-dimensional variable to a lower-dimensional boundary or interface (defined inline in §1.6.5; this section will formalise it and catalogue side-specifier syntax for the rare case of a single variable defined on both sides of an internal interface).
-- **Geometric helpers** — outward unit normal `n(x)`, tangent basis, mean curvature `H(x)`, surface element, and similar quantities provided as built-ins.
-- **Time and spatial coordinates** — `t`, `x` (and named accessors like `theta(x)` for polar angle, etc.).
-- **Variable references and parameters** — the rules for resolving a bare name in an expression context.
+#### 1.8.1 What an expression is
 
-This section formalises the expression vocabulary that §1.4 (term slots), §1.5 (weak forms), §1.6 (BC expressions), and §1.7 (initial conditions) all draw on.
+An **expression** is a typed formula that evaluates to a scalar, a vector in $\mathbb{R}^d$, or a $d \times d$ tensor at a point in space and time. The spatial point is implicit from the expression's *evaluation context*: the subdomain on which the equation lives (for term slots), the labelled boundary the BC constrains (for BC expressions), and so on. The time point is the current solver time, or $t = 0$ for initial conditions.
+
+Expressions are built from:
+
+1. References to variables and named parameters (§1.8.6),
+2. Time and spatial coordinates (§1.8.3),
+3. Geometric helpers (§1.8.4),
+4. Standard mathematical functions (§1.8.5),
+5. Calculus operators on variables, subject to the rule in §1.8.5,
+6. The cross-dimensional `trace(·)` operator (§1.8.2),
+7. Arithmetic combinators (`+`, `-`, `*`, `/`, `**`) and tensor algebra (`·` for inner product, `:` for double-contraction, `⊗` for outer product).
+
+The concrete syntactic carrier — parsable string, Python AST, SymPy expression, etc. — is a data-model decision deferred to §2. This section specifies *what may appear*, not *how it is written*.
+
+#### 1.8.2 Cross-dimensional reference: the trace operator
+
+**Definition.** For a variable $u$ defined on a higher-dimensional subdomain $\Sigma_{\text{high}}$ and a lower-dimensional subdomain $\Sigma_{\text{low}}$ that is a sub-manifold of $\Sigma_{\text{high}}$ or of its boundary, the **trace** of $u$ on $\Sigma_{\text{low}}$ is the restriction $u|_{\Sigma_{\text{low}}}$ — formally the boundary trace operator from the Sobolev space of $u$ on $\Sigma_{\text{high}}$ to its image on $\Sigma_{\text{low}}$ (the standard $H^1 \to H^{1/2}$ result for second-order PDEs on Lipschitz domains).
+
+**Syntax.** Written `trace(u)` in expressions evaluated on $\Sigma_{\text{low}}$ when $u$ lives on $\Sigma_{\text{high}}$.
+
+**When required.** Whenever an expression evaluated on $\Sigma_{\text{low}}$ references a variable defined on a strictly higher-dimensional $\Sigma_{\text{high}}$. Variables defined on the *same* subdomain as the expression are referenced directly. Variables defined on a *strictly lower-dimensional* subdomain than the expression's evaluation domain are intentionally not referenceable inside an expression (§1.8.7): the surface → bulk direction is mathematically non-unique, and the cases that need it are better expressed as a named bulk variable with its own equation tied to the surface variable via a boundary condition.
+
+**Side specifier (deferred to v2).** When a single variable is defined on a single subdomain — the v1 norm — `trace(u)` is unambiguous: there is exactly one side. If v2 admits a variable defined on both sides of an internal interface, the syntax `trace(u, from=<subdomain>)` is reserved for disambiguation; the schema will reject ambiguous traces at validation time until then.
+
+**Implementation.** Trace evaluation is a backend concern. In FEniCSx 0.10, traces of bulk variables on internal facets are realised through native mixed-dimensional assembly (see `docs/research/2026-05-21-fenicsx-ecosystem.md`). The user-facing formalism does not commit to a particular evaluation strategy.
+
+#### 1.8.3 Time, space, and parameters
+
+| Symbol | Meaning | Type |
+|---|---|---|
+| `t` | The time variable. Reserved name; equals current solver time, $t = 0$ in IC expressions. | scalar |
+| `x` | Spatial coordinate at the evaluation point, in the embedding-space dimension. | vector in $\mathbb{R}^d$ |
+| `<param_name>` | A named scalar parameter declared in the MathDescription. | scalar (declared dtype) |
+
+Component access on `x` is by index: `x[0]`, `x[1]`, `x[2]`. Named coordinate accessors derived from `x` are listed under geometric helpers (§1.8.4).
+
+#### 1.8.4 Geometric helpers
+
+Available in expressions evaluated on subdomains for which the relevant notion is defined:
+
+| Helper | Meaning | Defined where |
+|---|---|---|
+| `n(x)` | Outward unit normal. On a boundary or codim-1 subdomain, the outward direction relative to the home subdomain. | codim-1 entities |
+| `H(x)` | Mean curvature. | codim-1 entities embedded in higher-dim space |
+| `kappa1(x)`, `kappa2(x)` | Principal curvatures. | codim-1 surfaces in 3D |
+| `tangent(x)` | Tangent unit vector. | 1-curves in 2D, or codim-2 edges in 3D |
+| `theta(x)`, `phi(x)`, `r(x)` | Polar / spherical accessors. Sugar for `atan2(x[1], x[0])`, etc. | any subdomain |
+
+For subdomains with `motion.kind = unknown`, geometric helpers are evaluated against the current (solver-computed) configuration at every time step including $t = 0$, where the configuration comes from the motion variable's initial condition (§1.7, §1.10).
+
+#### 1.8.5 Standard functions and calculus operators
+
+**Standard mathematical functions.** The usual elementary, transcendental, and piecewise primitives: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `sqrt`, `abs`, `min`, `max`, `pow`, `if(cond, a, b)` for conditional evaluation, `step(x)` for Heaviside, `sign(x)`. These have no usage restrictions — they appear anywhere an expression appears.
+
+**Calculus operators on variables:**
+
+| Operator | Meaning | Input type | Output type |
+|---|---|---|---|
+| `grad(u)` | Gradient of scalar field $u$. | scalar variable | vector |
+| `div(v)` | Divergence of vector field $v$. | vector variable | scalar |
+| `lapl(u)` | Laplacian of scalar field $u$ (full-space). | scalar variable | scalar |
+| `grad_surf(u)` | Surface (tangential) gradient on a codim-1 subdomain. | scalar variable on the surface | tangent vector |
+| `div_surf(v)` | Surface divergence on a codim-1 subdomain. | tangent vector variable | scalar |
+| `lapl_beltrami(u)` | Laplace–Beltrami operator on a codim-1 subdomain. | scalar variable on the surface | scalar |
+
+**Usage rule — the narrow rule.** In operator-template slots (T1–T7), a calculus operator may be applied to *any variable except the one the slot's equation governs*. In the weak-form escape hatch (§1.5), there is no restriction — the user is writing a UFL form and is responsible for the resulting equation's well-posedness.
+
+The rule exists because operator templates make assumptions about the differential order and integration-by-parts pattern of the assembled weak form. Allowing arbitrary calculus on the equation's own variable can silently violate those assumptions: a `lapl(u)` in T1's `source` slot for $u$ embeds a second-order operator on $u$ where the template expects a coefficient; a `grad(u)` in the same slot creates a first-order advective term outside the template's integration-by-parts machinery. UFL would compile these into *some* form; the result is unlikely to be what the user meant.
+
+Calculus on *other* variables is safe because it produces a coefficient-shaped value (scalar, vector, or tensor) that the template uses positionally — chemotaxis source `-grad(phi) * u`, voltage-gradient drift in a relative-advection slot, or a custom flux on an internal interface BC referencing both sides' gradients. The PDE structure for the slot's governing variable is preserved.
+
+The validator (§1.11) enforces this by walking the expression AST: if any `grad`/`div`/`lapl`/`grad_surf`/`div_surf`/`lapl_beltrami` is applied to (or transitively reduces to) the slot's governing variable, that's an error.
+
+#### 1.8.6 Variable, parameter, and bare-name resolution
+
+A **bare name** (no `trace(·)`, no calculus operator) in an expression resolves in this order:
+
+1. **Local variable** — a variable defined on the same subdomain as the expression's evaluation context. Resolves to the function value at the current point.
+2. **Named parameter** — a top-level parameter declared in the MathDescription. Resolves to its constant value.
+3. **Reserved name** — `t` (time), `x` (space), or a name from the geometric-helper or standard-function tables.
+
+A name that matches none of the above is an error (caught by §1.11). A variable defined on a *different* subdomain than the expression's evaluation context may not be referenced by bare name — higher-dimensional variables must go through `trace(·)`; lower-dimensional variables cannot be referenced inside an expression at all (§1.8.7), and the coupling must be expressed structurally via a boundary condition.
+
+Name shadowing — a parameter and a local variable with the same name — is an error at MathDescription construction time, not a precedence resolution.
+
+#### 1.8.7 Reserved for v2+
+
+- **`trace(u, from=<subdomain>)` side specifier.** Disambiguator for a single variable defined on both sides of an internal interface.
+- **DG flux operators.** `jump([u])`, `avg({u})` for discontinuous-Galerkin formulations. Deferred until the variable schema admits DG function spaces.
+- **General-algebraic interface BC expression vocabulary.** The general-algebraic interface BC kind (anticipated for v2, §1.6.2) will need operators for trace fluxes (`flux_trace(u)` or similar) on both sides of an interface; those will be specified when that BC kind is.
+
+There is intentionally **no** lift / extension operator (sometimes called `extend(·)`) in the formalism, even as a reservation. The membrane–bulk case that most uses suggest — a surface reaction needing the bulk concentration at the membrane — is exactly the `trace(·)` direction (§1.8.2): the bulk basis functions evaluate uniquely at the boundary, no smoothing or auxiliary problem needed. The reverse direction (surface → bulk lift) is mathematically non-unique and shows up only in a few specialised settings — ALE mesh-motion is the most common — where it is more honest to express the extension as a *named bulk variable with its own equation and a boundary condition tying it to the surface variable* than to hide a substantive computational choice behind a one-symbol operator.
+
+#### 1.8.8 Type rules summary
+
+Every slot has a declared type; expressions in that slot must produce a matching type.
+
+| Slot category | Expected type |
+|---|---|
+| Scalar source, scalar diffusion $D$, Dirichlet `expression`, Neumann `expression`, IC, partition coefficient $k$, constraint, rate, source on T2/T3/T4 | scalar |
+| Vector advection, vector `relative_advection`, vector `motion.velocity` | vector in $\mathbb{R}^d$ |
+| Tensor diffusion $D$ | symmetric $d \times d$ tensor |
+| Robin coefficient tuple $(\alpha, \beta, h)$ | tuple of three scalars |
+| Interface value-equality partition coefficient $k$ | scalar |
+
+Type mismatches are validation errors. A scalar where a vector is expected is **not** implicitly broadcast; the user must write the broadcast explicitly (e.g., `c * n(x)` to turn a scalar `c` into a vector along the outward normal).
 
 ### 1.9 Temporality, mixed systems, and DAE structure
 
