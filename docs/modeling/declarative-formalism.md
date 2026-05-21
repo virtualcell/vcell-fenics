@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.4 (equation templates), §1.6 (boundary conditions), and §1.8 (coupling and expression vocabulary) have been drafted in detail; the surrounding sections are sketched as headings only.
+**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.6 (boundary conditions), and §1.8 (coupling and expression vocabulary) have been drafted in detail; the surrounding sections are sketched as headings only.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -25,11 +25,191 @@ Excluded from this v1 by design: VCell-style FastSystem (solver-side reduction),
 
 ### 1.2 Geometry vocabulary
 
-*To be written.* Subdomains by topological dimension (volume Ω_k, surface Γ_k, curve Λ_k, point P_k). Labelled codim-1 sub-boundaries (∂Ω_k = ⋃ Γ_kj). Reference-by-name to a geometry object that lives outside the MathDescription.
+#### 1.2.1 What the geometry is, and what it is not
+
+A MathDescription does not embed a geometry. It **references** one by name. The geometry — mesh, named regions, region-to-subdomain-class assignments, boundary labels — lives in a separate object that is loaded alongside the MathDescription at solve time. This separation lets the same math description run against different geometries (a 2D test disk vs. a real cell mesh, a simple disk-in-disk vs. a multi-cell tissue patch) without modification, and lets different math descriptions share a geometry.
+
+The MathDescription is responsible for declaring the geometric *vocabulary* it uses — what subdomain classes and labelled boundaries it references. The Geometry is responsible for providing concrete regions and labels matching those names. Schema validation cross-checks the two: every name the MathDescription references must resolve in the Geometry, with matching kind.
+
+#### 1.2.2 Subdomain classes, not regions
+
+A **subdomain** in this formalism is a *class* — a named topological entity, not a contiguous mesh region. Multiple physical regions in a geometry may belong to the same subdomain class. The canonical example: a tissue patch geometry with two cells, each cell's interior tagged `cytoplasm` and each cell's surface tagged `membrane`. There are two `cytoplasm` regions in the mesh and two `membrane` regions, but the MathDescription has *one* `cytoplasm` subdomain class and *one* `membrane` subdomain class. Equations and BCs are written once per class and apply uniformly to all regions of that class.
+
+This is the VCell / SBML-Spatial convention (the user authored SBML Spatial; VCell `MathDescription.SubDomain` is the same idea). Its compactness comes from "say once, apply to all instances"; its limitation is that region-level distinction is not visible to the math description. Region-specific variation in coefficients is addressed by region-keyed parameter maps in §1.2.5 / §1.4. Region-specific variation in equation *structure* requires either Tier-2 overrides (deferred to v2) or splitting into distinct subdomain classes.
+
+A MathDescription declares its subdomain classes in a top-level `subdomains:` block. Each entry has:
+
+| Field | Meaning |
+|---|---|
+| `name` | A unique identifier within the MathDescription. Must resolve to a same-named class in the referenced Geometry. |
+| `kind` | One of `volume`, `surface`, `curve`, `point`. Determines topological dimension and which operator templates may live on the subdomain. |
+| `motion` | Optional; declares how the subdomain moves. See §1.10. Default `{ kind: none }`. |
+
+The subdomain block is *required* (not optional shorthand): `subdomain.motion` is a property of the subdomain and has nowhere else to live.
+
+#### 1.2.3 Subdomain kinds
+
+| Kind | Topological dimension | Examples | Templates available |
+|---|---|---|---|
+| `volume` | $d$ (ambient) | cytoplasm, extracellular space, nucleus interior, ECM | T1 (bulk RAD), T3 (constraint), T4 (lumped ODE on a point-like volume), T5–T7 (mechanics) |
+| `surface` | $d - 1$ | plasma membrane, nuclear membrane, ECM interface | T2 (surface PDE with dilution), T3, T4 |
+| `curve` | $d - 2$ | filaments, actin bundles, cytokinetic furrow | (v2; not in v1 templates) |
+| `point` | 0 | single localised pole, spindle pole body | T4 (ODE), T3 (constraint) |
+
+"Ambient dimension" $d$ is the dimension of the embedding geometry (2 for a 2D model, 3 for a 3D model). Subdomain kinds are forms of dimensionality relative to that — a `surface` is always codim-1 in the ambient space.
+
+#### 1.2.4 Labelled boundaries
+
+Boundaries are first-class named entities in the geometry. Every boundary is a codim-1 sub-manifold of *some* subdomain. The MathDescription does not declare boundaries as top-level entries (the geometry owns the boundary list); they appear only via references in BC entries (§1.6) and in the natural-BC default behaviour (§1.6.4).
+
+A boundary's incidence — which subdomain class(es) it bounds — is geometry-side metadata. From it the schema derives:
+
+- **External boundaries**: incident to exactly one subdomain. Default no-flux applies if no BC declared.
+- **Internal boundaries**: incident to two subdomains (one on each side). No default — every variable that lives on either side and touches the boundary requires an explicit BC.
+
+If a labelled codim-1 entity in the geometry is *itself* a subdomain class (the canonical cell-membrane case — `membrane` is both an internal boundary between `cytoplasm` and `extracellular` *and* a surface subdomain that carries its own PDEs), it appears in both roles: as a name in the `subdomains:` block, and as a name available for BC references. Bulk-surface coupling via this same-name double role is the §1.6.5 composable pattern.
+
+#### 1.2.5 Region-keyed parameters (Tier 1 region variation)
+
+Region-specific coefficient values within a class are expressed via `region_map` parameters. A parameter declared this way provides a value per region of the relevant subdomain class; expressions that reference it resolve to the region-appropriate value at evaluation time.
+
+```yaml
+parameters:
+  - name: D
+    kind: region_map
+    subdomain: cytoplasm
+    values:
+      cytoplasm_left_cell:  0.10
+      cytoplasm_right_cell: 0.25
+```
+
+Every region the geometry assigns to the parameter's subdomain class must have a value in `values`. Missing regions are validation errors (no implicit defaults — silent missing values are how subtle physical inconsistencies leak in).
+
+Class-level (region-independent) parameters are declared as plain scalars, as in earlier examples:
+
+```yaml
+parameters:
+  - { name: k_on, value: 0.10 }
+```
+
+A class-level parameter resolves to the same value in every region of its subdomain class — the v1 common case.
+
+**Tier 2 (per-region term overrides) is deferred.** When term *structure*, not just coefficient values, needs to vary by region, v1 requires splitting into distinct subdomain classes (Tier 3) or shaping the equation so the variation lives in a coefficient (Tier 1). Tier 2 ships if it earns its keep through a concrete model that cannot be expressed in Tier 1.
+
+#### 1.2.7 Known topological limitations
+
+These three patterns from the user's experience with VCell and SBML Spatial are recognised as poorly supported by class-based subdomain abstractions and intentionally **not** addressed in v1. They are recorded here so a future v2 has them in scope. The latter two share a root cause — the class abstraction loses region-instance information when a single class is realised by multiple regions in the geometry.
+
+**(1) Squashed thin layers — multi-role mesh entities.** When two cells are adjacent and the extracellular space between them is too thin to resolve at the mesh scale, the geometric reduction maps three physical entities onto a single codim-1 surface in the mesh: the left cell's membrane, the right cell's membrane, and the squashed-to-zero-thickness extracellular volume between them. The formalism currently assumes each region in the geometry belongs to exactly one subdomain class. The squashed-layer case requires *multi-role* region assignment — one mesh entity bearing multiple subdomain-class labels simultaneously, with thickness-derived weights so that each class's measure over that entity is physically correct (each membrane contributes its own surface integral; the squashed extracellular contributes a volume integral scaled by its collapsed thickness). This is a geometry-layer extension; v1 has no mechanism for it.
+
+**(2) Per-cell connected components within a subdomain class.** When a subdomain class (e.g. `membrane`) is realised as many topologically disconnected regions — one membrane per cell in a tissue patch — and a species on the class is supposed to diffuse *within each cell's membrane* but **not** *between cells*, the class-level equation as written would couple all components into one connected field. The checkerboard case makes this concrete: a single cell's membrane spans four boundary patches shared with its four neighbours; the species on that cell should diffuse across those four patches, but not onto a neighbour's four patches. Tier 3 (one subdomain class per cell) handles this but scales poorly with cell count. Cleaner mechanisms — per-region variable instancing where one class declaration generates one variable instance per region with independent value fields, or a topology-aware diffusion operator that respects connected components — are deferred to v2.
+
+**(3) Same-class-on-both-sides ambiguity for membrane expressions.** When a membrane subdomain is adjacent to two regions of the *same* subdomain class — both sides are the same cell type's cytoplasm, both compartments are extracellular space, etc. — variables on either side become ambiguous in expressions written on the membrane. A Na/Ca exchanger sitting in a membrane between two `cytoplasm` regions needs `Na` and `Ca` on each side separately to compute the exchange flux, but `trace(Na)` cannot distinguish them — both sides resolve to the same subdomain class. The v2 syntax `trace(u, from=<subdomain>)` anticipated in §1.8.7 does *not* solve this: the subdomain is the same on both sides; the *region* or *orientation* is what differs. A working v2 syntax would need a side-or-region specifier — e.g. `trace(Na, side=outward_n)` / `trace(Na, side=inward_n)` using the membrane's outward normal as the canonical orientation reference, or `trace(Na, region=<region_name>)` when a specific region is named. Either approach requires the geometry to provide enough orientation metadata for the formalism to resolve the reference unambiguously. v1 punts; cases that need this fall back to Tier 3 (declare distinct subdomain classes for each region — e.g. `cytoplasm_A` and `cytoplasm_B` — even when their physics is identical), trading some duplication for unambiguous addressability.
+
+These three limitations are flagged here rather than buried in v2 roadmap notes because they are the most likely surprises to bite a modeller coming from a mature tool like VCell that has accumulated workarounds for all three.
+
+#### 1.2.6 Worked sketch — geometry block of the §1.6.6 example
+
+The MathDescription side of the §1.6.6 ligand-receptor model declares its geometric vocabulary:
+
+```yaml
+math_description:
+  geometry: cell_with_extracellular   # external geometry object
+
+  subdomains:
+    - { name: extracellular, kind: volume }
+    - name: membrane
+      kind: surface
+      motion: { kind: prescribed, velocity: "0" }
+    # No cytoplasm in this example — ligand only diffuses in the extracellular bulk.
+
+  # BCs reference the boundary names `outer` and `membrane`; both must
+  # exist as labelled boundaries in the geometry object.
+```
+
+The `cell_with_extracellular` geometry is expected to provide:
+
+- A region or regions tagged `extracellular` (kind: volume).
+- A region or regions tagged `membrane` (kind: surface). The same name appears both as a subdomain (the surface carries its own PDEs) and as a labelled boundary (the bulk's BC at the membrane references it).
+- A labelled boundary `outer` (codim-1 surface of the extracellular volume), incident to one subdomain (`extracellular`).
+
+The math description is independent of which mesh is used, so long as the geometry honours these names and kinds.
 
 ### 1.3 Variables
 
-*To be written.* Function spaces (scalar, vector, tensor; continuous, discontinuous), scope (defined on which subdomain — multiple variables on the same subdomain is the normal case), domain-of-definition semantics on moving subdomains.
+#### 1.3.1 What a variable is
+
+A variable is a named unknown function defined on exactly one subdomain class. Its envelope:
+
+| Field | Meaning |
+|---|---|
+| `name` | Unique identifier within the MathDescription. |
+| `subdomain` | The name of the subdomain class this variable lives on. |
+| `type` | One of `scalar`, `vector`, `symmetric_tensor`. Defines the value type at each point. Default `scalar`. |
+| `space` | Optional FE function-space hint. Default `lagrange_p1` (continuous H¹ piecewise-linear). Other values listed in §1.3.3. |
+
+A MathDescription may contain many variables; multiple variables on the same subdomain class is the normal case (one membrane carries multiple species; cytoplasm carries ligand plus an intracellular signal plus a regulator). The pairing of `(name, subdomain)` is what uniquely identifies a variable — the same name `c` on `cytoplasm` and on `extracellular` would be two distinct variables.
+
+A variable's *value field* exists on every region of its subdomain class; the user does not declare per-region values or per-region existence. If the subdomain has motion (§1.10), the value field is defined on the deforming manifold; the time derivative in any equation referring to this variable is taken in the appropriate frame, with the convention fixed by the equation's operator template (§1.4) or the user's UFL form (§1.5).
+
+#### 1.3.2 Variable types
+
+Three value types in v1:
+
+- **`scalar`** — a single real number per point. The default. Covers concentrations, densities, voltages, pressures, scalar order parameters.
+- **`vector`** — a tuple in $\mathbb{R}^d$ where $d$ is the ambient dimension. Covers velocities, displacements, fluxes (when treated as primary unknowns), gradients of scalar fields when those are first-class unknowns.
+- **`symmetric_tensor`** — a symmetric $d \times d$ tensor per point. Covers stress, strain, diffusivity-as-an-unknown, and similar quantities. Less common in v1 but included so mechanics templates have somewhere natural to live.
+
+Tensor variables that are *not* symmetric (rare in cell-biology but possible for e.g. gradient of velocity as an unknown) require the weak-form escape hatch in v1; v2 may add a `general_tensor` type.
+
+#### 1.3.3 Function-space hints
+
+The `space` field provides an FE-method hint to the backend. v1 default is `lagrange_p1`:
+
+| Value | Meaning |
+|---|---|
+| `lagrange_p1` | Continuous piecewise-linear ($H^1$ on the subdomain). The workhorse for cell-biology reaction-diffusion. **Default.** |
+| `lagrange_p2` | Continuous piecewise-quadratic. Higher accuracy where worth the cost. |
+| `lagrange_pk` for `k ∈ {3,4,...}` | Higher-order Lagrange. |
+| `discontinuous_galerkin_pk` | Element-wise polynomial of degree $k$, discontinuous across element boundaries. For advection-dominated problems and certain flux-conservative schemes. |
+| `taylor_hood` | Reserved for mechanics-template vector velocities paired with $P_1$ pressure (Stokes / Navier–Stokes); not in v1. |
+
+The `space` field is a *hint*, not a contract. A backend may choose a different but compatible discretisation if it justifies the change. Backends are not required to support every space value; an unsupported hint is a solver-side error, not a MathDescription error.
+
+The reason for default-then-override: cell-biology modellers should not have to think about FE function spaces for the common case. A scalar concentration variable on a bulk subdomain is overwhelmingly likely to want $P_1$ Lagrange; making them spell that out adds friction without adding signal.
+
+#### 1.3.4 Motion variables
+
+A motion variable is just a regular vector variable that happens to be referenced from a subdomain's `motion` slot. There is no separate "motion variable" entity kind.
+
+```yaml
+subdomains:
+  - name: membrane
+    kind: surface
+    motion: { kind: unknown, variable: membrane_velocity }
+
+variables:
+  - { name: membrane_velocity, subdomain: membrane, type: vector }
+
+equations:
+  - template: <constitutive_template_for_motion>   # e.g. force balance, viscous slip
+    variable: membrane_velocity
+    subdomain: membrane
+    temporality: ...
+    terms: { ... }
+```
+
+The motion variable lives on the same subdomain whose motion it represents. The equation governing it can reference any other variable visible from that subdomain — including bulk variables via `trace(·)` (e.g. cortical actin stress imported from the cytoplasm), parameters, etc. The composability of motion-as-unknown comes from this plain-variable treatment.
+
+#### 1.3.5 Variables on moving subdomains
+
+When a variable's subdomain has `motion.kind` of `prescribed` or `unknown`, the value field is defined on the deforming manifold. The semantic conventions:
+
+- **Spatial coordinates and geometric helpers** (`x`, `n(x)`, `H(x)`, etc.) evaluate against the current (deformed) configuration at every time step.
+- **Time derivative `∂_t u`** in an operator template's `∂_t` slot is interpreted as the derivative *at a fixed material point* — i.e., the Lagrangian / material time derivative. The template's compression / dilution term (`u ∇·v` for T1, `ρ ∇_Γ·v_Γ` for T2 — both computed from `subdomain.motion`) reconciles this with an Eulerian observer's $\partial_t$ when needed.
+- **Initial conditions** are evaluated on the initial (t=0) configuration. For subdomains with `motion.kind = unknown`, the initial configuration is determined by the motion variable's initial condition (a displacement field at t=0).
+
+These conventions are imposed *by* the operator templates; the user writing a template's `source`, `diffusion`, or BC expression does not need to think about which frame they are working in. The escape-hatch weak form (§1.5) requires the user to be explicit about time-derivative conventions — that is a v1.5 problem.
 
 ### 1.4 Equations — operator templates
 
@@ -415,7 +595,7 @@ The concrete syntactic carrier — parsable string, Python AST, SymPy expression
 
 **When required.** Whenever an expression evaluated on $\Sigma_{\text{low}}$ references a variable defined on a strictly higher-dimensional $\Sigma_{\text{high}}$. Variables defined on the *same* subdomain as the expression are referenced directly. Variables defined on a *strictly lower-dimensional* subdomain than the expression's evaluation domain are intentionally not referenceable inside an expression (§1.8.7): the surface → bulk direction is mathematically non-unique, and the cases that need it are better expressed as a named bulk variable with its own equation tied to the surface variable via a boundary condition.
 
-**Side specifier (deferred to v2).** When a single variable is defined on a single subdomain — the v1 norm — `trace(u)` is unambiguous: there is exactly one side. If v2 admits a variable defined on both sides of an internal interface, the syntax `trace(u, from=<subdomain>)` is reserved for disambiguation; the schema will reject ambiguous traces at validation time until then.
+**Side specifier (deferred to v2).** When the higher-dim subdomain $\Sigma_{\text{high}}$ contributes exactly one connected region on one side of the lower-dim evaluation context, `trace(u)` is unambiguous. Two cases require a side specifier and are deferred (see §1.2.7): (a) a single variable defined on both sides of an internal interface where the two sides are *different* subdomain classes — resolved by `trace(u, from=<subdomain>)`; (b) an interface between two regions of the *same* subdomain class — resolved by a region-or-orientation specifier (syntax TBD). v1 rejects ambiguous traces at validation time and the modeller falls back to Tier 3 (separate subdomain classes) for unambiguous addressing.
 
 **Implementation.** Trace evaluation is a backend concern. In FEniCSx 0.10, traces of bulk variables on internal facets are realised through native mixed-dimensional assembly (see `docs/research/2026-05-21-fenicsx-ecosystem.md`). The user-facing formalism does not commit to a particular evaluation strategy.
 
