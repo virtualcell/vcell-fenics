@@ -72,3 +72,10 @@ dev = { features = ["dev"], solve-group = "default" }
 
 [tool.pixi.tasks]
 test = "pytest"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # PETSc on some platforms warns when LU is chosen on a tiny linear problem.
+    "ignore::DeprecationWarning",
+]
