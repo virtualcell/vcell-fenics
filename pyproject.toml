@@ -75,6 +75,10 @@ test = "pytest"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# -rP shows captured stdout for passed tests in the summary, so tests that
+# write inspectable artifacts (viz, ParaView output) surface the paths
+# without requiring `-s`.
+addopts = ["-rP"]
 filterwarnings = [
     # PETSc on some platforms warns when LU is chosen on a tiny linear problem.
     "ignore::DeprecationWarning",
