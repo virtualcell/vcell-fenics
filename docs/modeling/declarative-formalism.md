@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.7 (initial conditions), §1.8 (coupling and expression vocabulary), and §1.10 (moving subdomains) have been drafted in detail; the surrounding sections (§1.1, §1.9, §1.11, and Parts 2 and 3) are sketched as headings only.
+**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.7 (initial conditions), §1.8 (coupling and expression vocabulary), §1.9 (temporality and DAE structure), and §1.10 (moving subdomains) have been drafted in detail; the surrounding sections (§1.1, §1.11, and Parts 2 and 3) are sketched as headings only.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -924,7 +924,99 @@ Type mismatches are validation errors. A scalar where a vector is expected is **
 
 ### 1.9 Temporality, mixed systems, and DAE structure
 
-*To be written.* Per-equation `time_dependent` / `steady_state` declaration; what it means for a model to contain both; validation rules ("you said steady but have ∂_t" — error).
+#### 1.9.1 Per-equation temporality declaration
+
+Every equation in a MathDescription declares a `temporality` field. The value is one of:
+
+| Value | Meaning |
+|---|---|
+| `time_dependent` | The equation describes how the variable evolves: it produces a time derivative of the governed variable, which the solver integrates. |
+| `steady_state` | The equation describes an algebraic constraint that must hold at every instant: it produces no time derivative of the governed variable, and the solver determines the variable's value instantaneously. |
+
+`temporality` is required. There is no default and no inference from the equation's structure — the user states their intent and the validator (§1.9.5) checks that the equation's form is consistent with the declaration. The rationale (recorded in memory decision 3) is that inferring temporality from "is ∂_t present?" forecloses the mixed-systems case below, where the user genuinely wants to say "this equation has no time derivative but is part of the time-coupled system."
+
+#### 1.9.2 Time-dependent equations
+
+A `time_dependent` equation contributes a rule for how the governed variable evolves. Operationally:
+
+- **Template equations (T1, T2, T4):** the template's `∂_t` slot is generated and assembled. The user does not write `∂_t` explicitly; it is part of the template's mathematical form, activated by the `time_dependent` flag.
+- **Weak-form equations:** the user writes `partial_t(u)` for the governed variable $u$ inside the form (§1.5.4). The expression must appear at least once.
+
+In both cases the variable acquires a time evolution, requires an **initial condition** (§1.7), and is part of the solver's time integration loop.
+
+#### 1.9.3 Steady-state equations
+
+A `steady_state` equation contributes an algebraic constraint. Operationally:
+
+- **Template equations:** for templates with an optional `∂_t` slot (T1, T2, T4), the slot is omitted. T3 (algebraic constraint) is always `steady_state`; declaring it otherwise is an error.
+- **Weak-form equations:** the form must not contain `partial_t(u)` for the governed variable $u$.
+
+The governed variable does not have a time evolution rule from this equation — its value is determined at every instant by satisfying the constraint. **No initial condition is required, and providing one is an error** (§1.7.1).
+
+A `steady_state` equation may still be re-solved at every time step. Whether it is solved once (in an all-steady model) or repeatedly (in a mixed model) is a model-level property, not a per-equation one — see §1.9.6.
+
+#### 1.9.4 Mixed systems and DAE structure
+
+A MathDescription is **mixed-temporality** when it contains both `time_dependent` and `steady_state` equations. The combined system is a **differential-algebraic equation (DAE)**: time derivatives appear for some variables, algebraic constraints for others, all coupled through shared variables in their expressions.
+
+Canonical examples:
+
+- **Stokes flow.** Time-dependent momentum equation `∂_t v = ∇·σ + f` paired with steady-state continuity `∇·v = 0`. The continuity equation determines pressure (via Lagrange multiplier structure) at every instant; momentum evolves $v$ in time.
+- **Quasi-static cell mechanics with diffusing species** (the §1.10.8 worked example). Steady-state force balance for the membrane velocity (mechanical equilibrium at every instant); time-dependent surface PDE for receptor density (evolves on the moving membrane).
+- **Reaction-diffusion with a conserved-total constraint.** Time-dependent species equations plus a steady-state integral constraint enforcing $\int_\Omega u \, \mathrm{d}\Omega = M_0$.
+
+The DAE structure is the natural way to express these. Without a per-equation temporality declaration the modeller would have to either pin everything as time-dependent (and somehow encode "this variable has no time derivative") or rewrite the math to eliminate constraints (which loses physical clarity). Per-equation temporality is the cleaner abstraction.
+
+**DAE index.** Mathematically, DAEs have an *index* that measures how far they are from a pure ODE — index-1 systems are tractable with standard implicit solvers; index-2 and higher require careful treatment. The math description does not pin the index. The validator does not compute it. This is a solver-side concern: the backend may choose how to handle the DAE (full DAE solver, index reduction, partitioned approach), and that choice is independent of the math description.
+
+#### 1.9.5 Validation rules
+
+The validator checks the following at MathDescription construction time:
+
+**Temporality ↔ time-derivative consistency:**
+
+- An equation declared `time_dependent` must contain $\partial_t$ of its governed variable. For T1/T2/T4 templates, this means the template's `∂_t` slot is present (always true when `temporality: time_dependent`). For weak-form equations, the form must contain `partial_t(u)` where $u$ is the governed variable.
+- An equation declared `steady_state` must not contain $\partial_t$ of its governed variable. T3 may only be `steady_state`. Weak-form equations must not contain `partial_t(u)` for the governed $u$.
+- References to *other* variables' time derivatives (e.g. a steady-state weak form that references `partial_t(v)` for some other variable $v$ as a coefficient) are unrestricted. The temporality flag controls the governed variable's evolution; other variables' time derivatives are just coefficient values.
+
+**IC consistency (cross-references §1.7):**
+
+- A `time_dependent` equation must have an `initial_condition` field for its governed variable.
+- A `steady_state` equation must not have an `initial_condition` field.
+
+These are the strict-matching rules; they catch a class of silent errors where a `time_dependent` equation forgets its time derivative (and silently becomes an algebraic constraint inside the time loop) or a `steady_state` equation accidentally introduces $\partial_t$ (and silently becomes an evolution equation without an IC).
+
+#### 1.9.6 Whole-model classifications
+
+The model itself acquires a temporality from its equations:
+
+| Model has... | Model is... | Solver behaviour |
+|---|---|---|
+| All equations `steady_state` | A **steady-state model** | Solved once as a nonlinear algebraic system. No time stepping. No ICs required anywhere. |
+| At least one equation `time_dependent` | A **time-dependent (possibly DAE) model** | Solved over a time interval $[0, T]$. Time-stepping required. ICs required for every time-dependent variable. Steady-state equations are re-solved at every time step alongside the integration. |
+
+The model's temporality is implied, not declared. The user does not write a top-level `temporality: ...` field; it is determined by aggregating the per-equation declarations.
+
+#### 1.9.7 Solver-side concerns (briefly)
+
+The following are explicitly *not* part of the MathDescription, even though they materially affect a mixed-temporality simulation:
+
+- **Time-stepping scheme.** BE, CN, BDF2, IMEX splits, Runge-Kutta variants — backend's choice. The math description's `partial_t(u)` is continuous-time and discretization-agnostic.
+- **DAE index reduction.** If the system is high-index, the backend may rewrite it (Pantelides algorithm and friends). The math description states the well-posed problem; rewriting is a solver-side optimisation.
+- **Predictor-corrector iteration for stiff couplings.** Monolithic vs partitioned solve of the coupled system at each step — backend's choice.
+- **Tolerance and convergence criteria.** Always solver-side.
+
+The math description says *what* the well-posed time-coupled DAE is; the backend says *how* it is integrated.
+
+#### 1.9.8 Worked example reference
+
+The §1.10.8 example (viscous force balance for membrane motion with a receptor density on the moving membrane) is the canonical mixed-temporality model in this document:
+
+- The motion equation is `temporality: steady_state` — mechanical equilibrium at every instant.
+- The receptor density equation is `temporality: time_dependent` — diffusion plus reaction plus auto-dilution from the membrane's motion.
+- The two are coupled through `subdomain.motion.variable = v_membrane`: the receptor's surface-PDE template reads the solved motion at each time step to compute its dilution term.
+
+A pure steady-state model would have all equations declared `steady_state` and no ICs anywhere; a pure time-dependent model (no constraints) would have all equations `time_dependent` and ICs for every variable. Most cell-biology models with mechanics fall between these — quasi-static mechanics balances paired with time-evolving species — which is exactly what mixed-temporality systems are for.
 
 ### 1.10 Moving subdomains
 
