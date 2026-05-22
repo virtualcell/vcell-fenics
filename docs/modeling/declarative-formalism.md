@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.7 (initial conditions), §1.8 (coupling and expression vocabulary), §1.9 (temporality and DAE structure), and §1.10 (moving subdomains) have been drafted in detail; the surrounding sections (§1.1, §1.11, and Parts 2 and 3) are sketched as headings only.
+**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, all of Part 1 except §1.1 has been drafted in detail: §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.7 (initial conditions), §1.8 (coupling and expression vocabulary), §1.9 (temporality and DAE structure), §1.10 (moving subdomains), and §1.11 (well-posedness checks). §1.1 (goals and non-goals) and Parts 2 (data model) and 3 (solver contract) remain sketched as headings.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -1195,7 +1195,116 @@ This sketch is intentionally minimal — a single membrane, one mechanics balanc
 
 ### 1.11 Well-posedness checks
 
-*To be written.* Static rules a MathDescription must satisfy: every variable referenced has an equation in every subdomain where it lives; every time-dependent variable has an IC; every BC references a labelled boundary that exists; types of slot expressions match the template's declared types; etc.
+#### 1.11.1 Purpose and stance
+
+A MathDescription that passes validation is *structurally* well-posed: every name resolves, every required field is provided, every typed slot receives a value of the right type, and the temporal / boundary structure is internally consistent. The validator does **not** prove the resulting math problem has a unique solution — that is a deeper property of the equations themselves, depending on coefficient signs, coercivity, inf-sup conditions, and many other things no static check can verify on arbitrary user expressions. The validator's job is to catch the class of errors that produce silently wrong models: missing time derivatives, mismatched types, dangling references, conflicting BCs. The user remains responsible for the math.
+
+The rules are stated below in categories, with forward-references back to the section where each rule was originally introduced. They are checks the schema runs at MathDescription construction time; they do not require a solver, a geometry beyond the name-level interface, or any numerical computation.
+
+#### 1.11.2 Errors versus warnings
+
+Validation outputs distinguish two severities:
+
+- **Errors** prevent MathDescription construction. The model is malformed; no solve can run.
+- **Warnings** allow construction but flag a suspicious or possibly-wrong pattern that the validator cannot prove is incorrect.
+
+Most rules below are errors. The few warning cases are noted explicitly. Examples of warnings: IC ↔ Dirichlet compatibility with complex expressions the validator cannot evaluate symbolically; non-trivial expression patterns that suggest user intent might be different from what the syntax says.
+
+#### 1.11.3 Reference resolution
+
+**Errors.** Every name appearing in a MathDescription must resolve:
+
+- Variable names referenced in equations, BCs, ICs, or motion-variable slots must be declared in the `variables:` block.
+- Parameter names referenced in expressions must be declared in the `parameters:` block.
+- Subdomain class names referenced anywhere must be declared in the `subdomains:` block (§1.2).
+- Labelled boundary names referenced in BCs must exist in the referenced geometry (§1.11.10).
+- Reserved names (`t`, `x`, geometric helpers, standard functions, operator names) must not be shadowed by variable or parameter names. Shadowing is an error at construction, not a precedence resolution (§1.8.6).
+- A bare name in an expression must resolve to a local variable (defined on the same subdomain as the expression's evaluation context), a parameter, or a reserved name. References to variables on a *different* subdomain require `trace(·)`; lower-dimensional variables cannot be referenced at all (§1.8.6, §1.8.7).
+
+#### 1.11.4 Coverage rules
+
+**Errors.**
+
+- Every variable must be governed by exactly one equation. A variable without an equation is undetermined; a variable with two or more equations is overdetermined.
+- Every equation declared `temporality: time_dependent` must have an `initial_condition` (§1.7.1, §1.9.5).
+- Every equation declared `temporality: steady_state` must **not** have an `initial_condition` (§1.7.1, §1.9.5).
+- Every variable referenced in any equation, BC, or IC must be declared.
+- Every internal boundary touched by a variable must have at least one explicit BC for that variable (no zero-Neumann default on internal boundaries; §1.6.4).
+- For region-keyed parameter maps (`kind: region_map`), every region of the named subdomain class must have a value in the map (§1.2.5).
+
+External boundaries have a zero-Neumann default, so missing BCs there are *not* errors.
+
+#### 1.11.5 Type rules
+
+**Errors** (cross-references §1.4.4, §1.8.8, §1.7.4):
+
+- A slot expression's value type must match the slot's declared type. Scalar slots require scalar values; vector slots require vectors in $\mathbb{R}^d$; tensor slots require symmetric $d \times d$ tensors.
+- No implicit broadcast. A scalar where a vector is expected must be made explicit (e.g., `c * n(x)` to broadcast scalar $c$ along the normal).
+- Calculus operators' argument and result types must be honoured (`grad(u)` for scalar $u$ returns a vector; `div(v)` for vector $v$ returns a scalar; etc., per §1.8.5).
+- Variable initial conditions must match the variable's declared type (§1.7.4).
+- The Robin coefficient triple $(\alpha, \beta, h)$ must be three scalars (§1.6.2).
+- Interface BC `partner_variable` must be defined on a subdomain incident to the BC's boundary from the opposite side (§1.6.2).
+
+#### 1.11.6 Temporality consistency
+
+**Errors** (cross-references §1.9.5):
+
+- An equation declared `time_dependent` must contain $\partial_t$ of its governed variable. For T1/T2/T4 templates this is automatic when the flag is set. For weak-form equations, the form must contain `partial_t(u)` where $u$ is the governed variable.
+- An equation declared `steady_state` must **not** contain $\partial_t$ of its governed variable.
+- T3 (algebraic constraint) may only be `steady_state`.
+- References to $\partial_t$ of *other* variables (variables not governed by this equation) in an expression are unrestricted — those are coefficient values, not evolution rules for this equation.
+
+#### 1.11.7 Boundary-condition consistency
+
+**Errors** (cross-references §1.6.4, §1.5.6):
+
+- No two BCs for the same (variable, boundary) pair may declare conflicting kinds (e.g. Dirichlet and Neumann on the same variable and boundary).
+- Interface BCs must have a `partner_variable` defined on a subdomain incident to the BC's boundary from the opposite side.
+- Dirichlet BCs must be declared on a labelled boundary that exists; the boundary must be incident to a subdomain on which the variable lives.
+- For weak-form equations (template = `weak_form`), §1.6 BCs on the governed variable must all be Dirichlet. Non-Dirichlet §1.6 BCs on a weak-form-governed variable are an error (§1.5.6); the user must encode natural BCs in the form itself.
+- Trace ambiguity: when an expression's `trace(u)` would have multiple resolutions (e.g. higher-dim $u$ contributes regions on both sides of the lower-dim evaluation context), the reference is ambiguous and rejected. In v1 the modeller's recourse is Tier 3 (separate subdomain classes); v2 will add side-or-region specifiers (§1.2.7, §1.8.2).
+
+#### 1.11.8 Initial-condition consistency
+
+**Errors** (cross-references §1.7):
+
+- ICs must not reference other state variables.
+- ICs must not reference time `t`.
+- IC type must match the variable's declared type.
+
+**Warnings**:
+
+- At points on a Dirichlet boundary where both an IC and a Dirichlet BC apply, the IC value should equal the Dirichlet BC value at $t = 0$. The validator checks this for syntactically simple cases (constant expressions, polynomial expressions whose boundary trace is computable) and emits a warning when it cannot prove agreement but cannot prove disagreement either (§1.7.5).
+
+#### 1.11.9 Operator narrow rule
+
+**Errors** (cross-references §1.8.5):
+
+- In operator-template slots (T1–T7), calculus operators (`grad`, `div`, `lapl`, `grad_surf`, `div_surf`, `lapl_beltrami`) may not be applied to the equation's own governed variable. Applications to *other* variables are unrestricted.
+- The validator walks the slot expression's AST: if any calculus operator's argument resolves (directly or via composition) to the slot's governed variable, that is an error. The rule does not apply to weak-form equations (§1.5.3); there, the user has full UFL expressiveness and owns well-posedness.
+
+#### 1.11.10 Geometry interface compatibility
+
+**Errors.** Cross-checks between the MathDescription and its referenced Geometry (§1.2.1):
+
+- Every subdomain class name declared in the MathDescription must have a same-named class in the Geometry, with the same `kind`.
+- Every labelled boundary name referenced in a BC must exist in the Geometry.
+- Every internal boundary referenced by an interface BC must in fact bound two subdomains in the Geometry, matching the BC's `variable.subdomain` and `partner_variable.subdomain`.
+- Region-keyed parameter maps (`kind: region_map`) must cover every region the Geometry assigns to the parameter's subdomain class — missing regions are errors, not silent zero defaults.
+
+These checks require the Geometry to be available at MathDescription validation time. If the Geometry is loaded lazily (typical at solve time), some of these checks are deferred until both are present. The validator may still run all *intra*-MathDescription checks without the Geometry.
+
+#### 1.11.11 What the validator cannot check
+
+The following are explicitly outside the validator's scope. They are the user's responsibility, and they are the deepest reason validation cannot prove a model is well-posed:
+
+- **Coercivity, ellipticity, inf-sup conditions.** Whether a given bilinear form admits a unique solution depends on the sign and structure of its terms (positive-definite diffusion, properly-paired mixed spaces, etc.). The validator does not check these.
+- **Sign conventions.** Whether the user wrote $\nabla \cdot (D \nabla u)$ with the correct sign for a diffusion equation (or accidentally $-\nabla \cdot (D \nabla u)$) is invisible to a static walk of the AST.
+- **Physical consistency.** Whether $k_{on}$ and $k_{off}$ in a binding reaction have the right dimensions, whether $D$ has units of length²/time, whether the chosen $\sigma_T$ produces a meaningful tension — none of these can be checked without unit annotations the formalism does not currently require. Unit-aware validation is a possible v2 enhancement.
+- **Conservation across coupled bulk-surface expressions.** The §1.6.5 composable pattern relies on the user writing matched expressions in three places (bulk BC, surface source for the bound form, surface source for the free form, with appropriate signs). The validator does not enforce that they are consistent; silent mass leakage is a class of error the user is responsible for catching, e.g. through dedicated mass-balance test cases.
+- **Well-posedness of the user's weak forms.** The escape hatch trades guardrails for expressiveness. A form whose bilinear part is singular, whose test-function structure does not match the trial-function space, or whose boundary integrals are missing terms required for integration-by-parts consistency will silently produce a malformed problem. The validator catches name-resolution and type-level errors only.
+
+These limits define the validator's stance: catch the structural mistakes a static check *can* catch, and trust the modeller for the rest.
 
 ---
 
