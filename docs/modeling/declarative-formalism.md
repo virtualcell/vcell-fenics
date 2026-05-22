@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. As of 2026-05-21, **Part 1 (Mathematical formalism) is drafted in full**: §1.1 (goals and non-goals), §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.7 (initial conditions), §1.8 (coupling and expression vocabulary), §1.9 (temporality and DAE structure), §1.10 (moving subdomains), and §1.11 (well-posedness checks). Part 2 (data model) and Part 3 (solver contract) remain sketched as headings.
+**Status:** work in progress. As of 2026-05-22, **Part 1 (Mathematical formalism) and Part 2 (Data model) are drafted in full**: Part 1 covers §1.1–§1.11 (goals and non-goals, geometry vocabulary, variables, equation templates, weak-form escape hatch, boundary conditions, initial conditions, coupling and expression vocabulary, temporality and DAE structure, moving subdomains, well-posedness checks); Part 2 covers §2.1–§2.7 (schema overview, schema by entity, expression language, naming and reference resolution, validation, VCell mapping, end-to-end worked example). Part 3 (solver contract) remains sketched as headings.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -1364,7 +1364,490 @@ These limits define the validator's stance: catch the structural mistakes a stat
 
 ## Part 2 — Data model
 
-*To be written.* Schema (Python dataclasses, with YAML/JSON round-trip), naming and reference resolution, validation rules, and the mapping to/from VCell `MathDescription` (which subset round-trips, which parts deliberately do not and why).
+Part 1 specified what is in a MathDescription. Part 2 specifies *how* a MathDescription is represented — its concrete syntactic carrier, its schema, the expression-language parser, and the rules by which references resolve. The carrier is the bridge from the abstract formalism to something a modeller can write and a backend can load.
+
+### 2.1 Schema overview
+
+#### 2.1.1 Three carriers, one model
+
+A MathDescription ships in three forms that describe the same underlying data model:
+
+| Carrier | Purpose | Audience |
+|---|---|---|
+| **YAML** | Human-edited form; the primary authoring interface. | Modellers writing models by hand. Matches every worked example in Part 1. |
+| **JSON** | Canonical machine interchange and storage. | Tools, CI, archives, and any consumer that wants a parser without a YAML dependency. |
+| **Python dataclasses** | In-memory representation. | The `vcell-fenics` runtime; `pyvcell` integration; programmatic model construction. |
+
+A single parser / serializer round-trips among the three: YAML ↔ JSON ↔ dataclasses, with the dataclass form as the canonical AST. No information is lost going through any of the three forms.
+
+YAML and JSON differ only syntactically. YAML's nested-block format is what the documentation has shown; JSON is the same shape with `{}` / `[]` punctuation and quoted keys. A YAML model and the equivalent JSON model parse to identical dataclass instances.
+
+#### 2.1.2 The top-level envelope
+
+A MathDescription has the following top-level fields:
+
+```yaml
+math_description:
+  geometry: <string>            # name of the external Geometry object
+  subdomains: [...]             # list of Subdomain entries (§2.2.2)
+  variables: [...]              # list of Variable entries (§2.2.3)
+  parameters: [...]             # list of Parameter entries (§2.2.4)
+  equations: [...]              # list of Equation entries (§2.2.5)
+  boundary_conditions: [...]    # list of BoundaryCondition entries (§2.2.6)
+```
+
+All six fields are required. `subdomains`, `variables`, `equations` may not be empty (a model with no equations cannot be solved). `parameters` and `boundary_conditions` may be empty lists. The order within any list is not semantically significant; references are by name.
+
+There is no top-level `temporality` or `motion` declaration — both are derived from per-equation and per-subdomain fields. There is no top-level `solver` block either; solver configuration is a separate object (Part 3).
+
+### 2.2 Schema by entity
+
+#### 2.2.1 Subdomain
+
+```yaml
+subdomains:
+  - name: <string>              # unique within the MathDescription
+    kind: volume | surface | curve | point
+    motion:                     # optional; defaults to { kind: none }
+      kind: none | prescribed | unknown
+      # additional fields per `kind`, below
+```
+
+`motion` field shapes:
+
+- **`kind: none`** — no further fields. Subdomain is static.
+- **`kind: prescribed`** — exactly one of `velocity` or `displacement`:
+  ```yaml
+  motion: { kind: prescribed, velocity: "<vector_expr>" }
+  motion: { kind: prescribed, displacement: "<vector_expr>" }
+  ```
+- **`kind: unknown`** — references a motion variable:
+  ```yaml
+  motion: { kind: unknown, variable: <variable_name> }
+  ```
+  The referenced variable must be declared in `variables:`, must be `type: vector`, must have `subdomain: <this subdomain>`, and must be governed by some equation (§1.10.3, §1.11.4).
+
+The `kind` discriminator in `motion` selects which fields are valid. Cross-mixing (e.g. `kind: none` with a `velocity` field, or `kind: prescribed` with both `velocity` and `displacement`) is rejected at construction time.
+
+#### 2.2.2 Variable
+
+```yaml
+variables:
+  - name: <string>              # unique within the MathDescription
+    subdomain: <subdomain_name>
+    type: scalar | vector | symmetric_tensor    # default: scalar
+    space: <function_space_hint>                # optional; default: lagrange_p1
+```
+
+The `space` hint values are catalogued in §1.3.3. Backends are not required to honour every hint; an unsupported hint is a solver-side error.
+
+The pair `(name, subdomain)` uniquely identifies a variable. The same variable name on different subdomains denotes two distinct variables (per §1.3.1).
+
+#### 2.2.3 Parameter
+
+Two parameter kinds:
+
+```yaml
+# Class-level (region-independent) — the common case:
+parameters:
+  - { name: <string>, value: <number> }
+
+# Region-keyed (Tier 1 region variation, §1.2.5):
+  - name: <string>
+    kind: region_map
+    subdomain: <subdomain_name>
+    values:
+      <region_name>: <number>
+      <region_name>: <number>
+      # ... one entry per region of the subdomain class
+```
+
+The class-level form is shorthand for `{ name, kind: scalar, value }`; the `kind` field defaults to `scalar` when only `value` is provided. Region-keyed parameters require explicit `kind: region_map` plus the `subdomain` and `values` fields.
+
+Region-keyed parameters resolve at expression-evaluation time using the geometry's region-to-class assignment. Every region of the named subdomain class must have an entry in `values` (validator-checked, §1.11.4).
+
+#### 2.2.4 Equation — template form
+
+```yaml
+equations:
+  - template: <template_name>           # e.g. bulk_radv_diff, surface_pde_with_dilution, ...
+    variable: <variable_name>
+    subdomain: <subdomain_name>
+    temporality: time_dependent | steady_state
+    terms:
+      <slot_name>: "<expression>"
+      # one entry per template slot the user wants to fill;
+      # omitted slots default to zero per §1.4.4
+    initial_condition: "<expression>"   # required iff temporality = time_dependent
+```
+
+Template names for v1: `bulk_radv_diff` (T1), `surface_pde_with_dilution` (T2), `algebraic_constraint` (T3), `lumped_ode` (T4). Template slot names per template are catalogued in §1.4.2.
+
+The validator checks that every slot in `terms` is a valid slot name for the template and that the expression types match the slot's declared types (§1.11.5).
+
+#### 2.2.5 Equation — weak-form
+
+```yaml
+equations:
+  - template: weak_form
+    variable: <variable_name>
+    subdomain: <subdomain_name>
+    temporality: time_dependent | steady_state
+    form: |
+      <UFL-style residual expression — see §1.5 and §2.3.5>
+    initial_condition: "<expression>"   # required iff temporality = time_dependent
+```
+
+The `form` field carries the full residual; the equation is `form = 0` for all admissible test functions, per §1.5. The form references `<variable>_test` for the test function and uses the measure vocabulary catalogued in §1.5.3.
+
+#### 2.2.6 Boundary condition
+
+```yaml
+boundary_conditions:
+  - variable: <variable_name>
+    boundary: <boundary_name>            # labelled boundary in the Geometry
+    kind: dirichlet | neumann | robin | interface_value_equality | interface_flux_balance
+    # additional fields per `kind`:
+
+  # Dirichlet / Neumann: scalar expression
+  - { variable: u, boundary: outer, kind: dirichlet, expression: "<expr>" }
+  - { variable: u, boundary: outer, kind: neumann,   expression: "<expr>" }
+
+  # Robin: triple
+  - variable: u
+    boundary: outer
+    kind: robin
+    alpha: "<scalar_expr>"
+    beta: "<scalar_expr>"
+    expression: "<scalar_expr>"          # the h in alpha*u + beta*D*grad(u)·n = h
+
+  # Interface value-equality
+  - variable: u_left
+    partner_variable: u_right
+    boundary: membrane
+    kind: interface_value_equality
+    expression: "<scalar_expr>"          # the partition coefficient k; default 1
+
+  # Interface flux-balance
+  - variable: u_left
+    partner_variable: u_right
+    boundary: membrane
+    kind: interface_flux_balance
+    expression: "<scalar_expr>"          # the constitutive flux expression
+```
+
+Interface kinds require `partner_variable` per §1.6.2. The validator checks all the BC consistency rules from §1.11.7 (no conflicting kinds on the same `(variable, boundary)`; partner subdomain incidence is correct; Dirichlet-only restriction on weak-form-governed variables; etc.).
+
+### 2.3 Expression language
+
+#### 2.3.1 Surface syntax
+
+Expression strings in YAML use math-like infix notation. The syntactic primitives:
+
+- **Numeric literals.** `0`, `1.0`, `0.5`, `1.0e-3`, scientific notation per usual.
+- **Bare names** resolve per §1.8.6: local variable → parameter → reserved name. Examples: `rho`, `k_on`, `t`, `x`.
+- **Indexed access** on the spatial coordinate: `x[0]`, `x[1]`, `x[2]`.
+- **Binary arithmetic**: `+`, `-`, `*`, `/`, `**` (power). Standard precedence.
+- **Unary minus**: `-expr`.
+- **Function calls**: `f(arg1, arg2, ...)` for every function in the vocabulary — `sin`, `cos`, `exp`, `sqrt`, `trace`, `grad`, `n`, `H`, `theta`, `inner`, `if`, `partial_t`, etc.
+- **Vector and tensor literals**: `[a, b]`, `[a, b, c]` for vectors; tensor literals are nested lists, e.g. `[[a, b], [c, d]]`.
+- **Parentheses** for grouping, as expected.
+
+There are no statements, no assignments, no control flow outside the `if(cond, a, b)` form. Expressions are pure.
+
+Examples seen in Part 1's worked models:
+
+```
+"1.0"
+"1.0 + 0.5 * cos(2 * theta(x))"
+"-k_off * rho_active"
+"k_on * trace(L) * rho_f - k_off * rho_b"
+"r_dot * (x / |x|)"
+"k_on * rho_inactive - k_off * rho_active"
+```
+
+#### 2.3.2 Parsing
+
+The string is parsed at MathDescription construction time into a **typed AST**. The parser is hand-written (a small recursive-descent for math-like infix; no third-party dependency); errors point to the offending position in the string. The AST is the canonical internal form.
+
+#### 2.3.3 AST node kinds
+
+The AST has the following node kinds:
+
+| Node | Carries | Notes |
+|---|---|---|
+| `Literal` | numeric value, type | Scalars; vector / tensor literals are constructed by `VectorLiteral` / `TensorLiteral`. |
+| `VariableRef` | name | Resolves to a local variable's value field at evaluation. |
+| `ParameterRef` | name | Resolves to a parameter's value (per-region if `region_map`). |
+| `ReservedRef` | which (`t`, `x`) | Time or spatial-coordinate access. |
+| `IndexAccess` | object, index | `x[0]` parses to `IndexAccess(ReservedRef("x"), Literal(0))`. |
+| `FunctionCall` | callee, args | Both built-in functions (sin, cos, …) and special operators (`trace`, `grad`, geometric helpers, `partial_t`, `inner`). |
+| `BinaryOp` | op (`+`, `-`, `*`, `/`, `**`), left, right | Standard arithmetic. |
+| `UnaryOp` | op (`-`), operand | |
+| `VectorLiteral`, `TensorLiteral` | components | |
+| `MeasureRef` | which (`dx`, `dx_Gamma`, `ds`, …) | Only valid in weak-form `form:` expressions. |
+
+Each node carries a type (`scalar`, `vector`, `symmetric_tensor`, or an error type for un-resolved cases). The validator (§1.11, §2.5) walks the AST type-checking each node.
+
+#### 2.3.4 Operator and function vocabulary
+
+The vocabulary is the union of:
+
+- **Standard mathematical functions** from §1.8.5 (`sin`, `cos`, `tan`, inverse trig, `exp`, `log`, `sqrt`, `abs`, `min`, `max`, `pow`, `if`, `step`, `sign`).
+- **Geometric helpers** from §1.8.4 (`n(x)`, `H(x)`, `kappa1`, `kappa2`, `tangent`, `theta`, `phi`, `r`).
+- **Calculus operators** from §1.8.5, subject to the narrow rule of §1.8.5 in template slots and unrestricted in weak-form (`grad`, `div`, `lapl`, `grad_surf`, `div_surf`, `lapl_beltrami`).
+- **Cross-dimensional reference** from §1.8.2 (`trace`).
+- **Tensor algebra** for weak-form expressions: `inner(a, b)` for the standard inner product, `dot(a, b)` for vector inner product, `outer(a, b)` for outer product, `cross(a, b)` in 3D.
+- **Time derivative**: `partial_t(u)`, valid only inside weak-form `form:` expressions and only for time-dependent equations.
+- **Measures**: `dx`, `dx_Gamma`, `dl`, `dp`, `ds(<boundary>)`, `dS(<boundary>)`, `dl_Gamma(<boundary>)`. Valid only inside weak-form `form:` expressions; multiply expressions by a measure to integrate them.
+
+#### 2.3.5 Weak-form expression specifics
+
+A weak-form `form:` expression has additional rules:
+
+- Must reference `<variable>_test` for the governed variable's test function at least once.
+- Must end up with measure multiplications producing an integrated scalar — the residual.
+- For `temporality: time_dependent`, must contain `partial_t(<variable>)` at least once.
+- For `temporality: steady_state`, must not contain `partial_t(<variable>)`.
+
+Weak-form expressions may span multiple lines via YAML's `|` (literal block) syntax. Whitespace and line breaks are not semantic except as token separators.
+
+### 2.4 Naming and reference resolution
+
+#### 2.4.1 Naming conventions
+
+Names within a MathDescription:
+
+- **Identifiers** match `[A-Za-z_][A-Za-z0-9_]*` — letters, digits, underscores, leading non-digit. Case-sensitive.
+- **Snake_case** is conventional but not enforced; `rho_active`, `k_on`, `cytoplasm_left_cell` are typical.
+- **Reserved names** (cannot be used as variable, parameter, or subdomain names): `t`, `x`, plus every function and helper name in §2.3.4 (`sin`, `trace`, `grad`, `n`, `H`, `theta`, etc.) and every measure name (`dx`, `ds`, ...).
+- **Boundary and region names** are also identifiers; their assignment is the Geometry's responsibility.
+
+#### 2.4.2 Scope rules
+
+Names resolve in the order specified in §1.8.6:
+
+1. Local variable (on the expression's subdomain).
+2. Named parameter.
+3. Reserved name.
+
+A name that matches more than one of these at construction time is an error (shadowing — §1.11.3). A name that matches none is an error.
+
+Variable names on *different* subdomains are not conflicts — `(c, cytoplasm)` and `(c, extracellular)` are two distinct variables with the same simple name. References must use `trace(·)` to cross subdomain boundaries (§1.8.2); within an expression, the bare name `c` resolves to whichever variable lives on the expression's evaluation subdomain.
+
+### 2.5 Validation
+
+The validation rules of §1.11 are implemented by a single validation pass over the MathDescription dataclass tree, run during construction (after YAML/JSON parsing, before the MathDescription is exposed to downstream code). The pass:
+
+1. Resolves every name (§1.11.3) — every reference must point to a declared entity.
+2. Type-checks every expression AST (§1.11.5) — node types must match slot expectations.
+3. Checks coverage (§1.11.4) — every variable governed, every internal boundary BC'd, etc.
+4. Checks temporality consistency (§1.11.6) — strict matching of `temporality` and `∂_t` presence.
+5. Checks BC consistency (§1.11.7) — no conflicts, interface partner-subdomain validity, weak-form Dirichlet-only restriction.
+6. Checks IC consistency (§1.11.8) — type match, no inter-variable references, Dirichlet-compatibility warnings.
+7. Applies the operator narrow rule (§1.11.9) — template slot expressions must not contain calculus on the governed variable.
+
+Errors prevent construction and are reported with the offending field's location (line / column for YAML, JSON pointer for JSON, attribute path for dataclasses). Warnings are emitted but allow construction.
+
+Geometry-compatibility checks (§1.11.10) run when the Geometry object is loaded — typically at solve time. The MathDescription itself can be validated without a Geometry, catching intra-model errors early.
+
+### 2.6 Mapping to / from VCell `MathDescription`
+
+This section specifies which VCell `MathDescription` constructs map to which formalism constructs, which don't map and why. **No converter ships in v1**; this is documentation of the translation rules to inform the eventual `pyvcell` integration when concrete VCell models need to be imported.
+
+#### 2.6.1 Constructs that map directly
+
+| VCell construct (cbit.vcell.math) | This formalism |
+|---|---|
+| `CompartmentSubDomain` | `Subdomain` with `kind: volume` |
+| `MembraneSubDomain` | `Subdomain` with `kind: surface` |
+| `FilamentSubDomain` (planned) | `Subdomain` with `kind: curve` |
+| `PointSubDomain` | `Subdomain` with `kind: point` |
+| `VolVariable` | `Variable` with appropriate `subdomain` and `type: scalar` |
+| `MemVariable` | `Variable` with surface `subdomain` and `type: scalar` |
+| `PdeEquation` with `bSteady = false` | `Equation` template `bulk_radv_diff` or `surface_pde_with_dilution`, `temporality: time_dependent` |
+| `PdeEquation` with `bSteady = true` | Same template, `temporality: steady_state` |
+| `OdeEquation` | `Equation` template `lumped_ode`, `temporality: time_dependent` |
+| Constant parameters | `Parameter` with plain `value` |
+| Initial expression on a PDE/ODE | `initial_condition` field on the equation |
+| `BoundaryConditionType` (DIRICHLET/NEUMANN/PERIODIC/ROBIN) on a compartment face | `BoundaryCondition` with corresponding `kind` |
+
+#### 2.6.2 Constructs that need transformation
+
+| VCell construct | Transformation needed |
+|---|---|
+| `JumpCondition` | Translates to one or two `boundary_condition` entries with `kind: interface_flux_balance`. The Neumann-only restriction in VCell is relaxed here; flux-balance interface BCs may have any constitutive expression. |
+| Per-face Cartesian BCs (Xp/Xm/Yp/Ym/Zp/Zm) on a CompartmentSubDomain | Each face becomes a separate labelled-boundary BC. The Geometry must expose those faces as named boundaries (`x_minus`, `x_plus`, etc.). |
+| `MembraneSubDomain.velocityX`, `velocityY` | A `subdomain.motion` with `kind: prescribed` and `velocity: "[velocityX, velocityY]"`. Note the formalism uses a single vector expression, not per-component scalars. |
+| VCell `Expression` strings (infix math) | Parse using §2.3.2; the syntax is largely compatible. VCell's parser supports a few constructs ours does not (e.g. integer division semantics, certain function names) — translation may need minor rewrites. |
+| `ReservedSymbols` (Faraday, gas constant, …) | Become reserved parameter names in the MathDescription, with values from a shared constants module. |
+
+#### 2.6.3 Constructs that don't map in v1
+
+| VCell construct | Reason it does not map |
+|---|---|
+| `FastSystem`, `FastInvariant`, `FastRate` | Solver-side QSSA reduction; not part of this formalism (memory decision: "out of scope"). |
+| `Event` | Discrete state transitions are deferred to v2 (no template). |
+| `VolumeRegionVariable`, `MembraneRegionVariable` | Piecewise-constant region variables are deferred to v2. |
+| `ParticleMolecularType`, `StochVolVariable` | Stochastic dynamics are out of scope for this formalism entirely. |
+| `PostProcessingBlock` | Observables / derived outputs are out of scope for the formalism — they belong with the solver-configuration / output-spec object. |
+
+Models using any of these constructs cannot be imported losslessly in v1.
+
+#### 2.6.4 Round-trip considerations
+
+For models that fall entirely within §2.6.1 (direct mappings), bidirectional round-trip is feasible. For models requiring §2.6.2 transformations, round-trip is *lossy in one direction*: the formalism's richer constructs (labelled non-Cartesian boundaries, flux-balance interface BCs with arbitrary expressions, unknown motion) cannot in general be expressed back into VCell `MathDescription` without losing information. The natural direction is **VCell → formalism** (importing legacy models); **formalism → VCell** is offered only for the subset that fits in VCell's quirks (recorded as v2 if a use case earns it).
+
+SBML Spatial compatibility (the standard interchange format for spatial cell biology, which the user authored) is **not** part of v1. The schemas diverge non-trivially — SBML Spatial does not have a weak-form escape hatch, lacks first-class unknown motion, and has its own per-face BC machinery. A v2 SBML Spatial converter would be valuable but is a substantial project on its own.
+
+### 2.7 End-to-end worked example
+
+The §1.10.8 mechanics-driven membrane motion model in complete YAML form, ready to load:
+
+```yaml
+math_description:
+  geometry: cell_2d                       # external Geometry name
+
+  subdomains:
+    - name: membrane
+      kind: surface
+      motion:
+        kind: unknown
+        variable: v_membrane
+
+  variables:
+    - { name: v_membrane, subdomain: membrane, type: vector }
+    - { name: rho,        subdomain: membrane, type: scalar }
+
+  parameters:
+    - { name: eta,     value: 1.0   }
+    - { name: sigma_T, value: 0.10  }
+    - { name: k_off,   value: 0.02  }
+
+  equations:
+    # Motion equation — weak-form viscous force balance, quasi-static.
+    - template: weak_form
+      variable: v_membrane
+      subdomain: membrane
+      temporality: steady_state
+      form: |
+        ( eta * inner(v_membrane, v_membrane_test)
+          + sigma_T * H(x) * inner(n(x), v_membrane_test)
+          - inner(f_active(x, t), v_membrane_test)
+        ) * dx_Gamma
+      initial_condition: "0"
+
+    # Receptor density — standard T2 surface PDE with auto-dilution.
+    - template: surface_pde_with_dilution
+      variable: rho
+      subdomain: membrane
+      temporality: time_dependent
+      terms:
+        diffusion: "0.05"
+        source: "-k_off * rho"
+      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"
+
+  boundary_conditions: []
+```
+
+The Geometry object `cell_2d` is expected to provide:
+
+- A region or regions tagged `membrane` (surface kind).
+- No labelled boundaries are referenced in this model, so `boundary_conditions` is empty — but the geometry may still have labelled boundaries that the model could use later.
+
+What the equivalent JSON looks like (same data, different syntax):
+
+```json
+{
+  "math_description": {
+    "geometry": "cell_2d",
+    "subdomains": [
+      {
+        "name": "membrane", "kind": "surface",
+        "motion": { "kind": "unknown", "variable": "v_membrane" }
+      }
+    ],
+    "variables": [
+      { "name": "v_membrane", "subdomain": "membrane", "type": "vector" },
+      { "name": "rho",        "subdomain": "membrane", "type": "scalar" }
+    ],
+    "parameters": [
+      { "name": "eta",     "value": 1.0  },
+      { "name": "sigma_T", "value": 0.10 },
+      { "name": "k_off",   "value": 0.02 }
+    ],
+    "equations": [
+      {
+        "template": "weak_form",
+        "variable": "v_membrane",
+        "subdomain": "membrane",
+        "temporality": "steady_state",
+        "form": "( eta * inner(v_membrane, v_membrane_test) + sigma_T * H(x) * inner(n(x), v_membrane_test) - inner(f_active(x, t), v_membrane_test) ) * dx_Gamma",
+        "initial_condition": "0"
+      },
+      {
+        "template": "surface_pde_with_dilution",
+        "variable": "rho",
+        "subdomain": "membrane",
+        "temporality": "time_dependent",
+        "terms": { "diffusion": "0.05", "source": "-k_off * rho" },
+        "initial_condition": "1.0 + 0.3 * cos(2 * theta(x))"
+      }
+    ],
+    "boundary_conditions": []
+  }
+}
+```
+
+And what programmatic dataclass construction looks like (sketched, exact API in `vcell-fenics`):
+
+```python
+from vcell_fenics.formalism import (
+    MathDescription, Subdomain, Variable, Parameter,
+    TemplateEquation, WeakFormEquation, Motion,
+)
+
+md = MathDescription(
+    geometry="cell_2d",
+    subdomains=[
+        Subdomain(name="membrane", kind="surface",
+                  motion=Motion(kind="unknown", variable="v_membrane")),
+    ],
+    variables=[
+        Variable(name="v_membrane", subdomain="membrane", type="vector"),
+        Variable(name="rho",        subdomain="membrane", type="scalar"),
+    ],
+    parameters=[
+        Parameter(name="eta",     value=1.0),
+        Parameter(name="sigma_T", value=0.10),
+        Parameter(name="k_off",   value=0.02),
+    ],
+    equations=[
+        WeakFormEquation(
+            variable="v_membrane",
+            subdomain="membrane",
+            temporality="steady_state",
+            form=(
+                "( eta * inner(v_membrane, v_membrane_test)"
+                " + sigma_T * H(x) * inner(n(x), v_membrane_test)"
+                " - inner(f_active(x, t), v_membrane_test)"
+                ") * dx_Gamma"
+            ),
+            initial_condition="0",
+        ),
+        TemplateEquation(
+            template="surface_pde_with_dilution",
+            variable="rho",
+            subdomain="membrane",
+            temporality="time_dependent",
+            terms={"diffusion": "0.05", "source": "-k_off * rho"},
+            initial_condition="1.0 + 0.3 * cos(2 * theta(x))",
+        ),
+    ],
+)
+```
+
+All three forms describe the same MathDescription and round-trip among each other without loss. The validator runs once after construction, producing the same errors / warnings regardless of which carrier was used.
 
 ---
 
