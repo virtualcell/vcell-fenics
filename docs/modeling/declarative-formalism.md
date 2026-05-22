@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. As of 2026-05-22, **Part 1 (Mathematical formalism) and Part 2 (Data model) are drafted in full**: Part 1 covers §1.1–§1.11 (goals and non-goals, geometry vocabulary, variables, equation templates, weak-form escape hatch, boundary conditions, initial conditions, coupling and expression vocabulary, temporality and DAE structure, moving subdomains, well-posedness checks); Part 2 covers §2.1–§2.7 (schema overview, schema by entity, expression language, naming and reference resolution, validation, VCell mapping, end-to-end worked example). Part 3 (solver contract) remains sketched as headings.
+**Status:** complete first draft as of 2026-05-22. All three parts are drafted: **Part 1 (Mathematical formalism)** covers §1.1–§1.11; **Part 2 (Data model)** covers §2.1–§2.7; **Part 3 (Solver contract)** covers §3.1–§3.6. The document is now a discussion artifact for review and revision rather than an outline with TBD sections.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -1853,4 +1853,178 @@ All three forms describe the same MathDescription and round-trip among each othe
 
 ## Part 3 — Solver contract
 
-*To be written.* What a backend must implement to claim "I solve any model in this class": assemble forms from templates, assemble user-supplied UFL, apply BCs, advance time or solve steady. What the backend is free to choose (FE order, mesh, time-stepper, linear solver, preconditioner — none of which appear in the math description). The vcell-fenics DOLFINx backend: which templates it handles in v1 and what it punts.
+Part 1 specified what is in a MathDescription. Part 2 specified how it is represented. Part 3 specifies what a backend must do with it — the contract that lets the formalism claim "the same MathDescription + Geometry + SolverConfiguration produces equivalent results regardless of which compliant backend runs it."
+
+### 3.1 Purpose
+
+A **backend** is software that consumes a MathDescription, a Geometry, and a SolverConfiguration, and produces approximate numerical solutions of the well-posed math problem the MathDescription describes. `vcell-fenics`'s DOLFINx implementation is one backend; a finite-volume implementation would be another; VCell's existing moving-boundary solver could be wrapped as a third.
+
+The **contract** in Part 3 is what makes the formalism's "one math description, many solvers" promise (§1.1.1) operationally meaningful. It specifies:
+
+- **Required operations** — what every compliant backend must implement (§3.2).
+- **Discretion zone** — what backends are free to choose, with the understanding that those choices affect numerical accuracy and performance but not the well-posed math problem being solved (§3.3).
+- **The SolverConfiguration object** — how a user expresses preferences within the discretion zone, in a way that is portable across backends (§3.4).
+- **Conformance** — what makes a backend compliant; a small reference suite of canonical models that any backend must reproduce within tolerance (§3.5).
+- **The vcell-fenics DOLFINx backend's v1 status** — which formalism subset it implements, what it punts (§3.6).
+
+### 3.2 Backend interface — required operations
+
+Every compliant backend implements the following operations. The names below describe semantics; the concrete API in `vcell-fenics` may differ in spelling but not in capability.
+
+#### 3.2.1 Loading
+
+- **Accept a `MathDescription`** in any of the three carriers from §2.1 (YAML, JSON, or in-memory dataclass). Run the validation pass (§2.5) and reject any MathDescription that fails.
+- **Accept a `Geometry`** referenced by name from the MathDescription. The geometry provides at minimum: the mesh, the region-to-subdomain-class assignment, the labelled-boundary identifiers and their incidence to subdomain classes. The precise Geometry API is not specified here; it is a separate design (and a separate document) at the Geometry layer.
+- **Accept a `SolverConfiguration`** specifying discretisation choices (§3.4). The SolverConfiguration may declare backend-specific options that compliant backends are free to ignore if they do not understand them — but only after the backend has confirmed it has its own sensible default for the relevant choice.
+- **Cross-validate** the three artifacts: subdomain class names in the MathDescription resolve to regions in the Geometry; labelled-boundary names referenced in BCs resolve to entities in the Geometry; region-keyed parameters cover every region (§1.11.10). Any mismatch is a hard error before any solving begins.
+
+#### 3.2.2 Assembly
+
+- **Operator templates (T1–T4)** — assemble the equation each template specifies, in Eulerian conservation form (§1.10.5), filling slot expressions provided by the user. Compression / dilution terms from `subdomain.motion` are computed automatically and added to the assembled form. The narrow rule on calculus operators (§1.8.5) is enforced at validation time; the backend trusts the validator's result.
+- **Weak-form equations** — assemble the user-supplied form directly, treating it as a UFL-equivalent residual. The backend chooses any FE-method primitives needed to support the form (mixed function spaces, internal facet integrals, etc.) according to the SolverConfiguration's space hints.
+- **Boundary conditions** — assemble Dirichlet BCs as strong constraints (DOF elimination or equivalent); Neumann / Robin / interface BCs as boundary integrals added to the relevant equations' assembled forms; for weak-form-governed variables, only Dirichlet BCs from §1.6 are honoured (the rest must live in the form, §1.5.6).
+- **Initial conditions** — for `time_dependent` equations, evaluate the IC expression on the reference (t=0) configuration and use it as the starting state for time stepping.
+
+#### 3.2.3 Solving
+
+- **Steady-state models** (all equations declared `steady_state`, §1.9.6) — solve as a nonlinear algebraic system using the backend's chosen nonlinear solver.
+- **Time-dependent models** (any equation declared `time_dependent`) — advance over a time interval $[0, T]$ using the backend's chosen time-stepping scheme. Steady-state equations in a mixed model are re-solved at every time step alongside the time-dependent ones (DAE structure, §1.9.4).
+- **Moving subdomains** — for prescribed motion, update the subdomain's configuration each time step using the user-supplied velocity or displacement expression. For unknown motion, the motion variable's equation participates in the per-step solve; the backend chooses an ALE algorithm to propagate the resulting motion through the bulk mesh (§1.10.7).
+
+#### 3.2.4 Results exposure
+
+- **At each output time** the backend must expose, for every variable in the MathDescription, its current value field on its subdomain. The form of this exposure (in-memory arrays, on-disk file in XDMF / VTKHDF / similar, callbacks) is backend-discretion, but a compliant backend must be able to provide values at user-requested output times within the simulation interval.
+- **The geometric configuration** at each output time (for subdomains with non-`none` motion) must be available alongside the field values. Without it, the values cannot be interpreted spatially.
+
+### 3.3 What backends choose
+
+The following are explicitly *not* part of the MathDescription. They are the backend's discretion (sometimes guided by the SolverConfiguration). Choices in this zone affect numerical accuracy, stability, and performance — but not the well-posed math problem being solved.
+
+| Choice | Examples |
+|---|---|
+| **Finite-element order** | $P_1$ Lagrange, $P_2$ Lagrange, $P_k$ for higher $k$, Taylor–Hood pair for Stokes-type problems, DG variants. The MathDescription's `space` hint (§1.3.3) is a suggestion; the backend may honour or override it. |
+| **Mesh resolution and refinement** | Element size; adaptive refinement triggers; remeshing for large deformations. |
+| **Time-stepping scheme** | Backward Euler, Crank–Nicolson, BDF$k$, implicit Runge-Kutta, IMEX splits. |
+| **Linear solver** | Direct (LU, Cholesky) or iterative (GMRES, CG, MINRES, BiCGSTAB). |
+| **Preconditioner** | Multigrid (algebraic, geometric), block-diagonal, AMG, ILU. |
+| **Nonlinear solver** | Newton, Picard, damped Newton, line search, trust region. |
+| **Stabilisation** | SUPG, GLS, entropy viscosity for advection-dominated regimes; pressure stabilisation for Stokes; ghost penalty for cut-FEM. |
+| **Parallelisation** | MPI domain decomposition, threading, GPU offload. |
+| **ALE algorithm** | Whether the bulk mesh follows the surface motion exactly, follows a harmonic-extension velocity field, follows an elastic-extension velocity field, or uses a different recipe. |
+| **Remeshing strategy** | When to remesh during large deformations; what algorithm; how to transfer fields. |
+| **Convergence tolerances** | Linear solver relative tolerance, nonlinear solver convergence threshold, time-stepping error control. |
+
+The discretion is asymmetric: the backend may choose anything in this zone, but the choice must not change *what* equation is being solved — only *how* approximately. A backend that, say, drops a slot expression to "simplify" the equation is not compliant.
+
+### 3.4 The SolverConfiguration object
+
+Discretion-zone choices that a user wants to pin (for reproducibility, for parameter sweeps, for cross-backend comparisons) go in a separate **SolverConfiguration** artifact, with its own YAML/JSON schema.
+
+```yaml
+solver_configuration:
+  math_description: my_model.yaml         # reference to the MathDescription
+  geometry: my_geometry.yaml              # reference to the Geometry
+
+  fe_order:
+    default: 1                            # P1 Lagrange unless overridden per-variable
+    overrides:
+      v_membrane: 2                       # P2 for the velocity field
+
+  time_stepping:
+    scheme: backward_euler                # or crank_nicolson, bdf2, ...
+    dt: 0.01
+    t_final: 1.0
+    output_times: [0.0, 0.5, 1.0]             # or `every: 0.1`
+
+  linear_solver:
+    type: gmres
+    preconditioner: amg
+    rel_tol: 1.0e-8
+    abs_tol: 1.0e-12
+
+  nonlinear_solver:
+    type: newton
+    max_iterations: 25
+    convergence_tol: 1.0e-9
+
+  ale:
+    bulk_velocity_extension: harmonic     # or material, elastic, none
+    remesh_when_quality_below: 0.3        # backend may ignore if it does not support remeshing
+
+  stabilisation:
+    advection: none                       # or supg, gls, ...
+
+  parallelisation:
+    mpi_processes: 4                      # backend may honour or override
+```
+
+Most fields have backend-side defaults. A SolverConfiguration may be entirely empty (`solver_configuration: { math_description: m, geometry: g }`) and the backend will use sensible defaults for everything else.
+
+Backend-specific options are permitted under a `backend_specific:` key per-backend; compliant backends ignore options they do not understand, after confirming they have their own default for the relevant choice. This lets a user pin DOLFINx-specific behaviour (e.g. PETSc options) without breaking other backends that do not interpret PETSc strings.
+
+A run is `(MathDescription, Geometry, SolverConfiguration)` — three files / objects. The MathDescription stays the same across, e.g., a time-step convergence study; only the SolverConfiguration's `time_stepping.dt` varies.
+
+### 3.5 Conformance
+
+#### 3.5.1 What conformance means
+
+A backend is **compliant** if, for every (MathDescription, Geometry, SolverConfiguration) triple it claims to support, it produces a numerical approximation of the well-posed math problem the MathDescription describes — within the tolerance specified in the SolverConfiguration. Two compliant backends, given the same input triple, should produce results that agree up to discretisation error and solver tolerance.
+
+Compliance is *scoped*. A backend may claim conformance for a subset of the formalism — say, "this backend implements T1 and T2 with prescribed motion, no weak-form, no Robin BCs." Models that fall outside the claimed subset are not the backend's responsibility; the backend should reject them with a clear error rather than silently produce a wrong result.
+
+#### 3.5.2 The conformance reference suite
+
+The formalism ships a small reference suite of canonical models. Any backend that claims conformance for the relevant subset of the formalism must reproduce these results within stated tolerance. The suite formalises what "implements the formalism correctly" means.
+
+**v1 reference models** (corresponding to existing `vcell-fenics` tests — `tests/test_*`):
+
+| Reference model | Formalism subset exercised | Expected behaviour |
+|---|---|---|
+| **Bulk diffusion eigenmode decay** | T1 (bulk RAD), `temporality: time_dependent`, no motion, zero-Neumann external BC | A Bessel eigenmode $J_0(\lambda r)$ initial condition decays as $\exp(-D \lambda^2 t)$ at the analytical rate, within $\le 2\%$ relative error at $t = 0.5$ on a moderately refined mesh. |
+| **Closed-surface mass conservation** | T2 (surface PDE), `temporality: time_dependent`, no motion | Total mass $\int_\Gamma \rho \, \mathrm{d}\Gamma$ is conserved to $\le 10^{-10}$ relative error over $\ge 50$ time steps on a closed manifold (no boundary). |
+| **Closed-surface eigenmode decay** | T2 (surface PDE), `temporality: time_dependent`, no motion | A $\cos(k\theta)$ initial condition on a circle of radius $r$ decays as $\exp(-D k^2 / r^2 \cdot t)$ within $\le 2\%$ relative error. |
+| **Moving-membrane dilution — positive control** | T2 (surface PDE), `temporality: time_dependent`, prescribed radial motion | A uniform $\rho_0$ initial condition under prescribed radial expansion conserves mass to $\le 2\%$ relative error over the full motion. |
+| **Moving-membrane dilution — negative control** | T2 (surface PDE) **without** the auto-dilution term | The same model, with dilution explicitly suppressed, produces $M(T) = 2 M(0)$ when the membrane doubles in length. This negative-control test asserts the discriminator — that the positive-control test would *fail* without the auto-dilution machinery. |
+
+The reference models are deliberately small (single-variable, simple geometries, analytical reference solutions). The conformance suite is the *floor*; backends may layer arbitrarily rich additional tests above it.
+
+When templates T5–T7 ship (v2+), the reference suite extends to cover them: a simple Stokes flow (analytical Poiseuille), a linear-elastic deformation under known load, and a mechanics-driven membrane-motion case with an analytical-or-converged-solution reference.
+
+#### 3.5.3 Determinism and reproducibility
+
+Backends are *encouraged* to produce deterministic results across runs with identical inputs (same MathDescription, Geometry, SolverConfiguration, hardware, software stack). Determinism is not required — some legitimate backend strategies (randomised algebraic preconditioners, asynchronous parallelism) sacrifice strict reproducibility — but a backend that is non-deterministic must say so in its documentation.
+
+Across compliant backends, results agree *up to discretisation error*. The math problem is the same; the numerical approximation is not. Cross-backend agreement is convergence under refinement, not bit-identical output.
+
+### 3.6 The vcell-fenics DOLFINx backend
+
+This backend is the canonical implementation of the formalism and the reference backend for v1 conformance.
+
+#### 3.6.1 v1 status
+
+**Implemented** as of 2026-05-22:
+
+- Bulk reaction-diffusion (T1, partial) — scalar variable, `temporality: time_dependent`, no advection, no source, no motion, zero-Neumann external BC. Backward-Euler time stepping, $P_1$ Lagrange, direct LU. See `src/vcell_fenics/approaches/static/bulk_pde.py`.
+- Surface PDE with dilution (T2, partial) — scalar variable, `temporality: time_dependent`, prescribed motion (velocity form, implicit via per-step `scale_radially`), no advection, no source. See `src/vcell_fenics/approaches/submesh/surface_pde.py`.
+- Visualization helpers — PyVista in-process, XDMF for ParaView. See `src/vcell_fenics/viz.py`.
+
+**Implemented at the test layer but not yet exposed as backend-driveable from a MathDescription**:
+
+- The conformance suite's v1 models pass (`tests/test_bulk_diffusion_static.py`, `tests/test_surface_diffusion_static.py`, `tests/test_dilution_mass_balance.py`).
+
+**Punted in v1**:
+
+- The MathDescription parser, validator, and the formalism-to-DOLFINx translation layer. Currently the existing `BulkPDE` / `SurfacePDE` classes are bespoke implementations of T1 and T2 respectively; they are not driven by the formalism. Building the formalism layer is forthcoming work — see [[project-implementation-state]] in the project's memory record.
+- Operator templates T3 (algebraic constraint), T4 (lumped ODE), T5–T7 (mechanics).
+- Weak-form escape hatch.
+- Boundary-condition system beyond the implicit zero-Neumann of the existing code.
+- Region-keyed parameter maps.
+- Unknown motion.
+- The full SolverConfiguration object.
+- Conformance subset declaration; the backend currently only runs its built-in tests, it does not advertise "I implement this subset of the formalism."
+
+#### 3.6.2 What v1 conformance means for this backend
+
+The vcell-fenics backend claims conformance for a strict subset: T1 and T2 with prescribed motion, scalar variables, zero-Neumann external BCs, no weak-form. Models within that subset run correctly and pass the conformance reference suite's relevant entries. Models outside that subset are not supported in v1; an attempt to load such a model should fail with a clear error rather than silently produce wrong results — though this rejection-with-clear-error behaviour itself is forthcoming work.
+
+This honest scoping is deliberate. The formalism is broader than what v1 implements; the v1 backend is one slice. The roadmap to broader coverage is the same as the formalism's v2 roadmap in §1.1.5 — driven by concrete use cases, not by speculative feature addition.
