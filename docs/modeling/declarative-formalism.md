@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, all of Part 1 except §1.1 has been drafted in detail: §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.7 (initial conditions), §1.8 (coupling and expression vocabulary), §1.9 (temporality and DAE structure), §1.10 (moving subdomains), and §1.11 (well-posedness checks). §1.1 (goals and non-goals) and Parts 2 (data model) and 3 (solver contract) remain sketched as headings.
+**Status:** work in progress. As of 2026-05-21, **Part 1 (Mathematical formalism) is drafted in full**: §1.1 (goals and non-goals), §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.7 (initial conditions), §1.8 (coupling and expression vocabulary), §1.9 (temporality and DAE structure), §1.10 (moving subdomains), and §1.11 (well-posedness checks). Part 2 (data model) and Part 3 (solver contract) remain sketched as headings.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -21,7 +21,61 @@ Excluded from this v1 by design: VCell-style FastSystem (solver-side reduction),
 
 ### 1.1 Goals and non-goals
 
-*To be written.* Will state explicitly what is in scope (well-posed deterministic PDE/ODE systems on labelled geometric domains with possibly moving subdomains) and what is out of scope (solver settings — time-stepper, mesh resolution, tolerances, preconditioner; stochastic dynamics; agent-based simulation).
+#### 1.1.1 Purpose
+
+This formalism captures a well-posed mathematical problem in cell-biology modelling — deterministic partial- and ordinary-differential equations on labelled geometric domains, with possibly moving subdomains — as data, independent of how the problem is solved. Two consequences follow from that single design choice:
+
+- **One math description, many solvers.** The same MathDescription can be run by a finite-element backend (the `vcell-fenics` DOLFINx implementation), by a finite-volume backend, or by VCell's existing moving-boundary solver, with no edits to the math description. Solver choice is a separate decision made in a separate object (§3).
+- **One math description, many geometries.** The math description references geometric entities by name; the concrete mesh, region-to-class assignment, and labelled boundaries live in a separate Geometry object. A model written for a 2D test disk runs against a 3D real-cell mesh by swapping the Geometry, not by rewriting the math.
+
+The goal is **a stable, declarative description language that survives changes in both solver technology and concrete geometry**, while still being precise enough that any compliant backend produces the same well-posed problem when handed the same MathDescription + Geometry pair.
+
+#### 1.1.2 In scope
+
+The formalism covers:
+
+- **Bulk reaction-advection-diffusion** on volume subdomains, in 1D / 2D / 3D, with scalar or vector or tensor species, with prescribed or solved-for substrate motion (§1.4 T1, §1.10).
+- **Surface PDEs with stretch-dilution** on codim-1 subdomains, including the canonical case of moving cell membranes carrying receptor / activator densities (§1.4 T2).
+- **Algebraic constraints** alongside time-evolving equations, producing differential-algebraic systems naturally — incompressibility constraints, conserved-total constraints, instantaneous force balances (§1.4 T3, §1.9).
+- **Lumped ODE dynamics** at zero-dimensional points or in non-spatial models (§1.4 T4).
+- **Mechanics-driven moving geometries** — subdomain motion may be prescribed (a known velocity or displacement field) or itself unknown (solved by an equation in the same MathDescription, which is the path to mechanics-driven cell migration; §1.10).
+- **Boundary conditions** on labelled codim-1 sub-boundaries: Dirichlet, Neumann, Robin, and interface BCs (value-equality and flux-balance), uniformly applied to external and internal boundaries (§1.6).
+- **Coupled multi-physics within a single MathDescription** — reaction-diffusion + mechanics + electrical signalling can coexist in one well-posed math object, coupled through shared variables, traces, and matched BC / source expressions (§1.6.5, §1.8).
+- **A weak-form escape hatch** for equations no operator template covers — custom constitutive laws, higher-order operators, mixed-FE-pair problems (§1.5).
+- **VCell-importability** — the formalism is intended to round-trip with a useful subset of VCell `MathDescription` artifacts. The full subset and the mapping rules are deferred to §2.4.
+
+#### 1.1.3 Non-goals
+
+The formalism does **not** cover and is **not intended** to cover:
+
+- **Solver settings.** Time-stepping scheme (BE, CN, BDF2, RK), mesh resolution, FE polynomial order, linear-solver and preconditioner choice, nonlinear-iteration tolerances, DAE-index reduction strategy. These live in a separate solver-configuration object (§3); they are not part of the math problem.
+- **Stochastic dynamics.** Particle-based simulators (Smoldyn, MCell), stochastic PDEs, Langevin systems, random fields. These require their own formalism with different primitives; this document is the deterministic PDE/ODE formalism only.
+- **Agent-based and cellular-automaton models.** Individual-based simulators where rules act on discrete entities rather than continuous fields.
+- **Reactions as first-class entities.** VCell-style explicit `Reaction` objects with kinetic-law metadata. In this formalism, reactions are source terms — algebraic combinations of variables and parameters in the `source` slot of an equation (§1.4.2 T1, T2). Users with reaction-network models can still capture them; the formalism just does not impose a separate Reaction abstraction.
+- **Code generation.** This is a *description* of a problem, not a procedure for solving one. Backends translate the description into executable code, but the formalism itself does not prescribe how.
+- **Be all things to all PDE problems.** The targeted audience is cell-biology modellers: cytoplasmic reaction-diffusion, membrane signalling, cell mechanics, cell migration. PDE problem classes outside that scope (geophysical fluid dynamics, computational electromagnetics, solid mechanics of structural assemblies) may be partially expressible but are not the design target.
+
+#### 1.1.4 Audience and assumed background
+
+The intended reader is a cell-biology modeller comfortable with PDE / ODE language at the level used in papers like Contri–Massing–Rangamani 2025 (`docs/research/2026-05-21-fenicsx-ecosystem.md`) — they know what a Laplace operator is, what a reaction-diffusion equation looks like, and what a moving membrane means in math. They do not need to be FE practitioners. This document deliberately leaves FE-specific concerns (function spaces, weak-form assembly patterns, integration-by-parts mechanics) at the boundary — they appear in §1.3.3 as hints with sensible defaults, and in §1.5 as the escape hatch for users who *do* know UFL.
+
+For the FE-savvy reader, the formalism is best understood as a domain-specific subset of UFL plus a coupling vocabulary (`trace`, `subdomain.motion`, labelled boundaries) and explicit per-equation temporality / well-posedness machinery.
+
+For a modeller coming from VCell, the formalism is a direct generalisation of `MathDescription`: subdomain classes mapped to mesh regions (same as VCell), variables scoped to subdomains (same), per-equation operator templates filling named slots (same), with three intentional widenings — labelled boundaries replacing per-face Cartesian slots, geometry-as-unknown for mechanics-driven motion, and a UFL escape hatch for non-templated physics.
+
+#### 1.1.5 v1 status and roadmap
+
+This document is the v1 design of the formalism. Several capabilities and templates are explicitly deferred:
+
+- **Mechanics templates T5–T7** (Stokes / Navier-Stokes, linear elasticity, hyperelasticity) — §1.4.3, anticipated for v2.
+- **Constitutive templates for adhesion / slippage** at moving membrane-substrate interfaces — §1.4.3, v2.
+- **Three known topological limitations** of the class-based subdomain abstraction (squashed thin layers, per-cell connected components, same-class-on-both-sides interface ambiguity) — §1.2.7, intentionally not addressed in v1.
+- **FastSystem / Events / region variables / stochastic constructs** — recorded as v2+ scope at the top of this document.
+- **Per-region term overrides (Tier 2)** for structural variation within a subdomain class — §1.2.5, deferred to v2 unless v1 use cases force it.
+- **General-algebraic interface BCs and the broader expression vocabulary for them** — §1.6.2, §1.8.7.
+- **Lift / extension operators** (surface → bulk) — explicitly removed from the formalism rather than reserved; cases that need such lifts express them structurally via auxiliary variables and BCs (§1.8.7).
+
+The roadmap for moving from v1 to v2 is driven by concrete use cases, not by speculative feature addition. Each deferred item ships when a model that genuinely cannot be expressed without it is concretely needed.
 
 ### 1.2 Geometry vocabulary
 
