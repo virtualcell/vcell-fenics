@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.6 (boundary conditions), §1.8 (coupling and expression vocabulary), and §1.10 (moving subdomains) have been drafted in detail; the surrounding sections are sketched as headings only.
+**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.8 (coupling and expression vocabulary), and §1.10 (moving subdomains) have been drafted in detail; the surrounding sections (§1.1, §1.7, §1.9, §1.11, and Parts 2 and 3) are sketched as headings only.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -390,7 +390,166 @@ Notes on what this example demonstrates:
 
 ### 1.5 Equations — weak-form escape hatch
 
-*To be written.* Schema for "this equation is a UFL form; here are the test/trial functions, integration measures, and boundary terms." For unusual physics that no operator template covers (Cahn-Hilliard, custom constitutive laws, mixed FE pairs).
+#### 1.5.1 When to use it
+
+The operator templates of §1.4 cover the equation forms common in cell-biology PDE/ODE modelling: scalar reaction-advection-diffusion in a bulk (T1), surface PDEs with stretch-dilution (T2), algebraic constraints (T3), lumped ODEs (T4). They do not cover everything. The **weak-form escape hatch** is the route for equations that no template fits:
+
+- Custom constitutive laws (non-Fickian flux, anisotropic stress responses, history-dependent material).
+- Higher-order spatial operators (Cahn–Hilliard's biharmonic, gradient-flow models with $\nabla^4$).
+- Mixed-space problems requiring inf-sup-stable FE pairs (Stokes / Navier–Stokes with Taylor–Hood, mixed elasticity).
+- Mechanics force balances in v1 (since mechanics templates T5–T7 ship in v2; see §1.10.3, §1.10.8).
+
+The trade-off is straightforward: the user gives up the template's guardrails (auto-compression term, narrow calculus rule, schema-level term-type validation) in exchange for full UFL expressiveness. The validator can no longer check the equation's differential structure; the user owns well-posedness.
+
+Use it deliberately. For everything that fits a template, the template path is shorter and safer.
+
+#### 1.5.2 Form envelope
+
+A weak-form equation uses the same envelope as a template equation (§1.4.1), with two slot-level changes:
+
+| Field | Meaning |
+|---|---|
+| `template` | The literal string `weak_form` — signals the escape hatch. |
+| `variable` | The unknown this equation governs (named; must exist in the MathDescription's variable list). |
+| `subdomain` | The subdomain on which the equation holds. The form's default integration measure is determined by this subdomain's kind (see §1.5.3). |
+| `temporality` | `time_dependent` or `steady_state` (§1.9). |
+| `form` | A UFL-style expression describing the residual. The equation is interpreted as `form = 0` for all admissible test functions. Detailed semantics in §1.5.3–§1.5.5. |
+| `initial_condition` | Required iff `temporality = time_dependent`. |
+
+One weak-form equation governs one variable. Mixed-space problems (Stokes' coupled velocity and pressure, mixed elasticity) are expressed as multiple coupled weak-form equations whose forms share variables — same pattern operator templates already use (T1 momentum + T3 incompressibility for Stokes).
+
+#### 1.5.3 What the form contains
+
+The form is a residual expression: the equation is `form = 0` for all admissible test functions. The expression is built from:
+
+- **The governed variable**, written by its declared name (e.g. `v_membrane` for the §1.10.8 motion variable).
+- **The variable's test function**, written as `<variable>_test` (e.g. `v_membrane_test`). The user does not declare the test function; it is implicit, has the same function-space as the governed variable, and is the function the equation is satisfied against.
+- **Other variables**, including via `trace(·)` when they live on a different subdomain (§1.8.2). Calculus operators (`grad`, `div`, `lapl`, `grad_surf`, `div_surf`, `lapl_beltrami`) may be applied to **any** variable — the narrow rule of §1.8.5 does *not* apply to the weak-form escape hatch. The user is writing UFL and is responsible for the resulting equation's well-posedness.
+- **Parameters, time `t`, spatial coordinates `x`, geometric helpers** (`n(x)`, `H(x)`, etc.) per §1.8.
+- **Standard functions** (`sin`, `cos`, `exp`, `if`, …) per §1.8.5.
+- **Integration measures**:
+
+| Measure | Meaning | Default availability |
+|---|---|---|
+| `dx` | Volume / interior measure on the equation's own subdomain (for a `volume` subdomain). | Default for bulk equations. |
+| `dx_Gamma` | Surface measure on the equation's own subdomain (for a `surface` subdomain). | Default for surface equations. |
+| `dl` | Line measure (for a `curve` subdomain). | Default for curve equations (v2+). |
+| `dp` | Point measure (for a `point` subdomain). | Default for point equations. |
+| `ds(<boundary>)` | Surface measure on a labelled boundary of the equation's subdomain. | Used for boundary integrals (natural BC terms). |
+| `dS(<boundary>)` | Internal-facet measure on a labelled internal boundary. | Used for jump-flux terms in DG-flavoured forms (v2+). |
+| `dl_Gamma(<boundary>)` | Line measure on the boundary of a surface subdomain. | For surface PDEs with edges. |
+
+#### 1.5.4 Time-derivative convention
+
+For `temporality: time_dependent` equations, the time derivative is written symbolically as **`partial_t(u)`**, where `u` is any variable in scope. This is the **Eulerian** partial-time derivative at fixed lab-frame coordinate, consistent with the operator-template convention from §1.10.5.
+
+The backend handles time stepping. The math description does not pin the time-integration scheme (BE, CN, BDF2, …); that is a solver-side choice (§3). Users who need fine-grained control over time integration use the solver-configuration object, not the math description.
+
+**On moving subdomains**, `partial_t(u)` is the Eulerian time derivative — the template machinery's auto-compression behaviour does **not** apply to weak-form equations. If a weak-form equation's variable lives on a moving subdomain and the user wants the conservation-form $\partial_t u + \nabla \cdot (u \mathbf{v}_\Omega)$ behaviour, they must write that flux divergence explicitly in the form. Similarly, material-derivative-style equations (where $D_t u = \partial_t u + \mathbf{v}_\Omega \cdot \nabla u$ is what's intended) require the user to add the substrate-advection term themselves. The escape hatch buys flexibility at the price of explicitness.
+
+Discrete-time forms (with reserved `u_prev` / `dt` symbols) are intentionally **not** part of v1. They would encode discretization choices in the math description, which conflicts with the formalism's solver-agnostic stance. v2 may add a discrete-time mode as an opt-in for users who need fine time-integration control.
+
+#### 1.5.5 Test functions
+
+Each weak-form equation has exactly one test function, implicitly named `<variable>_test`. It is in the same function space as the governed variable and is the function the residual is satisfied against (the equation is `form = 0` for all admissible `<variable>_test`).
+
+Test functions for *other* variables appearing in the form (via `trace(·)` or directly) are **not** in scope. If the user wants those, the right pattern is to write a separate weak-form equation governing each variable. Coupled multi-variable forms (Stokes' joint velocity-pressure form with mixed test functions) become multiple weak-form equations sharing variables — same coupling pattern as the rest of the formalism.
+
+#### 1.5.6 Interaction with §1.6 boundary conditions
+
+A weak-form equation's variable may carry §1.6 boundary conditions. The rule is split:
+
+- **Dirichlet BCs** declared in §1.6 are imposed as **strong** constraints (DOF elimination, exactly as for template equations). The form is solved subject to the Dirichlet condition; the user does not need to encode the Dirichlet value in the form.
+- **Neumann, Robin, value-equality, and flux-balance interface BCs** declared in §1.6 are **not** automatically added to the form. The user must encode their boundary terms in the form they write. This matches FEniCSx idiom: natural BCs become boundary integrals in the variational form via integration by parts; the form's author writes them where they belong.
+
+The schema rejects (or at minimum warns about) a non-Dirichlet §1.6 BC on a weak-form-governed variable, to avoid silent double-counting (the user encoding the Neumann term in the form *and* declaring a §1.6 Neumann) or silent omission (the user expecting §1.6 to handle a Neumann BC the form does not encode). The clean rule: for weak-form equations, all natural BCs live in the form; only Dirichlet is in §1.6.
+
+#### 1.5.7 Validation
+
+The validator checks that:
+
+- Every name referenced in the form resolves — variables, parameters, geometric helpers, measures.
+- The form returns a scalar value (it's a residual, which integrates to zero).
+- The variable's `<variable>_test` reference is present in the form (a form without any test-function reference is almost certainly wrong).
+- The form does not reference test functions of variables other than the governed one.
+- If `temporality = time_dependent`, an initial condition is provided.
+- If the variable has §1.6 BCs, they are all Dirichlet (per §1.5.6).
+
+The validator **cannot** check:
+
+- Well-posedness (does the form have a unique solution?).
+- Differential structure (does the form make physical sense?).
+- Sign conventions (is the user's $\nabla \cdot (D \nabla u)$ in the right direction?).
+- Consistency between coupled weak-form equations (do they reconcile at shared interfaces?).
+
+These are the user's responsibility — the price of the escape hatch.
+
+#### 1.5.8 Worked example — viscous force balance for membrane motion
+
+Expanded from the §1.10.8 sketch: a closed 2D membrane whose velocity is solved by a quasi-static viscous force balance. The membrane is in mechanical equilibrium at every instant; surface tension and a prescribed active traction drive motion, and viscous drag from the surrounding cytosol resists it.
+
+The strong form of the force balance is
+
+$$\eta \, \mathbf{v}_\Gamma \;+\; \sigma_T \, H(\mathbf{x}) \, \mathbf{n}(\mathbf{x}) \;-\; \mathbf{f}_{\text{active}}(\mathbf{x}, t) \;=\; \mathbf{0} \quad \text{on } \Gamma$$
+
+where $\eta$ is viscous drag, $\sigma_T$ surface tension, $H$ mean curvature, $\mathbf{n}$ outward normal, and $\mathbf{f}_{\text{active}}$ a user-supplied driving traction (e.g. a polarised contractile force). Multiplying by a test function $\mathbf{v}_{\Gamma,\,\text{test}}$ and integrating over the membrane:
+
+$$\int_\Gamma \Bigl[ \eta \, \mathbf{v}_\Gamma \cdot \mathbf{v}_{\Gamma,\,\text{test}} \;+\; \sigma_T \, H \, \mathbf{n} \cdot \mathbf{v}_{\Gamma,\,\text{test}} \;-\; \mathbf{f}_{\text{active}} \cdot \mathbf{v}_{\Gamma,\,\text{test}} \Bigr] \, \mathrm{d}\Gamma \;=\; 0.$$
+
+This is a steady-state (quasi-static) weak form on the membrane subdomain. In the formalism's syntax:
+
+```yaml
+math_description:
+  geometry: cell_2d
+
+  subdomains:
+    - name: membrane
+      kind: surface
+      motion: { kind: unknown, variable: v_membrane }
+
+  variables:
+    - { name: v_membrane, subdomain: membrane, type: vector }
+    - { name: rho,        subdomain: membrane, type: scalar }
+
+  equations:
+    # Motion equation: weak-form viscous force balance.
+    - template: weak_form
+      variable: v_membrane
+      subdomain: membrane
+      temporality: steady_state
+      form: |
+        ( eta * inner(v_membrane, v_membrane_test)
+          + sigma_T * H(x) * inner(n(x), v_membrane_test)
+          - inner(f_active(x, t), v_membrane_test)
+        ) * dx_Gamma
+      initial_condition: "0"      # zero default (memory decision 11c)
+
+    # Receptor density: standard T2 surface PDE — unchanged from the §1.4.5
+    # / §1.6.6 examples. The T2 template picks up dilution from
+    # membrane.motion automatically.
+    - template: surface_pde_with_dilution
+      variable: rho
+      subdomain: membrane
+      temporality: time_dependent
+      terms:
+        diffusion: 0.05
+        source: "-k_off * rho"
+      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"
+
+  parameters:
+    - { name: eta,     value: 1.0  }
+    - { name: sigma_T, value: 0.10 }
+    - { name: k_off,   value: 0.02 }
+```
+
+What this example demonstrates:
+
+- **The weak-form equation is a residual that integrates to zero.** The expression following `form:` is the entire residual; the convention is that the assembled equation reads "form = 0 for all `v_membrane_test`."
+- **Test function is implicit.** `v_membrane_test` is the test function for `v_membrane`, in the same function space. The user did not declare it.
+- **No automatic compression term.** The membrane has unknown motion, but because this is a weak-form equation, the auto-dilution that T2 would apply does **not** apply here. The force-balance equation has no time derivative anyway, so there is nothing to reconcile — but if the user had wanted a transient force balance with `partial_t(v_membrane)` on a moving substrate, they would have had to write the appropriate Eulerian / material-derivative terms themselves.
+- **Steady-state weak form is fine.** Mechanics at low Reynolds is quasi-static; the membrane velocity at each instant is determined by the instantaneous force balance, not by inertia. `temporality: steady_state` makes this explicit — the equation has no time derivative and is solved as an algebraic problem at each time step.
+- **Two equations coexisting cleanly.** The motion equation (weak-form, steady) and the receptor equation (T2 template, time-dependent) share the membrane subdomain. The T2 equation reads `membrane.motion.variable = v_membrane` and uses that variable's solved value at each time step to compute its own dilution term. Composability across template and weak-form paths is direct.
+- **Solver-side concerns absent.** No time-stepping scheme, no FE order, no remeshing trigger. The MathDescription specifies the math; the backend picks the rest.
 
 ### 1.6 Boundary conditions
 
@@ -831,14 +990,14 @@ math_description:
     #
     # where eta is drag, sigma_T is surface tension, H is mean curvature,
     # n is outward normal, f_active is a user-supplied driving traction.
-    - template: weak_form               # §1.5; placeholder syntax
+    - template: weak_form               # §1.5
       variable: v_membrane
       subdomain: membrane
       temporality: steady_state          # quasi-static at each time step
       form: |
-        ( eta * inner(v_membrane, w)
-          - sigma_T * H(x) * inner(n(x), w)
-          - inner(f_active(x, t), w) ) * dx_Gamma  # = 0
+        ( eta * inner(v_membrane, v_membrane_test)
+          + sigma_T * H(x) * inner(n(x), v_membrane_test)
+          - inner(f_active(x, t), v_membrane_test) ) * dx_Gamma  # = 0
       initial_condition: "0"              # zero default (memory decision 11c)
 
     # Receptor density: standard T2 surface PDE. Dilution from v_membrane is automatic.
