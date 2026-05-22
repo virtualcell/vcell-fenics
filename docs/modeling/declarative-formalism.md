@@ -1,6 +1,6 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
-**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.8 (coupling and expression vocabulary), and §1.10 (moving subdomains) have been drafted in detail; the surrounding sections (§1.1, §1.7, §1.9, §1.11, and Parts 2 and 3) are sketched as headings only.
+**Status:** work in progress. The document is being built section-by-section through discussion. As of 2026-05-21, §1.2 (geometry vocabulary), §1.3 (variables), §1.4 (equation templates), §1.5 (weak-form escape hatch), §1.6 (boundary conditions), §1.7 (initial conditions), §1.8 (coupling and expression vocabulary), and §1.10 (moving subdomains) have been drafted in detail; the surrounding sections (§1.1, §1.9, §1.11, and Parts 2 and 3) are sketched as headings only.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).
 
@@ -732,7 +732,82 @@ If the membrane were itself moving (replace `motion.velocity: "0"` with a real e
 
 ### 1.7 Initial conditions
 
-*To be written.* Required iff the model has any `time_dependent` equation. Specified per variable, must be well-defined on the variable's subdomain at t = 0.
+#### 1.7.1 When required
+
+An initial condition is required for a variable iff its governing equation declares `temporality: time_dependent`. Variables governed by `steady_state` equations have no IC and the schema rejects one if provided. Variables that are not governed by any equation (a corner case that should not occur in a well-formed MathDescription, caught by §1.11) likewise have no IC.
+
+Each variable's IC appears as the `initial_condition` field on its governing equation. This placement — IC on the equation, not on the variable's declaration — reflects that the IC is part of the well-posed time-evolution problem (variable + equation + IC + BCs) and is meaningless without the equation context.
+
+#### 1.7.2 Form, scope, and evaluation context
+
+An initial condition is a typed expression evaluated at $t = 0$ on the variable's subdomain. Its type must match the variable's `type` (scalar IC for scalar variable, vector IC for vector variable, symmetric-tensor IC for tensor variable).
+
+The evaluation context is the **reference configuration**: the geometry's initial mesh, with no motion applied. For subdomains with `motion.kind` of `prescribed` or `unknown` (§1.10), the reference configuration is what the geometry provides; the motion field's effect on positions is applied for $t > 0$, not at $t = 0$. Geometric helpers (`n(x)`, `H(x)`, etc.) in IC expressions therefore evaluate against the reference configuration.
+
+Spatial coordinates `x` in an IC expression refer to the reference configuration's coordinate. There is no IC equivalent of "current configuration coordinates" — at $t = 0$ the two coincide.
+
+#### 1.7.3 Vocabulary restrictions
+
+IC expressions use the §1.8 vocabulary with two restrictions:
+
+- **No references to other state variables.** An IC expression for variable $u$ may not reference any other variable in the MathDescription (whether via `trace(·)`, by bare name, or otherwise). This avoids ordering ambiguity — what does "$u(\mathbf{x}, 0) = 0.5 \cdot v(\mathbf{x}, 0)$" mean if $v$ is itself defined by an IC that references $u$? Worse, it avoids cycles. v1 sidesteps both concerns by forbidding the references; if a concrete use case demands coupled ICs, v2 may relax with topological-sort resolution.
+
+- **No reference to time `t`.** ICs are evaluated at $t = 0$ by definition; referencing $t$ in an IC expression has no useful meaning beyond a constant substitution. The schema rejects `t` in IC expressions to catch the misconception cleanly (a user writing `initial_condition: "exp(-t)"` likely meant a *forcing* expression, not an IC, and should be told).
+
+What IC expressions **may** reference: the spatial coordinate `x` and its accessors (`x[0]`, `theta(x)`, `r(x)`, …); named parameters, including region-keyed parameter maps (§1.2.5); geometric helpers (`n(x)`, `H(x)`, principal curvatures, tangent basis); standard functions (`sin`, `cos`, `exp`, `if`, `step`, etc.).
+
+#### 1.7.4 Type matching
+
+The IC's value type must match the variable's `type`:
+
+| Variable type | IC must produce |
+|---|---|
+| `scalar` | scalar |
+| `vector` | vector in $\mathbb{R}^d$ |
+| `symmetric_tensor` | symmetric $d \times d$ tensor |
+
+No implicit broadcasting. A scalar where a vector is expected is an error; the user must write the broadcast explicitly (e.g. `0.0 * n(x)` for the zero vector along normal, or `[0.0, 0.0]` for an explicit 2D vector).
+
+#### 1.7.5 Compatibility with Dirichlet boundary conditions
+
+At every point on a labelled boundary where a Dirichlet BC is declared for variable $u$, the IC value must equal the Dirichlet BC value at $t = 0$:
+
+$$u_{\text{IC}}(\mathbf{x}) \;=\; g(\mathbf{x}, 0) \quad \text{for all } \mathbf{x} \in \Gamma_{\text{Dirichlet}}$$
+
+Incompatibility produces a discontinuity at $t = 0^+$ as the solution snaps from the IC to the BC at the boundary, typically manifesting as a spurious boundary layer or oscillation depending on the discretization. The validator (§1.11) checks compatibility for syntactically simple cases (constant IC vs. constant Dirichlet, both evaluable at validation time); complex expressions are the user's responsibility, with the validator emitting a warning if it cannot prove compatibility but cannot prove incompatibility either.
+
+There is no compatibility requirement between ICs and Neumann or Robin BCs — these are flux conditions and impose nothing on the IC value.
+
+#### 1.7.6 Region-keyed initial conditions
+
+ICs are class-level, just like equations: one IC expression for variable $u$ on subdomain class `cytoplasm` applies to every region of that class. Region-specific initial fields are expressed by using region-keyed parameter maps (§1.2.5) in the IC expression. The resolution happens at evaluation time, per region, transparently:
+
+```yaml
+parameters:
+  - name: c0
+    kind: region_map
+    subdomain: cytoplasm
+    values:
+      cytoplasm_left_cell:  1.0
+      cytoplasm_right_cell: 0.3
+
+equations:
+  - template: bulk_radv_diff
+    variable: c
+    subdomain: cytoplasm
+    temporality: time_dependent
+    terms:
+      diffusion: 0.1
+    initial_condition: c0           # resolves per region from the map
+```
+
+The IC expression `c0` references the region-keyed parameter; each region of `cytoplasm` receives its own initial value from the map. No per-region IC syntax is needed in §1.7.
+
+#### 1.7.7 Motion-variable initial conditions
+
+The IC for an unknown-motion variable (§1.10.3) follows the standard rules of this section, with the additional default established in §1.10.4: the IC defaults to zero, with the interpretation "initial configuration equals the reference (geometry) configuration." A displacement-typed motion variable's zero IC means "geometry starts where the mesh is"; a velocity-typed motion variable's zero IC means "starts at rest." Users may override the default when a non-zero initial deformation or initial motion is wanted.
+
+The IC for a motion variable is, like every other IC, evaluated on the reference configuration — there is no other configuration available at $t = 0$.
 
 ### 1.8 Coupling between subdomains and the expression vocabulary
 
