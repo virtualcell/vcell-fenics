@@ -951,6 +951,8 @@ For subdomains with `motion.kind = unknown`, geometric helpers are evaluated aga
 
 **Usage rule — the narrow rule.** In operator-template slots (T1–T7), a calculus operator may be applied to *any variable except the one the slot's equation governs*. In the weak-form escape hatch (§1.5), there is no restriction — the user is writing a UFL form and is responsible for the resulting equation's well-posedness.
 
+**Usage rule — smoothness requirement.** Second-order operators (`lapl`, `lapl_beltrami`) require their argument variable to live in a function space that admits a meaningful strong second derivative. v1's rule: the argument's `space` must be `lagrange_p2` or higher; applying `lapl(u)` to a `lagrange_p1` variable is a validation error (§1.11.9), because the strong Laplacian of a piecewise-linear function is element-wise zero and singular on facets — the user almost certainly did not mean that. First-order operators (`grad`, `div`, `grad_surf`, `div_surf`) have no smoothness restriction beyond the default `lagrange_p1`. In the weak-form escape hatch (§1.5), users who need second-order behaviour on a P1 variable should apply integration-by-parts in the form they write — that is exactly the kind of FE-method maneuver the escape hatch is for, and it sidesteps the strong-second-derivative issue.
+
 The rule exists because operator templates make assumptions about the differential order and integration-by-parts pattern of the assembled weak form. Allowing arbitrary calculus on the equation's own variable can silently violate those assumptions: a `lapl(u)` in T1's `source` slot for $u$ embeds a second-order operator on $u$ where the template expects a coefficient; a `grad(u)` in the same slot creates a first-order advective term outside the template's integration-by-parts machinery. UFL would compile these into *some* form; the result is unlikely to be what the user meant.
 
 Calculus on *other* variables is safe because it produces a coefficient-shaped value (scalar, vector, or tensor) that the template uses positionally — chemotaxis source `-grad(phi) * u`, voltage-gradient drift in a relative-advection slot, or a custom flux on an internal interface BC referencing both sides' gradients. The PDE structure for the slot's governing variable is preserved.
@@ -1356,12 +1358,19 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 
 - At points on a Dirichlet boundary where both an IC and a Dirichlet BC apply, the IC value should equal the Dirichlet BC value at $t = 0$. The validator checks this for syntactically simple cases (constant expressions, polynomial expressions whose boundary trace is computable) and emits a warning when it cannot prove agreement but cannot prove disagreement either (§1.7.5).
 
-#### 1.11.9 Operator narrow rule
+#### 1.11.9 Operator usage rules
 
-**Errors** (cross-references §1.8.5):
+**Narrow rule — errors** (cross-references §1.8.5):
 
 - In operator-template slots (T1–T7), calculus operators (`grad`, `div`, `lapl`, `grad_surf`, `div_surf`, `lapl_beltrami`) may not be applied to the equation's own governed variable. Applications to *other* variables are unrestricted.
 - The validator walks the slot expression's AST: if any calculus operator's argument resolves (directly or via composition) to the slot's governed variable, that is an error. The rule does not apply to weak-form equations (§1.5.3); there, the user has full UFL expressiveness and owns well-posedness.
+
+**Smoothness requirement — errors** (cross-references §1.8.5):
+
+- Second-order calculus operators (`lapl`, `lapl_beltrami`) require their argument to live in a function space that admits a meaningful strong second derivative. v1 enforces this by requiring the argument variable's `space` to be `lagrange_p2` or higher. Applying `lapl(u)` to a variable with `space: lagrange_p1` (the default) is an error, because the strong Laplacian of a piecewise-linear function is element-wise zero and singular on facets — the user almost certainly did not intend that.
+- The validator walks the expression AST and checks the `space` of every variable that appears under a second-order operator. The error message names the offending operator, the offending variable, and the suggested fix (raise the variable's `space` to `lagrange_p2`, or use the weak-form escape hatch with explicit integration-by-parts).
+- First-order calculus operators (`grad`, `div`, `grad_surf`, `div_surf`) have no v1 smoothness restriction beyond the default `lagrange_p1`.
+- This rule does not apply to weak-form equations (§1.5.3); the escape-hatch user owns the smoothness consequences of their UFL forms.
 
 #### 1.11.10 Geometry interface compatibility
 
@@ -1700,7 +1709,7 @@ The validation rules of §1.11 are implemented by a single validation pass over 
 5. Checks temporality consistency (§1.11.6) — strict matching of `temporality` and `∂_t` presence.
 6. Checks BC consistency (§1.11.7) — no conflicts, interface partner-subdomain validity, weak-form Dirichlet-only restriction.
 7. Checks IC consistency (§1.11.8) — type match, no inter-variable references, Dirichlet-compatibility warnings.
-8. Applies the operator narrow rule (§1.11.9) — template slot expressions must not contain calculus on the governed variable.
+8. Applies the operator usage rules (§1.11.9) — template slot expressions must not contain calculus on the governed variable (narrow rule), and second-order operators (`lapl`, `lapl_beltrami`) require argument variables with `space: lagrange_p2` or higher (smoothness rule).
 9. Checks parameter scoping (§1.11.10) — expression parameters with geometric helpers carry a `subdomain:` scope; their uses must be from compatible contexts.
 
 Errors prevent construction and are reported with the offending field's location (line / column for YAML, JSON pointer for JSON, attribute path for dataclasses). Warnings are emitted but allow construction.
