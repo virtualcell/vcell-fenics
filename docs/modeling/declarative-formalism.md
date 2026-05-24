@@ -574,7 +574,7 @@ math_description:
       form: |
         ( eta * inner(v_membrane, v_membrane_test)
           + sigma_T * H(x) * inner(n(x), v_membrane_test)
-          - inner(f_active(x, t), v_membrane_test)
+          - inner(f_active, v_membrane_test)
         ) * dx_Gamma
       initial_condition: "0"      # zero default (memory decision 11c)
 
@@ -594,12 +594,18 @@ math_description:
     - { name: eta,     value: 1.0  }
     - { name: sigma_T, value: 0.10 }
     - { name: k_off,   value: 0.02 }
+    - { name: f0,      value: 0.3  }              # active-traction amplitude
+    - name: f_active                              # polarised active traction (vector)
+      type: vector
+      subdomain: membrane                         # uses theta(x) — scope required (§2.2.3)
+      expression: "[f0 * cos(theta(x)), 0]"
 ```
 
 What this example demonstrates:
 
 - **The weak-form equation is a residual that integrates to zero.** The expression following `form:` is the entire residual; the convention is that the assembled equation reads "form = 0 for all `v_membrane_test`."
 - **Test function is implicit.** `v_membrane_test` is the test function for `v_membrane`, in the same function space. The user did not declare it.
+- **`f_active` is an expression-valued parameter (§2.2.3), not a state variable.** It carries a vector-valued expression body (`[f0 * cos(theta(x)), 0]`) and is referenced from the form as a bare name. Because the body uses `theta(x)`, the parameter declares `subdomain: membrane` (§1.11.10). At assembly time the parameter resolves to its expression's value at the current point — the same mechanism that lets `L_reservoir = "1.0 + 0.5 * sin(omega * t)"` carry time-varying boundary data.
 - **No automatic compression term.** The membrane has unknown motion, but because this is a weak-form equation, the auto-dilution that T2 would apply does **not** apply here. The force-balance equation has no time derivative anyway, so there is nothing to reconcile — but if the user had wanted a transient force balance with `partial_t(v_membrane)` on a moving substrate, they would have had to write the appropriate Eulerian / material-derivative terms themselves.
 - **Steady-state weak form is fine.** Mechanics at low Reynolds is quasi-static; the membrane velocity at each instant is determined by the instantaneous force balance, not by inertia. `temporality: steady_state` makes this explicit — the equation has no time derivative and is solved as an algebraic problem at each time step.
 - **Two equations coexisting cleanly.** The motion equation (weak-form, steady) and the receptor equation (T2 template, time-dependent) share the membrane subdomain. The T2 equation reads `membrane.motion.variable = v_membrane` and uses that variable's solved value at each time step to compute its own dilution term. Composability across template and weak-form paths is direct.
@@ -779,6 +785,7 @@ What this example demonstrates:
 - **Composable bulk-surface coupling.** The Neumann BC for L at the membrane and the source terms for $\rho_f$ and $\rho_b$ all reference the same constitutive expression $k_{on}\, \mathrm{trace}(L)\, \rho_f - k_{off}\, \rho_b$. The user writes it three times with correct signs; the formalism does not auto-balance. If the signs are wrong, mass is not conserved — there is no schema-level check for that.
 - **`trace(L)` versus `rho_f`.** L is a bulk variable; on the membrane its value is the boundary trace, written `trace(L)`. $\rho_f$ already lives on the membrane and is referenced directly.
 - **Zero-Neumann default applies nowhere here**, because every external boundary touched by every variable has an explicit BC — but if `extracellular` had a second outer boundary that we did not declare, it would default to no-flux.
+- **Time-varying reservoir is a one-line swap.** `L_reservoir` is a constant here, but to model a pulse-stimulation experiment it can be replaced by an expression-valued parameter (§2.2.3) — e.g. `{ name: L_reservoir, type: scalar, expression: "1.0 + 0.5 * sin(omega * t)" }` (with `omega` added as another parameter). The Dirichlet BC declaration does not change; the value it delivers becomes time-varying automatically because the parameter resolves to its expression at every evaluation.
 
 If the membrane were itself moving (replace `motion.velocity: "0"` with a real expression), the dilution term in both surface PDEs picks up automatically from `membrane.motion`; the BC structure does not change.
 
@@ -806,7 +813,7 @@ IC expressions use the §1.8 vocabulary with two restrictions:
 
 - **No references to other state variables.** An IC expression for variable $u$ may not reference any other variable in the MathDescription (whether via `trace(·)`, by bare name, or otherwise). This avoids ordering ambiguity — what does "$u(\mathbf{x}, 0) = 0.5 \cdot v(\mathbf{x}, 0)$" mean if $v$ is itself defined by an IC that references $u$? Worse, it avoids cycles. v1 sidesteps both concerns by forbidding the references; if a concrete use case demands coupled ICs, v2 may relax with topological-sort resolution.
 
-- **No reference to time `t`.** ICs are evaluated at $t = 0$ by definition; referencing $t$ in an IC expression has no useful meaning beyond a constant substitution. The schema rejects `t` in IC expressions to catch the misconception cleanly (a user writing `initial_condition: "exp(-t)"` likely meant a *forcing* expression, not an IC, and should be told).
+- **No bare reference to time `t`.** ICs are evaluated at $t = 0$ by definition; a bare `t` in an IC expression has no useful meaning beyond a constant substitution. The schema rejects bare `t` in IC expressions to catch the misconception cleanly (a user writing `initial_condition: "exp(-t)"` likely meant a *forcing* expression, not an IC, and should be told). This rule applies to the IC expression directly; if the IC references a parameter (§2.2.3) whose body expression contains `t`, the parameter is evaluated at $t = 0$ in the usual way — referencing such a parameter from an IC is permitted and produces the parameter's value at $t = 0$.
 
 What IC expressions **may** reference: the spatial coordinate `x` and its accessors (`x[0]`, `theta(x)`, `r(x)`, …); named parameters, including region-keyed parameter maps (§1.2.5); geometric helpers (`n(x)`, `H(x)`, principal curvatures, tangent basis); standard functions (`sin`, `cos`, `exp`, `if`, `step`, etc.).
 
@@ -901,9 +908,13 @@ The concrete syntactic carrier — parsable string, Python AST, SymPy expression
 |---|---|---|
 | `t` | The time variable. Reserved name; equals current solver time, $t = 0$ in IC expressions. | scalar |
 | `x` | Spatial coordinate at the evaluation point, in the embedding-space dimension. | vector in $\mathbb{R}^d$ |
-| `<param_name>` | A named scalar parameter declared in the MathDescription. | scalar (declared dtype) |
+| `<param_name>` | A named parameter declared in the MathDescription. May resolve to a constant, to the value of an expression in `t` / `x` / helpers / other parameters, or to a region-keyed value (§2.2.3). | scalar, vector, or symmetric tensor — per the parameter's declared type |
 
 Component access on `x` is by index: `x[0]`, `x[1]`, `x[2]`. Named coordinate accessors derived from `x` are listed under geometric helpers (§1.8.4).
+
+**Parameter resolution at evaluation time.** A bare-name reference to a parameter is replaced by the parameter's value at the current evaluation point. For **constant** parameters the value is the declared scalar. For **expression-valued** parameters (§2.2.3) the value is the parameter's body expression evaluated against the surrounding context — same `x`, same `t`, same subdomain. For **region-keyed** parameters the value is the entry corresponding to the current region. From the call-site's perspective the parameter is just a typed value at a point; the declaration form determines how that value is computed.
+
+Expression-valued parameters may carry an optional `subdomain:` scope (§2.2.3) and must declare one if their body references a geometric helper. A reference from outside the scoping subdomain is a validation error (§1.11.10).
 
 #### 1.8.4 Geometric helpers
 
@@ -947,7 +958,7 @@ The validator (§1.11) enforces this by walking the expression AST: if any `grad
 A **bare name** (no `trace(·)`, no calculus operator) in an expression resolves in this order:
 
 1. **Local variable** — a variable defined on the same subdomain as the expression's evaluation context. Resolves to the function value at the current point.
-2. **Named parameter** — a top-level parameter declared in the MathDescription. Resolves to its constant value.
+2. **Named parameter** — a top-level parameter declared in the MathDescription. Resolves to the parameter's value at the current point: a constant if declared so, the body expression evaluated in context if expression-valued, or the per-region value if region-keyed (§2.2.3, §1.8.3).
 3. **Reserved name** — `t` (time), `x` (space), or a name from the geometric-helper or standard-function tables.
 
 A name that matches none of the above is an error (caught by §1.11). A variable defined on a *different* subdomain than the expression's evaluation context may not be referenced by bare name — higher-dimensional variables must go through `trace(·)`; lower-dimensional variables cannot be referenced inside an expression at all (§1.8.7), and the coupling must be expressed structurally via a boundary condition.
@@ -1207,10 +1218,11 @@ math_description:
     # In v1, this uses the weak-form escape hatch (§1.5) because mechanics templates
     # (T5-T7) ship in v2. The form below is illustrative; full UFL is left to §1.5.
     #
-    #   eta * v_membrane = -sigma_T * H(x) * n(x) + f_active(x, t)
+    #   eta * v_membrane = -sigma_T * H(x) * n(x) + f_active
     #
     # where eta is drag, sigma_T is surface tension, H is mean curvature,
-    # n is outward normal, f_active is a user-supplied driving traction.
+    # n is outward normal, and f_active is a vector-valued expression
+    # parameter (§2.2.3) declared below.
     - template: weak_form               # §1.5
       variable: v_membrane
       subdomain: membrane
@@ -1221,7 +1233,7 @@ math_description:
       form: |
         ( eta * inner(v_membrane, v_membrane_test)
           + sigma_T * H(x) * inner(n(x), v_membrane_test)
-          - inner(f_active(x, t), v_membrane_test) ) * dx_Gamma
+          - inner(f_active, v_membrane_test) ) * dx_Gamma
       initial_condition: "0"              # zero default (memory decision 11c)
 
     # Receptor density: standard T2 surface PDE. Dilution from v_membrane is automatic.
@@ -1238,6 +1250,11 @@ math_description:
     - { name: eta,     value: 1.0  }     # viscous drag coefficient
     - { name: sigma_T, value: 0.10 }     # surface tension
     - { name: k_off,   value: 0.02 }     # receptor decay rate
+    - { name: f0,      value: 0.3  }     # active-traction amplitude
+    - name: f_active                     # polarised active traction (vector)
+      type: vector
+      subdomain: membrane                # uses theta(x) — scope required (§2.2.3)
+      expression: "[f0 * cos(theta(x)), 0]"
 ```
 
 What this sketch demonstrates:
@@ -1277,6 +1294,7 @@ Most rules below are errors. The few warning cases are noted explicitly. Example
 - Labelled boundary names referenced in BCs must exist in the referenced geometry (§1.11.10).
 - Reserved names (`t`, `x`, geometric helpers, standard functions, operator names) must not be shadowed by variable or parameter names. Shadowing is an error at construction, not a precedence resolution (§1.8.6).
 - A bare name in an expression must resolve to a local variable (defined on the same subdomain as the expression's evaluation context), a parameter, or a reserved name. References to variables on a *different* subdomain require `trace(·)`; lower-dimensional variables cannot be referenced at all (§1.8.6, §1.8.7).
+- **Parameter expression cycles are an error.** Parameter expressions may reference other parameters (§2.2.3); the validator topologically sorts the parameter graph and rejects any cycle. The error message names the cycle's members.
 
 #### 1.11.4 Coverage rules
 
@@ -1348,6 +1366,7 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 - Every labelled boundary name referenced in a BC must exist in the Geometry.
 - Every internal boundary referenced by an interface BC must in fact bound two subdomains in the Geometry, matching the BC's `variable.subdomain` and `partner_variable.subdomain`.
 - Region-keyed parameter maps (`kind: region_map`) must cover every region the Geometry assigns to the parameter's subdomain class — missing regions are errors, not silent zero defaults.
+- **Expression-valued parameter scoping (§2.2.3).** A parameter whose body expression references any geometric helper (`n(x)`, `H(x)`, `kappa1`, `tangent`, `theta(x)`, `r(x)`, …) must declare a `subdomain:` scope. Any *use* of a scoped parameter must be from an expression whose evaluation context is on (or a sub-entity of) the parameter's scope subdomain. A use from an incompatible context is an error pointing both to the parameter declaration and the offending use site.
 
 These checks require the Geometry to be available at MathDescription validation time. If the Geometry is loaded lazily (typical at solve time), some of these checks are deferred until both are present. The validator may still run all *intra*-MathDescription checks without the Geometry.
 
@@ -1448,14 +1467,43 @@ The pair `(name, subdomain)` uniquely identifies a variable. The same variable n
 
 #### 2.2.3 Parameter
 
-Two parameter kinds:
+A parameter is a named input to the math problem that does not evolve in time as a state variable. v1 supports three forms.
+
+**(a) Constant scalar — the common case:**
 
 ```yaml
-# Class-level (region-independent) — the common case:
 parameters:
   - { name: <string>, value: <number> }
+```
 
-# Region-keyed (Tier 1 region variation, §1.2.5):
+Shorthand for `{ name, kind: scalar, value }`. Most rate constants, diffusion coefficients, and reservoir values are constants.
+
+**(b) Expression — scalar, vector, or symmetric tensor:**
+
+```yaml
+parameters:
+  - name: <string>
+    type: scalar | vector | symmetric_tensor   # default: scalar
+    subdomain: <subdomain_name>                 # optional; see scoping below
+    expression: "<expression>"
+```
+
+The `expression` body is an expression in the §1.8 vocabulary: `t`, `x`, geometric helpers, standard functions, and references to other parameters. It is **not** a function declaration (no formal arguments) — it is the parameter's *value*, which happens to depend on the evaluation point. At each use, the parameter resolves to its expression evaluated in the surrounding context (current `x`, current `t`, current subdomain).
+
+This covers time-varying boundary values (`L_reservoir = "1.0 + 0.5 * sin(omega * t)"`), prescribed forcing fields (`f_active = "[f0 * cos(theta(x)), 0]"`), and any data field that is a known function of space-time but not a state variable.
+
+**Scoping rules for expression parameters:**
+
+- The `subdomain:` field is optional. When provided, the parameter may only be referenced from expressions whose evaluation context is on (or a sub-entity of) that subdomain — geometric helpers like `H(x)` and tangent-frame quantities are only meaningful inside the scope they were written for.
+- **`subdomain:` is required** if the expression body uses any geometric helper (`n(x)`, `H(x)`, `kappa1`, `tangent`, `theta(x)`, `r(x)`, etc.). Without a scope, the validator cannot tell where the helper is meaningful.
+- Parameters with no geometric-helper references are unscoped by default and may be used from any expression context.
+
+**Parameter-to-parameter references** are permitted (e.g. `omega = 2 * pi * freq`). The validator topologically sorts the parameter graph at construction time and rejects any cycle (§1.11.3).
+
+**(c) Region-keyed — Tier 1 region variation (§1.2.5):**
+
+```yaml
+parameters:
   - name: <string>
     kind: region_map
     subdomain: <subdomain_name>
@@ -1465,9 +1513,7 @@ parameters:
       # ... one entry per region of the subdomain class
 ```
 
-The class-level form is shorthand for `{ name, kind: scalar, value }`; the `kind` field defaults to `scalar` when only `value` is provided. Region-keyed parameters require explicit `kind: region_map` plus the `subdomain` and `values` fields.
-
-Region-keyed parameters resolve at expression-evaluation time using the geometry's region-to-class assignment. Every region of the named subdomain class must have an entry in `values` (validator-checked, §1.11.4).
+Region-keyed parameters resolve at expression-evaluation time using the geometry's region-to-class assignment. Every region of the named subdomain class must have an entry in `values` (validator-checked, §1.11.4). v1 supports per-region *constants* only; per-region expressions are deferred to v2 (memory: the v1-vs-v2 scope was explicitly chosen to keep region-keyed parameters simple).
 
 #### 2.2.4 Equation — template form
 
@@ -1581,7 +1627,7 @@ The AST has the following node kinds:
 |---|---|---|
 | `Literal` | numeric value, type | Scalars; vector / tensor literals are constructed by `VectorLiteral` / `TensorLiteral`. |
 | `VariableRef` | name | Resolves to a local variable's value field at evaluation. |
-| `ParameterRef` | name | Resolves to a parameter's value (per-region if `region_map`). |
+| `ParameterRef` | name | Resolves to the parameter's value at the current point: constant value for `kind: scalar`; the parameter's body expression (already a parsed AST) evaluated against the current context for expression-valued parameters; per-region value for `kind: region_map` (§2.2.3). |
 | `ReservedRef` | which (`t`, `x`) | Time or spatial-coordinate access. |
 | `IndexAccess` | object, index | `x[0]` parses to `IndexAccess(ReservedRef("x"), Literal(0))`. |
 | `FunctionCall` | callee, args | Both built-in functions (sin, cos, …) and special operators (`trace`, `grad`, geometric helpers, `partial_t`, `inner`). |
@@ -1643,12 +1689,14 @@ Variable names on *different* subdomains are not conflicts — `(c, cytoplasm)` 
 The validation rules of §1.11 are implemented by a single validation pass over the MathDescription dataclass tree, run during construction (after YAML/JSON parsing, before the MathDescription is exposed to downstream code). The pass:
 
 1. Resolves every name (§1.11.3) — every reference must point to a declared entity.
-2. Type-checks every expression AST (§1.11.5) — node types must match slot expectations.
-3. Checks coverage (§1.11.4) — every variable governed, every internal boundary BC'd, etc.
-4. Checks temporality consistency (§1.11.6) — strict matching of `temporality` and `∂_t` presence.
-5. Checks BC consistency (§1.11.7) — no conflicts, interface partner-subdomain validity, weak-form Dirichlet-only restriction.
-6. Checks IC consistency (§1.11.8) — type match, no inter-variable references, Dirichlet-compatibility warnings.
-7. Applies the operator narrow rule (§1.11.9) — template slot expressions must not contain calculus on the governed variable.
+2. Topologically sorts parameter expressions (§1.11.3) — parameter-to-parameter references must be acyclic.
+3. Type-checks every expression AST (§1.11.5) — node types must match slot expectations.
+4. Checks coverage (§1.11.4) — every variable governed, every internal boundary BC'd, etc.
+5. Checks temporality consistency (§1.11.6) — strict matching of `temporality` and `∂_t` presence.
+6. Checks BC consistency (§1.11.7) — no conflicts, interface partner-subdomain validity, weak-form Dirichlet-only restriction.
+7. Checks IC consistency (§1.11.8) — type match, no inter-variable references, Dirichlet-compatibility warnings.
+8. Applies the operator narrow rule (§1.11.9) — template slot expressions must not contain calculus on the governed variable.
+9. Checks parameter scoping (§1.11.10) — expression parameters with geometric helpers carry a `subdomain:` scope; their uses must be from compatible contexts.
 
 Errors prevent construction and are reported with the offending field's location (line / column for YAML, JSON pointer for JSON, attribute path for dataclasses). Warnings are emitted but allow construction.
 
@@ -1726,6 +1774,11 @@ math_description:
     - { name: eta,     value: 1.0   }
     - { name: sigma_T, value: 0.10  }
     - { name: k_off,   value: 0.02  }
+    - { name: f0,      value: 0.3   }              # active-traction amplitude
+    - name: f_active                                # polarised active traction (vector)
+      type: vector
+      subdomain: membrane                           # uses theta(x) — scope required (§2.2.3)
+      expression: "[f0 * cos(theta(x)), 0]"
 
   equations:
     # Motion equation — weak-form viscous force balance, quasi-static.
@@ -1736,7 +1789,7 @@ math_description:
       form: |
         ( eta * inner(v_membrane, v_membrane_test)
           + sigma_T * H(x) * inner(n(x), v_membrane_test)
-          - inner(f_active(x, t), v_membrane_test)
+          - inner(f_active, v_membrane_test)
         ) * dx_Gamma
       initial_condition: "0"
 
@@ -1777,7 +1830,14 @@ What the equivalent JSON looks like (same data, different syntax):
     "parameters": [
       { "name": "eta",     "value": 1.0  },
       { "name": "sigma_T", "value": 0.10 },
-      { "name": "k_off",   "value": 0.02 }
+      { "name": "k_off",   "value": 0.02 },
+      { "name": "f0",      "value": 0.3  },
+      {
+        "name": "f_active",
+        "type": "vector",
+        "subdomain": "membrane",
+        "expression": "[f0 * cos(theta(x)), 0]"
+      }
     ],
     "equations": [
       {
@@ -1785,7 +1845,7 @@ What the equivalent JSON looks like (same data, different syntax):
         "variable": "v_membrane",
         "subdomain": "membrane",
         "temporality": "steady_state",
-        "form": "( eta * inner(v_membrane, v_membrane_test) + sigma_T * H(x) * inner(n(x), v_membrane_test) - inner(f_active(x, t), v_membrane_test) ) * dx_Gamma",
+        "form": "( eta * inner(v_membrane, v_membrane_test) + sigma_T * H(x) * inner(n(x), v_membrane_test) - inner(f_active, v_membrane_test) ) * dx_Gamma",
         "initial_condition": "0"
       },
       {
@@ -1824,6 +1884,13 @@ md = MathDescription(
         Parameter(name="eta",     value=1.0),
         Parameter(name="sigma_T", value=0.10),
         Parameter(name="k_off",   value=0.02),
+        Parameter(name="f0",      value=0.3),
+        Parameter(
+            name="f_active",
+            type="vector",
+            subdomain="membrane",
+            expression="[f0 * cos(theta(x)), 0]",
+        ),
     ],
     equations=[
         WeakFormEquation(
@@ -1833,7 +1900,7 @@ md = MathDescription(
             form=(
                 "( eta * inner(v_membrane, v_membrane_test)"
                 " + sigma_T * H(x) * inner(n(x), v_membrane_test)"
-                " - inner(f_active(x, t), v_membrane_test)"
+                " - inner(f_active, v_membrane_test)"
                 ") * dx_Gamma"
             ),
             initial_condition="0",
