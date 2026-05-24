@@ -69,7 +69,7 @@ This document is the v1 design of the formalism. Several capabilities and templa
 
 - **Mechanics templates T5–T7** (Stokes / Navier-Stokes, linear elasticity, hyperelasticity) — §1.4.3, anticipated for v2.
 - **Constitutive templates for adhesion / slippage** at moving membrane-substrate interfaces — §1.4.3, v2.
-- **Three known topological limitations** of the class-based subdomain abstraction (squashed thin layers, per-cell connected components, same-class-on-both-sides interface ambiguity) — §1.2.7, intentionally not addressed in v1.
+- **Three known topological limitations** of the class-based subdomain abstraction (squashed thin layers, per-cell connected components, same-class-on-both-sides interface ambiguity) — §1.2.6, intentionally not addressed in v1.
 - **FastSystem / Events / region variables / stochastic constructs** — recorded as v2+ scope at the top of this document.
 - **Per-region term overrides (Tier 2)** for structural variation within a subdomain class — §1.2.5, deferred to v2 unless v1 use cases force it.
 - **General-algebraic interface BCs and the broader expression vocabulary for them** — §1.6.2, §1.8.7.
@@ -150,7 +150,7 @@ A class-level parameter resolves to the same value in every region of its subdom
 
 **Tier 2 (per-region term overrides) is deferred.** When term *structure*, not just coefficient values, needs to vary by region, v1 requires splitting into distinct subdomain classes (Tier 3) or shaping the equation so the variation lives in a coefficient (Tier 1). Tier 2 ships if it earns its keep through a concrete model that cannot be expressed in Tier 1.
 
-#### 1.2.7 Known topological limitations
+#### 1.2.6 Known topological limitations
 
 These three patterns from the user's experience with VCell and SBML Spatial are recognised as poorly supported by class-based subdomain abstractions and intentionally **not** addressed in v1. They are recorded here so a future v2 has them in scope. The latter two share a root cause — the class abstraction loses region-instance information when a single class is realised by multiple regions in the geometry.
 
@@ -170,7 +170,7 @@ v1 ships neither mechanism. Cases that need either fall back to Tier 3 (declare 
 
 These three limitations are flagged here rather than buried in v2 roadmap notes because they are the most likely surprises to bite a modeller coming from a mature tool like VCell that has accumulated workarounds for all three.
 
-#### 1.2.6 Worked sketch — geometry block of the §1.6.6 example
+#### 1.2.7 Worked sketch — geometry block of the §1.6.6 example
 
 The MathDescription side of the §1.6.6 ligand-receptor model declares its geometric vocabulary:
 
@@ -404,7 +404,7 @@ math_description:
       kind: surface
       motion:
         kind: prescribed
-        velocity: "r_dot * (x / |x|)"   # uniform radial expansion in R^2
+        velocity: "r_dot * x / r(x)"    # uniform radial expansion in R^2 (r(x) = |x|, §1.8.4)
 
   variables:
     - { name: rho_active,   type: scalar, subdomain: membrane }
@@ -642,7 +642,7 @@ Fixes the *outward* normal flux on the boundary. $\mathbf{n}$ is the outward uni
 
 $$\alpha \, u \;+\; \beta \, D \, \nabla u \cdot \mathbf{n} \;=\; h(\mathbf{x}, t)$$
 
-Linear combination of value and flux. Covers permeability-type conditions (membrane permeability with a fixed external reference, semi-permeable wall, etc.) without a separate template. `expression` here is a tuple `(α, β, h)` of three scalar expressions.
+Linear combination of value and flux. Covers permeability-type conditions (membrane permeability with a fixed external reference, semi-permeable wall, etc.) without a separate template. Robin is the one BC kind that carries three coefficients rather than a single `expression`; in the schema (§2.2.6) they appear as separate named fields `alpha`, `beta`, and `expression` (where `expression` is the right-hand side $h$).
 
 ##### Interface — value-equality
 
@@ -708,7 +708,7 @@ math_description:
   geometry: cell_with_extracellular   # external reference; provides Ω_ext, Γ_mem, ∂Ω_outer
 
   subdomains:
-    - { name: extracellular, kind: bulk,    motion: { kind: none } }
+    - { name: extracellular, kind: volume,  motion: { kind: none } }
     - name: membrane
       kind: surface
       motion:
@@ -891,7 +891,7 @@ The concrete syntactic carrier — parsable string, Python AST, SymPy expression
 
 **When required.** Whenever an expression evaluated on $\Sigma_{\text{low}}$ references a variable defined on a strictly higher-dimensional $\Sigma_{\text{high}}$. Variables defined on the *same* subdomain as the expression are referenced directly. Variables defined on a *strictly lower-dimensional* subdomain than the expression's evaluation domain are intentionally not referenceable inside an expression (§1.8.7): the surface → bulk direction is mathematically non-unique, and the cases that need it are better expressed as a named bulk variable with its own equation tied to the surface variable via a boundary condition.
 
-**Side specifier (deferred to v2).** When the higher-dim subdomain $\Sigma_{\text{high}}$ contributes exactly one connected region on one side of the lower-dim evaluation context, `trace(u)` is unambiguous. Two cases require a side specifier and are deferred (see §1.2.7): (a) a single variable defined on both sides of an internal interface where the two sides are *different* subdomain classes — resolved by `trace(u, from=<subdomain>)`; (b) an interface between two regions of the *same* subdomain class — resolved by intrinsic index-based disambiguation `trace(u, side=a)` / `trace(u, side=b)` (recommended path, mirrors UFL `+`/`-` semantics) or, when physical names matter, by explicit region naming `trace(u, region=<region_name>)`. v1 rejects ambiguous traces at validation time and the modeller falls back to Tier 3 (separate subdomain classes) for unambiguous addressing.
+**Side specifier (deferred to v2).** When the higher-dim subdomain $\Sigma_{\text{high}}$ contributes exactly one connected region on one side of the lower-dim evaluation context, `trace(u)` is unambiguous. Two cases require a side specifier and are deferred (see §1.2.6): (a) a single variable defined on both sides of an internal interface where the two sides are *different* subdomain classes — resolved by `trace(u, from=<subdomain>)`; (b) an interface between two regions of the *same* subdomain class — resolved by intrinsic index-based disambiguation `trace(u, side=a)` / `trace(u, side=b)` (recommended path, mirrors UFL `+`/`-` semantics) or, when physical names matter, by explicit region naming `trace(u, region=<region_name>)`. v1 rejects ambiguous traces at validation time and the modeller falls back to Tier 3 (separate subdomain classes) for unambiguous addressing.
 
 **Implementation.** Trace evaluation is a backend concern. In FEniCSx 0.10, traces of bulk variables on internal facets are realised through native mixed-dimensional assembly (see `docs/research/2026-05-21-fenicsx-ecosystem.md`). The user-facing formalism does not commit to a particular evaluation strategy.
 
@@ -971,7 +971,7 @@ Every slot has a declared type; expressions in that slot must produce a matching
 | Scalar source, scalar diffusion $D$, Dirichlet `expression`, Neumann `expression`, IC, partition coefficient $k$, constraint, rate, source on T2/T3/T4 | scalar |
 | Vector advection, vector `relative_advection`, vector `motion.velocity` | vector in $\mathbb{R}^d$ |
 | Tensor diffusion $D$ | symmetric $d \times d$ tensor |
-| Robin coefficient tuple $(\alpha, \beta, h)$ | tuple of three scalars |
+| Robin coefficient fields `alpha`, `beta`, `expression` ($\alpha$, $\beta$, $h$) | three scalars |
 | Interface value-equality partition coefficient $k$ | scalar |
 
 Type mismatches are validation errors. A scalar where a vector is expected is **not** implicitly broadcast; the user must write the broadcast explicitly (e.g., `c * n(x)` to turn a scalar `c` into a vector along the outward normal).
@@ -1215,10 +1215,13 @@ math_description:
       variable: v_membrane
       subdomain: membrane
       temporality: steady_state          # quasi-static at each time step
+      # The form is the residual; the equation is "form = 0" for all
+      # admissible test functions (§1.5). Inline YAML comments inside a `|`
+      # block are part of the string, so the "= 0" note lives outside the form.
       form: |
         ( eta * inner(v_membrane, v_membrane_test)
           + sigma_T * H(x) * inner(n(x), v_membrane_test)
-          - inner(f_active(x, t), v_membrane_test) ) * dx_Gamma  # = 0
+          - inner(f_active(x, t), v_membrane_test) ) * dx_Gamma
       initial_condition: "0"              # zero default (memory decision 11c)
 
     # Receptor density: standard T2 surface PDE. Dilution from v_membrane is automatic.
@@ -1296,7 +1299,7 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 - No implicit broadcast. A scalar where a vector is expected must be made explicit (e.g., `c * n(x)` to broadcast scalar $c$ along the normal).
 - Calculus operators' argument and result types must be honoured (`grad(u)` for scalar $u$ returns a vector; `div(v)` for vector $v$ returns a scalar; etc., per §1.8.5).
 - Variable initial conditions must match the variable's declared type (§1.7.4).
-- The Robin coefficient triple $(\alpha, \beta, h)$ must be three scalars (§1.6.2).
+- The Robin coefficient fields `alpha`, `beta`, `expression` ($\alpha$, $\beta$, $h$ in §1.6.2) must each be scalar.
 - Interface BC `partner_variable` must be defined on a subdomain incident to the BC's boundary from the opposite side (§1.6.2).
 
 #### 1.11.6 Temporality consistency
@@ -1316,7 +1319,7 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 - Interface BCs must have a `partner_variable` defined on a subdomain incident to the BC's boundary from the opposite side.
 - Dirichlet BCs must be declared on a labelled boundary that exists; the boundary must be incident to a subdomain on which the variable lives.
 - For weak-form equations (template = `weak_form`), §1.6 BCs on the governed variable must all be Dirichlet. Non-Dirichlet §1.6 BCs on a weak-form-governed variable are an error (§1.5.6); the user must encode natural BCs in the form itself.
-- Trace ambiguity: when an expression's `trace(u)` would have multiple resolutions (e.g. higher-dim $u$ contributes regions on both sides of the lower-dim evaluation context), the reference is ambiguous and rejected. In v1 the modeller's recourse is Tier 3 (separate subdomain classes); v2 will add side-or-region specifiers (§1.2.7, §1.8.2).
+- Trace ambiguity: when an expression's `trace(u)` would have multiple resolutions (e.g. higher-dim $u$ contributes regions on both sides of the lower-dim evaluation context), the reference is ambiguous and rejected. In v1 the modeller's recourse is Tier 3 (separate subdomain classes); v2 will add side-or-region specifiers (§1.2.6, §1.8.2).
 
 #### 1.11.8 Initial-condition consistency
 
@@ -1388,15 +1391,15 @@ A MathDescription has the following top-level fields:
 
 ```yaml
 math_description:
-  geometry: <string>            # name of the external Geometry object
-  subdomains: [...]             # list of Subdomain entries (§2.2.2)
-  variables: [...]              # list of Variable entries (§2.2.3)
-  parameters: [...]             # list of Parameter entries (§2.2.4)
-  equations: [...]              # list of Equation entries (§2.2.5)
-  boundary_conditions: [...]    # list of BoundaryCondition entries (§2.2.6)
+  geometry: <string>            # name of the external Geometry object — required
+  subdomains: [...]             # list of Subdomain entries (§2.2.1) — required, non-empty
+  variables: [...]              # list of Variable entries (§2.2.2) — required, non-empty
+  equations: [...]              # list of Equation entries (§2.2.4 / §2.2.5) — required, non-empty
+  parameters: [...]             # list of Parameter entries (§2.2.3) — optional, defaults to []
+  boundary_conditions: [...]    # list of BoundaryCondition entries (§2.2.6) — optional, defaults to []
 ```
 
-All six fields are required. `subdomains`, `variables`, `equations` may not be empty (a model with no equations cannot be solved). `parameters` and `boundary_conditions` may be empty lists. The order within any list is not semantically significant; references are by name.
+`geometry`, `subdomains`, `variables`, and `equations` are required (a model with no equations cannot be solved). `parameters` and `boundary_conditions` are optional and default to empty lists when omitted — a model with no named constants or no boundary conditions is a normal case (closed-membrane surface PDEs need no BCs at all, §1.6.6). The order within any list is not semantically significant; references are by name.
 
 There is no top-level `temporality` or `motion` declaration — both are derived from per-equation and per-subdomain fields. There is no top-level `solver` block either; solver configuration is a separate object (Part 3).
 
@@ -1984,9 +1987,10 @@ The formalism ships a small reference suite of canonical models. Any backend tha
 | **Closed-surface mass conservation** | T2 (surface PDE), `temporality: time_dependent`, no motion | Total mass $\int_\Gamma \rho \, \mathrm{d}\Gamma$ is conserved to $\le 10^{-10}$ relative error over $\ge 50$ time steps on a closed manifold (no boundary). |
 | **Closed-surface eigenmode decay** | T2 (surface PDE), `temporality: time_dependent`, no motion | A $\cos(k\theta)$ initial condition on a circle of radius $r$ decays as $\exp(-D k^2 / r^2 \cdot t)$ within $\le 2\%$ relative error. |
 | **Moving-membrane dilution — positive control** | T2 (surface PDE), `temporality: time_dependent`, prescribed radial motion | A uniform $\rho_0$ initial condition under prescribed radial expansion conserves mass to $\le 2\%$ relative error over the full motion. |
-| **Moving-membrane dilution — negative control** | T2 (surface PDE) **without** the auto-dilution term | The same model, with dilution explicitly suppressed, produces $M(T) = 2 M(0)$ when the membrane doubles in length. This negative-control test asserts the discriminator — that the positive-control test would *fail* without the auto-dilution machinery. |
 
 The reference models are deliberately small (single-variable, simple geometries, analytical reference solutions). The conformance suite is the *floor*; backends may layer arbitrarily rich additional tests above it.
+
+The vcell-fenics test suite additionally carries a **negative-control discriminator** for the moving-membrane case: the same model with the dilution term explicitly suppressed in the backend code produces $M(T) = 2 M(0)$ when the membrane doubles in length, confirming that the positive-control test would fail if the auto-dilution machinery were ever removed or bypassed. This is a backend-implementation check, not a formalism conformance test — T2 has no schema-level switch to disable dilution, by design (§1.4.2, §1.10.5), so the suppressed-dilution variant is not expressible in the formalism and not required of any compliant backend.
 
 When templates T5–T7 ship (v2+), the reference suite extends to cover them: a simple Stokes flow (analytical Poiseuille), a linear-elastic deformation under known load, and a mechanics-driven membrane-motion case with an analytical-or-converged-solution reference.
 
