@@ -50,6 +50,12 @@ from vcell_fenics.formalism.schema import (
     VariableType,
     WeakFormEquation,
 )
+from vcell_fenics.formalism.validator import (
+    Diagnostic,
+    FormalismValidationError,
+    validate,
+    validate_or_raise,
+)
 
 __all__ = [
     "BCDirichlet",
@@ -59,10 +65,12 @@ __all__ = [
     "BCRobin",
     "BinaryOp",
     "BoundaryCondition",
+    "Diagnostic",
     "Equation",
     "Expr",
     "ExpressionSyntaxError",
     "FormalismLoadError",
+    "FormalismValidationError",
     "FunctionCall",
     "IndexAccess",
     "MathDescription",
@@ -94,4 +102,6 @@ __all__ = [
     "load_yaml",
     "parse",
     "to_dict",
+    "validate",
+    "validate_or_raise",
 ]
