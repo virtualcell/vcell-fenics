@@ -11,7 +11,19 @@ is the in-memory representation those decisions resolve into.
 """
 
 from vcell_fenics.formalism.dumper import dump_json, dump_yaml, to_dict
+from vcell_fenics.formalism.expr import (
+    BinaryOp,
+    Expr,
+    FunctionCall,
+    IndexAccess,
+    Name,
+    Number,
+    TensorLiteral,
+    UnaryOp,
+    VectorLiteral,
+)
 from vcell_fenics.formalism.loader import FormalismLoadError, load_dict, load_json, load_yaml
+from vcell_fenics.formalism.parser import ExpressionSyntaxError, parse
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
     BCInterfaceFluxBalance,
@@ -45,15 +57,22 @@ __all__ = [
     "BCInterfaceValueEquality",
     "BCNeumann",
     "BCRobin",
+    "BinaryOp",
     "BoundaryCondition",
     "Equation",
+    "Expr",
+    "ExpressionSyntaxError",
     "FormalismLoadError",
+    "FunctionCall",
+    "IndexAccess",
     "MathDescription",
     "Motion",
     "MotionNone",
     "MotionPrescribedDisplacement",
     "MotionPrescribedVelocity",
     "MotionUnknown",
+    "Name",
+    "Number",
     "Parameter",
     "ParameterConstant",
     "ParameterExpression",
@@ -62,13 +81,17 @@ __all__ = [
     "SubdomainKind",
     "TemplateEquation",
     "Temporality",
+    "TensorLiteral",
+    "UnaryOp",
     "Variable",
     "VariableType",
+    "VectorLiteral",
     "WeakFormEquation",
     "dump_json",
     "dump_yaml",
     "load_dict",
     "load_json",
     "load_yaml",
+    "parse",
     "to_dict",
 ]
