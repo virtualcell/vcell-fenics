@@ -540,7 +540,7 @@ These are the user's responsibility — the price of the escape hatch.
 
 #### 1.5.8 Worked example — viscous force balance for membrane motion
 
-Expanded from the §1.10.8 sketch: a closed 2D membrane whose velocity is solved by a quasi-static viscous force balance. The membrane is in mechanical equilibrium at every instant; surface tension and a prescribed active traction drive motion, and viscous drag from the surrounding cytosol resists it.
+This is the same viscous-force-balance + receptor-density model that appears in §1.10.8 (presented there with focus on unknown motion) and §2.7 (presented there in complete YAML / JSON / Python carrier round-trip form). Here the focus is the **weak-form escape hatch**: how to write the force-balance equation as a UFL form when no template fits. A closed 2D membrane whose velocity is solved by a quasi-static viscous force balance. The membrane is in mechanical equilibrium at every instant; surface tension and a prescribed active traction drive motion, and viscous drag from the surrounding cytosol resists it.
 
 The strong form of the force balance is
 
@@ -932,7 +932,7 @@ Available in expressions evaluated on subdomains for which the relevant notion i
 | `tangent(x)` | Tangent unit vector. | 1-curves in 2D, or codim-2 edges in 3D |
 | `theta(x)`, `phi(x)`, `r(x)` | Polar / spherical accessors. Sugar for `atan2(x[1], x[0])`, etc. | any subdomain |
 
-For subdomains with `motion.kind = unknown`, geometric helpers are evaluated against the current (solver-computed) configuration at every time step including $t = 0$, where the configuration comes from the motion variable's initial condition (§1.7, §1.10).
+For subdomains with `motion.kind` of `prescribed` or `unknown` (§1.10.6), geometric helpers are evaluated against the current (deformed) configuration at every time step. For `unknown` motion the $t = 0$ configuration comes from the motion variable's initial condition (§1.7, §1.10); for `prescribed` motion the $t = 0$ configuration is the reference configuration (no displacement has yet been applied). At any $t > 0$, `n(x)`, `H(x)`, principal curvatures, and the tangent basis reflect the deformed shape — a moving membrane's outward normal is the *current* outward normal, not the reference one.
 
 #### 1.8.5 Standard functions and calculus operators
 
@@ -1202,7 +1202,7 @@ The math description states the well-posed problem; the backend chooses how to s
 
 #### 1.10.8 Worked sketch — mechanics-driven membrane motion with a surface species
 
-The first model that pushes beyond the §1.4.5 / §1.6.6 prescribed-motion examples: a closed membrane whose motion is solved by a simple viscous force balance, with a receptor density on the membrane that experiences the resulting motion via the standard T2 dilution.
+The first model that pushes beyond the §1.4.5 / §1.6.6 prescribed-motion examples: a closed membrane whose motion is solved by a simple viscous force balance, with a receptor density on the membrane that experiences the resulting motion via the standard T2 dilution. Here the focus is **unknown motion** — the mechanics-driven path to a non-prescribed substrate velocity. The same model returns in §1.5.8 with the weak-form escape hatch in the foreground, and in §2.7 as the complete YAML / JSON / Python end-to-end example.
 
 ```yaml
 math_description:
@@ -1683,7 +1683,7 @@ Names within a MathDescription:
 
 - **Identifiers** match `[A-Za-z_][A-Za-z0-9_]*` — letters, digits, underscores, leading non-digit. Case-sensitive.
 - **Snake_case** is conventional but not enforced; `rho_active`, `k_on`, `cytoplasm_left_cell` are typical.
-- **Reserved names** (cannot be used as variable, parameter, or subdomain names): `t`, `x`, plus every function and helper name in §2.3.4 (`sin`, `trace`, `grad`, `n`, `H`, `theta`, etc.) and every measure name (`dx`, `ds`, ...).
+- **Reserved names** (cannot be used as variable, parameter, or subdomain names): `t`, `x`, plus every function and helper name in §2.3.4 (`sin`, `trace`, `grad`, `n`, `H`, `theta`, etc.) and every measure name (`dx`, `ds`, ...). Common shadowing pitfall: the polar / spherical accessors `theta`, `phi`, `r` (§1.8.4) are reserved even though they are natural names for angle, phase, or radial *parameters* in biological models. A user trying to declare `parameter: theta` for an angle offset will hit a shadowing error at construction; the workaround is a non-reserved synonym (`angle_offset`, `phase_lag`, `radius0`, …).
 - **Boundary and region names** are also identifiers; their assignment is the Geometry's responsibility.
 
 #### 2.4.2 Scope rules
@@ -1767,7 +1767,7 @@ SBML Spatial compatibility (the standard interchange format for spatial cell bio
 
 ### 2.7 End-to-end worked example
 
-The §1.10.8 mechanics-driven membrane motion model in complete YAML form, ready to load:
+The mechanics-driven membrane motion model from §1.10.8 (also discussed in §1.5.8 as a weak-form example), now shown end-to-end in all three carriers — YAML, JSON, and Python dataclass — to demonstrate that they describe the same data and round-trip without loss. The focus here is the **data model and its three syntactic forms**; the model itself is exactly the same.
 
 ```yaml
 math_description:
