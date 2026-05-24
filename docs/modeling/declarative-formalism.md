@@ -1625,32 +1625,35 @@ Examples seen in Part 1's worked models:
 "1.0 + 0.5 * cos(2 * theta(x))"
 "-k_off * rho_active"
 "k_on * trace(L) * rho_f - k_off * rho_b"
-"r_dot * (x / |x|)"
+"r_dot * x / r(x)"
 "k_on * rho_inactive - k_off * rho_active"
 ```
 
 #### 2.3.2 Parsing
 
-The string is parsed at MathDescription construction time into a **typed AST**. The parser is hand-written (a small recursive-descent for math-like infix; no third-party dependency); errors point to the offending position in the string. The AST is the canonical internal form.
+The string is parsed at MathDescription construction time. The parser is hand-written (a small recursive-descent for math-like infix; no third-party dependency); errors point to the offending position in the string.
+
+Parsing happens in two stages with distinct inputs. The **parser** sees only the string and produces a *syntactic* AST: every bare identifier becomes a single `Name` node, every `f(...)` becomes a `FunctionCall`, and no node carries a type. Distinguishing a local variable from a parameter from a reserved name (`t`, `x`) from a measure (`dx`, `ds`, …) requires the surrounding MathDescription — which variables and parameters exist, and on which subdomain the expression lives — that the parser does not have. The **validator's resolution pass** (§1.11, §2.5), which does have that context, walks the syntactic AST, resolves each `Name` into one of the typed reference kinds below, and assigns every node a type. The fully-resolved, typed AST is the canonical internal form the backend consumes.
 
 #### 2.3.3 AST node kinds
 
-The AST has the following node kinds:
+After the validator's resolution pass, the AST has the following node kinds. The parser itself produces only the syntactic subset noted below; `Name` is the unresolved form the resolution pass rewrites into `VariableRef` / `ParameterRef` / `ReservedRef` / `MeasureRef`.
 
-| Node | Carries | Notes |
-|---|---|---|
-| `Literal` | numeric value, type | Scalars; vector / tensor literals are constructed by `VectorLiteral` / `TensorLiteral`. |
-| `VariableRef` | name | Resolves to a local variable's value field at evaluation. |
-| `ParameterRef` | name | Resolves to the parameter's value at the current point: constant value for `kind: scalar`; the parameter's body expression (already a parsed AST) evaluated against the current context for expression-valued parameters; per-region value for `kind: region_map` (§2.2.3). |
-| `ReservedRef` | which (`t`, `x`) | Time or spatial-coordinate access. |
-| `IndexAccess` | object, index | `x[0]` parses to `IndexAccess(ReservedRef("x"), Literal(0))`. |
-| `FunctionCall` | callee, args | Both built-in functions (sin, cos, …) and special operators (`trace`, `grad`, geometric helpers, `partial_t`, `inner`). |
-| `BinaryOp` | op (`+`, `-`, `*`, `/`, `**`), left, right | Standard arithmetic. |
-| `UnaryOp` | op (`-`), operand | |
-| `VectorLiteral`, `TensorLiteral` | components | |
-| `MeasureRef` | which (`dx`, `dx_Gamma`, `ds`, …) | Only valid in weak-form `form:` expressions. |
+| Node | Produced by | Carries | Notes |
+|---|---|---|---|
+| `Number` | parser | numeric value | Scalar numeric literal. |
+| `Name` | parser | name | Unresolved bare identifier. The resolution pass rewrites it into one of the four `*Ref` kinds; it does not survive into the canonical AST. |
+| `VariableRef` | resolution | name | A `Name` that resolved to a local variable's value field. |
+| `ParameterRef` | resolution | name | A `Name` that resolved to a parameter: constant value for `kind: scalar`; the parameter's body expression (already a parsed AST) evaluated against the current context for expression-valued parameters; per-region value for `kind: region_map` (§2.2.3). |
+| `ReservedRef` | resolution | which (`t`, `x`) | A `Name` that resolved to time or the spatial coordinate. |
+| `MeasureRef` | resolution | which (`dx`, `dx_Gamma`, `ds`, …) | A `Name` (or `FunctionCall` for the parametrised `ds(<boundary>)` forms) that resolved to a measure. Only valid in weak-form `form:` expressions. |
+| `IndexAccess` | parser | object, index | `x[0]` parses to `IndexAccess(Name("x"), Number(0))`; resolution rewrites the base to `ReservedRef("x")`. |
+| `FunctionCall` | parser | callee, args | Both built-in functions (sin, cos, …) and special operators (`trace`, `grad`, geometric helpers, `partial_t`, `inner`). The callee is a raw name; resolution dispatches on it (and rewrites measure callees to `MeasureRef`). |
+| `BinaryOp` | parser | op (`+`, `-`, `*`, `/`, `**`), left, right | Standard arithmetic. |
+| `UnaryOp` | parser | op (`+`, `-`), operand | |
+| `VectorLiteral`, `TensorLiteral` | parser | components / rows | A bracket whose every element is itself a bracket is a `TensorLiteral`; otherwise a `VectorLiteral`. |
 
-Each node carries a type (`scalar`, `vector`, `symmetric_tensor`, or an error type for un-resolved cases). The validator (§1.11, §2.5) walks the AST type-checking each node.
+After resolution, each node carries a type (`scalar`, `vector`, `symmetric_tensor`, or an error type for un-resolved cases). The validator (§1.11, §2.5) walks the AST type-checking each node.
 
 #### 2.3.4 Operator and function vocabulary
 
