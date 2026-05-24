@@ -65,17 +65,17 @@ For a modeller coming from VCell, the formalism is a direct generalisation of `M
 
 #### 1.1.5 v1 status and roadmap
 
-This document is the v1 design of the formalism. Several capabilities and templates are explicitly deferred:
+This document is the v1 design of the formalism. The headline deferrals are:
 
-- **Mechanics templates T5–T7** (Stokes / Navier-Stokes, linear elasticity, hyperelasticity) — §1.4.3, anticipated for v2.
-- **Constitutive templates for adhesion / slippage** at moving membrane-substrate interfaces — §1.4.3, v2.
-- **Three known topological limitations** of the class-based subdomain abstraction (squashed thin layers, per-cell connected components, same-class-on-both-sides interface ambiguity) — §1.2.6, intentionally not addressed in v1.
-- **FastSystem / Events / region variables / stochastic constructs** — recorded as v2+ scope at the top of this document.
-- **Per-region term overrides (Tier 2)** for structural variation within a subdomain class — §1.2.5, deferred to v2 unless v1 use cases force it.
-- **General-algebraic interface BCs and the broader expression vocabulary for them** — §1.6.2, §1.8.7.
-- **Lift / extension operators** (surface → bulk) — explicitly removed from the formalism rather than reserved; cases that need such lifts express them structurally via auxiliary variables and BCs (§1.8.7).
+- **Mechanics templates T5–T7** (Stokes / Navier-Stokes, linear elasticity, hyperelasticity).
+- **Constitutive templates for adhesion / slippage** at moving membrane-substrate interfaces.
+- **Three known topological limitations** of the class-based subdomain abstraction (squashed thin layers, per-cell connected components, same-class-on-both-sides interface ambiguity).
+- **FastSystem / Events / region variables / stochastic constructs** from the VCell heritage.
+- **Per-region term overrides (Tier 2)** for structural variation within a subdomain class.
+- **General-algebraic interface BCs** for couplings that the value-equality + flux-balance kinds cannot express.
+- **Lift / extension operators** (surface → bulk) — explicitly *not planned*; cases that need such lifts express them structurally via auxiliary variables and BCs.
 
-The roadmap for moving from v1 to v2 is driven by concrete use cases, not by speculative feature addition. Each deferred item ships when a model that genuinely cannot be expressed without it is concretely needed.
+The full consolidated list — every item explicitly deferred or rejected, organised by category with source-section cross-references — is **Appendix B (v2 Roadmap)**. The driving principle, applied throughout: each item ships when a model that genuinely cannot be expressed without it is concretely needed — not on speculation.
 
 ### 1.2 Geometry vocabulary
 
@@ -2124,4 +2124,144 @@ This backend is the canonical implementation of the formalism and the reference 
 
 The vcell-fenics backend claims conformance for a strict subset: T1 and T2 with prescribed motion, scalar variables, zero-Neumann external BCs, no weak-form. Models within that subset run correctly and pass the conformance reference suite's relevant entries. Models outside that subset are not supported in v1; an attempt to load such a model should fail with a clear error rather than silently produce wrong results — though this rejection-with-clear-error behaviour itself is forthcoming work.
 
-This honest scoping is deliberate. The formalism is broader than what v1 implements; the v1 backend is one slice. The roadmap to broader coverage is the same as the formalism's v2 roadmap in §1.1.5 — driven by concrete use cases, not by speculative feature addition.
+This honest scoping is deliberate. The formalism is broader than what v1 implements; the v1 backend is one slice. The roadmap to broader coverage is the same as the formalism's v2 roadmap (Appendix B) — driven by concrete use cases, not by speculative feature addition.
+
+---
+
+## Appendix A — Glossary
+
+Alphabetical. Each entry links to the section that defines or first uses the term in full.
+
+- **Auto-dilution** — The $\rho \, \nabla_\Gamma \cdot \mathbf{v}_\Gamma$ term that operator templates with a $\partial_t$ slot generate automatically when their subdomain has non-zero motion. The canonical correctness check for moving-membrane surface PDEs; not user-settable (§1.4.2 T2, §1.10.5).
+- **Bare name** — A reference in an expression with no `trace(·)`, no calculus operator, and no subscripts. Resolves to a local variable, parameter, or reserved name in that order (§1.8.6).
+- **Boundary (labelled)** — A codim-1 entity in the geometry with a name. Carries BCs in the MathDescription; can also be a subdomain in its own right (membrane double-role, §1.2.4).
+- **Composable pattern** — The §1.6.5 bulk-surface coupling idiom: a regular Neumann BC on the bulk variable plus a matching `source:` term on a surface variable. Used for accumulation (binding, capture). Contrast with `interface_flux_balance` (conservation, no accumulation).
+- **Conformance** — A backend claim that, for some declared subset of the formalism, it reproduces the reference suite's models within tolerance (§3.5).
+- **Current configuration** — The deformed mesh position at the current time step for moving subdomains. Geometric helpers (`n(x)`, `H(x)`, …) evaluate against it. Contrast with reference configuration (§1.7.2, §1.10.6).
+- **DAE** — Differential-algebraic equation. The combined system when a MathDescription has both `time_dependent` and `steady_state` equations (§1.9.4).
+- **Equation envelope** — The fixed five-field envelope every equation has: `template`, `variable`, `subdomain`, `temporality`, `terms` (or `form` for weak-form), plus `initial_condition` when time-dependent (§1.4.1, §1.5.2).
+- **Expression-valued parameter** — A parameter whose value is an expression in `t`, `x`, helpers, and other parameters rather than a constant. Scalar, vector, or symmetric-tensor (§2.2.3 (b)).
+- **Form (weak)** — The UFL-style residual expression in a weak-form equation. Equation is interpreted as `form = 0` for all admissible test functions (§1.5.3).
+- **Geometry** — The external object that provides the mesh, region-to-class assignment, and labelled-boundary identifiers. Referenced by name from the MathDescription (§1.2.1).
+- **Interface BC** — A boundary condition on an internal boundary (two-sided). Two kinds in v1: value-equality and flux-balance. Both require `partner_variable` (§1.6.2). Flux-balance is bulk-bulk only; bulk-surface accumulation uses the composable pattern.
+- **Loader** — Runtime-provided machinery that turns a name into a concrete MathDescription / Geometry / SolverConfiguration object. Not specified by the formalism; common strategies are filesystem search, registry, package-bundled artifacts (§3.4).
+- **MathDescription** — The top-level declarative artifact this whole document defines. A self-contained mathematical problem in data form, independent of solver and (largely) of geometry (§2.1.2).
+- **Motion** — A subdomain field declaring how the subdomain moves: `none`, `prescribed`, or `unknown` (§1.10). Property of the subdomain, not of any equation.
+- **Motion variable** — A vector-typed variable referenced from a subdomain's `motion.variable` slot when motion is `unknown`. Governed by some equation in the same MathDescription (§1.3.4, §1.10.3).
+- **Narrow rule** — The §1.8.5 / §1.11.9 restriction that calculus operators cannot be applied to the slot's own governed variable in operator-template equations. Does not apply to weak-form equations.
+- **Operator template** — A named equation shape (T1–T7) that fills a fixed differential form with user-supplied slot expressions. Contrast with weak-form escape hatch (§1.4, §1.5).
+- **Parameter** — A named, non-state input. Three forms: constant scalar, expression, region-keyed (§2.2.3).
+- **Reference configuration** — The geometry's initial mesh, with no motion applied. ICs evaluate against it; geometric helpers in IC expressions evaluate against it (§1.7.2, §1.10.4).
+- **Region** — A concrete mesh entity (a connected piece of the mesh tagged with a subdomain class name). One subdomain class may correspond to many regions (§1.2.2).
+- **Region map** — A `kind: region_map` parameter providing per-region constant values within a subdomain class (§1.2.5, §2.2.3 (c)). Tier 1 region variation.
+- **Slot** — A named field in an operator template (e.g. `diffusion`, `source`, `relative_advection`). Each slot has a declared type; optional slots default to zero (§1.4.4).
+- **Smoothness rule** — The §1.8.5 / §1.11.9 requirement that arguments of second-order operators (`lapl`, `lapl_beltrami`) have `space: lagrange_p2` or higher.
+- **SolverConfiguration** — A separate artifact that pins discretisation choices (FE order, time-stepping scheme, linear solver, tolerances, …). Same MathDescription can run with different SolverConfigurations (§3.4).
+- **Subdomain (class)** — A named topological entity in the MathDescription (e.g. `cytoplasm`, `membrane`). One class may be realised by multiple regions in the geometry. Carries `kind`, `motion`, and a set of equations / BCs / variables (§1.2.2).
+- **Substrate velocity** — The motion velocity of a subdomain at a point: `subdomain.motion.velocity` for prescribed motion, or the resolved value of the motion variable for unknown motion. Feeds compression / dilution terms automatically (§1.10).
+- **Temporality** — A per-equation field declaring `time_dependent` or `steady_state`. Determines whether the equation produces a time derivative of the governed variable. Required, not inferred (§1.9.1).
+- **Tier 1 / Tier 2 / Tier 3** — Mechanisms for region-specific behaviour within a subdomain class. Tier 1 = region-keyed parameter maps (v1). Tier 2 = per-region term overrides (v2). Tier 3 = distinct subdomain classes for genuinely different physics (always available) (§1.2.5).
+- **Trace operator** — `trace(u)` is the restriction of a higher-dimensional variable to a lower-dimensional evaluation context. Used to reference bulk variables from surface equations (§1.6.5, §1.8.2).
+- **Variable** — A named unknown function on exactly one subdomain class. Types: scalar, vector, symmetric_tensor. Governed by exactly one equation (§1.3, §1.11.4).
+- **Weak-form escape hatch** — `template: weak_form`. A UFL-residual equation for cases no operator template covers; user gives up template guardrails in exchange for full UFL expressiveness (§1.5).
+
+---
+
+## Appendix B — v2 Roadmap
+
+A consolidated record of everything explicitly deferred to v2 (or beyond), pulled together from the various sections that introduce each item. Cross-referenced for context. The driving principle (§1.1.5): each item ships when a model that genuinely cannot be expressed without it is concretely needed — not on speculation.
+
+### B.1 Operator templates
+
+| Item | Source | Notes |
+|---|---|---|
+| **T5 — Stokes / Navier–Stokes momentum balance** | §1.4.3 | Vector unknown on bulk; pairs with T3 incompressibility constraint. |
+| **T6 — Linear elasticity** | §1.4.3 | Vector displacement on bulk; steady-state form drops inertia. |
+| **T7 — Hyperelasticity** | §1.4.3 | Non-linear $\sigma(F)$ constitutive slot. |
+| **Adhesion / slippage constitutive templates** | §1.4.3 | Stokes drag, Coulomb friction, viscous slippage between membrane and substrate — so users do not write force balances from scratch. |
+| **Reaction-BC sugar template** | §1.6.5 | A sugar over the composable Neumann + source pattern that desugars to the matching expressions a careful user would write by hand. Ships once enough cases accumulate to justify standardising. |
+
+### B.2 Variable types and function spaces
+
+| Item | Source | Notes |
+|---|---|---|
+| **`general_tensor` variable type** | §1.3.2 | For non-symmetric tensors (velocity gradient as a primary unknown, etc.). v1 workaround: decompose into symmetric + skew. |
+| **`taylor_hood` function space** | §1.3.3 | Reserved for mechanics-template vector velocities paired with $P_1$ pressure. Lands with T5. |
+| **`discontinuous_galerkin_pk` for $k \ge 2$** | §1.3.3 | Listed as a space-hint value but no operator template uses it in v1. |
+
+### B.3 Expression language
+
+| Item | Source | Notes |
+|---|---|---|
+| **Side specifiers for `trace`** | §1.2.6, §1.8.2, §1.8.7 | `trace(u, from=<subdomain>)` for different-class interfaces; `trace(u, side=a/b)` for same-class interfaces (intrinsic by region index); `trace(u, region=<name>)` opt-in when physical names matter. |
+| **DG flux operators** | §1.8.7 | `jump([u])`, `avg({u})` for discontinuous-Galerkin formulations. Deferred until DG spaces are used by a template. |
+| **Tensor contraction beyond `inner`** | §2.3.4 | The matching-rank inner case is sufficient for v1; explicit contraction operators land if a use case warrants. |
+| **`flux_trace(u)` and friends** | §1.8.7 | Operators needed by the general-algebraic interface BC; specified alongside that BC kind. |
+
+### B.4 Parameters
+
+| Item | Source | Notes |
+|---|---|---|
+| **Per-region expressions for region-keyed parameters** | §2.2.3 (c) | v1 region maps carry per-region constants only; expressions land if a model needs per-cell time-varying inputs etc. |
+
+### B.5 Boundary conditions
+
+| Item | Source | Notes |
+|---|---|---|
+| **General-algebraic interface BC** | §1.6.2, §1.8.7 | Any expression in traces and fluxes from either side $= 0$. Escape hatch for couplings value-equality and flux-balance cannot express. |
+| **Surface-surface flux-balance** | §1.6.2 (implied) | v1 flux-balance is bulk-bulk only; surface-surface conservation across a curve interface is unaddressed. |
+
+### B.6 Initial conditions
+
+| Item | Source | Notes |
+|---|---|---|
+| **Inter-variable IC references with topological-sort resolution** | §1.7.3 | v1 forbids ICs referencing other state variables to avoid ordering ambiguity. v2 may relax with explicit ordering. |
+
+### B.7 Weak-form escape hatch
+
+| Item | Source | Notes |
+|---|---|---|
+| **Discrete-time forms** | §1.5.4 | Reserved `u_prev` and `dt` symbols for users who need explicit time-integration control. v1 is continuous-time only. |
+
+### B.8 Topological limitations (geometry-side)
+
+| Item | Source | Notes |
+|---|---|---|
+| **Squashed thin layers — multi-role region assignment** | §1.2.6 (1) | One mesh entity bearing multiple subdomain-class labels with thickness-derived weights. Geometry-layer extension; not yet a formalism-level concern. |
+| **Per-cell connected components within a class** | §1.2.6 (2) | Per-region variable instancing, or a topology-aware diffusion operator. v1 workaround is Tier 3. |
+| **Same-class-on-both-sides disambiguation** | §1.2.6 (3), §1.8.2 | Addressed by the side-specifier work in B.3. |
+
+### B.9 Validator
+
+| Item | Source | Notes |
+|---|---|---|
+| **Unit-aware validation** | §1.11.11 | Catch dimensional errors in expressions (D in length²/time, etc.). Requires unit annotations the formalism does not currently require. |
+| **Bulk-surface conservation check** | §1.6.5, §1.11.11 | Currently user-enforced — sign-matched expressions in three places. A static check would need a mass-balance solver; out of scope for the schema-level validator. |
+
+### B.10 VCell / SBML-Spatial compatibility
+
+| Item | Source | Notes |
+|---|---|---|
+| **VCell → formalism converter (executable)** | §2.6 | v1 ships docs only. Executable converter develops alongside concrete pyvcell integration use cases. |
+| **formalism → VCell converter** | §2.6.4 | Lossy in one direction; offered only for the subset that fits in VCell's quirks. |
+| **SBML Spatial converter** | §2.6.4 | Schemas diverge non-trivially (no weak-form, no first-class unknown motion, different per-face BC machinery). Substantial standalone project. |
+| **VCell `Event`** | §2.6.3 | Discrete state transitions; needs its own design pass. |
+| **`VolumeRegionVariable` / `MembraneRegionVariable`** | §2.6.3 | Piecewise-constant region variables (compartment-aggregate quantities). |
+| **`FastSystem` / `FastInvariant` / `FastRate`** | §2.6.3 (memory decision) | Solver-side QSSA reduction; user's read is "could be done via change of variables, not worth it." |
+| **Particle / `StochVolVariable` / stochastic constructs** | §2.6.3 | Out of scope for this formalism entirely — different primitives. |
+| **`PostProcessingBlock`** | §2.6.3 | Observables / derived outputs belong with the solver-configuration / output-spec object. |
+
+### B.11 SolverConfiguration
+
+| Item | Source | Notes |
+|---|---|---|
+| **Adaptive time-stepping** | §3.4 (implied) | Schema currently has a fixed `dt`; adaptive control would add tolerance / error-estimate fields. |
+| **Output specification** | §3.2.4 | A formal output-spec sub-schema (which variables, at which times, in which format) rather than the current backend-discretion exposure. |
+
+### B.12 Explicitly NOT planned
+
+These were considered and deliberately rejected, not deferred:
+
+- **Lift / extension operators** (surface → bulk). Mathematically non-unique; cases that need them express the extension as a named bulk variable with its own equation and a boundary condition (§1.8.7).
+- **Stochastic constructs in this formalism.** Stochastic dynamics get their own formalism with different primitives; this document is the deterministic PDE/ODE formalism only (§1.1.3).
+- **Code generation.** The formalism is a *description* of a problem, not a procedure for solving one (§1.1.3).
