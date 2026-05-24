@@ -1646,7 +1646,7 @@ The vocabulary is the union of:
 - **Geometric helpers** from §1.8.4 (`n(x)`, `H(x)`, `kappa1`, `kappa2`, `tangent`, `theta`, `phi`, `r`).
 - **Calculus operators** from §1.8.5, subject to the narrow rule of §1.8.5 in template slots and unrestricted in weak-form (`grad`, `div`, `lapl`, `grad_surf`, `div_surf`, `lapl_beltrami`).
 - **Cross-dimensional reference** from §1.8.2 (`trace`).
-- **Tensor algebra** for weak-form expressions: `inner(a, b)` for the standard inner product, `dot(a, b)` for vector inner product, `outer(a, b)` for outer product, `cross(a, b)` in 3D.
+- **Tensor algebra** for weak-form expressions: `inner(a, b)` for the inner product (works on any matching-rank pair — scalar*scalar, vector·vector, tensor:tensor — returns a scalar), `outer(a, b)` for outer product, `cross(a, b)` in 3D. There is intentionally no separate `dot(·, ·)` — on vectors it would coincide with `inner` and the duplication invites confusion; tensor-contraction beyond the matching-rank inner case is deferred to the v2 vocabulary if a use case warrants it.
 - **Time derivative**: `partial_t(u)`, valid only inside weak-form `form:` expressions and only for time-dependent equations.
 - **Measures**: `dx`, `dx_Gamma`, `dl`, `dp`, `ds(<boundary>)`, `dS(<boundary>)`, `dl_Gamma(<boundary>)`. Valid only inside weak-form `form:` expressions; multiply expressions by a measure to integrate them.
 
