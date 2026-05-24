@@ -1951,7 +1951,8 @@ Every compliant backend implements the following operations. The names below des
 - **Accept a `MathDescription`** in any of the three carriers from §2.1 (YAML, JSON, or in-memory dataclass). Run the validation pass (§2.5) and reject any MathDescription that fails.
 - **Accept a `Geometry`** referenced by name from the MathDescription. The geometry provides at minimum: the mesh, the region-to-subdomain-class assignment, the labelled-boundary identifiers and their incidence to subdomain classes. The precise Geometry API is not specified here; it is a separate design (and a separate document) at the Geometry layer.
 - **Accept a `SolverConfiguration`** specifying discretisation choices (§3.4). The SolverConfiguration may declare backend-specific options that compliant backends are free to ignore if they do not understand them — but only after the backend has confirmed it has its own sensible default for the relevant choice.
-- **Cross-validate** the three artifacts: subdomain class names in the MathDescription resolve to regions in the Geometry; labelled-boundary names referenced in BCs resolve to entities in the Geometry; region-keyed parameters cover every region (§1.11.10). Any mismatch is a hard error before any solving begins.
+- **Resolve names through the loader.** All three artifacts reference each other by name (§3.4 "Name resolution"); the backend uses whichever loader the runtime provides — filesystem search, in-memory registry, package-bundled artifacts, or a combination — to turn the names into concrete objects. The loader API is not specified by the formalism.
+- **Cross-validate** the three artifacts: the SolverConfiguration's `geometry` name matches the MathDescription's `geometry` name (otherwise the binding is incoherent); subdomain class names in the MathDescription resolve to regions in the Geometry; labelled-boundary names referenced in BCs resolve to entities in the Geometry; region-keyed parameters cover every region (§1.11.10). Any mismatch is a hard error before any solving begins.
 
 #### 3.2.2 Assembly
 
@@ -1997,8 +1998,8 @@ Discretion-zone choices that a user wants to pin (for reproducibility, for param
 
 ```yaml
 solver_configuration:
-  math_description: my_model.yaml         # reference to the MathDescription
-  geometry: my_geometry.yaml              # reference to the Geometry
+  math_description: my_model              # name; resolved by the loader (see below)
+  geometry: cell_2d                       # name; must match the MathDescription's `geometry:` field
 
   fe_order:
     default: 1                            # P1 Lagrange unless overridden per-variable
@@ -2038,6 +2039,17 @@ Most fields have backend-side defaults. A SolverConfiguration may be entirely em
 Backend-specific options are permitted under a `backend_specific:` key per-backend; compliant backends ignore options they do not understand, after confirming they have their own default for the relevant choice. This lets a user pin DOLFINx-specific behaviour (e.g. PETSc options) without breaking other backends that do not interpret PETSc strings.
 
 A run is `(MathDescription, Geometry, SolverConfiguration)` — three files / objects. The MathDescription stays the same across, e.g., a time-step convergence study; only the SolverConfiguration's `time_stepping.dt` varies.
+
+**Name resolution.** All three artifacts reference each other by **name**, not by file path. The MathDescription declares the geometric vocabulary it requires (`math_description.geometry: <name>`); the SolverConfiguration names the MathDescription and Geometry it wants to run (`solver_configuration.math_description: <name>`, `solver_configuration.geometry: <name>`). The SolverConfiguration's `geometry` name must match the MathDescription's declared geometry name; the validator checks this at load time.
+
+How names resolve to concrete objects is a **loader concern**, not a formalism concern. A loader is provided by the runtime (e.g. the `vcell-fenics` backend supplies its own) and is responsible for taking a name and returning the concrete artifact. Common loader strategies — none mandated:
+
+- **Filesystem search path.** The loader walks a configured set of directories looking for `<name>.yaml`, `<name>.json`, or similar.
+- **Programmatic registration.** Code constructs a dataclass instance and registers it under a name with the loader; subsequent lookups by that name resolve to the registered instance. The natural pattern for `pyvcell` integration and for unit tests.
+- **Package-bundled artifacts.** The runtime ships reference Geometries / MathDescriptions under canonical names (e.g. `cell_2d`, `disk_radius_1`); user code can reference them without supplying files.
+- **Hybrid.** A loader may chain strategies, e.g. check the in-memory registry first, then a search path.
+
+This separation keeps the math model independent of filesystem layout (the same `math_description: my_model` works whether the file lives in `./models/`, in a package, or was built programmatically), and lets `pyvcell` consume MathDescriptions as library objects without needing a file system at all.
 
 ### 3.5 Conformance
 
