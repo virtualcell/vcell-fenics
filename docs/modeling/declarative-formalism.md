@@ -662,15 +662,19 @@ The BC names both variables: `variable` (the one on the left), `partner_variable
 
 ##### Interface — flux-balance
 
-The jump in outward normal flux across an internal boundary, evaluated from the perspective of `variable`'s subdomain, equals a constitutive expression:
+At an internal boundary between two **bulk** subdomains, the outward normal flux of the home variable equals a user-supplied constitutive expression:
 
-$$\bigl[D \, \nabla u \cdot \mathbf{n}\bigr] \;=\; f(\text{traces from either side}, \mathbf{x}, t, \text{parameters})$$
+$$D \, \nabla u_L \cdot \mathbf{n} \;=\; f(u_L, u_R, \text{partner traces}, \mathbf{x}, t, \text{parameters})$$
 
-The expression may reference the variable itself, the partner variable, traces of any other variable defined on either side's subdomain, geometric helpers, time, and parameters. This is the generalisation of VCell's `JumpCondition` without the Neumann-only restriction — the flux expression can express any constitutive relation (linear permeability $P(u_L - u_R)$, saturating transport $V_{max} u_L / (K + u_L)$, voltage-gated channel kinetics, …).
+The equal-and-opposite flux into the partner subdomain is enforced automatically by mass conservation — the partner side's Neumann condition is not separately written. The constitutive expression $f$ may reference the home variable, the partner variable (named via `partner_variable`), traces of any other variable on either side's subdomain, geometric helpers, time, and parameters. This is the generalisation of VCell's `JumpCondition` without the Neumann-only restriction — $f$ can express any constitutive relation (linear permeability $P(u_L - u_R)$, saturating transport $V_{max} u_L / (K + u_L)$, voltage-gated channel kinetics, …).
 
-`partner_variable` must be supplied. As with value-equality, the BC is symmetric across the two sides; the sign convention is fixed by which subdomain `variable` belongs to.
+`partner_variable` must be supplied. The BC's sign convention is fixed by which subdomain `variable` belongs to: positive $f$ means flow *out of* the home subdomain *into* the partner subdomain.
 
-A v2 "general algebraic" interface kind — any expression in traces and fluxes from either side $= 0$ — is anticipated as an escape hatch but deferred. Value-equality and flux-balance together cover every interface coupling in the project's foreseeable use cases.
+**Scope: bulk-bulk only.** This BC kind is for transport between two bulk compartments where mass *crosses* the interface but does not *accumulate* on it. Use it for channel kinetics, semi-permeable wall transport, paracellular flux between cells, and similar bulk-to-bulk crossings.
+
+**For bulk-surface coupling where mass accumulates on the surface** (binding reactions, receptor capture, membrane-bound complex formation), use the **composable Neumann + source pattern** documented in §1.6.5 — not this BC kind. The composable pattern writes a regular `kind: neumann` BC on the bulk variable and a matching `source:` term on the surface variable's equation, with the user enforcing mass-balance by matching the expressions with appropriate signs. Worked end-to-end in §1.6.6.
+
+A v2 "general algebraic" interface kind — any expression in traces and fluxes from either side $= 0$ — is anticipated as an escape hatch but deferred. Value-equality and flux-balance plus the §1.6.5 composable pattern together cover every interface coupling in the project's foreseeable use cases.
 
 #### 1.6.3 Sign convention
 
@@ -693,7 +697,7 @@ This is the standard PDE textbook convention and matches the natural BC of the w
 
 #### 1.6.5 Bulk-surface coupling — the composable pattern
 
-When a boundary is *itself* a subdomain that carries its own PDE — the canonical cell-membrane case, where Γ_mem is both the interface between cytoplasm and extracellular space *and* a surface subdomain carrying receptor density variables — the coupling between bulk and surface is expressed entirely through trace operators in expressions.
+When a boundary is *itself* a subdomain that carries its own PDE — the canonical cell-membrane case, where Γ_mem is both the interface between cytoplasm and extracellular space *and* a surface subdomain carrying receptor density variables — the coupling between bulk and surface is expressed entirely through trace operators in expressions. Note that this is **not** the same as `interface_flux_balance` (§1.6.2): flux-balance is for bulk-bulk interfaces where mass *crosses* the boundary without accumulating; the composable pattern below is for bulk-surface interfaces where mass *accumulates* on the surface (binding, capture, complex formation).
 
 **The trace operator.** `trace(u)` is the value of a higher-dimensional variable $u$ restricted to a lower-dimensional boundary or interface within its domain. For a bulk variable $L$ defined throughout the cytoplasm Ω_cyto, `trace(L)` evaluated on the membrane Γ_mem is the value of $L$ at the membrane — formally, the limit of $L$ as you approach the membrane from inside Ω_cyto. Surface variables like $\rho_f$ that already live on Γ_mem are written directly; only higher-dimensional variables need an explicit `trace(·)` when used in a lower-dimensional expression. The trace is mathematically well-defined for the Sobolev spaces our variables live in (H¹ bulk functions have H^{1/2} traces on the boundary); FEniCSx handles trace assembly automatically. The full vocabulary of cross-dimensional reference operators is catalogued in §1.8.
 
@@ -1337,6 +1341,7 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 - Interface BCs must have a `partner_variable` defined on a subdomain incident to the BC's boundary from the opposite side.
 - Dirichlet BCs must be declared on a labelled boundary that exists; the boundary must be incident to a subdomain on which the variable lives.
 - For weak-form equations (template = `weak_form`), §1.6 BCs on the governed variable must all be Dirichlet. Non-Dirichlet §1.6 BCs on a weak-form-governed variable are an error (§1.5.6); the user must encode natural BCs in the form itself.
+- **`interface_flux_balance` requires both sides to be `volume` (bulk) subdomains.** The kind enforces mass conservation across an interface where mass *crosses* but does not *accumulate*. Bulk-surface couplings (where mass accumulates on the surface, e.g. ligand binding to membrane receptors) are not expressible as flux-balance and are an error here; use the composable Neumann + source pattern in §1.6.5 instead. The validator rejects flux-balance entries whose `variable` or `partner_variable` lives on a non-volume subdomain, with an error message pointing the user at §1.6.5.
 - Trace ambiguity: when an expression's `trace(u)` would have multiple resolutions (e.g. higher-dim $u$ contributes regions on both sides of the lower-dim evaluation context), the reference is ambiguous and rejected. In v1 the modeller's recourse is Tier 3 (separate subdomain classes); v2 will add side-or-region specifiers (§1.2.6, §1.8.2).
 
 #### 1.11.8 Initial-condition consistency
