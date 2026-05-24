@@ -222,7 +222,7 @@ Three value types in v1:
 - **`vector`** — a tuple in $\mathbb{R}^d$ where $d$ is the ambient dimension. Covers velocities, displacements, fluxes (when treated as primary unknowns), gradients of scalar fields when those are first-class unknowns.
 - **`symmetric_tensor`** — a symmetric $d \times d$ tensor per point. Covers stress, strain, diffusivity-as-an-unknown, and similar quantities. Less common in v1 but included so mechanics templates have somewhere natural to live.
 
-Tensor variables that are *not* symmetric (rare in cell-biology but possible for e.g. gradient of velocity as an unknown) require the weak-form escape hatch in v1; v2 may add a `general_tensor` type.
+Non-symmetric tensor variables are **not supported in v1.** Cases that need them (e.g. velocity-gradient as a primary unknown) must decompose into a symmetric part and a skew part — each declared as its own variable with its own equation — or wait for the `general_tensor` type, which is on the v2 roadmap when a concrete use case demands it. The weak-form escape hatch (§1.5) does not change this: a weak-form equation governs a *declared* variable, and the declared types are `scalar | vector | symmetric_tensor` only.
 
 #### 1.3.3 Function-space hints
 
