@@ -53,12 +53,14 @@ pyvista = "*"
 # Numerics
 numpy = "*"
 scipy = "*"
+pyyaml = ">=6.0.3,<7"
 
 [tool.pixi.feature.dev.dependencies]
 pytest = "*"
 ipython = "*"
 ruff = "*"
 mypy = "*"
+types-pyyaml = ">=6.0.12.20260518,<7"
 
 # Approach D (cut/trace FEM via CutFEMx) is intentionally NOT defined here yet.
 # CutFEMx v0.1.0 targets DOLFINx 0.9 (not 0.10) and is source-only; it will

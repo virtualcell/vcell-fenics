@@ -1,0 +1,48 @@
+# §2.7 of docs/modeling/declarative-formalism.md (also discussed in §1.10.8
+# as the unknown-motion worked sketch and §1.5.8 as a weak-form example).
+# Mechanics-driven membrane motion (weak-form viscous force balance) with
+# a receptor density carried on the moving membrane.
+math_description:
+  geometry: cell_2d
+
+  subdomains:
+    - name: membrane
+      kind: surface
+      motion:
+        kind: unknown
+        variable: v_membrane
+
+  variables:
+    - { name: v_membrane, subdomain: membrane, type: vector }
+    - { name: rho,        subdomain: membrane }
+
+  parameters:
+    - { name: eta,     value: 1.0  }
+    - { name: sigma_T, value: 0.10 }
+    - { name: k_off,   value: 0.02 }
+    - { name: f0,      value: 0.3  }
+    - name: f_active
+      type: vector
+      subdomain: membrane
+      expression: "[f0 * cos(theta(x)), 0]"
+
+  equations:
+    - template: weak_form
+      variable: v_membrane
+      subdomain: membrane
+      temporality: steady_state
+      form: |
+        ( eta * inner(v_membrane, v_membrane_test)
+          + sigma_T * H(x) * inner(n(x), v_membrane_test)
+          - inner(f_active, v_membrane_test)
+        ) * dx_Gamma
+      initial_condition: "0"
+
+    - template: surface_pde_with_dilution
+      variable: rho
+      subdomain: membrane
+      temporality: time_dependent
+      terms:
+        diffusion: "0.05"
+        source: "-k_off * rho"
+      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"

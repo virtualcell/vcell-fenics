@@ -1,0 +1,40 @@
+# §1.4.5 of docs/modeling/declarative-formalism.md.
+# 2D single-cell receptor density: two-species mass-action on a
+# prescribed-motion (radial-expansion) membrane.
+math_description:
+  geometry: disk_radius_1
+
+  subdomains:
+    - name: membrane
+      kind: surface
+      motion:
+        kind: prescribed
+        velocity: "r_dot * x / r(x)"
+
+  variables:
+    - { name: rho_active,   subdomain: membrane }
+    - { name: rho_inactive, subdomain: membrane }
+
+  equations:
+    - template: surface_pde_with_dilution
+      variable: rho_active
+      subdomain: membrane
+      temporality: time_dependent
+      terms:
+        diffusion: "0.1"
+        source: "k_on * rho_inactive - k_off * rho_active"
+      initial_condition: "1.0 + 0.5 * cos(2 * theta(x))"
+
+    - template: surface_pde_with_dilution
+      variable: rho_inactive
+      subdomain: membrane
+      temporality: time_dependent
+      terms:
+        diffusion: "0.1"
+        source: "-k_on * rho_inactive + k_off * rho_active"
+      initial_condition: "1.0"
+
+  parameters:
+    - { name: k_on,  value: 0.10 }
+    - { name: k_off, value: 0.05 }
+    - { name: r_dot, value: 1.00 }
