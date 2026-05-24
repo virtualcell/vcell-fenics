@@ -799,7 +799,7 @@ If the membrane were itself moving (replace `motion.velocity: "0"` with a real e
 
 #### 1.7.1 When required
 
-An initial condition is required for a variable iff its governing equation declares `temporality: time_dependent`. Variables governed by `steady_state` equations have no IC and the schema rejects one if provided. Variables that are not governed by any equation (a corner case that should not occur in a well-formed MathDescription, caught by §1.11) likewise have no IC.
+An initial condition is required for a variable iff its governing equation declares `temporality: time_dependent`. Variables governed by `steady_state` equations have no IC and the schema rejects one if provided — **with one exception: an unknown-motion variable** (§1.10.3) governed by a `steady_state` (quasi-static) equation may carry an IC, because that IC sets the $t = 0$ configuration of the moving subdomain (§1.7.7, §1.10.4), not a time-evolution starting value. The IC is optional there and defaults to zero. Variables that are not governed by any equation (a corner case that should not occur in a well-formed MathDescription, caught by §1.11) likewise have no IC.
 
 Each variable's IC appears as the `initial_condition` field on its governing equation. This placement — IC on the equation, not on the variable's declaration — reflects that the IC is part of the well-posed time-evolution problem (variable + equation + IC + BCs) and is meaningless without the equation context.
 
@@ -1053,7 +1053,7 @@ The validator checks the following at MathDescription construction time:
 **IC consistency (cross-references §1.7):**
 
 - A `time_dependent` equation must have an `initial_condition` field for its governed variable.
-- A `steady_state` equation must not have an `initial_condition` field.
+- A `steady_state` equation must not have an `initial_condition` field — **except** when its governed variable is an unknown-motion variable (§1.10.3), whose IC sets the $t = 0$ configuration of the moving subdomain (§1.7.1, §1.7.7). There the IC is optional, not forbidden.
 
 These are the strict-matching rules; they catch a class of silent errors where a `time_dependent` equation forgets its time derivative (and silently becomes an algebraic constraint inside the time loop) or a `steady_state` equation accidentally introduces $\partial_t$ (and silently becomes an evolution equation without an IC).
 
@@ -1308,7 +1308,7 @@ Most rules below are errors. The few warning cases are noted explicitly. Example
 
 - Every variable must be governed by exactly one equation. A variable without an equation is undetermined; a variable with two or more equations is overdetermined.
 - Every equation declared `temporality: time_dependent` must have an `initial_condition` (§1.7.1, §1.9.5).
-- Every equation declared `temporality: steady_state` must **not** have an `initial_condition` (§1.7.1, §1.9.5).
+- Every equation declared `temporality: steady_state` must **not** have an `initial_condition` (§1.7.1, §1.9.5) — except when its governed variable is an unknown-motion variable, whose IC sets the $t = 0$ configuration (§1.7.7); there the IC is optional, not forbidden.
 - Every variable referenced in any equation, BC, or IC must be declared.
 - Every internal boundary touched by a variable must have at least one explicit BC for that variable (no zero-Neumann default on internal boundaries; §1.6.4).
 - For region-keyed parameter maps (`kind: region_map`), every region of the named subdomain class must have a value in the map (§1.2.5).
