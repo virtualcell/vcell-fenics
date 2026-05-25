@@ -25,10 +25,12 @@ from vcell_fenics.formalism import parse
 
 def _ctx(params: dict[str, float] | None = None) -> CompileContext:
     mesh = create_disk(radius=1.0, h=0.3).mesh
-    symbols = {
+    symbols: dict[str, Any] = {
         name: fem.Constant(mesh, PETSc.ScalarType(value))  # type: ignore[operator]
         for name, value in (params or {}).items()
     }
+    # The assembler binds `x` to the spatial coordinate; mirror that here.
+    symbols["x"] = ufl.SpatialCoordinate(mesh)
     return CompileContext(mesh=mesh, symbols=symbols)
 
 
@@ -65,6 +67,27 @@ def test_parameter_resolves_from_context() -> None:
     assert _mean("k_on * 2 - 1", {"k_on": 3.0}) == pytest.approx(5.0)
 
 
+# ---------------------------------------------------------------------------
+# Coordinates, indexing, and functions of x (inc 1).
+# ---------------------------------------------------------------------------
+
+
+def test_coordinate_component_averages_to_zero_on_centred_disk() -> None:
+    # ∫_disk x[0] dA = 0 for a disk centred at the origin.
+    assert _mean("x[0]") == pytest.approx(0.0, abs=1e-9)
+
+
+def test_radius_helper_averages_to_two_thirds() -> None:
+    # ∫_disk r dA / area = (2/3)R = 2/3 for R = 1; coarse mesh, loose tol.
+    assert _mean("r(x)") == pytest.approx(2.0 / 3.0, abs=2e-2)
+
+
+def test_cos_of_theta_mode_averages_to_constant() -> None:
+    # ∫_disk cos(2θ) dA = 0 analytically, so the mean of 1 + 0.5·cos(2θ) is 1.
+    # θ is singular at the origin, so a coarse mesh leaves a small residue; loose tol.
+    assert _mean("1.0 + 0.5 * cos(2 * theta(x))") == pytest.approx(1.0, abs=2e-3)
+
+
 def test_compiled_coefficient_matches_handwritten_ufl() -> None:
     # The compiler ↔ UFL equivalence layer: a compiled coefficient assembles
     # into the same matrix as the hand-written form with the same coefficient.
@@ -88,6 +111,11 @@ def test_unresolved_name_raises() -> None:
 
 
 def test_unsupported_construct_raises() -> None:
-    # x[0] (IndexAccess) is not in the inc-0 subset.
+    # Vector literals are not in the supported subset yet.
     with pytest.raises(CompileError, match="not supported"):
-        compile_expression(parse("x[0]"), _ctx())
+        compile_expression(parse("[1.0, 2.0]"), _ctx())
+
+
+def test_unsupported_function_raises() -> None:
+    with pytest.raises(CompileError, match="not supported"):
+        compile_expression(parse("sinh(x[0])"), _ctx())

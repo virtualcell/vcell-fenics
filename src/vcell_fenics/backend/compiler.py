@@ -11,21 +11,42 @@ compiler assumes the expression has already passed validation (`formalism.valida
 so an unresolved name or unsupported construct is an internal error, raised as
 `CompileError` rather than returned as a diagnostic.
 
-Increment-0 scope: numeric literals, name lookups (parameters), and arithmetic
-(`+ - * / **`, unary `±`). Coordinates, geometric helpers, calculus operators,
-`trace`, tensor algebra, and vector/tensor literals raise `CompileError` until
-the increments that add them.
+Supported so far: numeric literals, name lookups (parameters, and `x` when the
+assembler binds it to a SpatialCoordinate), arithmetic (`+ - * / **`, unary `±`),
+coordinate indexing (`x[0]`), the standard scalar math functions, and the
+geometric helpers that expand to functions of `x` (`theta`, `r`). Calculus
+operators, `trace`, tensor algebra, multi-argument functions, the `n`/`H`/tangent/
+curvature helpers, and vector/tensor literals raise `CompileError` until the
+increments that add them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
+import ufl
 from dolfinx import fem
 from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import DolfinxMesh, UflExpr
-from vcell_fenics.formalism.expr import BinaryOp, Expr, Name, Number, UnaryOp
+from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, Name, Number, UnaryOp
+
+# Formalism standard functions that map to a single-argument UFL function
+# (§1.8.5). Multi-argument functions (atan2, min, max, pow) and the
+# conditionals (if, step, sign) are added when a model needs them.
+_UFL_UNARY_FUNCTIONS: dict[str, Any] = {
+    "sin": ufl.sin,
+    "cos": ufl.cos,
+    "tan": ufl.tan,
+    "asin": ufl.asin,
+    "acos": ufl.acos,
+    "atan": ufl.atan,
+    "exp": ufl.exp,
+    "log": ufl.ln,  # the formalism `log` is the natural log; UFL spells it `ln`
+    "sqrt": ufl.sqrt,
+    "abs": abs,
+}
 
 
 class CompileError(Exception):
@@ -73,4 +94,26 @@ def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
                 return left / right
             case "**":
                 return left**right
+    if isinstance(node, IndexAccess):
+        base = compile_expression(node.base, ctx)
+        if not isinstance(node.index, Number) or not node.index.value.is_integer():
+            raise CompileError("index must be an integer literal, e.g. x[0]")
+        return base[int(node.index.value)]
+    if isinstance(node, FunctionCall):
+        return _compile_call(node, ctx)
     raise CompileError(f"{type(node).__name__} is not supported by the backend yet")
+
+
+def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
+    args = [compile_expression(arg, ctx) for arg in node.args]
+    # Geometric helpers that are sugar for functions of x (§1.8.4).
+    if node.callee == "theta":
+        x = args[0]
+        return ufl.atan2(x[1], x[0])
+    if node.callee == "r":
+        x = args[0]
+        return ufl.sqrt(ufl.dot(x, x))
+    fn = _UFL_UNARY_FUNCTIONS.get(node.callee)
+    if fn is not None:
+        return fn(*args)
+    raise CompileError(f"function {node.callee!r} is not supported by the backend yet")
