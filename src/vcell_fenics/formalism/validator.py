@@ -2,13 +2,11 @@
 
 This module implements the checks of §1.11 that do not need a Geometry object.
 Schema-level checks read declared fields; expression-level checks parse each
-expression string (via `formalism.parser`) and walk the AST. The two pieces
-still deferred: full slot type-checking (§1.11.5 — bottom-up type inference
-over the whole vocabulary, a following increment) and the geometry cross-check
-(§1.11.10, which needs a Geometry the MathDescription does not carry).
-BC-expression contents are also deferred: a BC evaluates on a boundary whose
-incident subdomains are geometry-side, so its resolution context is not known
-intra-model.
+expression string (via `formalism.parser`) and walk the AST. Two things stay
+deferred: the geometry cross-check (§1.11.10, which needs a Geometry the
+MathDescription does not carry) and BC-expression contents (a BC evaluates on a
+boundary whose incident subdomains are geometry-side, so its resolution context
+is not known intra-model).
 
 Schema-level checks:
 
@@ -38,6 +36,11 @@ Expression-level checks (parse + AST walk):
   `<governed>_test` function referenced at least once (§1.9.5, §2.3.5).
 - Operator usage — the narrow rule (no calculus on the slot's own variable) and
   the smoothness rule (`lapl` / `lapl_beltrami` need a P2+ argument) (§1.11.9).
+- Type-checking (§1.11.5) — bottom-up type inference over the vocabulary; each
+  term-slot, initial-condition, motion, and expression-parameter expression
+  must produce the type its slot declares, with no implicit broadcast (§1.8.8).
+  The numeric literal `0` is the one exception: it is the zero of any expected
+  type. Weak-form `form:` residuals are not type-checked (escape hatch, §1.5).
 
 Diagnostics are collected (not fail-fast) so a single pass reports every
 structural problem in a large model. `validate` returns all of them;
@@ -72,11 +75,13 @@ from vcell_fenics.formalism.schema import (
     MotionPrescribedVelocity,
     MotionUnknown,
     Parameter,
+    ParameterConstant,
     ParameterExpression,
     ParameterRegionMap,
     Subdomain,
     TemplateEquation,
     Variable,
+    VariableType,
     WeakFormEquation,
 )
 from vcell_fenics.formalism.templates import REGISTRY
@@ -103,6 +108,22 @@ _CALLABLE_NAMES: frozenset[str] = (
 )
 
 _ExprKind = Literal["motion", "parameter", "term_slot", "initial_condition", "weak_form"]
+
+# Inferred type of an expression node. "error" is a sentinel for an
+# unresolvable / already-diagnosed subtree; it suppresses cascade errors.
+_Type = Literal["scalar", "vector", "symmetric_tensor", "error"]
+
+_VECTOR_ONLY: frozenset[VariableType] = frozenset({"vector"})
+
+# (argument type, result type) for each calculus operator (§1.8.5).
+_CALCULUS_SIGNATURE: dict[str, tuple[_Type, _Type]] = {
+    "grad": ("scalar", "vector"),
+    "div": ("vector", "scalar"),
+    "lapl": ("scalar", "scalar"),
+    "grad_surf": ("scalar", "vector"),
+    "div_surf": ("vector", "scalar"),
+    "lapl_beltrami": ("scalar", "scalar"),
+}
 
 
 def _space_admits_second_derivative(space: str) -> bool:
@@ -430,20 +451,26 @@ class _Validator:
             if tree is None:
                 continue
             param_trees[p.name] = tree
-            self._walk(tree, _ExprContext(path, p.subdomain, "parameter", None))
+            ctx = _ExprContext(path, p.subdomain, "parameter", None)
+            self._walk(tree, ctx)
             if p.subdomain is None and self._uses_geometric_helper(tree):
                 self._error(
                     path,
                     "expression parameter references a geometric helper but declares no 'subdomain:' scope (§2.2.3)",
                 )
+            self._check_expr_type(tree, ctx, frozenset({p.type}))
         self._check_parameter_cycles(param_trees)
 
         for i, s in enumerate(self._md.subdomains):
             motion = s.motion
             if isinstance(motion, MotionPrescribedVelocity):
-                self._walk_site(motion.velocity, f"subdomains[{i}].motion.velocity", s.name, "motion", None)
+                self._walk_site(
+                    motion.velocity, f"subdomains[{i}].motion.velocity", s.name, "motion", None, _VECTOR_ONLY
+                )
             elif isinstance(motion, MotionPrescribedDisplacement):
-                self._walk_site(motion.displacement, f"subdomains[{i}].motion.displacement", s.name, "motion", None)
+                self._walk_site(
+                    motion.displacement, f"subdomains[{i}].motion.displacement", s.name, "motion", None, _VECTOR_ONLY
+                )
 
         for i, eq in enumerate(self._md.equations):
             path = f"equations[{i}]"
@@ -453,17 +480,39 @@ class _Validator:
                     self._walk(tree, _ExprContext(f"{path}.form", eq.subdomain, "weak_form", eq.variable))
                     self._check_weak_form_structure(eq, tree, path)
             else:
+                spec = REGISTRY.get(eq.template)
                 for slot, text in eq.terms.items():
-                    self._walk_site(text, f"{path}.terms.{slot}", eq.subdomain, "term_slot", eq.variable)
+                    slot_spec = spec.slot(slot) if spec is not None else None
+                    expected = slot_spec.types if slot_spec is not None else None
+                    self._walk_site(text, f"{path}.terms.{slot}", eq.subdomain, "term_slot", eq.variable, expected)
             if eq.initial_condition is not None:
+                var = self._var_by_key.get((eq.variable, eq.subdomain))
+                expected = frozenset({var.type}) if var is not None else None
                 self._walk_site(
-                    eq.initial_condition, f"{path}.initial_condition", eq.subdomain, "initial_condition", eq.variable
+                    eq.initial_condition,
+                    f"{path}.initial_condition",
+                    eq.subdomain,
+                    "initial_condition",
+                    eq.variable,
+                    expected,
                 )
 
-    def _walk_site(self, text: str, path: str, subdomain: str | None, kind: _ExprKind, governed: str | None) -> None:
+    def _walk_site(
+        self,
+        text: str,
+        path: str,
+        subdomain: str | None,
+        kind: _ExprKind,
+        governed: str | None,
+        expected: frozenset[VariableType] | None = None,
+    ) -> None:
         tree = self._parse(text, path)
-        if tree is not None:
-            self._walk(tree, _ExprContext(path, subdomain, kind, governed))
+        if tree is None:
+            return
+        ctx = _ExprContext(path, subdomain, kind, governed)
+        self._walk(tree, ctx)
+        if expected is not None:
+            self._check_expr_type(tree, ctx, expected)
 
     def _parse(self, text: str, path: str) -> Expr | None:
         try:
@@ -758,3 +807,195 @@ class _Validator:
         for child in self._children(node):
             found |= self._param_refs(child)
         return found
+
+    # -- §1.11.5 type inference / type-checking ------------------------------
+
+    def _check_expr_type(self, tree: Expr, ctx: _ExprContext, expected: frozenset[VariableType]) -> None:
+        inferred = self._infer(tree, ctx)
+        if inferred == "error" or inferred in expected:
+            return
+        # The numeric literal 0 is the zero of any type (the reference models
+        # write `0` for a zero vector velocity / IC). Allow it without an
+        # explicit `[0, 0]`; every other scalar-where-vector case is a no-broadcast error.
+        if isinstance(tree, Number) and tree.value == 0.0:
+            return
+        self._error(
+            ctx.path,
+            f"expression has type {inferred}, expected {self._format_types(expected)} (§1.11.5)",
+        )
+
+    def _infer(self, node: Expr, ctx: _ExprContext) -> _Type:
+        if isinstance(node, Number):
+            return "scalar"
+        if isinstance(node, Name):
+            return self._name_type(node.name, ctx)
+        if isinstance(node, UnaryOp):
+            return self._infer(node.operand, ctx)
+        if isinstance(node, BinaryOp):
+            return self._infer_binary(node, ctx)
+        if isinstance(node, IndexAccess):
+            base_type = self._infer(node.base, ctx)
+            index_type = self._infer(node.index, ctx)
+            if index_type not in ("scalar", "error"):
+                self._error(ctx.path, f"index must be scalar, got {index_type} (§1.11.5)")
+            if base_type == "vector":
+                return "scalar"
+            if base_type == "symmetric_tensor":
+                return "vector"
+            if base_type == "error":
+                return "error"
+            self._error(ctx.path, f"cannot index into a {base_type} value (§1.11.5)")
+            return "error"
+        if isinstance(node, VectorLiteral):
+            for component in node.components:
+                component_type = self._infer(component, ctx)
+                if component_type not in ("scalar", "error"):
+                    self._error(ctx.path, f"vector literal components must be scalar, got {component_type} (§1.11.5)")
+            return "vector"
+        if isinstance(node, TensorLiteral):
+            for row in node.rows:
+                self._infer(row, ctx)
+            return "symmetric_tensor"
+        if isinstance(node, FunctionCall):
+            return self._infer_call(node, ctx)
+        assert_never(node)
+
+    def _infer_binary(self, node: BinaryOp, ctx: _ExprContext) -> _Type:
+        left = self._infer(node.left, ctx)
+        right = self._infer(node.right, ctx)
+        if left == "error" or right == "error":
+            return "error"
+        op = node.op
+        if op in ("+", "-"):
+            if left == right:
+                return left
+            self._error(
+                ctx.path,
+                f"cannot compute {left} {op} {right}; operands must match, and there is no implicit broadcast (§1.8.8)",
+            )
+            return "error"
+        if op == "*":
+            if left == "scalar":
+                return right
+            if right == "scalar":
+                return left
+            self._error(
+                ctx.path,
+                f"cannot multiply {left} by {right}; use inner(...) / outer(...) for products of non-scalars (§1.11.5)",
+            )
+            return "error"
+        if op == "/":
+            if right != "scalar":
+                self._error(ctx.path, f"divisor must be scalar, got {right} (§1.11.5)")
+                return "error"
+            return left
+        if left == "scalar" and right == "scalar":  # op == "**"
+            return "scalar"
+        self._error(ctx.path, f"** requires scalar operands, got {left} ** {right} (§1.11.5)")
+        return "error"
+
+    def _infer_call(self, node: FunctionCall, ctx: _ExprContext) -> _Type:
+        callee = node.callee
+        args = node.args
+        if callee == "trace":
+            return self._trace_type(node, ctx)
+        if callee in CALCULUS_OPERATORS:
+            return self._calculus_type(callee, args, ctx)
+        if callee == "if":
+            if args:
+                condition = self._infer(args[0], ctx)
+                if condition not in ("scalar", "error"):
+                    self._error(ctx.path, f"if(...) condition must be scalar, got {condition} (§1.11.5)")
+            branches = [self._infer(a, ctx) for a in args[1:]]
+            if len(branches) == 2 and "error" not in branches:
+                if branches[0] == branches[1]:
+                    return branches[0]
+                self._error(
+                    ctx.path,
+                    f"if(cond, a, b) branches must match, got {branches[0]} and {branches[1]} (§1.11.5)",
+                )
+            return "error"
+        if callee == "inner":
+            types = [self._infer(a, ctx) for a in args]
+            if len(types) == 2 and "error" not in types and types[0] != types[1]:
+                self._error(ctx.path, f"inner(a, b) requires matching ranks, got {types[0]} and {types[1]} (§1.11.5)")
+            return "scalar"
+        if callee == "outer":
+            for a in args:
+                self._infer(a, ctx)
+            return "symmetric_tensor"
+        if callee == "cross":
+            for a in args:
+                self._infer(a, ctx)
+            return "vector"
+        if callee == "partial_t":
+            return self._infer(args[0], ctx) if args else "error"
+        if callee in STANDARD_FUNCTIONS:
+            for a in args:
+                arg_type = self._infer(a, ctx)
+                if arg_type not in ("scalar", "error"):
+                    self._error(ctx.path, f"{callee}(...) requires scalar arguments, got {arg_type} (§1.11.5)")
+            return "scalar"
+        if callee in GEOMETRIC_HELPERS:
+            for a in args:
+                self._infer(a, ctx)
+            return "vector" if callee in ("n", "tangent") else "scalar"
+        return "error"  # unknown function or measure — already handled in the resolution walk
+
+    def _calculus_type(self, callee: str, args: tuple[Expr, ...], ctx: _ExprContext) -> _Type:
+        if len(args) != 1:
+            for a in args:
+                self._infer(a, ctx)
+            self._error(ctx.path, f"{callee}(...) takes exactly one argument (§1.8.5)")
+            return "error"
+        arg_type = self._infer(args[0], ctx)
+        if arg_type == "error":
+            return "error"
+        in_type, out_type = _CALCULUS_SIGNATURE[callee]
+        if arg_type != in_type:
+            self._error(ctx.path, f"{callee}(...) requires a {in_type} argument, got {arg_type} (§1.8.5)")
+            return "error"
+        return out_type
+
+    def _trace_type(self, node: FunctionCall, ctx: _ExprContext) -> _Type:
+        if len(node.args) != 1 or not isinstance(node.args[0], Name):
+            return "error"
+        nm = node.args[0].name
+        for host in sorted(self._var_subdomains.get(nm, set())):
+            if self._rank(host) > self._rank(ctx.eval_subdomain):
+                var = self._var_by_key.get((nm, host))
+                if var is not None:
+                    return var.type
+        return "error"
+
+    def _name_type(self, nm: str, ctx: _ExprContext) -> _Type:
+        s = ctx.eval_subdomain
+        if ctx.kind == "weak_form":
+            if nm in MEASURES:
+                return "error"
+            if nm.endswith("_test"):
+                base = nm[: -len("_test")]
+                test_var = self._var_by_key.get((base, s)) if s is not None else None
+                return test_var.type if test_var is not None else "error"
+        if s is not None:
+            local = self._var_by_key.get((nm, s))
+            if local is not None:
+                return local.type
+        if nm in self._param_names:
+            return self._param_type(nm)
+        if nm == "t":
+            return "scalar"
+        if nm == "x":
+            return "vector"
+        return "error"
+
+    def _param_type(self, nm: str) -> _Type:
+        p = self._param_by_name.get(nm)
+        if isinstance(p, ParameterExpression):
+            return p.type
+        if isinstance(p, ParameterConstant | ParameterRegionMap):
+            return "scalar"
+        return "error"
+
+    def _format_types(self, types: frozenset[VariableType]) -> str:
+        return " or ".join(sorted(types))
