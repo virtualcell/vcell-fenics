@@ -9,6 +9,15 @@ The `formalism` package (schema / parser / validator) stays pure-Python with no
 FEniCSx dependency; this package is where DOLFINx enters.
 """
 
+from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
 from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind
 
-__all__ = ["BackwardEuler", "DiscreteProblem", "Term", "TermKind"]
+__all__ = [
+    "BackwardEuler",
+    "CompileContext",
+    "CompileError",
+    "DiscreteProblem",
+    "Term",
+    "TermKind",
+    "compile_expression",
+]
