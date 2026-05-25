@@ -7,8 +7,10 @@ guarded explicitly — anything outside it raises `NotImplementedError` rather t
 silently mis-assembling (§3.6.2):
 
 - exactly one equation, template `bulk_radv_diff` (T1) or `surface_pde_with_dilution`
-  (T2), `temporality: time_dependent`;
-- the `diffusion` slot only (advection / source are later increments);
+  (T2), `temporality: time_dependent` (coupled multi-equation systems are a later
+  increment);
+- the `diffusion` and `source` slots (advection is a later increment); a source
+  linear in the governed variable lands in the implicit bilinear form;
 - a static (`motion: none`) or prescribed-*velocity* subdomain (prescribed
   displacement and unknown motion are later increments);
 - constant parameters only.
@@ -70,6 +72,15 @@ def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: i
         # Auto-dilution ρ ∇_Γ·v_Γ; div on a (sub)mesh is the surface divergence.
         terms.append(Term(TermKind.DILUTION, ufl.div(velocity) * trial * test))
 
+    if "source" in eq.terms:
+        # The source is compiled with the governed variable bound to the trial
+        # function, so a source linear in the unknown lands in the implicit
+        # (backward-Euler) bilinear form. (A single-equation model can only
+        # reference its own variable; cross-variable coupling is increment 3b.)
+        source_ctx = CompileContext(mesh=mesh, symbols={**ctx.symbols, eq.variable: trial})
+        source = compile_expression(parse(eq.terms["source"]), source_ctx)
+        terms.append(Term(TermKind.SOURCE, source * test))
+
     problem = DiscreteProblem(
         variable_name=eq.variable,
         V=V,
@@ -99,9 +110,9 @@ def _resolve_equation(md: MathDescription) -> TemplateEquation:
         raise NotImplementedError(f"backend v1 supports templates {sorted(_SUPPORTED_TEMPLATES)}, not {template!r}")
     if eq.temporality != "time_dependent":
         raise NotImplementedError("backend v1 supports 'time_dependent' equations only")
-    unsupported = sorted(set(eq.terms) - {"diffusion"})
+    unsupported = sorted(set(eq.terms) - {"diffusion", "source"})
     if unsupported:
-        raise NotImplementedError(f"backend v1 supports only the 'diffusion' slot; got {unsupported}")
+        raise NotImplementedError(f"backend v1 supports the 'diffusion' and 'source' slots; got {unsupported}")
     return eq
 
 

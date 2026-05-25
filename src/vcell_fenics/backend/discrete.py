@@ -65,32 +65,36 @@ class Term:
 class BackwardEuler:
     """First-order implicit (backward-Euler) time scheme.
 
-    Composes, for a time-dependent problem, the implicit step
+    Builds the per-step residual (multiplied through by `dt`, so the mass term
+    keeps coefficient 1 — the convention the bespoke prototypes use, avoiding
+    division by `dt`):
 
-        ∫ u·w dx + dt·a_spatial(u, w) = ∫ u_old·w dx  (+ dt·source, when present)
+        F = (uⁿ⁺¹ − uⁿ)·w  +  dt·[ diffusion + dilution + advection ]  −  dt·source·w
 
-    multiplying the spatial terms through by `dt` and keeping the mass term's
-    coefficient at 1 — the convention the bespoke prototypes use, which avoids
-    dividing by `dt`.
+    and splits it with `ufl.lhs` / `ufl.rhs`: terms in the trial function form the
+    bilinear `a`, the rest form the linear `L`. Letting UFL do the split is what
+    lets a `source` linear in the unknown(s) — including cross-variable coupling
+    on a mixed space — land in `a` automatically, while a constant forcing lands
+    in `L`, with no per-term bookkeeping here.
     """
 
     name: str = "backward_euler"
 
     def compose(self, problem: DiscreteProblem) -> tuple[ufl.Form, ufl.Form]:
-        kinds = problem.term_kinds()
-        if TermKind.TIME_DERIVATIVE not in kinds:
+        if TermKind.TIME_DERIVATIVE not in problem.term_kinds():
             raise NotImplementedError("steady-state lowering is not in the v1 backend yet")
 
-        u, w, dx, dt = problem.trial, problem.test, problem.dx, problem.dt
-        bilinear = u * w  # mass term, coefficient 1
+        trial, test, dt = problem.trial, problem.test, problem.dt
+        residual = (trial - problem.previous) * test  # mass: (uⁿ⁺¹ − uⁿ)·w
         for term in problem.terms:
-            if term.kind in (TermKind.TIME_DERIVATIVE, TermKind.SOURCE):
-                continue  # mass handled above; SOURCE goes to the RHS (a later increment)
-            if term.integrand is not None:
-                bilinear = bilinear + dt * term.integrand
-        a = bilinear * dx
-        linear = problem.previous * w * dx  # ∫ u_old·w dx; source RHS contributions are a later increment
-        return a, linear
+            if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
+                continue
+            if term.kind is TermKind.SOURCE:
+                residual = residual - dt * term.integrand  # +s on the PDE's RHS ⇒ −s in the residual
+            else:
+                residual = residual + dt * term.integrand  # diffusion, dilution, advection
+        form = residual * problem.dx
+        return ufl.lhs(form), ufl.rhs(form)
 
 
 # A motion is "degenerate" once the spread of cell sizes (max/min cell volume)
