@@ -64,10 +64,3 @@ def create_disk_with_membrane(
         entity_map=entity_map,
         boundary_facets=np.asarray(boundary_facets),
     )
-
-
-def scale_radially(submesh: dmesh.Mesh, factor: float) -> None:
-    """Scale submesh node positions about the origin by ``factor``."""
-    x = submesh.geometry.x
-    x[:, 0] *= factor
-    x[:, 1] *= factor

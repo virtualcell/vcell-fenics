@@ -74,6 +74,21 @@ def test_static_bulk_diffusion_end_to_end() -> None:
     assert np.allclose(dp.unknown.x.array, 3.0, atol=1e-10)
 
 
+def test_bulk_diffusion_conserves_mass_with_spatial_ic() -> None:
+    # A non-uniform IC diffuses, but no-flux (natural Neumann) means ∫c is
+    # conserved exactly. (Covers the conservation check of the retired bespoke
+    # test_bulk_diffusion_static, now driven through the formalism.)
+    spatial_ic = _BULK_DIFFUSION.replace('initial_condition: "3.0"', 'initial_condition: "1.0 + 0.3 * x[0]"')
+    md = load_yaml(spatial_ic)
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cytoplasm", radius=1.0, h=0.1)
+    dp = assemble(md, geometry, dt=0.01)
+
+    mass0 = dp.total_mass()
+    for _ in range(50):
+        dp.step()
+    assert abs(dp.total_mass() - mass0) / abs(mass0) < 1e-10
+
+
 # ---------------------------------------------------------------------------
 # Loader registry.
 # ---------------------------------------------------------------------------

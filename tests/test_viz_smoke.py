@@ -20,18 +20,17 @@ import pytest
 from dolfinx import fem
 from scipy.special import j0, jn_zeros
 
-from vcell_fenics.approaches.static import BulkPDE, create_disk
+from vcell_fenics.approaches.static import create_disk
 from vcell_fenics.viz import quick_plot, write_snapshot
 
 
 @pytest.fixture(scope="module")
 def bessel_solution() -> fem.Function:
-    """A few BE steps on the Bessel eigenmode → a non-trivial Function."""
-    R, D, dt, n_steps = 1.0, 0.1, 0.01, 10
-    lam = jn_zeros(1, 1)[0] / R
-
-    disk = create_disk(radius=R, h=0.1)
-    pde = BulkPDE(disk.mesh, D=D, dt=dt)
+    """A J₀ eigenmode interpolated into a Function — a non-trivial field to viz.
+    (This is a viz smoke test, so any spatially-varying field will do.)"""
+    lam = jn_zeros(1, 1)[0]
+    disk = create_disk(radius=1.0, h=0.1)
+    field = fem.Function(fem.functionspace(disk.mesh, ("Lagrange", 1)), name="c")
 
     def eigenmode(x: npt.NDArray[Any]) -> npt.NDArray[Any]:
         r = np.sqrt(x[0] ** 2 + x[1] ** 2)
@@ -39,10 +38,8 @@ def bessel_solution() -> fem.Function:
         # at runtime it returns an ndarray.
         return cast(npt.NDArray[Any], j0(lam * r))
 
-    pde.set_initial(eigenmode)
-    for _ in range(n_steps):
-        pde.step()
-    return pde.c
+    field.interpolate(eigenmode)
+    return field
 
 
 def test_write_xdmf_snapshot(tmp_path: Path, bessel_solution: fem.Function) -> None:
