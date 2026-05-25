@@ -20,6 +20,7 @@ time-dependent problems only; steady-state lowering raises until a later increme
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -92,6 +93,21 @@ class BackwardEuler:
         return a, linear
 
 
+# A motion is "degenerate" once the spread of cell sizes (max/min cell volume)
+# grows this many times beyond the initial mesh's. Scale-invariant: uniform
+# dilation or contraction preserves the ratio and never trips it; only
+# non-uniform distortion (cells collapsing / tangling) does. A future
+# SolverConfiguration `ale.remesh_when_quality_below` (§3.4) would supply this.
+_MAX_CELL_RATIO_GROWTH = 100.0
+
+
+class MeshQualityError(RuntimeError):
+    """Prescribed motion degraded the mesh beyond a usable state — a cell
+    collapsed, inverted, or the mesh distorted badly. The backend moves nodes
+    but never remeshes, so rather than silently solving on a broken mesh it
+    fails here. Remeshing / field transfer is future work (§3.3)."""
+
+
 class _MeshMotion:
     """Advances mesh nodes by dt·velocity each step (prescribed motion, §1.10).
 
@@ -100,6 +116,10 @@ class _MeshMotion:
     one-time topological permutation maps interpolated values onto geometry rows.
     The permutation is invariant under motion (it is purely topological), so it
     is computed once from the initial coordinates and reused.
+
+    After each move the mesh quality is checked (`MeshQualityError` on failure):
+    a node-displacement scheme with no remeshing can only follow motions that
+    keep the elements valid, so a tangling motion must fail loudly.
     """
 
     def __init__(self, mesh: Mesh, velocity: UflExpr, dt: fem.Constant) -> None:
@@ -109,11 +129,32 @@ class _MeshMotion:
         self._displacement = fem.Function(space)
         self._expression = fem.Expression(dt * velocity, space.element.interpolation_points)
         self._geom_from_dof = cKDTree(space.tabulate_dof_coordinates()).query(mesh.geometry.x)[1]
+        # Per-cell volume form (DG0 test function integrates to each cell's
+        # volume); re-assembling after a move reports the deformed cell sizes.
+        self._cell_volume_form = fem.form(ufl.TestFunction(fem.functionspace(mesh, ("DG", 0))) * ufl.dx)
+        self._reference_ratio = self._cell_volume_ratio()
 
     def advance(self) -> None:
         self._displacement.interpolate(self._expression)
         increment = self._displacement.x.array.reshape((-1, self._gdim))[self._geom_from_dof]
         self._mesh.geometry.x[:, : self._gdim] += increment
+        ratio = self._cell_volume_ratio()
+        if ratio > _MAX_CELL_RATIO_GROWTH * self._reference_ratio:
+            raise MeshQualityError(
+                f"prescribed motion degraded the mesh: cell-volume max/min ratio {ratio:.3g} exceeds "
+                f"{_MAX_CELL_RATIO_GROWTH:g}x the initial {self._reference_ratio:.3g}. The backend moves nodes "
+                f"but does not remesh; reduce the step, the motion magnitude, or use a better-behaved velocity."
+            )
+
+    def _cell_volume_ratio(self) -> float:
+        volumes = fem.assemble_vector(self._cell_volume_form).array
+        v_min, v_max = float(volumes.min()), float(volumes.max())
+        if not (math.isfinite(v_min) and math.isfinite(v_max)) or v_min <= 0.0:
+            raise MeshQualityError(
+                f"prescribed motion produced a non-positive or non-finite cell volume (min={v_min:.3g}); "
+                f"an element has collapsed or inverted."
+            )
+        return v_max / v_min
 
 
 @dataclass(eq=False)

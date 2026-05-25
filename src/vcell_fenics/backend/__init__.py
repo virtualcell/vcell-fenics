@@ -11,7 +11,7 @@ FEniCSx dependency; this package is where DOLFINx enters.
 
 from vcell_fenics.backend.assemble import assemble
 from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
-from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind
+from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, MeshQualityError, Term, TermKind
 from vcell_fenics.backend.geometry import (
     Geometry,
     SubdomainGeometry,
@@ -29,6 +29,7 @@ __all__ = [
     "CompileError",
     "DiscreteProblem",
     "Geometry",
+    "MeshQualityError",
     "SubdomainGeometry",
     "Term",
     "TermKind",

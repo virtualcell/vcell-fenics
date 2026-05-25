@@ -29,6 +29,7 @@ from petsc4py import PETSc
 from vcell_fenics.backend import (
     BackwardEuler,
     DiscreteProblem,
+    MeshQualityError,
     Term,
     TermKind,
     assemble,
@@ -141,3 +142,43 @@ def test_omitting_dilution_doubles_mass() -> None:
     for _ in range(100):
         dp.step()
     assert abs(dp.total_mass() / mass0 - 2.0) < 0.05
+
+
+# ---------------------------------------------------------------------------
+# 4. Mesh-quality guard — a tangling motion fails loudly.
+# ---------------------------------------------------------------------------
+
+
+def test_degenerate_motion_fails_loudly() -> None:
+    # A strong inward contraction (unit inward velocity, dt = 0.5) drives the
+    # membrane from r = 1 to r = 0 in two steps — every cell collapses to zero
+    # length. The backend moves nodes but never remeshes, so the quality guard
+    # must raise rather than silently solve on a collapsed mesh. (Uniform
+    # *dilation*, by contrast, preserves cell-size ratios and never trips it —
+    # see test_expansion_conserves_mass_through_formalism.)
+    mesh = make_disk_membrane_geometry("g", surface_subdomain="m", radius=1.0, h=0.2).mesh_of("m")
+    V = fem.functionspace(mesh, ("Lagrange", 1))
+    trial, test = ufl.TrialFunction(V), ufl.TestFunction(V)
+    dx = ufl.Measure("dx", domain=mesh)
+    x = ufl.SpatialCoordinate(mesh)
+    contraction = -x / ufl.sqrt(ufl.dot(x, x))  # inward unit velocity → r shrinks to 0
+
+    dp = DiscreteProblem(
+        variable_name="rho",
+        V=V,
+        trial=trial,
+        test=test,
+        dx=dx,
+        unknown=fem.Function(V, name="rho"),
+        previous=fem.Function(V, name="rho_old"),
+        dt=fem.Constant(mesh, PETSc.ScalarType(0.5)),  # type: ignore[operator]
+        terms=(Term(TermKind.TIME_DERIVATIVE), Term(TermKind.DILUTION, ufl.div(contraction) * trial * test)),
+        scheme=BackwardEuler(),
+        bcs=[],
+        motion_velocity=contraction,
+    )
+    dp.set_initial(1.0)
+
+    with pytest.raises(MeshQualityError):
+        for _ in range(5):
+            dp.step()
