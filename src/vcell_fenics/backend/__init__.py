@@ -22,6 +22,7 @@ from vcell_fenics.backend.geometry import (
     make_disk_membrane_geometry,
     register_geometry,
 )
+from vcell_fenics.backend.solver import SolverConfiguration, run
 
 __all__ = [
     "BackwardEuler",
@@ -30,6 +31,7 @@ __all__ = [
     "DiscreteProblem",
     "Geometry",
     "MeshQualityError",
+    "SolverConfiguration",
     "SubdomainGeometry",
     "Term",
     "TermKind",
@@ -41,4 +43,5 @@ __all__ = [
     "make_disk_geometry",
     "make_disk_membrane_geometry",
     "register_geometry",
+    "run",
 ]
