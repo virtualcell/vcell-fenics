@@ -2111,6 +2111,8 @@ This backend is the canonical implementation of the formalism and the reference 
 
 The three v1 conformance models run **through the formalism** (`tests/test_backend_*.py`): bulk diffusion, the surface cos(kθ) eigenmode decay, and the dilution mass-balance with its negative control — plus the §1.4.5 two-species receptor model end-to-end. The bespoke single-physics prototypes that preceded the backend have been removed.
 
+- Convergence-rate verification (`tests/test_backend_convergence.py`): h-refinement against analytical diffusion eigenmodes confirms the P1 operator is **second-order in L2** on both the bulk path (cos(πx)cos(πy) on an exactly-meshed unit square) and the surface path (cos(kθ) on the circle membrane, where the O(h²) polygonal-geometry error matches the FE rate); dt-refinement confirms backward Euler is **first-order in time** by self-convergence on a fixed mesh, cross-checked against the closed-form decay. This is the order-of-accuracy axis the single-resolution reference tests cannot cover.
+
 **Punted in v1**:
 
 - Operator templates T3 (algebraic constraint), T4 (lumped ODE), T5–T7 (mechanics).
@@ -2119,7 +2121,7 @@ The three v1 conformance models run **through the formalism** (`tests/test_backe
 - Prescribed-displacement and **unknown** (mechanics-driven) motion; remeshing / field transfer (the mesh-quality guard currently fails loudly instead).
 - Region-keyed parameter maps; advection (`relative_advection`) slots; non-linear sources.
 - The full §3.4 SolverConfiguration (linear/nonlinear solver, ALE, stabilisation knobs) and a YAML carrier for it; intermediate output-time snapshots.
-- Convergence-rate (h/dt refinement) studies; a formal conformance-subset declaration.
+- A formal conformance-subset declaration.
 
 #### 3.6.2 What v1 conformance means for this backend
 
