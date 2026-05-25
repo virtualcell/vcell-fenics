@@ -29,6 +29,16 @@ from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
 from mpi4py import MPI
 
+from vcell_fenics.backend._typing import (
+    DolfinxConstant,
+    DolfinxDirichletBC,
+    DolfinxFunction,
+    DolfinxFunctionSpace,
+    UflExpr,
+    UflForm,
+    UflMeasure,
+)
+
 
 class TermKind(Enum):
     """The kinds of term a v1 template (T1 / T2) can contribute. A closed set,
@@ -52,7 +62,7 @@ class Term:
     """
 
     kind: TermKind
-    integrand: Any | None = None
+    integrand: UflExpr | None = None
 
 
 @dataclass(frozen=True)
@@ -70,7 +80,7 @@ class BackwardEuler:
 
     name: str = "backward_euler"
 
-    def compose(self, problem: DiscreteProblem) -> tuple[Any, Any]:
+    def compose(self, problem: DiscreteProblem) -> tuple[UflForm, UflForm]:
         kinds = problem.term_kinds()
         if TermKind.TIME_DERIVATIVE not in kinds:
             raise NotImplementedError("steady-state lowering is not in the v1 backend yet")
@@ -98,16 +108,16 @@ class DiscreteProblem:
     """
 
     variable_name: str
-    V: Any
-    trial: Any
-    test: Any
-    dx: Any
-    unknown: Any
-    previous: Any
-    dt: Any
+    V: DolfinxFunctionSpace
+    trial: UflExpr
+    test: UflExpr
+    dx: UflMeasure
+    unknown: DolfinxFunction
+    previous: DolfinxFunction
+    dt: DolfinxConstant
     terms: tuple[Term, ...]
     scheme: BackwardEuler
-    bcs: list[Any]
+    bcs: list[DolfinxDirichletBC]
 
     def __post_init__(self) -> None:
         self._a, self._L = self.scheme.compose(self)
@@ -125,18 +135,18 @@ class DiscreteProblem:
     def term_kinds(self) -> set[TermKind]:
         return {term.kind for term in self.terms}
 
-    def integrand_of(self, kind: TermKind) -> Any:
+    def integrand_of(self, kind: TermKind) -> UflExpr:
         """The UFL integrand of the (unique) term of `kind`. For invariant tests
         that assemble a single term's matrix (e.g. the stiffness `K`)."""
 
         return next(term.integrand for term in self.terms if term.kind is kind)
 
     @property
-    def bilinear_form(self) -> Any:
+    def bilinear_form(self) -> UflForm:
         return self._a
 
     @property
-    def linear_form(self) -> Any:
+    def linear_form(self) -> UflForm:
         return self._L
 
     # -- solve / state -------------------------------------------------------

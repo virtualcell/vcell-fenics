@@ -20,11 +20,11 @@ the increments that add them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from dolfinx import fem
 from petsc4py import PETSc
 
+from vcell_fenics.backend._typing import DolfinxMesh, UflExpr
 from vcell_fenics.formalism.expr import BinaryOp, Expr, Name, Number, UnaryOp
 
 
@@ -40,11 +40,11 @@ class CompileContext:
     `fem.Constant`s; `symbols` maps formalism names to UFL objects (parameters as
     Constants in increment 0)."""
 
-    mesh: Any
-    symbols: dict[str, Any] = field(default_factory=dict)
+    mesh: DolfinxMesh
+    symbols: dict[str, UflExpr] = field(default_factory=dict)
 
 
-def compile_expression(node: Expr, ctx: CompileContext) -> Any:
+def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
     """Compile one expression AST node to a UFL expression."""
 
     if isinstance(node, Number):

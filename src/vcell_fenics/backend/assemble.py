@@ -17,13 +17,12 @@ evaluated to its constant value; spatial-IC interpolation arrives with increment
 
 from __future__ import annotations
 
-from typing import Any
-
 import ufl
 from dolfinx import fem
 from mpi4py import MPI
 from petsc4py import PETSc
 
+from vcell_fenics.backend._typing import DolfinxMesh, UflExpr, UflMeasure
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind
 from vcell_fenics.backend.geometry import Geometry, cross_validate
@@ -91,8 +90,8 @@ def _single_bulk_equation(md: MathDescription) -> TemplateEquation:
     return eq
 
 
-def _compile_context(md: MathDescription, mesh: Any) -> CompileContext:
-    symbols: dict[str, Any] = {}
+def _compile_context(md: MathDescription, mesh: DolfinxMesh) -> CompileContext:
+    symbols: dict[str, UflExpr] = {}
     for p in md.parameters:
         if not isinstance(p, ParameterConstant):
             raise NotImplementedError("backend v1 (inc 0) supports constant parameters only")
@@ -100,7 +99,7 @@ def _compile_context(md: MathDescription, mesh: Any) -> CompileContext:
     return CompileContext(mesh=mesh, symbols=symbols)
 
 
-def _constant_value(ufl_expr: Any, mesh: Any, dx: Any) -> float:
+def _constant_value(ufl_expr: UflExpr, mesh: DolfinxMesh, dx: UflMeasure) -> float:
     """The constant value of a spatially-uniform expression, as its
     domain average. Valid because the inc-0 compiler subset is x-free."""
 
