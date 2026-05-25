@@ -2102,30 +2102,28 @@ This backend is the canonical implementation of the formalism and the reference 
 
 #### 3.6.1 v1 status
 
-**Implemented** as of 2026-05-22:
+**Implemented** (formalism-driven, end-to-end):
 
-- Bulk reaction-diffusion (T1, partial) — scalar variable, `temporality: time_dependent`, no advection, no source, no motion, zero-Neumann external BC. Backward-Euler time stepping, $P_1$ Lagrange, direct LU. See `src/vcell_fenics/approaches/static/bulk_pde.py`.
-- Surface PDE with dilution (T2, partial) — scalar variable, `temporality: time_dependent`, prescribed motion (velocity form, implicit via per-step `scale_radially`), no advection, no source. See `src/vcell_fenics/approaches/submesh/surface_pde.py`.
-- Visualization helpers — PyVista in-process, XDMF for ParaView. See `src/vcell_fenics/viz.py`.
+- The full Part 2 layer: schema dataclasses, YAML/JSON loader + dumper, the expression parser → typed AST (`src/vcell_fenics/formalism/`), and the validation pass (`formalism/validator.py`) — every check of §1.11 except the geometry cross-check and BC-expression contents, which run at the backend boundary.
+- The formalism → DOLFINx backend (`src/vcell_fenics/backend/`, ADR 004): an expression→UFL compiler, a `DiscreteProblem` IR with backward-Euler lowering via a residual `ufl.lhs`/`ufl.rhs` split, a geometry adapter + name loader + §1.11.10 cross-check, and the `assemble` / `run` driver with a `SolverConfiguration`.
+- T1 (bulk RAD) and T2 (surface PDE with dilution), `temporality: time_dependent`, with: scalar variables and **coupled multi-species systems** (one solve over a vector space); the `diffusion` and `source` slots (a source linear in the unknowns, including cross-variable coupling); prescribed-**velocity** motion with **automatic dilution** `ρ ∇_Γ·v_Γ` and a per-step mesh advance guarded by a mesh-quality check; zero-Neumann external BC; constant and expression parameters; spatially-varying ICs. Backward Euler, $P_1$ Lagrange (configurable), direct LU.
+- Visualization helpers — PyVista in-process, XDMF for ParaView (`src/vcell_fenics/viz.py`).
 
-**Implemented at the test layer but not yet exposed as backend-driveable from a MathDescription**:
-
-- The conformance suite's v1 models pass (`tests/test_bulk_diffusion_static.py`, `tests/test_surface_diffusion_static.py`, `tests/test_dilution_mass_balance.py`).
+The three v1 conformance models run **through the formalism** (`tests/test_backend_*.py`): bulk diffusion, the surface cos(kθ) eigenmode decay, and the dilution mass-balance with its negative control — plus the §1.4.5 two-species receptor model end-to-end. The bespoke single-physics prototypes that preceded the backend have been removed.
 
 **Punted in v1**:
 
-- The MathDescription parser, validator, and the formalism-to-DOLFINx translation layer. Currently the existing `BulkPDE` / `SurfacePDE` classes are bespoke implementations of T1 and T2 respectively; they are not driven by the formalism. Building the formalism layer is forthcoming work — see [[project-implementation-state]] in the project's memory record.
 - Operator templates T3 (algebraic constraint), T4 (lumped ODE), T5–T7 (mechanics).
 - Weak-form escape hatch.
-- Boundary-condition system beyond the implicit zero-Neumann of the existing code.
-- Region-keyed parameter maps.
-- Unknown motion.
-- The full SolverConfiguration object.
-- Conformance subset declaration; the backend currently only runs its built-in tests, it does not advertise "I implement this subset of the formalism."
+- Boundary conditions beyond the implicit zero-Neumann (Dirichlet/Neumann/Robin/interface), and bulk↔surface coupling via `trace` (cross-subdomain solves).
+- Prescribed-displacement and **unknown** (mechanics-driven) motion; remeshing / field transfer (the mesh-quality guard currently fails loudly instead).
+- Region-keyed parameter maps; advection (`relative_advection`) slots; non-linear sources.
+- The full §3.4 SolverConfiguration (linear/nonlinear solver, ALE, stabilisation knobs) and a YAML carrier for it; intermediate output-time snapshots.
+- Convergence-rate (h/dt refinement) studies; a formal conformance-subset declaration.
 
 #### 3.6.2 What v1 conformance means for this backend
 
-The vcell-fenics backend claims conformance for a strict subset: T1 and T2 with prescribed motion, scalar variables, zero-Neumann external BCs, no weak-form. Models within that subset run correctly and pass the conformance reference suite's relevant entries. Models outside that subset are not supported in v1; an attempt to load such a model should fail with a clear error rather than silently produce wrong results — though this rejection-with-clear-error behaviour itself is forthcoming work.
+The vcell-fenics backend claims conformance for a strict subset: T1 and T2 (including coupled multi-species), prescribed-velocity or no motion, the diffusion/source slots, zero-Neumann external BCs, no weak-form. Models within that subset run correctly and pass the conformance reference suite's relevant entries. Models outside that subset are not supported in v1; the assembler rejects them with a clear `NotImplementedError` at build time rather than silently producing wrong results.
 
 This honest scoping is deliberate. The formalism is broader than what v1 implements; the v1 backend is one slice. The roadmap to broader coverage is the same as the formalism's v2 roadmap (Appendix B) — driven by concrete use cases, not by speculative feature addition.
 
