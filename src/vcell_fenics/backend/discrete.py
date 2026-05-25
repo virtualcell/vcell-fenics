@@ -85,7 +85,9 @@ class BackwardEuler:
             raise NotImplementedError("steady-state lowering is not in the v1 backend yet")
 
         trial, test, dt = problem.trial, problem.test, problem.dt
-        residual = (trial - problem.previous) * test  # mass: (uⁿ⁺¹ − uⁿ)·w
+        # mass: (uⁿ⁺¹ − uⁿ)·w. `inner` so a mixed/vector space (coupled species)
+        # sums its components; for a scalar space it is just the product.
+        residual = ufl.inner(trial - problem.previous, test)
         for term in problem.terms:
             if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
                 continue

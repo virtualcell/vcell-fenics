@@ -48,79 +48,106 @@ _SUPPORTED_TEMPLATES = {"bulk_radv_diff", "surface_pde_with_dilution"}
 
 
 def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: int = 1) -> DiscreteProblem:
-    """Translate `md` (against `geometry`) into a lowered `DiscreteProblem`."""
+    """Translate `md` (against `geometry`) into a lowered `DiscreteProblem`.
+
+    One equation builds a scalar space; several equations on a shared subdomain
+    build one coupled solve over a vector space (component k ↔ equation k), so a
+    `source` referencing a sibling variable becomes an off-diagonal coupling that
+    the residual lhs/rhs split resolves automatically (ADR 004)."""
 
     validate_or_raise(md)
     geometry_errors = cross_validate(md, geometry)
     if geometry_errors:
         raise FormalismValidationError(geometry_errors)
 
-    eq = _resolve_equation(md)
-    mesh = geometry.mesh_of(eq.subdomain)
-    V = fem.functionspace(mesh, ("Lagrange", fe_degree))
+    equations = _resolve_equations(md)
+    subdomain = equations[0].subdomain
+    mesh = geometry.mesh_of(subdomain)
+    n = len(equations)
+    element = ("Lagrange", fe_degree) if n == 1 else ("Lagrange", fe_degree, (n,))
+    V = fem.functionspace(mesh, element)
     trial, test = ufl.TrialFunction(V), ufl.TestFunction(V)
+    components = [(trial, test)] if n == 1 else [(trial[k], test[k]) for k in range(n)]
     dx = ufl.Measure("dx", domain=mesh)
     ctx = _compile_context(md, mesh)
+    velocity = _motion_velocity(md, subdomain, ctx)
+    # Each governed variable bound to its component trial, so a source linear in
+    # the unknowns (incl. cross-variable terms) lands in the implicit bilinear.
+    var_trials = {eq.variable: components[k][0] for k, eq in enumerate(equations)}
 
-    terms = [Term(TermKind.TIME_DERIVATIVE)]
-    if "diffusion" in eq.terms:
-        diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
-        terms.append(Term(TermKind.DIFFUSION, diffusion * ufl.dot(ufl.grad(trial), ufl.grad(test))))
+    terms: list[Term] = [Term(TermKind.TIME_DERIVATIVE)]
+    for (u, w), eq in zip(components, equations, strict=True):
+        if "diffusion" in eq.terms:
+            diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
+            terms.append(Term(TermKind.DIFFUSION, diffusion * ufl.dot(ufl.grad(u), ufl.grad(w))))
+        if velocity is not None:
+            # Auto-dilution ρ ∇_Γ·v_Γ; div on a (sub)mesh is the surface divergence.
+            terms.append(Term(TermKind.DILUTION, ufl.div(velocity) * u * w))
+        if "source" in eq.terms:
+            source = compile_expression(parse(eq.terms["source"]), CompileContext(mesh, {**ctx.symbols, **var_trials}))
+            terms.append(Term(TermKind.SOURCE, source * w))
 
-    velocity = _motion_velocity(md, eq, ctx)
-    if velocity is not None:
-        # Auto-dilution ρ ∇_Γ·v_Γ; div on a (sub)mesh is the surface divergence.
-        terms.append(Term(TermKind.DILUTION, ufl.div(velocity) * trial * test))
-
-    if "source" in eq.terms:
-        # The source is compiled with the governed variable bound to the trial
-        # function, so a source linear in the unknown lands in the implicit
-        # (backward-Euler) bilinear form. (A single-equation model can only
-        # reference its own variable; cross-variable coupling is increment 3b.)
-        source_ctx = CompileContext(mesh=mesh, symbols={**ctx.symbols, eq.variable: trial})
-        source = compile_expression(parse(eq.terms["source"]), source_ctx)
-        terms.append(Term(TermKind.SOURCE, source * test))
-
+    names = ",".join(eq.variable for eq in equations)
     problem = DiscreteProblem(
-        variable_name=eq.variable,
+        variable_name=names,
         V=V,
         trial=trial,
         test=test,
         dx=dx,
-        unknown=fem.Function(V, name=eq.variable),
-        previous=fem.Function(V, name=f"{eq.variable}_old"),
+        unknown=fem.Function(V, name=names),
+        previous=fem.Function(V, name=f"{names}_old"),
         dt=fem.Constant(mesh, PETSc.ScalarType(float(dt))),  # type: ignore[operator]
         terms=tuple(terms),
         scheme=BackwardEuler(),
         bcs=[],
         motion_velocity=velocity,
     )
-
-    if eq.initial_condition is not None:
-        problem.interpolate_initial(compile_expression(parse(eq.initial_condition), ctx))
+    _apply_initial_conditions(problem, equations, ctx, n)
     return problem
 
 
-def _resolve_equation(md: MathDescription) -> TemplateEquation:
-    if len(md.equations) != 1:
-        raise NotImplementedError("backend v1 supports a single equation; coupled systems are a later increment")
-    eq = md.equations[0]
-    if not isinstance(eq, TemplateEquation) or eq.template not in _SUPPORTED_TEMPLATES:
-        template = getattr(eq, "template", None)
-        raise NotImplementedError(f"backend v1 supports templates {sorted(_SUPPORTED_TEMPLATES)}, not {template!r}")
-    if eq.temporality != "time_dependent":
-        raise NotImplementedError("backend v1 supports 'time_dependent' equations only")
-    unsupported = sorted(set(eq.terms) - {"diffusion", "source"})
-    if unsupported:
-        raise NotImplementedError(f"backend v1 supports the 'diffusion' and 'source' slots; got {unsupported}")
-    return eq
+def _apply_initial_conditions(
+    problem: DiscreteProblem, equations: list[TemplateEquation], ctx: CompileContext, n: int
+) -> None:
+    if n == 1:
+        eq = equations[0]
+        if eq.initial_condition is not None:
+            problem.interpolate_initial(compile_expression(parse(eq.initial_condition), ctx))
+        return
+    for k, eq in enumerate(equations):
+        if eq.initial_condition is not None:
+            ic = compile_expression(parse(eq.initial_condition), ctx)
+            sub = problem.V.sub(k)
+            problem.unknown.sub(k).interpolate(fem.Expression(ic, sub.element.interpolation_points))
+    problem.previous.x.array[:] = problem.unknown.x.array
 
 
-def _motion_velocity(md: MathDescription, eq: TemplateEquation, ctx: CompileContext) -> UflExpr | None:
-    """The compiled substrate velocity for `eq`'s subdomain, or None if static.
+def _resolve_equations(md: MathDescription) -> list[TemplateEquation]:
+    equations: list[TemplateEquation] = []
+    for eq in md.equations:
+        if not isinstance(eq, TemplateEquation) or eq.template not in _SUPPORTED_TEMPLATES:
+            template = getattr(eq, "template", None)
+            raise NotImplementedError(f"backend v1 supports templates {sorted(_SUPPORTED_TEMPLATES)}, not {template!r}")
+        if eq.temporality != "time_dependent":
+            raise NotImplementedError("backend v1 supports 'time_dependent' equations only")
+        unsupported = sorted(set(eq.terms) - {"diffusion", "source"})
+        if unsupported:
+            raise NotImplementedError(f"backend v1 supports the 'diffusion' and 'source' slots; got {unsupported}")
+        equations.append(eq)
+    subdomains = {eq.subdomain for eq in equations}
+    if len(subdomains) != 1:
+        raise NotImplementedError(
+            f"backend v1 couples equations on a single shared subdomain; got {sorted(subdomains)} "
+            f"(cross-subdomain coupling via trace is a later increment)"
+        )
+    return equations
+
+
+def _motion_velocity(md: MathDescription, subdomain: str, ctx: CompileContext) -> UflExpr | None:
+    """The compiled substrate velocity for `subdomain`, or None if static.
     Prescribed displacement and unknown motion are later increments."""
 
-    motion = next((s.motion for s in md.subdomains if s.name == eq.subdomain), None)
+    motion = next((s.motion for s in md.subdomains if s.name == subdomain), None)
     if motion is None or isinstance(motion, MotionNone):
         return None
     if isinstance(motion, MotionPrescribedVelocity):
