@@ -991,7 +991,7 @@ Every slot has a declared type; expressions in that slot must produce a matching
 | Robin coefficient fields `alpha`, `beta`, `expression` ($\alpha$, $\beta$, $h$) | three scalars |
 | Interface value-equality partition coefficient $k$ | scalar |
 
-Type mismatches are validation errors. A scalar where a vector is expected is **not** implicitly broadcast; the user must write the broadcast explicitly (e.g., `c * n(x)` to turn a scalar `c` into a vector along the outward normal).
+Type mismatches are validation errors. A scalar where a vector is expected is **not** implicitly broadcast; the user must write the broadcast explicitly (e.g., `c * n(x)` to turn a scalar `c` into a vector along the outward normal). The **one exception is the numeric literal `0`**, which is the zero of whichever type a slot expects — `velocity: "0"` and a vector variable's `initial_condition: "0"` are both accepted as the zero vector, so a zero default need not be spelled `[0, 0]`. Any *other* scalar (a nonzero literal, a named scalar, an expression) in a vector or tensor slot is still a no-broadcast error.
 
 ### 1.9 Temporality, mixed systems, and DAE structure
 
