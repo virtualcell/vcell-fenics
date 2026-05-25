@@ -28,7 +28,9 @@ from typing import Any
 import ufl
 from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
+from dolfinx.mesh import Mesh
 from mpi4py import MPI
+from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
 
@@ -90,6 +92,30 @@ class BackwardEuler:
         return a, linear
 
 
+class _MeshMotion:
+    """Advances mesh nodes by dt·velocity each step (prescribed motion, §1.10).
+
+    The displacement is interpolated into a P1 vector field; its dof order does
+    not match the mesh's geometry-node order (especially on a submesh), so a
+    one-time topological permutation maps interpolated values onto geometry rows.
+    The permutation is invariant under motion (it is purely topological), so it
+    is computed once from the initial coordinates and reused.
+    """
+
+    def __init__(self, mesh: Mesh, velocity: UflExpr, dt: fem.Constant) -> None:
+        self._mesh = mesh
+        self._gdim = mesh.geometry.dim
+        space = fem.functionspace(mesh, ("Lagrange", 1, (self._gdim,)))
+        self._displacement = fem.Function(space)
+        self._expression = fem.Expression(dt * velocity, space.element.interpolation_points)
+        self._geom_from_dof = cKDTree(space.tabulate_dof_coordinates()).query(mesh.geometry.x)[1]
+
+    def advance(self) -> None:
+        self._displacement.interpolate(self._expression)
+        increment = self._displacement.x.array.reshape((-1, self._gdim))[self._geom_from_dof]
+        self._mesh.geometry.x[:, : self._gdim] += increment
+
+
 @dataclass(eq=False)
 class DiscreteProblem:
     """A single coupled solve: a function space, the tagged residual terms, a
@@ -111,6 +137,10 @@ class DiscreteProblem:
     terms: tuple[Term, ...]
     scheme: BackwardEuler
     bcs: list[fem.DirichletBC]
+    # Prescribed substrate velocity (a UFL vector field). When set, each step
+    # advances the mesh by dt·velocity before solving — the moving-subdomain
+    # protocol of §1.10. None means a static subdomain.
+    motion_velocity: UflExpr | None = None
 
     def __post_init__(self) -> None:
         self._a, self._L = self.scheme.compose(self)
@@ -121,6 +151,9 @@ class DiscreteProblem:
             bcs=self.bcs,
             petsc_options_prefix=f"vcellfenics_dp_{id(self):x}_",
             petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        )
+        self._motion = (
+            _MeshMotion(self.V.mesh, self.motion_velocity, self.dt) if self.motion_velocity is not None else None
         )
 
     # -- inspection (structural verification, no solve) ----------------------
@@ -161,6 +194,11 @@ class DiscreteProblem:
         self.previous.x.array[:] = self.unknown.x.array
 
     def step(self) -> None:
+        # For a moving subdomain, advance the mesh first; field values are
+        # carried (material frame) and the mass + DILUTION terms re-assemble on
+        # the new configuration, so the dilution `div(velocity)` reflects it.
+        if self._motion is not None:
+            self._motion.advance()
         self._problem.solve()
         self.previous.x.array[:] = self.unknown.x.array
 

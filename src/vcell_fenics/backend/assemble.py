@@ -9,13 +9,16 @@ silently mis-assembling (§3.6.2):
 - exactly one equation, template `bulk_radv_diff` (T1) or `surface_pde_with_dilution`
   (T2), `temporality: time_dependent`;
 - the `diffusion` slot only (advection / source are later increments);
-- a static subdomain — `motion: none` (prescribed/unknown motion, and the
-  dilution term it implies, are increment 2);
+- a static (`motion: none`) or prescribed-*velocity* subdomain (prescribed
+  displacement and unknown motion are later increments);
 - constant parameters only.
 
 On a codim-1 submesh `ufl.grad` is the tangential gradient ∇_Γ, so the diffusion
-integrand is the same for T1 and T2 — they differ only in the mesh the geometry
-supplies. The initial condition is applied here by interpolation (§3.2.2).
+integrand is the same for T1 and T2 — they differ only in the mesh. When the
+subdomain moves, a `DILUTION` term `ρ ∇_Γ·v_Γ` is added automatically (the
+canonical moving-membrane term, §1.4.2) with `∇_Γ·v_Γ` taken as `div` of the
+velocity expression; the per-step mesh motion lives in DiscreteProblem. The
+initial condition is applied here by interpolation (§3.2.2).
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
     MathDescription,
     MotionNone,
+    MotionPrescribedVelocity,
     ParameterConstant,
     TemplateEquation,
 )
@@ -49,18 +53,23 @@ def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: i
     if geometry_errors:
         raise FormalismValidationError(geometry_errors)
 
-    eq = _single_static_diffusion_equation(md)
+    eq = _resolve_equation(md)
     mesh = geometry.mesh_of(eq.subdomain)
     V = fem.functionspace(mesh, ("Lagrange", fe_degree))
     trial, test = ufl.TrialFunction(V), ufl.TestFunction(V)
     dx = ufl.Measure("dx", domain=mesh)
     ctx = _compile_context(md, mesh)
 
-    diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
-    terms = (
-        Term(TermKind.TIME_DERIVATIVE),
-        Term(TermKind.DIFFUSION, diffusion * ufl.dot(ufl.grad(trial), ufl.grad(test))),
-    )
+    terms = [Term(TermKind.TIME_DERIVATIVE)]
+    if "diffusion" in eq.terms:
+        diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
+        terms.append(Term(TermKind.DIFFUSION, diffusion * ufl.dot(ufl.grad(trial), ufl.grad(test))))
+
+    velocity = _motion_velocity(md, eq, ctx)
+    if velocity is not None:
+        # Auto-dilution ρ ∇_Γ·v_Γ; div on a (sub)mesh is the surface divergence.
+        terms.append(Term(TermKind.DILUTION, ufl.div(velocity) * trial * test))
+
     problem = DiscreteProblem(
         variable_name=eq.variable,
         V=V,
@@ -70,9 +79,10 @@ def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: i
         unknown=fem.Function(V, name=eq.variable),
         previous=fem.Function(V, name=f"{eq.variable}_old"),
         dt=fem.Constant(mesh, PETSc.ScalarType(float(dt))),  # type: ignore[operator]
-        terms=terms,
+        terms=tuple(terms),
         scheme=BackwardEuler(),
         bcs=[],
+        motion_velocity=velocity,
     )
 
     if eq.initial_condition is not None:
@@ -80,7 +90,7 @@ def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: i
     return problem
 
 
-def _single_static_diffusion_equation(md: MathDescription) -> TemplateEquation:
+def _resolve_equation(md: MathDescription) -> TemplateEquation:
     if len(md.equations) != 1:
         raise NotImplementedError("backend v1 supports a single equation; coupled systems are a later increment")
     eq = md.equations[0]
@@ -89,17 +99,25 @@ def _single_static_diffusion_equation(md: MathDescription) -> TemplateEquation:
         raise NotImplementedError(f"backend v1 supports templates {sorted(_SUPPORTED_TEMPLATES)}, not {template!r}")
     if eq.temporality != "time_dependent":
         raise NotImplementedError("backend v1 supports 'time_dependent' equations only")
-
-    motion = next((s.motion for s in md.subdomains if s.name == eq.subdomain), None)
-    if not isinstance(motion, MotionNone):
-        raise NotImplementedError("backend v1 supports static subdomains only; motion (dilution) is a later increment")
-
     unsupported = sorted(set(eq.terms) - {"diffusion"})
     if unsupported:
         raise NotImplementedError(f"backend v1 supports only the 'diffusion' slot; got {unsupported}")
-    if "diffusion" not in eq.terms:
-        raise NotImplementedError("backend v1 requires a 'diffusion' slot")
     return eq
+
+
+def _motion_velocity(md: MathDescription, eq: TemplateEquation, ctx: CompileContext) -> UflExpr | None:
+    """The compiled substrate velocity for `eq`'s subdomain, or None if static.
+    Prescribed displacement and unknown motion are later increments."""
+
+    motion = next((s.motion for s in md.subdomains if s.name == eq.subdomain), None)
+    if motion is None or isinstance(motion, MotionNone):
+        return None
+    if isinstance(motion, MotionPrescribedVelocity):
+        return compile_expression(parse(motion.velocity), ctx)
+    raise NotImplementedError(
+        "backend v1 supports static or prescribed-velocity motion; "
+        "prescribed displacement and unknown motion are later increments"
+    )
 
 
 def _compile_context(md: MathDescription, mesh: Mesh) -> CompileContext:
