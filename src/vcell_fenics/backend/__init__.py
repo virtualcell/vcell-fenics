@@ -19,6 +19,7 @@ from vcell_fenics.backend.geometry import (
     cross_validate,
     load_geometry,
     make_disk_geometry,
+    make_disk_membrane_geometry,
     register_geometry,
 )
 
@@ -37,5 +38,6 @@ __all__ = [
     "cross_validate",
     "load_geometry",
     "make_disk_geometry",
+    "make_disk_membrane_geometry",
     "register_geometry",
 ]

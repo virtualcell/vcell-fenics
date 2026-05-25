@@ -158,6 +158,15 @@ class DiscreteProblem:
             self.unknown.x.array[:] = float(value)
         self.previous.x.array[:] = self.unknown.x.array
 
+    def interpolate_initial(self, ufl_expr: UflExpr) -> None:
+        """Set the initial state from a compiled UFL expression. Handles
+        spatially-varying ICs (a constant interpolates to a constant field), so
+        it is the assembler's path for applying a MathDescription's IC."""
+
+        expr = fem.Expression(ufl_expr, self.V.element.interpolation_points)
+        self.unknown.interpolate(expr)
+        self.previous.x.array[:] = self.unknown.x.array
+
     def step(self) -> None:
         self._problem.solve()
         self.previous.x.array[:] = self.unknown.x.array

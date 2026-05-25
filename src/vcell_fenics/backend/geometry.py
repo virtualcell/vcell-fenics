@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vcell_fenics.approaches.static.geometry import create_disk
+from vcell_fenics.approaches.submesh.geometry import create_disk_with_membrane
 from vcell_fenics.backend._typing import DolfinxMesh
 from vcell_fenics.formalism.schema import MathDescription, SubdomainKind
 from vcell_fenics.formalism.validator import Diagnostic
@@ -73,6 +74,14 @@ def make_disk_geometry(name: str, *, volume_subdomain: str, radius: float = 1.0,
 
     mesh = create_disk(radius=radius, h=h).mesh
     return Geometry(name=name, subdomains={volume_subdomain: SubdomainGeometry(mesh=mesh, kind="volume")})
+
+
+def make_disk_membrane_geometry(name: str, *, surface_subdomain: str, radius: float = 1.0, h: float = 0.1) -> Geometry:
+    """A bundled 2D disk's boundary, exposed as a single `surface` (codim-1)
+    subdomain class — the membrane submesh."""
+
+    submesh = create_disk_with_membrane(radius=radius, h=h).submesh
+    return Geometry(name=name, subdomains={surface_subdomain: SubdomainGeometry(mesh=submesh, kind="surface")})
 
 
 # ---------------------------------------------------------------------------
