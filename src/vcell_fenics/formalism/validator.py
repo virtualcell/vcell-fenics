@@ -1,14 +1,16 @@
 """Validation pass over a MathDescription (docs/modeling/declarative-formalism.md §2.5).
 
-This module implements the *structural* checks of §1.11 — the ones that read
-the dataclass tree's declared fields. It does **not** yet parse or walk the
-expression strings; the checks that depend on the expression AST (name
-resolution inside expressions, parameter-expression cycles, slot type-checking,
-weak-form `partial_t` presence, the operator-usage narrow/smoothness rules, and
-IC-content rules) are a following increment, as is the geometry cross-check
-(§1.11.10), which needs a Geometry object the MathDescription does not carry.
+This module implements the checks of §1.11 that do not need a Geometry object.
+Schema-level checks read declared fields; expression-level checks parse each
+expression string (via `formalism.parser`) and walk the AST. The two pieces
+still deferred: full slot type-checking (§1.11.5 — bottom-up type inference
+over the whole vocabulary, a following increment) and the geometry cross-check
+(§1.11.10, which needs a Geometry the MathDescription does not carry).
+BC-expression contents are also deferred: a BC evaluates on a boundary whose
+incident subdomains are geometry-side, so its resolution context is not known
+intra-model.
 
-Checks implemented here:
+Schema-level checks:
 
 - Reserved-name shadowing and duplicate / colliding declarations (§1.11.3).
 - Structural reference resolution — subdomains, governed variables, motion
@@ -22,6 +24,21 @@ Checks implemented here:
   declaration, `interface_flux_balance` bulk-only, weak-form Dirichlet-only
   (§1.11.7).
 
+Expression-level checks (parse + AST walk):
+
+- Name resolution — every bare name resolves to a local variable, parameter,
+  `t`/`x`, or (in weak forms) a measure or `<var>_test`; cross-subdomain refs
+  require `trace`, and `trace` only crosses high → low dimension (§1.8.2,
+  §1.8.6, §1.11.3).
+- Parameter expressions — no variable references, acyclic parameter graph, a
+  `subdomain:` scope when geometric helpers appear, and scope-compatible use
+  sites (§1.8.3, §1.11.3, §2.2.3).
+- Initial conditions — no references to `t` or to state variables (§1.11.8).
+- Weak forms — `partial_t(governed)` present iff `time_dependent`, and the
+  `<governed>_test` function referenced at least once (§1.9.5, §2.3.5).
+- Operator usage — the narrow rule (no calculus on the slot's own variable) and
+  the smoothness rule (`lapl` / `lapl_beltrami` need a P2+ argument) (§1.11.9).
+
 Diagnostics are collected (not fail-fast) so a single pass reports every
 structural problem in a large model. `validate` returns all of them;
 `validate_or_raise` raises `FormalismValidationError` if any is an error.
@@ -29,16 +46,32 @@ structural problem in a large model. `validate` returns all of them;
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, assert_never
 
+from vcell_fenics.formalism.expr import (
+    BinaryOp,
+    Expr,
+    FunctionCall,
+    IndexAccess,
+    Name,
+    Number,
+    TensorLiteral,
+    UnaryOp,
+    VectorLiteral,
+)
+from vcell_fenics.formalism.parser import ExpressionSyntaxError, parse
 from vcell_fenics.formalism.schema import (
     BCInterfaceFluxBalance,
     BCInterfaceValueEquality,
     BoundaryCondition,
     Equation,
     MathDescription,
+    MotionPrescribedDisplacement,
+    MotionPrescribedVelocity,
     MotionUnknown,
+    Parameter,
     ParameterExpression,
     ParameterRegionMap,
     Subdomain,
@@ -47,9 +80,40 @@ from vcell_fenics.formalism.schema import (
     WeakFormEquation,
 )
 from vcell_fenics.formalism.templates import REGISTRY
-from vcell_fenics.formalism.vocabulary import RESERVED_NAMES
+from vcell_fenics.formalism.vocabulary import (
+    CALCULUS_OPERATORS,
+    GEOMETRIC_HELPERS,
+    MEASURES,
+    RESERVED_NAMES,
+    STANDARD_FUNCTIONS,
+    TENSOR_ALGEBRA,
+    TIME_DERIVATIVE,
+    TRACE,
+)
 
 Severity = Literal["error", "warning"]
+
+# Relative topological dimension of each subdomain kind, volume highest. Lets
+# the trace direction rule (§1.8.2) compare dimensions without the ambient d.
+_KIND_RANK: dict[str, int] = {"point": 0, "curve": 1, "surface": 2, "volume": 3}
+
+# Names that may appear only as a call's callee, never as a bare value.
+_CALLABLE_NAMES: frozenset[str] = (
+    STANDARD_FUNCTIONS | GEOMETRIC_HELPERS | CALCULUS_OPERATORS | TENSOR_ALGEBRA | TRACE | TIME_DERIVATIVE
+)
+
+_ExprKind = Literal["motion", "parameter", "term_slot", "initial_condition", "weak_form"]
+
+
+def _space_admits_second_derivative(space: str) -> bool:
+    """Whether a function-space hint admits a meaningful strong second
+    derivative (§1.11.9). `lagrange_pN` needs N ≥ 2; unknown hints are given the
+    benefit of the doubt since the rule targets the P1 default specifically."""
+
+    match = re.fullmatch(r"lagrange_p(\d+)", space)
+    if match is not None:
+        return int(match.group(1)) >= 2
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +140,17 @@ class FormalismValidationError(Exception):
         self.errors = errors
         body = "\n".join(f"  {d}" for d in errors)
         super().__init__(f"MathDescription failed validation with {len(errors)} error(s):\n{body}")
+
+
+@dataclass(frozen=True, slots=True)
+class _ExprContext:
+    """The evaluation context of one expression string, threaded through the
+    AST walk so each node knows where it lives and what it may reference."""
+
+    path: str
+    eval_subdomain: str | None
+    kind: _ExprKind
+    governed_var: str | None
 
 
 def validate(md: MathDescription) -> list[Diagnostic]:
@@ -106,6 +181,7 @@ class _Validator:
         self._var_by_key: dict[tuple[str, str], Variable] = {}
         self._var_subdomains: dict[str, set[str]] = {}
         self._param_names: set[str] = set()
+        self._param_by_name: dict[str, Parameter] = {}
         # (variable, subdomain) pairs whose subdomain has unknown motion driven
         # by that variable — the IC-on-steady-state exception (§1.7.7).
         self._unknown_motion_vars: set[tuple[str, str]] = set()
@@ -124,6 +200,7 @@ class _Validator:
         self._check_motion_variables()
         self._check_equations()
         self._check_boundary_conditions()
+        self._check_expressions()
         return self._diagnostics
 
     def _build_indices(self) -> None:
@@ -146,6 +223,7 @@ class _Validator:
                 self._error(f"parameters[{i}]", f"duplicate parameter name {p.name!r}")
             else:
                 self._param_names.add(p.name)
+                self._param_by_name[p.name] = p
 
         for s in self._md.subdomains:
             if isinstance(s.motion, MotionUnknown):
@@ -339,3 +417,344 @@ class _Validator:
                 f"variable {variable!r} is governed by a weak-form equation; only Dirichlet BCs are allowed on it "
                 f"(§1.5.6) — encode natural BCs in the form itself",
             )
+
+    # -- §1.11.3/§1.11.8/§1.11.9 expression-level checks ---------------------
+
+    def _check_expressions(self) -> None:
+        param_trees: dict[str, Expr] = {}
+        for i, p in enumerate(self._md.parameters):
+            if not isinstance(p, ParameterExpression):
+                continue
+            path = f"parameters[{i}].expression"
+            tree = self._parse(p.expression, path)
+            if tree is None:
+                continue
+            param_trees[p.name] = tree
+            self._walk(tree, _ExprContext(path, p.subdomain, "parameter", None))
+            if p.subdomain is None and self._uses_geometric_helper(tree):
+                self._error(
+                    path,
+                    "expression parameter references a geometric helper but declares no 'subdomain:' scope (§2.2.3)",
+                )
+        self._check_parameter_cycles(param_trees)
+
+        for i, s in enumerate(self._md.subdomains):
+            motion = s.motion
+            if isinstance(motion, MotionPrescribedVelocity):
+                self._walk_site(motion.velocity, f"subdomains[{i}].motion.velocity", s.name, "motion", None)
+            elif isinstance(motion, MotionPrescribedDisplacement):
+                self._walk_site(motion.displacement, f"subdomains[{i}].motion.displacement", s.name, "motion", None)
+
+        for i, eq in enumerate(self._md.equations):
+            path = f"equations[{i}]"
+            if isinstance(eq, WeakFormEquation):
+                tree = self._parse(eq.form, f"{path}.form")
+                if tree is not None:
+                    self._walk(tree, _ExprContext(f"{path}.form", eq.subdomain, "weak_form", eq.variable))
+                    self._check_weak_form_structure(eq, tree, path)
+            else:
+                for slot, text in eq.terms.items():
+                    self._walk_site(text, f"{path}.terms.{slot}", eq.subdomain, "term_slot", eq.variable)
+            if eq.initial_condition is not None:
+                self._walk_site(
+                    eq.initial_condition, f"{path}.initial_condition", eq.subdomain, "initial_condition", eq.variable
+                )
+
+    def _walk_site(self, text: str, path: str, subdomain: str | None, kind: _ExprKind, governed: str | None) -> None:
+        tree = self._parse(text, path)
+        if tree is not None:
+            self._walk(tree, _ExprContext(path, subdomain, kind, governed))
+
+    def _parse(self, text: str, path: str) -> Expr | None:
+        try:
+            return parse(text)
+        except ExpressionSyntaxError as exc:
+            self._error(path, f"expression syntax error: {exc.message} (position {exc.pos})")
+            return None
+
+    # -- AST walk + per-node resolution / rules ------------------------------
+
+    def _walk(self, node: Expr, ctx: _ExprContext) -> None:
+        if isinstance(node, Number):
+            return
+        if isinstance(node, Name):
+            self._resolve_name(node.name, ctx)
+            return
+        if isinstance(node, IndexAccess):
+            self._walk(node.base, ctx)
+            self._walk(node.index, ctx)
+            return
+        if isinstance(node, UnaryOp):
+            self._walk(node.operand, ctx)
+            return
+        if isinstance(node, BinaryOp):
+            self._walk(node.left, ctx)
+            self._walk(node.right, ctx)
+            return
+        if isinstance(node, VectorLiteral):
+            for component in node.components:
+                self._walk(component, ctx)
+            return
+        if isinstance(node, TensorLiteral):
+            for row in node.rows:
+                self._walk(row, ctx)
+            return
+        if isinstance(node, FunctionCall):
+            self._walk_call(node, ctx)
+            return
+        assert_never(node)
+
+    def _walk_call(self, node: FunctionCall, ctx: _ExprContext) -> None:
+        callee = node.callee
+        weak = ctx.kind == "weak_form"
+        if callee == "trace":
+            self._check_trace(node, ctx)
+            return
+        if callee in MEASURES:
+            if not weak:
+                self._error(ctx.path, f"measure {callee!r} is only valid in a weak-form 'form:' expression (§2.3.4)")
+            return  # a measure's argument is a boundary label, not a value expression
+        if callee == "partial_t":
+            if not weak:
+                self._error(ctx.path, "partial_t(...) is only valid in a weak-form 'form:' expression (§2.3.4)")
+            for arg in node.args:
+                self._walk(arg, ctx)
+            return
+        if callee in CALCULUS_OPERATORS:
+            if (
+                ctx.kind == "term_slot"
+                and ctx.governed_var is not None
+                and any(self._contains_name(arg, ctx.governed_var) for arg in node.args)
+            ):
+                self._error(
+                    ctx.path,
+                    f"{callee}(...) may not be applied to the equation's own variable {ctx.governed_var!r} in a "
+                    f"template slot (§1.11.9, narrow rule); calculus on other variables is allowed",
+                )
+            if callee in ("lapl", "lapl_beltrami") and ctx.kind == "term_slot":
+                self._check_smoothness(node, ctx)
+            for arg in node.args:
+                self._walk(arg, ctx)
+            return
+        if callee in STANDARD_FUNCTIONS or callee in GEOMETRIC_HELPERS or callee in TENSOR_ALGEBRA:
+            for arg in node.args:
+                self._walk(arg, ctx)
+            return
+        self._error(ctx.path, f"unknown function {callee!r}")
+        for arg in node.args:
+            self._walk(arg, ctx)
+
+    def _resolve_name(self, nm: str, ctx: _ExprContext) -> None:
+        s = ctx.eval_subdomain
+        if ctx.kind == "weak_form":
+            if nm in MEASURES:
+                return
+            if nm.endswith("_test"):
+                base = nm[: -len("_test")]
+                if s is not None and (base, s) in self._var_by_key:
+                    return
+                self._error(ctx.path, f"{nm!r} is not a valid test function: no variable {base!r} on subdomain {s!r}")
+                return
+        if s is not None and (nm, s) in self._var_by_key:
+            self._reject_variable_in_restricted_context(nm, ctx)
+            return
+        if nm in self._param_names:
+            self._check_param_use_site(nm, ctx)
+            return
+        if nm == "t":
+            if ctx.kind == "initial_condition":
+                self._error(ctx.path, "initial condition may not reference time t (§1.11.8)")
+            return
+        if nm == "x":
+            return
+        if nm in MEASURES:
+            self._error(ctx.path, f"measure {nm!r} is only valid in a weak-form 'form:' expression (§2.3.4)")
+            return
+        if nm in _CALLABLE_NAMES:
+            self._error(ctx.path, f"{nm!r} is a function and must be called with arguments, e.g. {nm}(...)")
+            return
+        hosts = self._var_subdomains.get(nm)
+        if hosts:
+            if self._reject_variable_in_restricted_context(nm, ctx):
+                return
+            higher = sorted(h for h in hosts if self._rank(h) > self._rank(s))
+            if higher:
+                self._error(
+                    ctx.path,
+                    f"variable {nm!r} lives on a higher-dimensional subdomain ({higher}); "
+                    f"reference it via trace({nm}) (§1.8.2)",
+                )
+            else:
+                self._error(
+                    ctx.path,
+                    f"variable {nm!r} is defined on a different subdomain ({sorted(hosts)}) and cannot be "
+                    f"referenced by bare name here (§1.8.6)",
+                )
+            return
+        self._error(ctx.path, f"unknown name {nm!r}")
+
+    def _reject_variable_in_restricted_context(self, nm: str, ctx: _ExprContext) -> bool:
+        """Emit the right diagnostic when a variable is referenced where
+        variables are disallowed (parameter expressions, ICs). Returns True iff
+        a diagnostic was emitted."""
+
+        if ctx.kind == "parameter":
+            self._error(
+                ctx.path,
+                f"parameter expression may not reference the variable {nm!r}; parameters depend only on t, x, "
+                f"geometric helpers, and other parameters (§1.8.3)",
+            )
+            return True
+        if ctx.kind == "initial_condition":
+            self._error(ctx.path, f"initial condition may not reference the state variable {nm!r} (§1.11.8)")
+            return True
+        return False
+
+    def _check_trace(self, node: FunctionCall, ctx: _ExprContext) -> None:
+        if ctx.kind == "parameter":
+            self._error(ctx.path, "parameter expression may not reference variables via trace (§1.8.3)")
+            return
+        if ctx.kind == "initial_condition":
+            self._error(ctx.path, "initial condition may not reference state variables via trace (§1.11.8)")
+            return
+        if len(node.args) != 1:
+            self._error(ctx.path, "trace(...) takes exactly one argument; v1 has no side specifier (§1.8.2)")
+            for arg in node.args:
+                self._walk(arg, ctx)
+            return
+        arg = node.args[0]
+        if not isinstance(arg, Name):
+            self._error(ctx.path, "trace(...) argument must be a variable name (§1.8.2)")
+            self._walk(arg, ctx)
+            return
+        nm = arg.name
+        hosts = self._var_subdomains.get(nm, set())
+        higher = sorted(h for h in hosts if self._rank(h) > self._rank(ctx.eval_subdomain))
+        if not hosts:
+            self._error(ctx.path, f"trace argument {nm!r} is not a declared variable")
+        elif not higher:
+            self._error(
+                ctx.path,
+                f"trace({nm}) is invalid: {nm!r} does not live on a subdomain of higher dimension than "
+                f"{ctx.eval_subdomain!r}; trace only crosses from higher to lower dimension (§1.8.2)",
+            )
+
+    def _check_smoothness(self, node: FunctionCall, ctx: _ExprContext) -> None:
+        names: set[str] = set()
+        for arg in node.args:
+            names |= self._local_variable_names(arg, ctx.eval_subdomain)
+        for nm in sorted(names):
+            var = self._var_by_key.get((nm, ctx.eval_subdomain)) if ctx.eval_subdomain is not None else None
+            if var is not None and not _space_admits_second_derivative(var.space):
+                self._error(
+                    ctx.path,
+                    f"{node.callee}({nm}) requires {nm!r} to use 'lagrange_p2' or higher; its space is "
+                    f"{var.space!r}, and the strong second derivative of a P1 field is degenerate (§1.11.9). "
+                    f"Raise the variable's space or use the weak-form escape hatch.",
+                )
+
+    def _check_param_use_site(self, nm: str, ctx: _ExprContext) -> None:
+        p = self._param_by_name.get(nm)
+        if isinstance(p, ParameterExpression) and p.subdomain is not None and p.subdomain != ctx.eval_subdomain:
+            self._error(
+                ctx.path,
+                f"parameter {nm!r} is scoped to subdomain {p.subdomain!r} (it uses geometric helpers) and cannot "
+                f"be used from an expression evaluated on {ctx.eval_subdomain!r} (§1.11.10)",
+            )
+
+    def _check_weak_form_structure(self, eq: WeakFormEquation, tree: Expr, path: str) -> None:
+        governed = eq.variable
+        if not self._contains_name(tree, f"{governed}_test"):
+            self._error(
+                f"{path}.form",
+                f"weak form must reference the test function {governed}_test at least once (§2.3.5)",
+            )
+        has_dt = self._contains_partial_t_of(tree, governed)
+        if eq.temporality == "time_dependent" and not has_dt:
+            self._error(f"{path}.form", f"time_dependent weak form must contain partial_t({governed}) (§1.9.5)")
+        if eq.temporality == "steady_state" and has_dt:
+            self._error(f"{path}.form", f"steady_state weak form must not contain partial_t({governed}) (§1.9.5)")
+
+    def _check_parameter_cycles(self, trees: dict[str, Expr]) -> None:
+        graph = {name: self._param_refs(tree) & set(trees) for name, tree in trees.items()}
+        color: dict[str, int] = dict.fromkeys(graph, 0)  # 0=unvisited 1=on-stack 2=done
+        stack: list[str] = []
+        reported: set[frozenset[str]] = set()
+
+        def dfs(n: str) -> None:
+            color[n] = 1
+            stack.append(n)
+            for m in sorted(graph[n]):
+                if color[m] == 1:
+                    cycle = stack[stack.index(m) :]
+                    if frozenset(cycle) not in reported:
+                        reported.add(frozenset(cycle))
+                        self._error("parameters", f"parameter expression cycle: {' -> '.join([*cycle, m])} (§1.11.3)")
+                elif color[m] == 0:
+                    dfs(m)
+            stack.pop()
+            color[n] = 2
+
+        for n in sorted(graph):
+            if color[n] == 0:
+                dfs(n)
+
+    # -- small AST / index helpers -------------------------------------------
+
+    def _rank(self, subdomain_name: str | None) -> int:
+        if subdomain_name is None:
+            return -1
+        s = self._subdomain_by_name.get(subdomain_name)
+        return _KIND_RANK.get(s.kind, -1) if s is not None else -1
+
+    def _children(self, node: Expr) -> tuple[Expr, ...]:
+        if isinstance(node, Number | Name):
+            return ()
+        if isinstance(node, IndexAccess):
+            return (node.base, node.index)
+        if isinstance(node, UnaryOp):
+            return (node.operand,)
+        if isinstance(node, BinaryOp):
+            return (node.left, node.right)
+        if isinstance(node, FunctionCall):
+            return node.args
+        if isinstance(node, VectorLiteral):
+            return node.components
+        if isinstance(node, TensorLiteral):
+            return node.rows
+        assert_never(node)
+
+    def _contains_name(self, node: Expr, name: str) -> bool:
+        if isinstance(node, Name) and node.name == name:
+            return True
+        return any(self._contains_name(child, name) for child in self._children(node))
+
+    def _contains_partial_t_of(self, node: Expr, var: str) -> bool:
+        if (
+            isinstance(node, FunctionCall)
+            and node.callee == "partial_t"
+            and any(self._contains_name(arg, var) for arg in node.args)
+        ):
+            return True
+        return any(self._contains_partial_t_of(child, var) for child in self._children(node))
+
+    def _uses_geometric_helper(self, node: Expr) -> bool:
+        if isinstance(node, FunctionCall) and node.callee in GEOMETRIC_HELPERS:
+            return True
+        return any(self._uses_geometric_helper(child) for child in self._children(node))
+
+    def _local_variable_names(self, node: Expr, subdomain: str | None) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node, Name) and subdomain is not None and (node.name, subdomain) in self._var_by_key:
+            found.add(node.name)
+        for child in self._children(node):
+            found |= self._local_variable_names(child, subdomain)
+        return found
+
+    def _param_refs(self, node: Expr) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node, Name) and node.name in self._param_names:
+            found.add(node.name)
+        for child in self._children(node):
+            found |= self._param_refs(child)
+        return found
