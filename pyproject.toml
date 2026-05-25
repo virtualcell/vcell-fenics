@@ -61,6 +61,10 @@ ipython = "*"
 ruff = "*"
 mypy = "*"
 types-pyyaml = ">=6.0.12.20260518,<7"
+# For running the demo notebooks in docs/notebooks/ (`pixi run -e dev notebooks`).
+# ipykernel makes the dev env's Python the notebook kernel.
+jupyterlab = "*"
+ipykernel = "*"
 
 # Approach D (cut/trace FEM via CutFEMx) is intentionally NOT defined here yet.
 # CutFEMx v0.1.0 targets DOLFINx 0.9 (not 0.10) and is source-only; it will
@@ -81,6 +85,8 @@ format = "ruff format src tests"
 format-check = "ruff format --check src tests"
 typecheck = "mypy src tests"
 check = { depends-on = ["lint", "format-check", "typecheck", "test"] }
+# Launch JupyterLab on the demo notebooks (needs the dev env: `pixi run -e dev notebooks`).
+notebooks = "jupyter lab docs/notebooks"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

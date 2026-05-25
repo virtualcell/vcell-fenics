@@ -107,14 +107,15 @@ pixi install                 # resolve + install (after editing deps)
 pixi run -e dev check        # the gate: ruff lint + format-check + mypy --strict + pytest
 pixi run -e dev test         # just the tests
 pixi run -e dev test tests/test_backend_dilution.py
+pixi run -e dev notebooks     # launch JupyterLab on docs/notebooks/
 ```
 
 `pixi run -e dev check` must stay green. See [`CLAUDE.md`](../CLAUDE.md) for the
 quality conventions (e.g. how FEniCSx's partial type stubs are handled — ADR 005).
 
-The notebooks need a Jupyter kernel (not in the `dev` env yet); open them in an
-IDE with the `dev` interpreter, or add `jupyterlab`/`ipykernel` to the `dev`
-feature. Every notebook cell has been validated to run against the env.
+The notebooks are committed **pre-executed** (plots and outputs render without
+running). To run them interactively, `pixi run -e dev notebooks` opens JupyterLab
+rooted at `docs/notebooks/`; the dev env's Python is the kernel.
 
 ## Where to go next
 
