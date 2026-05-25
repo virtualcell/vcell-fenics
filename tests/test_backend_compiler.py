@@ -44,7 +44,9 @@ def _mean(expr_str: str, params: dict[str, float] | None = None) -> float:
     one = fem.Constant(ctx.mesh, PETSc.ScalarType(1.0))  # type: ignore[operator]
     area = fem.assemble_scalar(fem.form(one * dx))
     value = fem.assemble_scalar(fem.form(compiled * dx))
-    return float(value / area)
+    # assemble_scalar is typed float | complex (PETSc may be complex-valued);
+    # this is a real build, so take the real part.
+    return (value / area).real
 
 
 @pytest.mark.parametrize(

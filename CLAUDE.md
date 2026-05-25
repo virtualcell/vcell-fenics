@@ -58,7 +58,7 @@ pixi add --pypi <pkg>         # add a PyPI dep
 pixi update                   # upgrade within version specs
 ```
 
-**Quality enforcement.** Ruff (lint+format) and mypy in `--strict` are required across both `src/` and `tests/`. `pixi run -e dev check` is the gate. Stub gaps in the FEniCSx stack are handled by `follow_imports = "skip"` overrides in `[tool.mypy]`, not blanket `Any` annotations in our code — if a third-party return leaks `Any`, use a targeted `cast()` at the boundary rather than weakening the function signature.
+**Quality enforcement.** Ruff (lint+format) and mypy in `--strict` are required across both `src/` and `tests/`. `pixi run -e dev check` is the gate. The FEniCSx stack ships `py.typed` but with many unannotated functions, so mypy uses its **real** types (we do *not* `follow_imports = "skip"`); strict mode's `disallow_untyped_calls` is suppressed for that stack via `untyped_calls_exclude` so calls like `grad()`/`dot()` don't flood, while every other real check is kept (ADR 005). When a third-party stub is genuinely wrong (e.g. petsc4py's `PETSc.ScalarType`, some pyvista signatures), use a targeted `# type: ignore[code]` or `cast()` at that exact call site — never a blanket `Any` in our own signatures. The `backend/_typing.py` aliases (`DolfinxFunction`, `UflForm`, …) document which opaque object a field holds where the upstream type is still `Any`.
 
 To run Python directly in the env without going through `pixi shell`:
 

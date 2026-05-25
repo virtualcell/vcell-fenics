@@ -48,4 +48,6 @@ def create_disk(
     finally:
         gmsh.finalize()
 
-    return StaticDisk(mesh=data.mesh, facet_tags=data.facet_tags, radius=radius)
+    facet_tags = data.facet_tags
+    assert facet_tags is not None, "model_to_mesh returned no facet tags for the boundary physical group"
+    return StaticDisk(mesh=data.mesh, facet_tags=facet_tags, radius=radius)

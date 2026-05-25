@@ -16,9 +16,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from dolfinx.mesh import Mesh
+
 from vcell_fenics.approaches.static.geometry import create_disk
 from vcell_fenics.approaches.submesh.geometry import create_disk_with_membrane
-from vcell_fenics.backend._typing import DolfinxMesh
 from vcell_fenics.formalism.schema import MathDescription, SubdomainKind
 from vcell_fenics.formalism.validator import Diagnostic
 
@@ -28,7 +29,7 @@ class SubdomainGeometry:
     """The concrete mesh backing one subdomain class, plus its kind (for the
     cross-check)."""
 
-    mesh: DolfinxMesh
+    mesh: Mesh
     kind: SubdomainKind
 
 
@@ -43,7 +44,7 @@ class Geometry:
         entry = self.subdomains.get(subdomain)
         return entry.kind if entry is not None else None
 
-    def mesh_of(self, subdomain: str) -> DolfinxMesh:
+    def mesh_of(self, subdomain: str) -> Mesh:
         return self.subdomains[subdomain].mesh
 
 

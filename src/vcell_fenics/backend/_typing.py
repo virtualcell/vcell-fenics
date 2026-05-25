@@ -1,29 +1,19 @@
-"""Type aliases for the DOLFINx / UFL objects the backend threads around.
+"""The one backend type alias that isn't a real class: `UflExpr`.
 
-DOLFINx and UFL ship no usable type stubs, so the project treats that whole
-stack as opaque: `pyproject.toml` sets `follow_imports = "skip"` for `dolfinx.*`,
-`ufl.*`, `petsc4py.*`, and friends (see CLAUDE.md, which catalogues the broken
-stubs). Every value from those libraries is therefore `Any` to mypy.
+DOLFINx and UFL ship `py.typed`, and (since we stopped `follow_imports = "skip"`,
+ADR 005) mypy checks them concretely — so the backend annotates DOLFINx/UFL
+objects with their real classes directly (`fem.Function`, `mesh.Mesh`, `ufl.Form`,
+`ufl.Measure`, …). No alias indirection is warranted for those.
 
-Each alias below *is* `Any` — these add no type-checking. What they add is
-intent: a backend signature reads `unknown: Function`, `dx: Measure`,
-`compose(...) -> tuple[UflForm, UflForm]` instead of a wall of bare `Any`, so a
-reader can see what each opaque object actually is. If usable stubs ever land,
-repoint the aliases at the real types and the backend gains real checks for free.
+The exception is a *UFL expression*. It is heterogeneous — arguments,
+coefficients, arithmetic results, wrapped DOLFINx constants — and UFL's operators
+(`a + b`, `2 * a`) are themselves typed to return `Any`, so a value flowing
+through them cannot be pinned to a concrete type. `UflExpr` is that `Any`, named
+so a signature can still say *what* it is.
 """
 
 from __future__ import annotations
 
 from typing import Any, TypeAlias
 
-# DOLFINx objects (the `Dolfinx` prefix marks the source library).
-DolfinxMesh: TypeAlias = Any
-DolfinxFunctionSpace: TypeAlias = Any
-DolfinxFunction: TypeAlias = Any
-DolfinxConstant: TypeAlias = Any
-DolfinxDirichletBC: TypeAlias = Any
-
-# UFL objects (the `Ufl` prefix marks the source library).
-UflExpr: TypeAlias = Any  # a UFL expression: an integrand, coefficient, or trial/test argument
-UflForm: TypeAlias = Any  # an integrated UFL form (bilinear `a` or linear `L`)
-UflMeasure: TypeAlias = Any  # a UFL integration measure (dx, ds, ...)
+UflExpr: TypeAlias = Any

@@ -27,7 +27,8 @@ def _function_to_pyvista(field: fem.Function) -> pyvista.UnstructuredGrid:
     Uses ``dolfinx.plot.vtk_mesh`` so higher-order elements are linearized
     in a viz-only sense; values at the linear vertices are correct.
     """
-    topology, cell_types, geometry = plot.vtk_mesh(field.function_space)
+    # vtk_mesh accepts a FunctionSpace at runtime; the stub only types Mesh.
+    topology, cell_types, geometry = plot.vtk_mesh(field.function_space)  # type: ignore[arg-type]
     grid = pyvista.UnstructuredGrid(topology, cell_types, geometry)
     grid.point_data[field.name or "field"] = field.x.array.real
     grid.set_active_scalars(field.name or "field")
@@ -54,17 +55,17 @@ def quick_plot(
     """
     grid = _function_to_pyvista(field)
     off_screen = bool(screenshot) and not show
-    plotter = pyvista.Plotter(off_screen=off_screen, window_size=window_size)
+    plotter = pyvista.Plotter(off_screen=off_screen, window_size=list(window_size))
     plotter.add_mesh(
         grid,
         scalars=field.name or "field",
         show_edges=show_edges,
-        cmap=cmap,
+        cmap=cmap,  # type: ignore[arg-type]  # pyvista's stub types cmap as a huge Literal; any str is valid
         show_scalar_bar=scalar_bar,
     )
     if title:
         plotter.add_text(title, font_size=10)
-    plotter.view_xy()
+    plotter.view_xy()  # type: ignore[call-arg]  # pyvista stub bug: view_xy wrapped as a method missing self
 
     if screenshot is not None:
         plotter.screenshot(str(screenshot))

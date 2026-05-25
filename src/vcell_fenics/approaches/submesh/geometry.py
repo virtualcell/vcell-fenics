@@ -51,7 +51,9 @@ def create_disk_with_membrane(
         gmsh.finalize()
 
     bulk_mesh = data.mesh
-    boundary_facets = data.facet_tags.find(2)
+    facet_tags = data.facet_tags
+    assert facet_tags is not None, "model_to_mesh returned no facet tags for the 'membrane' physical group"
+    boundary_facets = facet_tags.find(2)
 
     tdim = bulk_mesh.topology.dim
     submesh, entity_map, _vertex_map, _node_map = dmesh.create_submesh(bulk_mesh, tdim - 1, boundary_facets)

@@ -25,19 +25,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import ufl
 from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
 from mpi4py import MPI
 
-from vcell_fenics.backend._typing import (
-    DolfinxConstant,
-    DolfinxDirichletBC,
-    DolfinxFunction,
-    DolfinxFunctionSpace,
-    UflExpr,
-    UflForm,
-    UflMeasure,
-)
+from vcell_fenics.backend._typing import UflExpr
 
 
 class TermKind(Enum):
@@ -80,7 +73,7 @@ class BackwardEuler:
 
     name: str = "backward_euler"
 
-    def compose(self, problem: DiscreteProblem) -> tuple[UflForm, UflForm]:
+    def compose(self, problem: DiscreteProblem) -> tuple[ufl.Form, ufl.Form]:
         kinds = problem.term_kinds()
         if TermKind.TIME_DERIVATIVE not in kinds:
             raise NotImplementedError("steady-state lowering is not in the v1 backend yet")
@@ -108,16 +101,16 @@ class DiscreteProblem:
     """
 
     variable_name: str
-    V: DolfinxFunctionSpace
+    V: fem.FunctionSpace
     trial: UflExpr
     test: UflExpr
-    dx: UflMeasure
-    unknown: DolfinxFunction
-    previous: DolfinxFunction
-    dt: DolfinxConstant
+    dx: ufl.Measure
+    unknown: fem.Function
+    previous: fem.Function
+    dt: fem.Constant
     terms: tuple[Term, ...]
     scheme: BackwardEuler
-    bcs: list[DolfinxDirichletBC]
+    bcs: list[fem.DirichletBC]
 
     def __post_init__(self) -> None:
         self._a, self._L = self.scheme.compose(self)
@@ -142,11 +135,11 @@ class DiscreteProblem:
         return next(term.integrand for term in self.terms if term.kind is kind)
 
     @property
-    def bilinear_form(self) -> UflForm:
+    def bilinear_form(self) -> ufl.Form:
         return self._a
 
     @property
-    def linear_form(self) -> UflForm:
+    def linear_form(self) -> ufl.Form:
         return self._L
 
     # -- solve / state -------------------------------------------------------

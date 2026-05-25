@@ -147,8 +147,18 @@ files = ["src", "tests"]
 # Strict already enables warn_unused_ignores; keep it explicit so anyone
 # reading the config sees that `# type: ignore` comments must be load-bearing.
 warn_unused_ignores = true
+# The FEniCSx stack ships py.typed but leaves many functions unannotated, so
+# strict mode's disallow_untyped_calls would flag every grad()/dot()/Measure()
+# call. Exclude those packages from *that one* check while keeping every other
+# real check against their types. See ADR 005; the whole stack was previously
+# follow_imports="skip" (all Any), which also hid genuine type errors in our code.
+untyped_calls_exclude = ["ufl", "basix", "dolfinx", "pyvista", "scifem", "dolfinx_mpc"]
 
 [[tool.mypy.overrides]]
+# These packages either ship no types (gmsh, meshio) or partly-wrong ones;
+# ignore_missing_imports lets the untyped ones resolve to Any without a
+# "missing stubs" error. We no longer follow_imports="skip" — we use whatever
+# real types they provide (ADR 005).
 module = [
     "dolfinx.*",
     "ufl.*",
@@ -164,4 +174,3 @@ module = [
     "scipy.*",
 ]
 ignore_missing_imports = true
-follow_imports = "skip"

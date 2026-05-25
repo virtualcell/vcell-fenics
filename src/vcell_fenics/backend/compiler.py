@@ -27,9 +27,10 @@ from typing import Any
 
 import ufl
 from dolfinx import fem
+from dolfinx.mesh import Mesh
 from petsc4py import PETSc
 
-from vcell_fenics.backend._typing import DolfinxMesh, UflExpr
+from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, Name, Number, UnaryOp
 
 # Formalism standard functions that map to a single-argument UFL function
@@ -61,7 +62,7 @@ class CompileContext:
     `fem.Constant`s; `symbols` maps formalism names to UFL objects (parameters as
     Constants in increment 0)."""
 
-    mesh: DolfinxMesh
+    mesh: Mesh
     symbols: dict[str, UflExpr] = field(default_factory=dict)
 
 

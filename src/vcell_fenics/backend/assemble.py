@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import ufl
 from dolfinx import fem
+from dolfinx.mesh import Mesh
 from petsc4py import PETSc
 
-from vcell_fenics.backend._typing import DolfinxMesh, UflExpr
+from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind
 from vcell_fenics.backend.geometry import Geometry, cross_validate
@@ -101,7 +102,7 @@ def _single_static_diffusion_equation(md: MathDescription) -> TemplateEquation:
     return eq
 
 
-def _compile_context(md: MathDescription, mesh: DolfinxMesh) -> CompileContext:
+def _compile_context(md: MathDescription, mesh: Mesh) -> CompileContext:
     symbols: dict[str, UflExpr] = {"x": ufl.SpatialCoordinate(mesh)}
     for p in md.parameters:
         if not isinstance(p, ParameterConstant):
