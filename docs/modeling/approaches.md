@@ -69,6 +69,7 @@ See `docs/research/2026-05-21-fenicsx-ecosystem.md` for full library-state detai
 - No `ALE.move()` equivalent in DOLFINx 0.10 — write the mesh-motion solver yourself (~150–300 lines).
 - ρ as a boundary trace inherits DOFs from the bulk mesh; for genuinely membrane-resident species, this couples membrane resolution to bulk resolution. Independent surface DOFs (Approach B) avoid this.
 - Large deformations break ALE: protrusions, blebs, contact, division need remeshing or a different representation.
+- **Conservative field transfer on remeshing is the hard part, not the remeshing itself.** Node displacement preserves the material identity of surface elements, so ρ rides along for free — *until* you remesh, at which point ρ must be mapped from the old surface mesh to the new one without creating or destroying mass (∫_Γ ρ must be preserved to the dilution-balance tolerance). The front-tracking / FV literature treats this as a first-class problem with a standard menu of strategies — Lagrangian material-element tracking, space-time swept-volume control volumes, overlap-based conservative remapping (geometric intersection → sparse transfer matrix), or Eulerian narrow-band transport with a mass-correction step. The current backend sidesteps it by refusing to remesh (raises `MeshQualityError`); when remeshing lands this is the design decision to get right. See `docs/research/2026-06-06-cutcell-fronttracking-chatgpt.md`.
 
 ### B. Separate-mesh / mixed-dimensional
 
@@ -121,6 +122,7 @@ See `docs/research/2026-05-21-fenicsx-ecosystem.md` for full library-state detai
 - Pinned to DOLFINx 0.9 — version-pin conflict with the rest of the stack; needs a separate Pixi environment.
 - Source-only build, depends on a companion library `CutCells`.
 - Conditioning of the cut-cell system is delicate; stabilization choices matter.
+- **Cut geometry is regenerated per step, but the cut library gives you no temporal lineage.** CutFEMx / CutCells produce the cut subcells and interface facets at *each* time independently — they do not maintain a map from an old interface fragment to the new fragments it became (overlap / sweep / split / merge). For a conserved surface density that map is exactly what a conservative transfer needs, so as with Approach A's remeshing, the conservative-remap layer is yours to build (overlap intersection, space-time swept volumes, or Eulerian transport with correction). The implicit-interface representation removes mesh *motion*, not the conservation bookkeeping. See `docs/research/2026-06-06-cutcell-fronttracking-chatgpt.md`.
 
 ---
 
@@ -165,5 +167,17 @@ Precedent codebases: **FESTIM v2.0** (DOLFINx-migrated 2025) is the closest exam
 - **DOLFINx 0.10 release notes** ([docs.fenicsproject.org/dolfinx/v0.10.0/python/release_notes.html](https://docs.fenicsproject.org/dolfinx/v0.10.0/python/release_notes.html)) — mixed-dimensional API.
 - **CutFEMx** ([github.com/sclaus2/CutFEMx](https://github.com/sclaus2/CutFEMx)) — for Approach D.
 - **FEniCS Discourse — Mesh moving / ALE in DOLFINx** ([fenicsproject.discourse.group/t/.../18323](https://fenicsproject.discourse.group/t/mesh-moving-ale-in-dolfinx-example-or-official-api/18323)) — canonical answer for Approach A's mesh-motion pattern.
+
+### Related finite-volume / front-tracking work (cross-method reference)
+
+These are **FV / OpenFOAM / C++** codes, not FEniCSx — not integration candidates, but conceptual references for moving-surface transport and comparison baselines. Surfactant transport on a moving interface is mathematically the same object as this project's canonical surface PDE (surface advection–diffusion + dilution from area change + bulk–surface exchange), so the FV treatment of the geometric conservation law is directly relevant to getting `ρ ∇_Γ · v_Γ` right. Full notes and provenance in `docs/research/2026-06-06-cutcell-fronttracking-chatgpt.md`.
+
+- **`../vcell-mbsolver`** — VCell's moving-boundary solver, recently extracted into its own repo (was in the monorepo). It **bundles FronTier** (`FronTierLib/`) — i.e. the comparison baseline named throughout this doc is a FronTier-based front-tracking FV code — and now builds a `pybind11` Python module (`vcellmbsolver_py`), so it is callable from Python for side-by-side comparison. Also carries polygon-clipping (`clipperLink/`), the overlap-based conservative-remap machinery.
+- **FronTier / FronTier++** — the classic Stony Brook front-tracking library (the lineage of the baseline above). Historically important; no modern standalone release. Recent derivative activity is mainly AMReX-coupled AMR around the existing front-tracking core.
+- **twoPhaseInterTrackFoam** — OpenFOAM ALE interface-tracking module *with surfactants*; the closest FV cousin to the moving-surface conservative-transport problem here (FV analogue of Approach A). Strongest external reference for the dilution / GCL treatment.
+- **cfdmfFTFoam** — OpenFOAM front-tracking solver (explicit Lagrangian front mesh + Eulerian grid, remeshing, volume correction); closest architectural cousin to classic FronTier-style front tracking.
+- **LENT / lentFoam**, **PARIS** — hybrid level-set/front-tracking and structured-grid FT/VOF reference implementations, respectively.
+
+Note: explicit front tracking (a Lagrangian surface mesh advected and remeshed independently of any bulk) is effectively a fifth representation, not in the A–D taxonomy above — closest to Approach B but FV-flavored and reliant on conservative remap rather than FEM trace/mixed-dim coupling.
 
 Full library state and additional references in `docs/research/2026-05-21-fenicsx-ecosystem.md`.
