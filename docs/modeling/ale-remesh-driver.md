@@ -103,18 +103,21 @@ def remesh(state, target_h):
 | Needed | Status |
 |---|---|
 | `correct_surface_trace` (boundary post-pass) | **built** — `core/surface_remap_trace.py` |
-| `BulkBoundaryTrace` boundary extraction | **built** — needs a `boundary_loop()` accessor added |
-| **Bulk-conservative interpolation** `transfer_bulk` | not built — the *bulk* sibling of the surface remap (supermesh / `libsupermesh`, or DOLFINx interpolation + global mass correction). DOLFINx's own non-matching interpolation is pointwise, **not** conservative. |
-| **Region remesher** `mesh_region(loop, h)` | partial — the repo drives gmsh for disks; meshing an arbitrary deformed polyline (with optional fixed boundary nodes) is more |
+| `BulkBoundaryTrace` boundary extraction | **built** — `boundary_loop()` accessor added |
+| **Bulk-conservative interpolation** `transfer_bulk` | **built** — `core/bulk_remap.py` (supermesh kernel) + `core/bulk_remap_mesh.py` (`remap_bulk_function`, the DOLFINx-Function bridge with optional global mass correction) |
+| **Region remesher** `mesh_region(loop, h)` | **built** — `core/region_remesh.py`; meshes an arbitrary deformed polyline, with `fix_boundary_nodes` for the interior-only fast path |
 | **`DiscreteProblem` rebuild path** | not built — the IR is build-once |
 | **Approach-A bulk mesh-motion** (harmonic-extension displacement PDE writing `geometry.x`) | not built — current motion is on the membrane submesh, not a bulk mesh |
 
-The driver is mostly *glue over unbuilt pieces*; the trace correction is the one ready
-component, and step (d) above is exactly where it slots. The critical-path prerequisite is
-**bulk-conservative interpolation** (`transfer_bulk`) — the natural next `core/` increment,
-mirroring the surface remap already built (it is the FEM form of the 2D overlap remap the
-`../vcell-mbsolver` baseline does on Voronoi cells; see `approaches.md` "Related
-finite-volume / front-tracking work").
+As of 2026-06-11 the three `core/` field-transfer + meshing prerequisites are all built —
+the surface-trace correction (step d), the bulk-conservative interpolation `transfer_bulk`
+(steps c; `remap_bulk_function`, the FEM form of the 2D overlap remap the
+`../vcell-mbsolver` baseline does on Voronoi cells), and the region remesher `mesh_region`
+(step b). What remains is the *backend-structural* glue, not new `core/` primitives: the
+**`DiscreteProblem` rebuild path** (subtlety 2 — the biggest change, since the IR is
+build-once) and **Approach-A bulk mesh-motion** (the harmonic-extension displacement that
+moves interior nodes with the boundary; today's motion is membrane-submesh only). With
+those two, `remesh()` and `step_with_remeshing()` become assemblable from existing parts.
 
 ## Verification plan (when built)
 

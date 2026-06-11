@@ -138,6 +138,7 @@ src/vcell_fenics/
     surface_remap_trace.py    #   Approach-A bulk-trace correction              [done]
     bulk_remap.py             #   conservative bulk (2D area) remap kernel      [done]
     bulk_remap_mesh.py        #   DOLFINx Function bridge for bulk fields       [done]
+    region_remesh.py          #   gmsh region remesher (polyline -> fresh mesh) [done]
     biochemistry.py           #   surface ρ RHS: surface Laplacian + reaction + dilution  [planned]
     mechanics/                #   constitutive laws                            [planned]
     time_integrators.py       #   [planned]
@@ -169,6 +170,10 @@ src/vcell_fenics/
 - `bulk_remap_mesh.py` — the **DOLFINx bridge**. Much simpler than the surface bridge: no loop-ordering, because for a P1 space on a triangle mesh the dof index *is* the vertex-array row and `V.dofmap.list` *is* the (n_cells, 3) triangle list. `remap_bulk_function(u_old, V_new, conserve=True)` reads `c_old` and `(verts, tris)` straight off `u_old`'s mesh, runs the kernel, writes `c_new` into a new `Function` on `V_new`, and (with `conserve=True`) rescales so the volume integral on the new mesh equals the old exactly — closing the geometric gap when the two meshes approximate the same domain (e.g. a disk) at different resolutions.
 
   *Scope:* serial, P1, 2D triangle mesh. Deferred: MPI/multi-rank, higher-order spaces, 3D tetrahedra, broad-phase acceleration for large meshes.
+
+**The region remesher (implemented).** `region_remesh.py` — `mesh_region(loop, h)` drives gmsh (geo kernel: one point per loop vertex, straight segments, one plane surface) to produce a fresh uniform-quality 2D mesh of the region a closed polyline encloses. This is step (b) of the ALE remesh routine (`docs/modeling/ale-remesh-driver.md`) — meshing an *arbitrary deformed* boundary, not just the analytic disk the geometry helpers build. Because the boundary segments are straight, any nodes gmsh inserts along them stay on the polyline, so the meshed region is exactly the input polygon and its area is preserved to round-off. `fix_boundary_nodes=True` forces exactly the input vertices onto the boundary (Γ_new ⊂ Γ_old) — the interior-only fast path that lets `correct_surface_trace` be skipped (subtlety 3 of the driver sketch). `h` is the authoritative uniform size (gmsh's extend-from-boundary / from-points / from-curvature sizing is disabled, so a deformed boundary's non-uniform spacing is not inherited). The deformed loop itself is recovered from a live mesh via `BulkBoundaryTrace.boundary_loop()`.
+
+  *Scope:* serial, 2D, a single simple closed loop; the caller owns the self-intersection / pinch-off guard. Deferred: holes / multiple loops, 3D, MPI.
 
 **Shared abstractions worth investing in:**
 
