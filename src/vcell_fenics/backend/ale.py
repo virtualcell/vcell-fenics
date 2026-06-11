@@ -12,12 +12,15 @@ makes a fresh mesh of the deformed configuration, `rebuild_on_mesh` reassembles 
 build-once IR on it with conservative state transfer, and the per-step
 backward-Euler solve is unchanged.
 
-**Scope (v1): the moving *membrane* (a 1D codim-1 submesh in 2D).** The deformed
-membrane is remeshed as the boundary of a freshly meshed region; ρ rides along via
-the conservative surface remap. The Approach-A case — ρ as a bulk *trace* on a
-2D mesh whose interior nodes move by harmonic extension — needs bulk mesh-motion
-(not built) and would additionally route the transfer through `correct_surface_trace`
-(built, waiting). Until then `_remesh_membrane` guards to 1D meshes.
+**Scope: a moving 2D region, either a codim-0 bulk or a codim-1 membrane.** A moving
+*bulk* (its interior nodes carried by harmonic-extension mesh-motion) is remeshed
+directly — the deformed boundary loop becomes the boundary of a fresh `mesh_region`
+mesh, and the bulk field is transferred conservatively (`remap_bulk_function`). A
+moving *membrane* is remeshed as the boundary of a freshly meshed region, with ρ
+carried by the conservative surface remap. `_remesh` dispatches on codimension. The
+genuine Approach-A case where ρ is a bulk *trace* (a surface PDE on bulk boundary
+facets) is a separate modelling increment; its transfer would route through
+`correct_surface_trace` (built, waiting), but the trace-PDE physics does not exist yet.
 
 The remesh trigger is *proactive on accumulated distortion*: each step checks how
 far the mesh has deformed since it was last built (`mesh_quality_growth`) and
@@ -40,7 +43,7 @@ from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
 from vcell_fenics.backend.discrete import DiscreteProblem, MeshQualityError
 from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.solver import SolverConfiguration
-from vcell_fenics.core import mesh_region, ordered_membrane_loop
+from vcell_fenics.core import BulkBoundaryTrace, mesh_region, ordered_membrane_loop
 from vcell_fenics.formalism.schema import MathDescription
 
 
@@ -72,7 +75,7 @@ class ALEState:
         `target_h`, conservatively transferring state. The build-once IR is rebuilt,
         not mutated (ADR 004)."""
 
-        new_mesh = _remesh_membrane(self.problem, target_h)
+        new_mesh = _remesh(self.problem, target_h)
         self.problem = rebuild_on_mesh(self.problem, self.md, new_mesh)
         self.remesh_count += 1
 
@@ -114,22 +117,34 @@ def run_with_remeshing(
     return state
 
 
-def _remesh_membrane(problem: DiscreteProblem, target_h: float) -> Mesh:
-    """A fresh 1D membrane mesh of the current (deformed) configuration at resolution
-    `target_h`: order the deformed boundary off the current mesh, mesh the region it
-    encloses (`mesh_region`), and extract that region's boundary as a new codim-1
-    submesh. v1 remeshes a 1D membrane only — bulk (Approach-A) mesh motion is later
-    work."""
+def _remesh(problem: DiscreteProblem, target_h: float) -> Mesh:
+    """A fresh mesh of the current (deformed) configuration at resolution `target_h`,
+    dispatched on the subdomain's codimension:
+
+    - **codim-0 (a moving bulk region).** The deformed boundary loop is recovered
+      from the bulk mesh (`BulkBoundaryTrace.boundary_loop()`) and meshed directly:
+      `mesh_region` returns the new bulk mesh, whose boundary is that same polyline,
+      so the old and new meshes triangulate the same deformed polygon and the bulk
+      transfer in `rebuild_on_mesh` (`remap_bulk_function`) conserves to round-off.
+    - **codim-1 (a moving membrane).** Order the deformed loop off the membrane mesh,
+      mesh the region it encloses, and extract that region's boundary as the new
+      codim-1 submesh.
+    """
 
     mesh = problem.V.mesh
-    if mesh.topology.dim != 1:
-        raise NotImplementedError(
-            "the v1 ALE driver remeshes a 1D membrane; bulk (Approach-A) mesh motion is later work"
-        )
-    loop, _order = ordered_membrane_loop(fem.functionspace(mesh, ("Lagrange", 1)))
-    bulk = mesh_region(loop, target_h)
-    tdim = bulk.topology.dim
-    bulk.topology.create_connectivity(tdim - 1, tdim)
-    facets = exterior_facet_indices(bulk.topology)
-    membrane, *_ = create_submesh(bulk, tdim - 1, facets)
-    return membrane
+    gdim = mesh.geometry.dim
+    if mesh.topology.dim == gdim:
+        loop = BulkBoundaryTrace(problem.V).boundary_loop()
+        return mesh_region(loop, target_h)
+    if mesh.topology.dim == gdim - 1:
+        loop, _order = ordered_membrane_loop(fem.functionspace(mesh, ("Lagrange", 1)))
+        bulk = mesh_region(loop, target_h)
+        tdim = bulk.topology.dim
+        bulk.topology.create_connectivity(tdim - 1, tdim)
+        facets = exterior_facet_indices(bulk.topology)
+        membrane, *_ = create_submesh(bulk, tdim - 1, facets)
+        return membrane
+    raise NotImplementedError(
+        f"the ALE driver remeshes a codim-0 bulk or codim-1 membrane in 2D; got topology dim "
+        f"{mesh.topology.dim} in {gdim}D"
+    )
