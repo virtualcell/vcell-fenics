@@ -106,18 +106,24 @@ def remesh(state, target_h):
 | `BulkBoundaryTrace` boundary extraction | **built** — `boundary_loop()` accessor added |
 | **Bulk-conservative interpolation** `transfer_bulk` | **built** — `core/bulk_remap.py` (supermesh kernel) + `core/bulk_remap_mesh.py` (`remap_bulk_function`, the DOLFINx-Function bridge with optional global mass correction) |
 | **Region remesher** `mesh_region(loop, h)` | **built** — `core/region_remesh.py`; meshes an arbitrary deformed polyline, with `fix_boundary_nodes` for the interior-only fast path |
-| **`DiscreteProblem` rebuild path** | not built — the IR is build-once |
+| **`DiscreteProblem` rebuild path** | **built** — `backend.rebuild_on_mesh(problem, md, new_mesh)`; teardown + reassemble on the new mesh with conservative transfer of **both** `unknown` and `previous` (scalar / vector, bulk / surface by tdim). This is `assemble_on(new)` + steps (c)+(d) of `remesh()` fused into one call. |
 | **Approach-A bulk mesh-motion** (harmonic-extension displacement PDE writing `geometry.x`) | not built — current motion is on the membrane submesh, not a bulk mesh |
 
-As of 2026-06-11 the three `core/` field-transfer + meshing prerequisites are all built —
-the surface-trace correction (step d), the bulk-conservative interpolation `transfer_bulk`
-(steps c; `remap_bulk_function`, the FEM form of the 2D overlap remap the
-`../vcell-mbsolver` baseline does on Voronoi cells), and the region remesher `mesh_region`
-(step b). What remains is the *backend-structural* glue, not new `core/` primitives: the
-**`DiscreteProblem` rebuild path** (subtlety 2 — the biggest change, since the IR is
-build-once) and **Approach-A bulk mesh-motion** (the harmonic-extension displacement that
-moves interior nodes with the boundary; today's motion is membrane-submesh only). With
-those two, `remesh()` and `step_with_remeshing()` become assemblable from existing parts.
+As of 2026-06-11 the three `core/` field-transfer + meshing prerequisites and the
+`DiscreteProblem` rebuild path are all built — the surface-trace correction (step d), the
+bulk-conservative interpolation `transfer_bulk` (step c; `remap_bulk_function`, the FEM
+form of the 2D overlap remap the `../vcell-mbsolver` baseline does on Voronoi cells), the
+region remesher `mesh_region` (step b), and `backend.rebuild_on_mesh` (steps c+d fused:
+reassemble on the new mesh + conservatively transfer `unknown` and `previous`; subtleties
+1 and 2). `rebuild_on_mesh` currently calls the `core` remaps *directly* on the subdomain
+field rather than going through the bulk-remap-then-`correct_surface_trace` two-step — that
+two-step is the Approach-A path where ρ is a bulk *trace*; the v1 backend's fields are the
+subdomain's own DOFs (Approach-B-flavoured), so the direct remap is correct and conservative
+for it. The remaining gap is **Approach-A bulk mesh-motion** (the harmonic-extension
+displacement that moves *interior* nodes with the boundary; today's motion is
+membrane-submesh only) plus the thin driver loop itself (`step_with_remeshing` — the
+predictive quality check + `mesh_region(BulkBoundaryTrace.boundary_loop(), h)` +
+`rebuild_on_mesh`). With Approach-A motion in place those compose from existing parts.
 
 ## Verification plan (when built)
 

@@ -34,6 +34,7 @@ from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind
 from vcell_fenics.backend.geometry import Geometry, cross_validate
+from vcell_fenics.core import remap_bulk_function, remap_surface_function
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
     MathDescription,
@@ -61,15 +62,67 @@ def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: i
         raise FormalismValidationError(geometry_errors)
 
     equations = _resolve_equations(md)
+    mesh = geometry.mesh_of(equations[0].subdomain)
+    ctx = _compile_context(md, mesh)
+    problem = _build_problem(md, equations, mesh, ctx, dt=dt, fe_degree=fe_degree)
+    _apply_initial_conditions(problem, equations, ctx, len(equations))
+    return problem
+
+
+def rebuild_on_mesh(
+    problem: DiscreteProblem, md: MathDescription, new_mesh: Mesh, *, conserve: bool = True
+) -> DiscreteProblem:
+    """Rebuild `problem` on `new_mesh` after a remesh, transferring its state.
+
+    The IR is build-once (ADR 004): its forms, `LinearProblem`, and mesh-motion
+    are bound to the *old* mesh, so a remesh is teardown + reassemble, not mutation
+    (subtlety 2 of `docs/modeling/ale-remesh-driver.md`). This re-runs the term
+    construction on `new_mesh` — same structure (term kinds, parameters, motion),
+    with the velocity and dilution coefficient re-derived on the new geometry — and
+    then conservatively transfers **both** `unknown` and `previous` via the `core`
+    remaps. Transferring `previous` too is load-bearing: backward Euler references
+    uⁿ on the new mesh, so leaving it un-transferred corrupts the first post-remesh
+    step (subtlety 1).
+
+    No initial condition is applied — the state comes from the transfer, not the
+    model's IC. The fresh `_MeshMotion` re-derives its quality budget from the new
+    (good) mesh, so the remesh resets the tangling headroom. v1 is P1-only (the
+    conservative remaps require P1) and transfers a bulk (2D) or surface (1D)
+    subdomain field.
+    """
+
+    degree = int(problem.V.ufl_element().degree)
+    if degree != 1:
+        raise NotImplementedError("the rebuild path is P1-only in v1 (the conservative remaps require P1)")
+
+    equations = _resolve_equations(md)
+    ctx = _compile_context(md, new_mesh)
+    new_problem = _build_problem(md, equations, new_mesh, ctx, dt=float(problem.dt.value), fe_degree=degree)
+    _transfer_state(problem.unknown, new_problem.unknown, conserve=conserve)
+    _transfer_state(problem.previous, new_problem.previous, conserve=conserve)
+    return new_problem
+
+
+def _build_problem(
+    md: MathDescription,
+    equations: list[TemplateEquation],
+    mesh: Mesh,
+    ctx: CompileContext,
+    *,
+    dt: float,
+    fe_degree: int,
+) -> DiscreteProblem:
+    """Build a lowered `DiscreteProblem` on `mesh` from already-resolved equations
+    and a compile context bound to `mesh`. No validation, no IC — the shared core
+    of `assemble` (fresh build) and `rebuild_on_mesh` (post-remesh)."""
+
     subdomain = equations[0].subdomain
-    mesh = geometry.mesh_of(subdomain)
     n = len(equations)
     element = ("Lagrange", fe_degree) if n == 1 else ("Lagrange", fe_degree, (n,))
     V = fem.functionspace(mesh, element)
     trial, test = ufl.TrialFunction(V), ufl.TestFunction(V)
     components = [(trial, test)] if n == 1 else [(trial[k], test[k]) for k in range(n)]
     dx = ufl.Measure("dx", domain=mesh)
-    ctx = _compile_context(md, mesh)
     velocity = _motion_velocity(md, subdomain, ctx)
     # Each governed variable bound to its component trial, so a source linear in
     # the unknowns (incl. cross-variable terms) lands in the implicit bilinear.
@@ -88,7 +141,7 @@ def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: i
             terms.append(Term(TermKind.SOURCE, source * w))
 
     names = ",".join(eq.variable for eq in equations)
-    problem = DiscreteProblem(
+    return DiscreteProblem(
         variable_name=names,
         V=V,
         trial=trial,
@@ -102,8 +155,32 @@ def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: i
         bcs=[],
         motion_velocity=velocity,
     )
-    _apply_initial_conditions(problem, equations, ctx, n)
-    return problem
+
+
+def _transfer_state(src: fem.Function, dst: fem.Function, *, conserve: bool) -> None:
+    """Conservatively transfer `src` (old mesh) into `dst` (new mesh), component by
+    component for a coupled vector space. The remap is chosen by topological
+    dimension: a 2D subdomain is a bulk field, a 1D subdomain a surface field."""
+
+    tdim = src.function_space.mesh.topology.dim
+    n = src.function_space.num_sub_spaces
+    if n == 0:
+        dst.x.array[:] = _remap_scalar(src, dst.function_space, tdim, conserve).x.array
+        return
+    for k in range(n):
+        V_src_k, src_dofs = src.function_space.sub(k).collapse()
+        src_k = fem.Function(V_src_k, name=src.name)
+        src_k.x.array[:] = src.x.array[src_dofs]
+        V_dst_k, dst_dofs = dst.function_space.sub(k).collapse()
+        dst.x.array[dst_dofs] = _remap_scalar(src_k, V_dst_k, tdim, conserve).x.array
+
+
+def _remap_scalar(src: fem.Function, V_new: fem.FunctionSpace, tdim: int, conserve: bool) -> fem.Function:
+    if tdim == 2:
+        return remap_bulk_function(src, V_new, conserve=conserve)
+    if tdim == 1:
+        return remap_surface_function(src, V_new, conserve=conserve)
+    raise NotImplementedError(f"the rebuild path transfers 1D (surface) or 2D (bulk) fields, not tdim {tdim}")
 
 
 def _apply_initial_conditions(

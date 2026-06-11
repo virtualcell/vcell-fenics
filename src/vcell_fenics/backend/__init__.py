@@ -9,7 +9,7 @@ The `formalism` package (schema / parser / validator) stays pure-Python with no
 FEniCSx dependency; this package is where DOLFINx enters.
 """
 
-from vcell_fenics.backend.assemble import assemble
+from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
 from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
 from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, MeshQualityError, Term, TermKind
 from vcell_fenics.backend.geometry import (
@@ -42,6 +42,7 @@ __all__ = [
     "load_geometry",
     "make_disk_geometry",
     "make_disk_membrane_geometry",
+    "rebuild_on_mesh",
     "register_geometry",
     "run",
 ]
