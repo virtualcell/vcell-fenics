@@ -217,3 +217,5 @@ signatures generalize.
   `approaches.md` "Related finite-volume / front-tracking work".
 - `docs/research/2026-06-06-cutcell-fronttracking-chatgpt.md` — the cut-cell /
   front-tracking survey that surfaced the conservative-remap-on-remeshing problem.
+- `docs/modeling/ale-remesh-driver.md` — the forward-looking sketch of the ALE remesh
+  loop that calls `correct_surface_trace` as its boundary post-pass.
