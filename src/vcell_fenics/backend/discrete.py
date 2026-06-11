@@ -47,6 +47,9 @@ class TermKind(Enum):
     ADVECTION = "advection"
     DILUTION = "dilution"
     SOURCE = "source"
+    # Boundary contributions (integrated over a labelled boundary measure, not dx).
+    NEUMANN = "neumann"
+    ROBIN = "robin"
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,24 @@ class Term:
 
     kind: TermKind
     integrand: UflExpr | None = None
+
+
+@dataclass(frozen=True)
+class BoundaryTerm:
+    """A weak-form contribution integrated over a labelled boundary `measure` (a
+    restricted `ds`) — for non-zero Neumann and Robin BCs.
+
+    `integrand` is the *signed* residual contribution: the assembler bakes in the
+    sign and coefficients, so lowering just adds `dt · integrand · measure` to the
+    residual form. The implicit-in-`u` part of a Robin term lands in the bilinear
+    form via the same `ufl.lhs`/`rhs` split the `SOURCE` term relies on. Dirichlet
+    BCs are *strong* (they live in `DiscreteProblem.bcs`), not here; the implicit
+    zero-Neumann default is simply the absence of any boundary term.
+    """
+
+    kind: TermKind
+    integrand: UflExpr
+    measure: ufl.Measure
 
 
 @dataclass(frozen=True)
@@ -89,15 +110,18 @@ class BackwardEuler:
         trial, test, dt = problem.trial, problem.test, problem.dt
         # mass: (uⁿ⁺¹ − uⁿ)·w. `inner` so a mixed/vector space (coupled species)
         # sums its components; for a scalar space it is just the product.
-        residual = ufl.inner(trial - problem.previous, test)
+        form = ufl.inner(trial - problem.previous, test) * problem.dx
         for term in problem.terms:
             if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
                 continue
             if term.kind is TermKind.SOURCE:
-                residual = residual - dt * term.integrand  # +s on the PDE's RHS ⇒ −s in the residual
+                form = form - dt * term.integrand * problem.dx  # +s on the PDE's RHS ⇒ −s in the residual
             else:
-                residual = residual + dt * term.integrand  # diffusion, dilution, advection
-        form = residual * problem.dx
+                form = form + dt * term.integrand * problem.dx  # diffusion, dilution, advection
+        # Boundary contributions integrate over their own (restricted) measure; the
+        # assembler has baked the residual sign into each integrand.
+        for boundary in problem.boundary_terms:
+            form = form + dt * boundary.integrand * boundary.measure
         return ufl.lhs(form), ufl.rhs(form)
 
 
@@ -252,6 +276,8 @@ class DiscreteProblem:
     terms: tuple[Term, ...]
     scheme: BackwardEuler
     bcs: list[fem.DirichletBC]
+    # Non-zero Neumann / Robin contributions (Dirichlet BCs are strong, in `bcs`).
+    boundary_terms: tuple[BoundaryTerm, ...] = ()
     # Prescribed substrate velocity (a UFL vector field). When set, each step
     # advances the mesh by dt·velocity before solving — the moving-subdomain
     # protocol of §1.10. None means a static subdomain.
@@ -275,6 +301,12 @@ class DiscreteProblem:
 
     def term_kinds(self) -> set[TermKind]:
         return {term.kind for term in self.terms}
+
+    def boundary_kinds(self) -> set[TermKind]:
+        """The kinds of boundary term present (NEUMANN / ROBIN). Empty when every
+        boundary is the implicit zero-Neumann default or a strong Dirichlet."""
+
+        return {boundary.kind for boundary in self.boundary_terms}
 
     def mesh_quality_growth(self) -> float:
         """How far the mesh has distorted since this problem was built, as a

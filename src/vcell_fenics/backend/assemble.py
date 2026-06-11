@@ -25,18 +25,27 @@ initial condition is applied here by interpolation (§3.2.2).
 
 from __future__ import annotations
 
+from typing import cast
+
+import numpy as np
 import ufl
 from dolfinx import fem
+from dolfinx import mesh as dmesh
 from dolfinx.mesh import Mesh
 from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
-from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind
+from vcell_fenics.backend.discrete import BackwardEuler, BoundaryTerm, DiscreteProblem, Term, TermKind
 from vcell_fenics.backend.geometry import Geometry, cross_validate
 from vcell_fenics.core import remap_bulk_function, remap_surface_function
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
+    BCDirichlet,
+    BCInterfaceFluxBalance,
+    BCInterfaceValueEquality,
+    BCNeumann,
+    BCRobin,
     MathDescription,
     MotionNone,
     MotionPrescribedVelocity,
@@ -64,7 +73,7 @@ def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: i
     equations = _resolve_equations(md)
     mesh = geometry.mesh_of(equations[0].subdomain)
     ctx = _compile_context(md, mesh)
-    problem = _build_problem(md, equations, mesh, ctx, dt=dt, fe_degree=fe_degree)
+    problem = _build_problem(md, equations, mesh, ctx, dt=dt, fe_degree=fe_degree, geometry=geometry)
     _apply_initial_conditions(problem, equations, ctx, len(equations))
     return problem
 
@@ -94,6 +103,11 @@ def rebuild_on_mesh(
     degree = int(problem.V.ufl_element().degree)
     if degree != 1:
         raise NotImplementedError("the rebuild path is P1-only in v1 (the conservative remaps require P1)")
+    if problem.bcs or problem.boundary_terms:
+        raise NotImplementedError(
+            "rebuilding a problem with Dirichlet/Neumann/Robin BCs on a remeshed mesh is not supported yet "
+            "(the labelled boundary must be re-identified on the new mesh); BCs are for static geometry in v1"
+        )
 
     equations = _resolve_equations(md)
     ctx = _compile_context(md, new_mesh)
@@ -111,10 +125,13 @@ def _build_problem(
     *,
     dt: float,
     fe_degree: int,
+    geometry: Geometry | None = None,
 ) -> DiscreteProblem:
     """Build a lowered `DiscreteProblem` on `mesh` from already-resolved equations
     and a compile context bound to `mesh`. No validation, no IC — the shared core
-    of `assemble` (fresh build) and `rebuild_on_mesh` (post-remesh)."""
+    of `assemble` (fresh build) and `rebuild_on_mesh` (post-remesh). When `geometry`
+    is given, the MathDescription's boundary conditions are translated too (the
+    rebuild path passes none — BCs are static-geometry only in v1)."""
 
     subdomain = equations[0].subdomain
     n = len(equations)
@@ -140,6 +157,12 @@ def _build_problem(
             source = compile_expression(parse(eq.terms["source"]), CompileContext(mesh, {**ctx.symbols, **var_trials}))
             terms.append(Term(TermKind.SOURCE, source * w))
 
+    bcs, boundary_terms = (
+        _build_boundary_conditions(md, equations, geometry, mesh, V, components, ctx)
+        if geometry is not None
+        else ([], [])
+    )
+
     names = ",".join(eq.variable for eq in equations)
     return DiscreteProblem(
         variable_name=names,
@@ -152,9 +175,106 @@ def _build_problem(
         dt=fem.Constant(mesh, PETSc.ScalarType(float(dt))),  # type: ignore[operator]
         terms=tuple(terms),
         scheme=BackwardEuler(),
-        bcs=[],
+        bcs=bcs,
+        boundary_terms=tuple(boundary_terms),
         motion_velocity=velocity,
     )
+
+
+_BC_TAG = 1
+
+
+def _build_boundary_conditions(
+    md: MathDescription,
+    equations: list[TemplateEquation],
+    geometry: Geometry,
+    mesh: Mesh,
+    V: fem.FunctionSpace,
+    components: list[tuple[UflExpr, UflExpr]],
+    ctx: CompileContext,
+) -> tuple[list[fem.DirichletBC], list[BoundaryTerm]]:
+    """Translate the MathDescription's boundary conditions into strong Dirichlet BCs
+    and weak Neumann / Robin boundary terms.
+
+    Scope (v1): external Dirichlet / Neumann / Robin on a labelled boundary of *this*
+    solve's subdomain. The two interface kinds need an internal boundary between two
+    subdomains (multi-compartment geometry) and raise `NotImplementedError`.
+    Expressions are compiled against `ctx` (`x` + constant parameters); a BC
+    referencing another variable or time `t` is out of the v1 subset and surfaces as
+    a `CompileError`.
+    """
+
+    subdomain = equations[0].subdomain
+    var_index = {eq.variable: k for k, eq in enumerate(equations)}
+    n = len(equations)
+    fdim = mesh.topology.dim - 1
+    mesh.topology.create_connectivity(fdim, mesh.topology.dim)
+
+    bcs: list[fem.DirichletBC] = []
+    boundary_terms: list[BoundaryTerm] = []
+    for bc in md.boundary_conditions:
+        if isinstance(bc, BCInterfaceValueEquality | BCInterfaceFluxBalance):
+            raise NotImplementedError(
+                "backend v1 supports external Dirichlet/Neumann/Robin BCs; an interface BC needs an internal "
+                "boundary between two subdomains (multi-compartment geometry), a later increment"
+            )
+        if bc.variable not in var_index:
+            raise NotImplementedError(
+                f"BC references variable {bc.variable!r}, not governed in this solve's subdomain {subdomain!r}"
+            )
+        bgeo = geometry.boundary_of(bc.boundary)
+        if bgeo is None:  # cross_validate already guards this; belt-and-braces for direct callers
+            raise NotImplementedError(f"BC boundary {bc.boundary!r} is not a labelled boundary of the geometry")
+        if bgeo.subdomain != subdomain:
+            raise NotImplementedError(
+                f"BC boundary {bc.boundary!r} bounds subdomain {bgeo.subdomain!r}, not this solve's {subdomain!r}"
+            )
+        k = var_index[bc.variable]
+        u, w = components[k]
+        if isinstance(bc, BCDirichlet):
+            bcs.append(_dirichlet_bc(bc, V, n, k, fdim, bgeo.facets, ctx))
+        elif isinstance(bc, BCNeumann):
+            # D∇u·n = h ⇒ the weak boundary term ∫_Γ h·v ds enters the residual as −h·v.
+            h = compile_expression(parse(bc.expression), ctx)
+            boundary_terms.append(BoundaryTerm(TermKind.NEUMANN, -h * w, _restricted_ds(mesh, bgeo.facets)))
+        elif isinstance(bc, BCRobin):
+            # αu + βD∇u·n = h ⇒ D∇u·n = (h − αu)/β ⇒ residual gains (α/β)u·v − (h/β)·v.
+            alpha = compile_expression(parse(bc.alpha), ctx)
+            beta = compile_expression(parse(bc.beta), ctx)
+            h = compile_expression(parse(bc.expression), ctx)
+            integrand = (alpha / beta) * u * w - (h / beta) * w
+            boundary_terms.append(BoundaryTerm(TermKind.ROBIN, integrand, _restricted_ds(mesh, bgeo.facets)))
+    return bcs, boundary_terms
+
+
+def _dirichlet_bc(
+    bc: BCDirichlet, V: fem.FunctionSpace, n: int, k: int, fdim: int, facets: np.ndarray, ctx: CompileContext
+) -> fem.DirichletBC:
+    """A strong Dirichlet BC u = g on the labelled boundary. For a coupled vector
+    space the constraint is applied on the k-th component subspace."""
+
+    g = compile_expression(parse(bc.expression), ctx)
+    if n == 1:
+        value = fem.Function(V, name=f"{bc.variable}_bc")
+        value.interpolate(fem.Expression(g, V.element.interpolation_points))
+        return fem.dirichletbc(value, fem.locate_dofs_topological(V, fdim, facets))
+    sub = V.sub(k)
+    sub_space, _ = sub.collapse()
+    value = fem.Function(sub_space, name=f"{bc.variable}_bc")
+    value.interpolate(fem.Expression(g, sub_space.element.interpolation_points))
+    dofs = fem.locate_dofs_topological((sub, sub_space), fdim, facets)
+    return fem.dirichletbc(value, dofs, sub)
+
+
+def _restricted_ds(mesh: Mesh, facets: np.ndarray) -> ufl.Measure:
+    """An exterior-facet measure restricted to `facets` (a labelled boundary)."""
+
+    facets = np.asarray(facets, dtype=np.int32)
+    order = np.argsort(facets)
+    tags = dmesh.meshtags(
+        mesh, mesh.topology.dim - 1, facets[order], np.full(facets.shape, _BC_TAG, dtype=np.int32)
+    )
+    return cast(ufl.Measure, ufl.Measure("ds", domain=mesh, subdomain_data=tags)(_BC_TAG))
 
 
 def _transfer_state(src: fem.Function, dst: fem.Function, *, conserve: bool) -> None:

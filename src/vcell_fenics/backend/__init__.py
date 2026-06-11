@@ -12,8 +12,16 @@ FEniCSx dependency; this package is where DOLFINx enters.
 from vcell_fenics.backend.ale import ALEState, StepTooLarge, run_with_remeshing, step_with_remeshing
 from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
 from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
-from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, MeshQualityError, Term, TermKind
+from vcell_fenics.backend.discrete import (
+    BackwardEuler,
+    BoundaryTerm,
+    DiscreteProblem,
+    MeshQualityError,
+    Term,
+    TermKind,
+)
 from vcell_fenics.backend.geometry import (
+    BoundaryGeometry,
     Geometry,
     SubdomainGeometry,
     clear_geometries,
@@ -28,6 +36,8 @@ from vcell_fenics.backend.solver import SolverConfiguration, run
 __all__ = [
     "ALEState",
     "BackwardEuler",
+    "BoundaryGeometry",
+    "BoundaryTerm",
     "CompileContext",
     "CompileError",
     "DiscreteProblem",

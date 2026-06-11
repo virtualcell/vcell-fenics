@@ -2106,7 +2106,8 @@ This backend is the canonical implementation of the formalism and the reference 
 
 - The full Part 2 layer: schema dataclasses, YAML/JSON loader + dumper, the expression parser → typed AST (`src/vcell_fenics/formalism/`), and the validation pass (`formalism/validator.py`) — every check of §1.11 except the geometry cross-check and BC-expression contents, which run at the backend boundary.
 - The formalism → DOLFINx backend (`src/vcell_fenics/backend/`, ADR 004): an expression→UFL compiler, a `DiscreteProblem` IR with backward-Euler lowering via a residual `ufl.lhs`/`ufl.rhs` split, a geometry adapter + name loader + §1.11.10 cross-check, and the `assemble` / `run` driver with a `SolverConfiguration`.
-- T1 (bulk RAD) and T2 (surface PDE with dilution), `temporality: time_dependent`, with: scalar variables and **coupled multi-species systems** (one solve over a vector space); the `diffusion` and `source` slots (a source linear in the unknowns, including cross-variable coupling); prescribed-**velocity** motion with **automatic dilution** `ρ ∇_Γ·v_Γ` and a per-step mesh advance guarded by a mesh-quality check; zero-Neumann external BC; constant and expression parameters; spatially-varying ICs. Backward Euler, $P_1$ Lagrange (configurable), direct LU.
+- T1 (bulk RAD) and T2 (surface PDE with dilution), `temporality: time_dependent`, with: scalar variables and **coupled multi-species systems** (one solve over a vector space); the `diffusion` and `source` slots (a source linear in the unknowns, including cross-variable coupling); prescribed-**velocity** motion with **automatic dilution** `ρ ∇_Γ·v_Γ` and a per-step mesh advance guarded by a mesh-quality check; external **Dirichlet / Neumann / Robin** BCs on a labelled boundary (with the zero-Neumann no-flux default where none is declared); constant and expression parameters; spatially-varying ICs. Backward Euler, $P_1$ Lagrange (configurable), direct LU.
+- **ALE remeshing** (`src/vcell_fenics/core/`, `backend/ale.py`): conservative surface and bulk field remaps, a gmsh region remesher, a `rebuild_on_mesh` teardown+reassemble of the build-once IR, harmonic-extension bulk mesh-motion, and a `step_with_remeshing` / `run_with_remeshing` driver that turns the mesh-quality guard into remesh-and-continue for a moving membrane or bulk region (`docs/modeling/ale-remesh-driver.md`).
 - Visualization helpers — PyVista in-process, XDMF for ParaView (`src/vcell_fenics/viz.py`).
 
 The three v1 conformance models run **through the formalism** (`tests/test_backend_*.py`): bulk diffusion, the surface cos(kθ) eigenmode decay, and the dilution mass-balance with its negative control — plus the §1.4.5 two-species receptor model end-to-end. The bespoke single-physics prototypes that preceded the backend have been removed.
@@ -2117,15 +2118,15 @@ The three v1 conformance models run **through the formalism** (`tests/test_backe
 
 - Operator templates T3 (algebraic constraint), T4 (lumped ODE), T5–T7 (mechanics).
 - Weak-form escape hatch.
-- Boundary conditions beyond the implicit zero-Neumann (Dirichlet/Neumann/Robin/interface), and bulk↔surface coupling via `trace` (cross-subdomain solves).
-- Prescribed-displacement and **unknown** (mechanics-driven) motion; remeshing / field transfer (the mesh-quality guard currently fails loudly instead).
+- The two **interface** BC kinds (value-equality, flux-balance) and bulk↔surface coupling via `trace` (cross-subdomain solves) — these need internal boundaries between two subdomains (a multi-compartment geometry); external Dirichlet/Neumann/Robin are implemented. Time-dependent BC expressions are also deferred (the v1 backend has no `t` handle).
+- Prescribed-displacement and **unknown** (mechanics-driven) motion. (Remeshing / conservative field transfer is now implemented — see the ALE bullet above.)
 - Region-keyed parameter maps; advection (`relative_advection`) slots; non-linear sources.
 - The full §3.4 SolverConfiguration (linear/nonlinear solver, ALE, stabilisation knobs) and a YAML carrier for it; intermediate output-time snapshots.
 - A formal conformance-subset declaration.
 
 #### 3.6.2 What v1 conformance means for this backend
 
-The vcell-fenics backend claims conformance for a strict subset: T1 and T2 (including coupled multi-species), prescribed-velocity or no motion, the diffusion/source slots, zero-Neumann external BCs, no weak-form. Models within that subset run correctly and pass the conformance reference suite's relevant entries. Models outside that subset are not supported in v1; the assembler rejects them with a clear `NotImplementedError` at build time rather than silently producing wrong results.
+The vcell-fenics backend claims conformance for a strict subset: T1 and T2 (including coupled multi-species), prescribed-velocity or no motion, the diffusion/source slots, external Dirichlet/Neumann/Robin (and zero-Neumann default) BCs, no weak-form. Models within that subset run correctly and pass the conformance reference suite's relevant entries. Models outside that subset are not supported in v1; the assembler rejects them with a clear `NotImplementedError` at build time rather than silently producing wrong results.
 
 This honest scoping is deliberate. The formalism is broader than what v1 implements; the v1 backend is one slice. The roadmap to broader coverage is the same as the formalism's v2 roadmap (Appendix B) — driven by concrete use cases, not by speculative feature addition.
 

@@ -14,11 +14,13 @@ resolve to a region of matching kind, and the referenced geometry name must matc
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import numpy as np
 from dolfinx.mesh import Mesh
+from numpy.typing import NDArray
 
-from vcell_fenics.approaches.static.geometry import create_disk
+from vcell_fenics.approaches.static.geometry import BOUNDARY_TAG, create_disk
 from vcell_fenics.approaches.submesh.geometry import create_disk_with_membrane
 from vcell_fenics.formalism.schema import MathDescription, SubdomainKind
 from vcell_fenics.formalism.validator import Diagnostic
@@ -34,11 +36,24 @@ class SubdomainGeometry:
 
 
 @dataclass(frozen=True)
+class BoundaryGeometry:
+    """A labelled codim-1 boundary: the subdomain it bounds and the facet indices
+    (on that subdomain's mesh) it covers. A boundary condition references it by
+    label; the assembler reads the facets to restrict a `ds` measure and to locate
+    Dirichlet dofs."""
+
+    subdomain: str
+    facets: NDArray[np.int32]
+
+
+@dataclass(frozen=True)
 class Geometry:
-    """A named geometry: subdomain-class name → its mesh and kind."""
+    """A named geometry: subdomain-class name → its mesh and kind, plus optional
+    labelled boundaries for boundary conditions."""
 
     name: str
     subdomains: dict[str, SubdomainGeometry]
+    boundaries: dict[str, BoundaryGeometry] = field(default_factory=dict)
 
     def kind_of(self, subdomain: str) -> SubdomainKind | None:
         entry = self.subdomains.get(subdomain)
@@ -46,6 +61,9 @@ class Geometry:
 
     def mesh_of(self, subdomain: str) -> Mesh:
         return self.subdomains[subdomain].mesh
+
+    def boundary_of(self, boundary: str) -> BoundaryGeometry | None:
+        return self.boundaries.get(boundary)
 
 
 # ---------------------------------------------------------------------------
@@ -70,11 +88,20 @@ def clear_geometries() -> None:
     _REGISTRY.clear()
 
 
-def make_disk_geometry(name: str, *, volume_subdomain: str, radius: float = 1.0, h: float = 0.1) -> Geometry:
-    """A bundled 2D disk exposed as a single `volume` subdomain class."""
+def make_disk_geometry(
+    name: str, *, volume_subdomain: str, boundary: str | None = None, radius: float = 1.0, h: float = 0.1
+) -> Geometry:
+    """A bundled 2D disk exposed as a single `volume` subdomain class. When
+    `boundary` is given, the disk's outer circle is registered as a labelled
+    boundary under that name, so boundary conditions can target it."""
 
-    mesh = create_disk(radius=radius, h=h).mesh
-    return Geometry(name=name, subdomains={volume_subdomain: SubdomainGeometry(mesh=mesh, kind="volume")})
+    disk = create_disk(radius=radius, h=h)
+    subdomains = {volume_subdomain: SubdomainGeometry(mesh=disk.mesh, kind="volume")}
+    boundaries: dict[str, BoundaryGeometry] = {}
+    if boundary is not None:
+        facets = disk.facet_tags.find(BOUNDARY_TAG)
+        boundaries[boundary] = BoundaryGeometry(subdomain=volume_subdomain, facets=facets)
+    return Geometry(name=name, subdomains=subdomains, boundaries=boundaries)
 
 
 def make_disk_membrane_geometry(name: str, *, surface_subdomain: str, radius: float = 1.0, h: float = 0.1) -> Geometry:
@@ -118,6 +145,18 @@ def cross_validate(md: MathDescription, geometry: Geometry) -> list[Diagnostic]:
                     f"subdomains[{i}]",
                     f"subdomain {subdomain.name!r} is declared kind {subdomain.kind!r} but the geometry "
                     f"provides {geom_kind!r} (§1.11.10)",
+                )
+            )
+    # Every BC's labelled boundary must resolve in the geometry — the §1.11.10 check
+    # the formalism validator deferred because a boundary is a geometry-side entity.
+    for i, bc in enumerate(md.boundary_conditions):
+        if geometry.boundary_of(bc.boundary) is None:
+            diagnostics.append(
+                Diagnostic(
+                    "error",
+                    f"boundary_conditions[{i}]",
+                    f"boundary {bc.boundary!r} has no matching labelled boundary in geometry "
+                    f"{geometry.name!r} (§1.11.10)",
                 )
             )
     return diagnostics
