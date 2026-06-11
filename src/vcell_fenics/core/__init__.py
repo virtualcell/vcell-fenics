@@ -13,6 +13,7 @@ mesh/`Function` machinery and can be tested without it. The DOLFINx bridge
 on top of that kernel.
 """
 
+from vcell_fenics.core.bulk_remap import supermesh_project_2d
 from vcell_fenics.core.surface_remap import (
     arclength_parameterization,
     project_points_to_polyline_arclength,
@@ -28,5 +29,6 @@ __all__ = [
     "ordered_membrane_loop",
     "project_points_to_polyline_arclength",
     "remap_surface_function",
+    "supermesh_project_2d",
     "supermesh_remap_1d",
 ]
