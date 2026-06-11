@@ -136,6 +136,8 @@ src/vcell_fenics/
     surface_remap.py          #   conservative remap kernel (pure NumPy)        [done]
     surface_remap_mesh.py     #   DOLFINx Function bridge for membranes         [done]
     surface_remap_trace.py    #   Approach-A bulk-trace correction              [done]
+    bulk_remap.py             #   conservative bulk (2D area) remap kernel      [done]
+    bulk_remap_mesh.py        #   DOLFINx Function bridge for bulk fields       [done]
     biochemistry.py           #   surface ρ RHS: surface Laplacian + reaction + dilution  [planned]
     mechanics/                #   constitutive laws                            [planned]
     time_integrators.py       #   [planned]
@@ -160,6 +162,13 @@ src/vcell_fenics/
 - `surface_remap_trace.py` — the **Approach-A trace correction**. Because ρ in A is a bulk *trace*, a conservative bulk (volume) remap does not conserve the surface integral. `BulkBoundaryTrace` maps bulk-boundary DOFs ↔ a boundary surface space; `correct_surface_trace(u_old, u_new)` gathers the old trace, surface-remaps it, and scatters the result over the new bulk function's boundary DOFs (interior untouched). With independent surface DOFs (Approach B) this step is unnecessary.
 
   *Scope:* serial, P1, single closed 2D membrane. Deferred: MPI/multi-rank, higher-order spaces, open arcs, P0 variant, 3D triangle-surface supermesh, and the ALE remesh *driver* that would call `correct_surface_trace` (depends on Approach A mesh-motion-with-remeshing, not yet built).
+
+**The conservative bulk remap (implemented).** The area sibling of the surface remap — it carries a P1 cytosolic field *c* from one 2D triangulation to another while preserving ∫_Ω c dx. This is the `transfer_bulk` prerequisite the ALE remesh driver sketch (`docs/modeling/ale-remesh-driver.md`) names on its critical path:
+
+- `bulk_remap.py` — the **kernel**. Pure NumPy + scipy.sparse, no DOLFINx: `supermesh_project_2d(old_verts, old_tris, c_old, new_verts, new_tris)` builds the supermesh by clipping each new triangle against bbox-overlapping old triangles (Sutherland–Hodgman), integrates the P1×P1 products with a degree-2 edge-midpoint rule, and returns `c_new = M⁻¹ B c_old` (M = true new-mesh mass matrix, B = mixed mass matrix). Conservation is structural (partition of unity), exact to round-off when the two meshes triangulate the same polygon. Isolated from DOLFINx so it can be tested on plain arrays.
+- `bulk_remap_mesh.py` — the **DOLFINx bridge**. Much simpler than the surface bridge: no loop-ordering, because for a P1 space on a triangle mesh the dof index *is* the vertex-array row and `V.dofmap.list` *is* the (n_cells, 3) triangle list. `remap_bulk_function(u_old, V_new, conserve=True)` reads `c_old` and `(verts, tris)` straight off `u_old`'s mesh, runs the kernel, writes `c_new` into a new `Function` on `V_new`, and (with `conserve=True`) rescales so the volume integral on the new mesh equals the old exactly — closing the geometric gap when the two meshes approximate the same domain (e.g. a disk) at different resolutions.
+
+  *Scope:* serial, P1, 2D triangle mesh. Deferred: MPI/multi-rank, higher-order spaces, 3D tetrahedra, broad-phase acceleration for large meshes.
 
 **Shared abstractions worth investing in:**
 

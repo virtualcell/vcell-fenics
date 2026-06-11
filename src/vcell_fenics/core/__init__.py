@@ -14,6 +14,7 @@ on top of that kernel.
 """
 
 from vcell_fenics.core.bulk_remap import supermesh_project_2d
+from vcell_fenics.core.bulk_remap_mesh import remap_bulk_function
 from vcell_fenics.core.surface_remap import (
     arclength_parameterization,
     project_points_to_polyline_arclength,
@@ -28,6 +29,7 @@ __all__ = [
     "correct_surface_trace",
     "ordered_membrane_loop",
     "project_points_to_polyline_arclength",
+    "remap_bulk_function",
     "remap_surface_function",
     "supermesh_project_2d",
     "supermesh_remap_1d",
