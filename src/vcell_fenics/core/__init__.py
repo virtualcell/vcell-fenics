@@ -19,9 +19,12 @@ from vcell_fenics.core.surface_remap import (
     supermesh_remap_1d,
 )
 from vcell_fenics.core.surface_remap_mesh import ordered_membrane_loop, remap_surface_function
+from vcell_fenics.core.surface_remap_trace import BulkBoundaryTrace, correct_surface_trace
 
 __all__ = [
+    "BulkBoundaryTrace",
     "arclength_parameterization",
+    "correct_surface_trace",
     "ordered_membrane_loop",
     "project_points_to_polyline_arclength",
     "remap_surface_function",
