@@ -152,6 +152,13 @@ class _MeshMotion:
                 f"but does not remesh; reduce the step, the motion magnitude, or use a better-behaved velocity."
             )
 
+    def current_growth(self) -> float:
+        """The cell-size (max/min volume) ratio relative to the fresh reference
+        mesh: 1.0 when undistorted, rising as motion deforms the mesh. The ALE
+        driver polls this to decide when to remesh, below the hard limit `advance`
+        enforces."""
+        return self._cell_volume_ratio() / self._reference_ratio
+
     def _cell_volume_ratio(self) -> float:
         volumes = fem.assemble_vector(self._cell_volume_form).array
         v_min, v_max = float(volumes.min()), float(volumes.max())
@@ -207,6 +214,15 @@ class DiscreteProblem:
 
     def term_kinds(self) -> set[TermKind]:
         return {term.kind for term in self.terms}
+
+    def mesh_quality_growth(self) -> float:
+        """How far the mesh has distorted since this problem was built, as a
+        cell-size ratio growth factor (1.0 for a fresh or static mesh, larger as
+        prescribed motion deforms it). The ALE driver (`backend/ale.py`) remeshes
+        when this crosses a configured limit, kept well below the hard
+        `MeshQualityError` threshold `_MeshMotion.advance` enforces."""
+
+        return 1.0 if self._motion is None else self._motion.current_growth()
 
     def integrand_of(self, kind: TermKind) -> UflExpr:
         """The UFL integrand of the (unique) term of `kind`. For invariant tests

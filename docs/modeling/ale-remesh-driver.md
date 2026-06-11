@@ -1,12 +1,16 @@
 # ALE remesh driver (design sketch)
 
-**Status: forward-looking sketch.** This note designs the loop that lets an Approach-A
-(ALE explicit membrane) simulation survive large deformation by *remeshing and
-continuing* instead of failing when the mesh tangles. It rides on several pieces that are
-not built yet (see [Dependencies](#dependencies-what-this-rides-on)); the one ready
-component is the conservative surface-trace correction
-(`docs/modeling/conservative-surface-remap.md`), and this note shows exactly where it
-plugs in. Treat the pseudocode as shape, not API.
+**Status: implemented for the moving *membrane* (1D); the bulk Approach-A path is still a
+sketch.** As of 2026-06-11 the driver loop exists as `backend/ale.py` —
+`ALEState`, `step_with_remeshing`, `run_with_remeshing` — and runs the remesh-and-continue
+loop for a moving 1D membrane: it remeshes the deformed membrane as the boundary of a
+freshly meshed region and carries ρ across via the conservative surface remap. What is
+still a sketch is the genuine Approach-A case where ρ is a bulk *trace* on a 2D mesh whose
+interior nodes move by harmonic extension (needs bulk mesh-motion, not built, and would
+route the transfer through `correct_surface_trace`). The pseudocode below is the original
+design shape; the [Dependencies](#dependencies-what-this-rides-on) table and the closing
+note record what is built vs. outstanding. Treat the pseudocode as shape, not API — the
+real signatures are `step_with_remeshing(state, *, quality_limit, target_h)` etc.
 
 ## Where it sits, and what changes vs. today
 
@@ -108,6 +112,7 @@ def remesh(state, target_h):
 | **Region remesher** `mesh_region(loop, h)` | **built** — `core/region_remesh.py`; meshes an arbitrary deformed polyline, with `fix_boundary_nodes` for the interior-only fast path |
 | **`DiscreteProblem` rebuild path** | **built** — `backend.rebuild_on_mesh(problem, md, new_mesh)`; teardown + reassemble on the new mesh with conservative transfer of **both** `unknown` and `previous` (scalar / vector, bulk / surface by tdim). This is `assemble_on(new)` + steps (c)+(d) of `remesh()` fused into one call. |
 | **Approach-A bulk mesh-motion** (harmonic-extension displacement PDE writing `geometry.x`) | not built — current motion is on the membrane submesh, not a bulk mesh |
+| **The driver loop** `step_with_remeshing` / `run_with_remeshing` | **built (membrane)** — `backend/ale.py`; the 1D-membrane case (remesh = `mesh_region` boundary; transfer = `rebuild_on_mesh`). The bulk Approach-A wiring waits on bulk mesh-motion. |
 
 As of 2026-06-11 the three `core/` field-transfer + meshing prerequisites and the
 `DiscreteProblem` rebuild path are all built — the surface-trace correction (step d), the
@@ -119,11 +124,18 @@ reassemble on the new mesh + conservatively transfer `unknown` and `previous`; s
 field rather than going through the bulk-remap-then-`correct_surface_trace` two-step — that
 two-step is the Approach-A path where ρ is a bulk *trace*; the v1 backend's fields are the
 subdomain's own DOFs (Approach-B-flavoured), so the direct remap is correct and conservative
-for it. The remaining gap is **Approach-A bulk mesh-motion** (the harmonic-extension
-displacement that moves *interior* nodes with the boundary; today's motion is
-membrane-submesh only) plus the thin driver loop itself (`step_with_remeshing` — the
-predictive quality check + `mesh_region(BulkBoundaryTrace.boundary_loop(), h)` +
-`rebuild_on_mesh`). With Approach-A motion in place those compose from existing parts.
+for it. The driver loop itself is now built (`backend/ale.py`) for the moving membrane — it polls
+`DiscreteProblem.mesh_quality_growth()` and, once distortion crosses `quality_limit`,
+remeshes the deformed membrane (order its loop → `mesh_region` → extract the boundary
+submesh) and `rebuild_on_mesh`es onto it; a step that tangles even a fresh mesh raises
+`StepTooLarge` (subtlety 5). The remesh trigger is *proactive on accumulated distortion*
+rather than the tentative look-ahead the pseudocode shows — simpler, and equivalent given
+the margin below the hard limit. The single **remaining gap** is **Approach-A bulk
+mesh-motion**: a harmonic-extension displacement PDE that moves *interior* nodes with the
+boundary (today's `_MeshMotion` moves a membrane submesh only). With it, ρ becomes a bulk
+trace, `_remesh_membrane`'s 1D guard generalises to the bulk region, and the transfer in
+`rebuild_on_mesh` routes through `correct_surface_trace` (built, waiting) — at which point
+the same driver loop runs the full Approach-A case.
 
 ## Verification plan (when built)
 
