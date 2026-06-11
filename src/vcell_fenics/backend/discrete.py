@@ -26,11 +26,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
-from dolfinx.mesh import Mesh
+from dolfinx.mesh import Mesh, exterior_facet_indices
 from mpi4py import MPI
+from petsc4py import PETSc
 from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
@@ -114,6 +116,54 @@ class MeshQualityError(RuntimeError):
     fails here. Remeshing / field transfer is future work (§3.3)."""
 
 
+class _HarmonicExtension:
+    """Extends a boundary displacement into a bulk mesh's interior by a vector
+    Laplace solve — the standard ALE mesh-motion fill (Approach A).
+
+    Given a displacement field whose *boundary* values are the prescribed dt·v, it
+    solves ∇²d = 0 with those values fixed on ∂Ω (Dirichlet) and overwrites the
+    field with the harmonic result. So interior nodes follow the moving boundary
+    *smoothly* rather than being dragged by the raw velocity formula — which for a
+    codim-0 mesh is both the physically right ALE choice (interior motion is a mesh
+    bookkeeping device, not a material velocity) and avoids interior singularities
+    of the boundary velocity expression (e.g. `x / r(x)` at the centre).
+
+    Bound to the mesh; the bilinear form re-assembles each solve, so a moving mesh
+    is handled automatically.
+    """
+
+    def __init__(self, space: fem.FunctionSpace) -> None:
+        mesh = space.mesh
+        tdim = mesh.topology.dim
+        mesh.topology.create_connectivity(tdim - 1, tdim)
+        facets = exterior_facet_indices(mesh.topology)
+        boundary_dofs = fem.locate_dofs_topological(space, tdim - 1, facets)
+        self._boundary = fem.Function(space)  # the prescribed boundary displacement (BC source)
+        self._solution = fem.Function(space)  # the harmonic result
+        bc = fem.dirichletbc(self._boundary, boundary_dofs)
+        u, w = ufl.TrialFunction(space), ufl.TestFunction(space)
+        a = ufl.inner(ufl.grad(u), ufl.grad(w)) * ufl.dx
+        zero = fem.Constant(mesh, np.zeros(mesh.geometry.dim, dtype=PETSc.ScalarType))
+        L = ufl.inner(zero, w) * ufl.dx
+        self._problem = LinearProblem(
+            a,
+            L,
+            u=self._solution,
+            bcs=[bc],
+            petsc_options_prefix=f"vcellfenics_ale_{id(self):x}_",
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        )
+
+    def fill(self, displacement: fem.Function) -> None:
+        """Replace `displacement`'s interior with the harmonic extension of its
+        boundary values (the boundary values themselves are preserved). Interior
+        values of the input are ignored — only the boundary DOFs feed the BC."""
+
+        self._boundary.x.array[:] = displacement.x.array
+        self._problem.solve()
+        displacement.x.array[:] = self._solution.x.array
+
+
 class _MeshMotion:
     """Advances mesh nodes by dt·velocity each step (prescribed motion, §1.10).
 
@@ -122,6 +172,12 @@ class _MeshMotion:
     one-time topological permutation maps interpolated values onto geometry rows.
     The permutation is invariant under motion (it is purely topological), so it
     is computed once from the initial coordinates and reused.
+
+    On a codim-0 (bulk) mesh the prescribed velocity only defines the *boundary*
+    motion; the interior is filled by harmonic extension (`_HarmonicExtension`) so
+    interior quality is preserved. On a codim-1 mesh (a membrane) every node is on
+    the boundary, so the interpolated dt·v moves them all directly — the original
+    behaviour, unchanged.
 
     After each move the mesh quality is checked (`MeshQualityError` on failure):
     a node-displacement scheme with no remeshing can only follow motions that
@@ -135,6 +191,9 @@ class _MeshMotion:
         self._displacement = fem.Function(space)
         self._expression = fem.Expression(dt * velocity, space.element.interpolation_points)
         self._geom_from_dof = cKDTree(space.tabulate_dof_coordinates()).query(mesh.geometry.x)[1]
+        # A bulk mesh (codim 0) has interior nodes to fill harmonically; a membrane
+        # (codim 1) is all boundary, so dt·v moves every node directly.
+        self._extension = _HarmonicExtension(space) if mesh.topology.dim == self._gdim else None
         # Per-cell volume form (DG0 test function integrates to each cell's
         # volume); re-assembling after a move reports the deformed cell sizes.
         self._cell_volume_form = fem.form(ufl.TestFunction(fem.functionspace(mesh, ("DG", 0))) * ufl.dx)
@@ -142,6 +201,8 @@ class _MeshMotion:
 
     def advance(self) -> None:
         self._displacement.interpolate(self._expression)
+        if self._extension is not None:
+            self._extension.fill(self._displacement)
         increment = self._displacement.x.array.reshape((-1, self._gdim))[self._geom_from_dof]
         self._mesh.geometry.x[:, : self._gdim] += increment
         ratio = self._cell_volume_ratio()
