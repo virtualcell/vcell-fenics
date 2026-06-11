@@ -62,6 +62,39 @@ def arclength_parameterization(points: Floats, *, closed: bool = True) -> tuple[
     return s, float(s[-1])
 
 
+def project_points_to_polyline_arclength(points: Floats, loop_coords: Floats, s_loop: Floats, length: float) -> Floats:
+    """Arc-length position on a closed polyline of each point's closest point.
+
+    `loop_coords` is the (M, d) ordered node array of the reference loop and
+    `s_loop` their arc-length coordinates (from `arclength_parameterization`);
+    `length` is the loop's total length. For each row of `points` (d-dimensional),
+    the nearest point on the polyline — over all segments including the wrap-around
+    closing segment — is found and its arc-length position returned, in `[0, length)`.
+
+    This is the step that lifts a *new* membrane mesh onto the *old* mesh's
+    arc-length frame so `supermesh_remap_1d` can remap between them. When the new
+    nodes lie exactly on the old polyline (a co-located remesh) the projection is
+    exact; otherwise it is the closest-point approximation the design note flags.
+    """
+
+    if points.ndim != 2 or loop_coords.ndim != 2 or points.shape[1] != loop_coords.shape[1]:
+        raise ValueError("points and loop_coords must be (N, d) and (M, d) with matching d")
+
+    starts = loop_coords
+    edges = np.roll(loop_coords, -1, axis=0) - loop_coords  # segment vectors, last = closing
+    edge_len = np.linalg.norm(edges, axis=1)
+    denom = np.sum(edges * edges, axis=1)
+
+    out = np.empty(points.shape[0])
+    for k, p in enumerate(points):
+        offset = p - starts
+        t = np.clip(np.sum(offset * edges, axis=1) / denom, 0.0, 1.0)
+        closest = starts + t[:, None] * edges
+        seg = int(np.argmin(np.sum((p - closest) ** 2, axis=1)))
+        out[k] = (s_loop[seg] + t[seg] * edge_len[seg]) % length
+    return out
+
+
 def supermesh_remap_1d(s_old: Floats, rho_old: Floats, s_new: Floats, length: float) -> Floats:
     """Conservatively remap a P1 surface density between two loop discretizations.
 
