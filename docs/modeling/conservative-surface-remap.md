@@ -9,14 +9,31 @@ verification plan.
 This is an **approach-agnostic primitive**: Approach A needs it whenever ALE node
 motion degrades element quality and the boundary is re-tessellated; Approaches B and D
 need the same operation on their own surface representations once remeshing /
-re-cutting enters the picture. It belongs in `core/` (alongside `BiochemistryRHS`), not
-in any one approach.
+re-cutting enters the picture. It lives in `core/` (it is in fact `core/`'s first
+occupant), not in any one approach.
 
 Background and the comparison baseline that motivated this note: the FronTier-based
 `../vcell-mbsolver` implements the *2D bulk* version of this remap (overlap-area-weighted
 between Voronoi control volumes, Clipper polygon clipping). See the "Related
 finite-volume / front-tracking work" section of `approaches.md` and
 `docs/research/2026-06-06-cutcell-fronttracking-chatgpt.md`.
+
+## Implementation status
+
+The serial / P1 / single-closed-2D-membrane envelope of this design is **implemented** in
+`src/vcell_fenics/core/` as three composable pieces. Sections below note `[implemented]`
+against the parts that are built and `[deferred]` against the rest; the prose remains the
+design rationale.
+
+| Piece | Module | Tests |
+|---|---|---|
+| Supermesh kernel (pure NumPy) | `core/surface_remap.py` | `tests/test_core_surface_remap.py` |
+| DOLFINx `Function` bridge | `core/surface_remap_mesh.py` | `tests/test_core_surface_remap_mesh.py` |
+| Approach-A trace correction | `core/surface_remap_trace.py` | `tests/test_core_surface_remap_trace.py` |
+
+**Deferred:** P0 variant, MPI / multi-rank, higher-order spaces, open arcs, the 3D
+triangle-surface supermesh, and the ALE remesh *driver* that would call the trace
+correction (depends on Approach A mesh-motion-with-remeshing, not yet built).
 
 ## Why the 2D-bulk trick does not port directly
 
@@ -49,7 +66,12 @@ not advance time and does not move the membrane. So the remap conserves **mass**
 Conserving *concentration* across a remesh instead would be exactly the mass-balance bug
 this whole machinery exists to prevent.
 
-## Algorithm — 1D supermesh / Galerkin-conservative remap
+## Algorithm — 1D supermesh / Galerkin-conservative remap  `[implemented]`
+
+Built as `supermesh_remap_1d(s_old, rho_old, s_new, length)` in `core/surface_remap.py`,
+with `arclength_parameterization` for step 1's `cumulative_arclength` and
+`project_points_to_polyline_arclength` for `arclength_of_closest_point`. The pseudocode
+below is the shape of the real code:
 
 ```python
 def remap_surface_density(gamma_old, rho_old, gamma_new):
@@ -93,7 +115,7 @@ Because the new P1 basis is a partition of unity (Σ_j φ_j ≡ 1), the column s
 equal `(∫ φ_old_i ds)` = `𝟙ᵀ M_old`, so total mass transfers **exactly**. This is the
 Farrell–Maddison–Pelletier supermesh conservation property, specialized to 1D.
 
-The cheaper **P0 (cell-average)** variant is the donor-cell special case:
+The cheaper **P0 (cell-average)** variant is the donor-cell special case `[deferred]`:
 
 ```
 avg_new[j] = (1 / len_j) · Σ_{sub ⊂ j} ρ_old[parent(sub)] · len(sub)
@@ -101,7 +123,10 @@ avg_new[j] = (1 / len_j) · Σ_{sub ⊂ j} ρ_old[parent(sub)] · len(sub)
 
 conservative and exact, but only piecewise-constant accuracy.
 
-## The Approach-A–specific wrinkle
+## The Approach-A–specific wrinkle  `[implemented]`
+
+Built as `correct_surface_trace(u_bulk_old, u_bulk_new)` + `BulkBoundaryTrace` in
+`core/surface_remap_trace.py`.
 
 In Approach A, ρ is **not an independent field** — it is the *trace* of a bulk function
 space on the boundary facets (`approaches.md` §A). A remesh regenerates the *bulk* mesh
@@ -117,49 +142,71 @@ explicit correction on the boundary DOFs** after the bulk transfer.
 
 Design consequence worth stating plainly: **the remap difficulty is another force
 pushing toward Approach B.** With independent surface DOFs (B), the membrane has its own
-1D mesh and `remap_surface_density` is clean and self-contained. In A you either
-(a) keep ρ as a trace and bolt on the boundary-DOF correction, or (b) carry ρ as a
+1D mesh and the remap is clean and self-contained — no gather/correct/scatter. In A you
+either (a) keep ρ as a trace and bolt on the boundary-DOF correction, or (b) carry ρ as a
 quasi-independent boundary field — which is really drifting into B. This compounds the
 trace/resolution coupling already noted as an Approach A weakness.
 
 ## Two regimes, and the honest failure mode
 
-- **Co-located remesh (prefer this).** New nodes are inserted / removed / redistributed
-  *along the existing polyline*, so Γ_new ⊂ Γ_old as a curve. Step 1's projection is then
-  exact and the remap is exact to round-off. The well-behaved path.
-- **Smoothed / non-co-located remesh.** If remeshing also moves the curve (smoothing it
-  off the old polyline), `arclength_of_closest_point` becomes a genuine normal projection
-  and the supermesh is approximate. Conservation is no longer automatic — apply a single
-  global rescale `ρ_new *= M_old_total / M_new_total`, or a constrained projection. This
-  is the lossy case flagged in the front-tracking research note; **log it at the call
-  site** rather than letting silent mass drift accumulate over many remeshes.
+The bridge (`remap_surface_function`) always uses closest-point projection onto the old
+polyline, so both regimes are handled by the same code path:
 
-## Verification plan
+- **Co-located remesh.** New nodes are inserted / removed / redistributed *along the
+  existing polyline*, so Γ_new ⊂ Γ_old as a curve. The projection is then exact and the
+  remap is exact to round-off. The well-behaved path.
+- **Smoothed / non-co-located remesh.** If remeshing also moves the curve (smoothing it
+  off the old polyline), the projection is a genuine normal projection and the supermesh
+  is approximate in the new mesh's own metric. `remap_surface_function(..., conserve=True)`
+  (the default) applies the global rescale `ρ_new *= M_old_total / M_new_total` so total
+  mass on the new mesh is exact regardless; `conserve=False` leaves the raw projection-frame
+  remap (constants still exact). This is the lossy case flagged in the front-tracking
+  research note.
+
+## Verification plan  `[implemented]`
 
 Mirrors the project's established pattern (analytical check + negative control; see the
-verification-patterns memory and `tests/test_backend_convergence.py`):
+verification-patterns memory and `tests/test_backend_convergence.py`). As built across the
+three test files:
 
-1. **Conservation (round-off).** Remap a known ρ(s) between two co-located resolutions;
-   assert `∫_{Γ_new} ρ_new ds == ∫_{Γ_old} ρ_old ds` to ~1e-12.
-2. **Accuracy (refinement).** For a smooth ρ(s), assert the L² remap error → 0 at the
-   expected rate as the meshes refine (P1: second order; P0: first).
-3. **Linear-preservation.** A linear ρ(s) (mod the closed-loop wrap) remaps exactly.
-4. **Negative control.** The naive nearest-node copy is *not* conservative — assert it
-   drifts ∫ρ ds, so the supermesh step is demonstrably load-bearing.
+1. **Conservation (round-off).** Remap a known ρ(s); assert `∫_{Γ_new} ρ_new ds ==
+   ∫_{Γ_old} ρ_old ds` to ~1e-12 — at the kernel level, on real membrane meshes, and on
+   the bulk trace.
+2. **Accuracy (refinement).** For a smooth ρ(s), the L² remap error → 0 at second order
+   (P1) as both meshes refine. *(Refining only the target floors the error at the source
+   interpolation error — accuracy is bounded by the coarser mesh, so both must refine.)*
+3. **Constant / refinement exactness.** A constant ρ remaps to the same constant exactly
+   (partition of unity); a co-located refinement reproduces ρ exactly at shared nodes.
+   *(The original sketch said "linear-preservation"; a globally linear field is
+   discontinuous across the closed-loop seam, so constant preservation is the clean exact
+   invariant.)*
+4. **Negative control.** The naive nearest-node copy is *not* conservative — it drifts
+   ∫ρ ds, confirming the supermesh step is load-bearing (checked for both the standalone
+   membrane and the bulk trace).
 
-## Interface sketch
+## Implemented interface
+
+The original sketch imagined a `SurfaceRemap` class; the built API is three small modules
+of functions (`core/__init__.py` re-exports all of them):
 
 ```python
-# core/ — approach-agnostic
-class SurfaceRemap:
-    """Conservative transfer of a surface density between two discretizations of
-    the same membrane. 1D (interval supermesh) for 2D problems; triangle-surface
-    supermesh for 3D. Conserves ∫_Γ ρ ds; applies no dilution."""
+# core/surface_remap.py — pure-NumPy kernel
+def arclength_parameterization(points, *, closed=True) -> (s, length): ...
+def supermesh_remap_1d(s_old, rho_old, s_new, length) -> rho_new: ...     # conserves ∫_Γ ρ ds
+def project_points_to_polyline_arclength(points, loop_coords, s_loop, length) -> s: ...
 
-    def transfer(self, rho_old, gamma_old, gamma_new) -> Field: ...
+# core/surface_remap_mesh.py — DOLFINx Function bridge
+def ordered_membrane_loop(V) -> (coords, dof_order): ...
+def remap_surface_function(u_old, V_new, *, conserve=True) -> fem.Function: ...
+
+# core/surface_remap_trace.py — Approach-A trace correction
+class BulkBoundaryTrace:  # gather()/scatter() between bulk-boundary and surface DOFs
+def correct_surface_trace(u_bulk_old, u_bulk_new, *, conserve=True) -> None: ...   # in place
 ```
 
-Both A (on remesh) and the eventual B / D remeshing paths call the same primitive.
+Both A (on remesh) and the eventual B / D remeshing paths call the same primitive. Applies
+no dilution. The 3D case (triangle-surface supermesh) is deferred but the function-level
+signatures generalize.
 
 ## References
 
