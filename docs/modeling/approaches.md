@@ -132,12 +132,15 @@ Per the research, a sensible code separation is:
 
 ```
 src/vcell_fenics/
-  core/                       # approach-agnostic
-    biochemistry.py           # surface ρ RHS: surface Laplacian + reaction + dilution
-    mechanics/                # constitutive laws
-    time_integrators.py
-    geometry.py
-    io.py
+  core/                       # approach-agnostic  [exists]
+    surface_remap.py          #   conservative remap kernel (pure NumPy)        [done]
+    surface_remap_mesh.py     #   DOLFINx Function bridge for membranes         [done]
+    surface_remap_trace.py    #   Approach-A bulk-trace correction              [done]
+    biochemistry.py           #   surface ρ RHS: surface Laplacian + reaction + dilution  [planned]
+    mechanics/                #   constitutive laws                            [planned]
+    time_integrators.py       #   [planned]
+    geometry.py               #   [planned]
+    io.py                     #   [planned]
   approaches/
     ale/                      # A
     submesh/                  # B  <- start here
@@ -148,8 +151,19 @@ src/vcell_fenics/
   tests/
 ```
 
+`core/` now exists; its first occupants are the conservative surface-density remap (below), not the `biochemistry.py` the original sketch imagined — that primitive was forced first by the remesh problem, and is orthogonal to the formalism backend that holds the receptor-density physics today.
+
+**The conservative surface remap (implemented).** Three composable pieces realizing `docs/modeling/conservative-surface-remap.md`; together they carry a surface density ρ from one membrane discretization to another while preserving ∫_Γ ρ ds. Used by Approach A on remesh (and the eventual B/D remeshing paths):
+
+- `surface_remap.py` — the **kernel**. Pure NumPy, no DOLFINx: `arclength_parameterization` lifts an ordered polyline onto its arc-length coordinate; `supermesh_remap_1d` merges old+new node sets into a supermesh and returns `ρ_new = M⁻¹ B ρ_old`, conserving total mass by the partition-of-unity argument; `project_points_to_polyline_arclength` is the closest-point step that puts two distinct discretizations in a common frame. Isolated from DOLFINx so conservation is provable and testable on its own.
+- `surface_remap_mesh.py` — the **DOLFINx bridge**. `ordered_membrane_loop(V)` orders a closed P1 membrane's dofs into a loop by walking the cell→dof edge list; `remap_surface_function(u_old, V_new, conserve=True)` reads ρ off `u_old`, remaps in the old mesh's arc-length frame, writes ρ_new into a new `Function`, and (with `conserve=True`) rescales so the surface integral on the new mesh equals the old exactly.
+- `surface_remap_trace.py` — the **Approach-A trace correction**. Because ρ in A is a bulk *trace*, a conservative bulk (volume) remap does not conserve the surface integral. `BulkBoundaryTrace` maps bulk-boundary DOFs ↔ a boundary surface space; `correct_surface_trace(u_old, u_new)` gathers the old trace, surface-remaps it, and scatters the result over the new bulk function's boundary DOFs (interior untouched). With independent surface DOFs (Approach B) this step is unnecessary.
+
+  *Scope:* serial, P1, single closed 2D membrane. Deferred: MPI/multi-rank, higher-order spaces, open arcs, P0 variant, 3D triangle-surface supermesh, and the ALE remesh *driver* that would call `correct_surface_trace` (depends on Approach A mesh-motion-with-remeshing, not yet built).
+
 **Shared abstractions worth investing in:**
 
+- `SurfaceRemap` — **implemented** as the three modules above; the approach-agnostic primitive every remeshing path calls.
 - `BiochemistryRHS` — a callable returning a UFL form for the surface PDE RHS, taking ρ and the surface measure. All four approaches use the same expression for the receptor-density physics.
 - `MechanicsModel` — returns a strain-energy density. Used by A and B; phase-field and cut-FEM have different mechanics coupling but the constitutive laws should be shareable.
 - `Geometry` — adapter exposing "the membrane" in each approach's native form (marked facets / submesh / level set / ϕ level set), so the biochemistry code doesn't need to know which approach it's running in.
