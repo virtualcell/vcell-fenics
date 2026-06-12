@@ -35,6 +35,75 @@ OUTER_TAG = 4
 
 
 @dataclass
+class ExtracellularAnnulus:
+    """The §1.6.6 substrate: a single extracellular bulk (an annulus) whose *inner*
+    boundary is the membrane (Γ_mem) and whose *outer* boundary is the reservoir
+    (∂Ω_outer). No cytoplasm is modelled. `membrane_mesh` is the codim-1 submesh of
+    the inner circle, and `membrane_entity_map` relates it to `bulk_mesh` so a form
+    over the bulk's membrane facets can reference membrane functions."""
+
+    bulk_mesh: dmesh.Mesh
+    facet_tags: dmesh.MeshTags
+    membrane_mesh: dmesh.Mesh
+    membrane_entity_map: dmesh.EntityMap
+    inner_radius: float
+    outer_radius: float
+
+
+def create_extracellular_annulus(
+    inner_radius: float = 0.5,
+    outer_radius: float = 1.0,
+    h: float = 0.1,
+    comm: MPI.Comm = MPI.COMM_WORLD,
+) -> ExtracellularAnnulus:
+    """An annular extracellular bulk: the outer disk with the inner (cell) disk cut
+    out. The inner circle is tagged `MEMBRANE_TAG`, the outer `OUTER_TAG`; the
+    membrane is extracted as a codim-1 submesh."""
+
+    if not 0.0 < inner_radius < outer_radius:
+        raise ValueError(f"need 0 < inner_radius < outer_radius, got {inner_radius} and {outer_radius}")
+
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    try:
+        gmsh.model.add("extracellular_annulus")
+        outer = gmsh.model.occ.addDisk(0.0, 0.0, 0.0, outer_radius, outer_radius)
+        inner = gmsh.model.occ.addDisk(0.0, 0.0, 0.0, inner_radius, inner_radius)
+        gmsh.model.occ.cut([(2, outer)], [(2, inner)])  # the annulus
+        gmsh.model.occ.synchronize()
+
+        surfaces = [s[1] for s in gmsh.model.getEntities(2)]
+        lengths = {c[1]: gmsh.model.occ.getMass(1, c[1]) for c in gmsh.model.getEntities(1)}
+        membrane_curve = min(lengths, key=lambda t: lengths[t])  # inner circle
+        outer_curve = max(lengths, key=lambda t: lengths[t])
+
+        gmsh.model.addPhysicalGroup(2, surfaces, tag=EXTRACELLULAR_TAG, name="extracellular")
+        gmsh.model.addPhysicalGroup(1, [membrane_curve], tag=MEMBRANE_TAG, name="membrane")
+        gmsh.model.addPhysicalGroup(1, [outer_curve], tag=OUTER_TAG, name="outer")
+
+        gmsh.option.setNumber("Mesh.MeshSizeMin", h)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", h)
+        gmsh.model.mesh.generate(2)
+        data = model_to_mesh(gmsh.model, comm, rank=0, gdim=2)
+    finally:
+        gmsh.finalize()
+
+    bulk = data.mesh
+    facet_tags = data.facet_tags
+    assert facet_tags is not None, "model_to_mesh returned no facet tags for the membrane / outer groups"
+    membrane_mesh, entity_map, *_ = dmesh.create_submesh(bulk, bulk.topology.dim - 1, facet_tags.find(MEMBRANE_TAG))
+
+    return ExtracellularAnnulus(
+        bulk_mesh=bulk,
+        facet_tags=facet_tags,
+        membrane_mesh=membrane_mesh,
+        membrane_entity_map=entity_map,
+        inner_radius=inner_radius,
+        outer_radius=outer_radius,
+    )
+
+
+@dataclass
 class CellExtracellular:
     """A concentric two-compartment cell. `parent_mesh` is the union mesh; `cell_tags`
     marks each cell's compartment (CYTOSOL_TAG / EXTRACELLULAR_TAG) and `facet_tags`
