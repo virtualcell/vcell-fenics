@@ -225,9 +225,14 @@ def _build_boundary_conditions(
         bgeo = geometry.boundary_of(bc.boundary)
         if bgeo is None:  # cross_validate already guards this; belt-and-braces for direct callers
             raise NotImplementedError(f"BC boundary {bc.boundary!r} is not a labelled boundary of the geometry")
-        if bgeo.subdomain != subdomain:
+        if bgeo.is_internal:
             raise NotImplementedError(
-                f"BC boundary {bc.boundary!r} bounds subdomain {bgeo.subdomain!r}, not this solve's {subdomain!r}"
+                f"BC boundary {bc.boundary!r} is an internal interface between {bgeo.subdomains}; interface BCs and "
+                f"cross-compartment assembly are a later increment (external Dirichlet/Neumann/Robin only in v1)"
+            )
+        if subdomain not in bgeo.subdomains:
+            raise NotImplementedError(
+                f"BC boundary {bc.boundary!r} bounds {bgeo.subdomains}, not this solve's subdomain {subdomain!r}"
             )
         k = var_index[bc.variable]
         u, w = components[k]
