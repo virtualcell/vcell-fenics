@@ -121,3 +121,51 @@ def test_unsupported_construct_raises() -> None:
 def test_unsupported_function_raises() -> None:
     with pytest.raises(CompileError, match="not supported"):
         compile_expression(parse("sinh(x[0])"), _ctx())
+
+
+# ---------------------------------------------------------------------------
+# trace(·) — the cross-dimensional reference (§1.8.2).
+# ---------------------------------------------------------------------------
+
+
+def _ctx_with_variable(name: str, value: float, params: dict[str, float] | None = None) -> CompileContext:
+    """A context with a P1 `Function` named `name` (a stand-in for a bulk variable's
+    solution Function), interpolated to the constant `value`."""
+
+    ctx = _ctx(params)
+    field = fem.Function(fem.functionspace(ctx.mesh, ("Lagrange", 1)), name=name)
+    field.x.array[:] = value
+    ctx.symbols[name] = field
+    return ctx
+
+
+def test_trace_resolves_to_the_variable_object() -> None:
+    # The cross-dimensional restriction is mixed-dimensional assembly's job, so the
+    # compiler returns the resolved variable unchanged (passthrough).
+    ctx = _ctx_with_variable("L", 2.0)
+    assert compile_expression(parse("trace(L)"), ctx) is ctx.symbols["L"]
+
+
+def test_trace_passes_through_arithmetic() -> None:
+    # k_on * trace(L) with L ≡ 2 and k_on = 3 averages to 6 — the traced value flows
+    # through the surrounding arithmetic.
+    ctx = _ctx_with_variable("L", 2.0, {"k_on": 3.0})
+    compiled = compile_expression(parse("k_on * trace(L)"), ctx)
+    dx = ufl.Measure("dx", domain=ctx.mesh)
+    one = fem.Constant(ctx.mesh, PETSc.ScalarType(1.0))  # type: ignore[operator]
+    area = fem.assemble_scalar(fem.form(one * dx))
+    value = fem.assemble_scalar(fem.form(compiled * dx))
+    assert (value / area).real == pytest.approx(6.0)
+
+
+def test_trace_requires_one_argument() -> None:
+    ctx = _ctx_with_variable("L", 1.0)
+    with pytest.raises(CompileError, match="exactly one argument"):
+        compile_expression(parse("trace(L, L)"), ctx)
+
+
+def test_trace_of_unresolved_variable_raises() -> None:
+    # The bulk variable must be in the symbol table (the cross-subdomain assembler
+    # provides it); otherwise it is an unresolved name like any other.
+    with pytest.raises(CompileError, match="unresolved name 'L'"):
+        compile_expression(parse("trace(L)"), _ctx())

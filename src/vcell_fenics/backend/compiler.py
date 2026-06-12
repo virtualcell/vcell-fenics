@@ -13,11 +13,21 @@ so an unresolved name or unsupported construct is an internal error, raised as
 
 Supported so far: numeric literals, name lookups (parameters, and `x` when the
 assembler binds it to a SpatialCoordinate), arithmetic (`+ - * / **`, unary `±`),
-coordinate indexing (`x[0]`), the standard scalar math functions, and the
-geometric helpers that expand to functions of `x` (`theta`, `r`). Calculus
-operators, `trace`, tensor algebra, multi-argument functions, the `n`/`H`/tangent/
-curvature helpers, and vector/tensor literals raise `CompileError` until the
-increments that add them.
+coordinate indexing (`x[0]`), the standard scalar math functions, the geometric
+helpers that expand to functions of `x` (`theta`, `r`), and `trace(·)` (the
+cross-dimensional reference to a higher-dimensional variable; §1.8.2). Calculus
+operators, tensor algebra, multi-argument functions, the `n`/`H`/tangent/curvature
+helpers, and vector/tensor literals raise `CompileError` until the increments that
+add them.
+
+`trace(u)` compiles to `u`'s UFL object unchanged: the cross-dimensional *restriction*
+of a bulk variable onto a lower-dimensional evaluation domain is realised by native
+mixed-dimensional assembly (entity maps relating the submeshes; §1.8.2 "trace
+evaluation is a backend concern"), not by a UFL wrapper. The compiler's only job is
+to resolve the name; the assembler that builds a cross-subdomain form provides the
+bulk variable's `Function` in the symbol table and the entity map at `fem.form` time.
+The validator has already enforced that the argument is a single declared variable on
+a strictly higher-dimensional subdomain (the direction rule), so the compiler trusts that.
 """
 
 from __future__ import annotations
@@ -114,6 +124,15 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
     if node.callee == "r":
         x = args[0]
         return ufl.sqrt(ufl.dot(x, x))
+    if node.callee == "trace":
+        # The trace of a higher-dimensional variable onto a lower-dimensional
+        # evaluation domain (§1.8.2). At the UFL level this is the variable itself;
+        # the actual restriction is mixed-dimensional assembly's job (entity maps),
+        # so the compiler just returns the resolved argument. The validator has
+        # guaranteed a single variable-name argument crossing high → low dimension.
+        if len(args) != 1:
+            raise CompileError("trace(...) takes exactly one argument")
+        return args[0]
     fn = _UFL_UNARY_FUNCTIONS.get(node.callee)
     if fn is not None:
         return fn(*args)
