@@ -25,7 +25,7 @@ initial condition is applied here by interpolation (§3.2.2).
 
 from __future__ import annotations
 
-from typing import cast
+from typing import cast, overload
 
 import numpy as np
 import ufl
@@ -36,8 +36,9 @@ from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
 from vcell_fenics.backend.discrete import BackwardEuler, BoundaryTerm, DiscreteProblem, Term, TermKind
-from vcell_fenics.backend.geometry import Geometry, cross_validate
+from vcell_fenics.backend.geometry import CoupledGeometry, Geometry, cross_validate
 from vcell_fenics.core import remap_bulk_function, remap_surface_function
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
@@ -57,13 +58,23 @@ from vcell_fenics.formalism.validator import FormalismValidationError, validate_
 _SUPPORTED_TEMPLATES = {"bulk_radv_diff", "surface_pde_with_dilution"}
 
 
-def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: int = 1) -> DiscreteProblem:
-    """Translate `md` (against `geometry`) into a lowered `DiscreteProblem`.
+@overload
+def assemble(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: int = 1) -> DiscreteProblem: ...
+@overload
+def assemble(md: MathDescription, geometry: CoupledGeometry, *, dt: float, fe_degree: int = 1) -> CoupledProblem: ...
+def assemble(
+    md: MathDescription, geometry: Geometry | CoupledGeometry, *, dt: float, fe_degree: int = 1
+) -> DiscreteProblem | CoupledProblem:
+    """Translate `md` (against `geometry`) into a runnable problem.
 
-    One equation builds a scalar space; several equations on a shared subdomain
-    build one coupled solve over a vector space (component k ↔ equation k), so a
-    `source` referencing a sibling variable becomes an off-diagonal coupling that
-    the residual lhs/rhs split resolves automatically (ADR 004)."""
+    A single-mesh `Geometry` builds a `DiscreteProblem`: one equation a scalar space,
+    several on a shared subdomain one coupled solve over a vector space (ADR 004). A
+    `CoupledGeometry` (a bulk + a surface on its boundary) dispatches to the
+    mixed-dimensional cross-mesh block assembly (`assemble_coupled`, the §1.6.6
+    class), returning a `CoupledProblem`."""
+
+    if isinstance(geometry, CoupledGeometry):
+        return assemble_coupled(md, geometry, dt=dt)
 
     validate_or_raise(md)
     geometry_errors = cross_validate(md, geometry)
@@ -276,9 +287,7 @@ def _restricted_ds(mesh: Mesh, facets: np.ndarray) -> ufl.Measure:
 
     facets = np.asarray(facets, dtype=np.int32)
     order = np.argsort(facets)
-    tags = dmesh.meshtags(
-        mesh, mesh.topology.dim - 1, facets[order], np.full(facets.shape, _BC_TAG, dtype=np.int32)
-    )
+    tags = dmesh.meshtags(mesh, mesh.topology.dim - 1, facets[order], np.full(facets.shape, _BC_TAG, dtype=np.int32))
     return cast(ufl.Measure, ufl.Measure("ds", domain=mesh, subdomain_data=tags)(_BC_TAG))
 
 

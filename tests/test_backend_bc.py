@@ -35,12 +35,15 @@ from vcell_fenics.formalism.validator import FormalismValidationError
 
 def _model(*, bcs: str = "", ic: str = "1.0", diffusion: str = "0.5", variables: str = "", equations: str = "") -> str:
     vars_block = variables or "    - { name: c, subdomain: cyto }"
-    eqs_block = equations or f"""    - template: bulk_radv_diff
+    eqs_block = (
+        equations
+        or f"""    - template: bulk_radv_diff
       variable: c
       subdomain: cyto
       temporality: time_dependent
       terms: {{ diffusion: "{diffusion}" }}
       initial_condition: "{ic}\""""
+    )
     return f"""
 math_description:
   geometry: disk_2d

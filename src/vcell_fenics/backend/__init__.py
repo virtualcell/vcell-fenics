@@ -13,6 +13,7 @@ from vcell_fenics.backend.ale import ALEState, StepTooLarge, run_with_remeshing,
 from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
 from vcell_fenics.backend.binding import BindingParameters, BindingState, LigandReceptorBinding
 from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
+from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
 from vcell_fenics.backend.discrete import (
     BackwardEuler,
     BoundaryTerm,
@@ -23,6 +24,7 @@ from vcell_fenics.backend.discrete import (
 )
 from vcell_fenics.backend.geometry import (
     BoundaryGeometry,
+    CoupledGeometry,
     Geometry,
     SubdomainGeometry,
     clear_geometries,
@@ -31,6 +33,7 @@ from vcell_fenics.backend.geometry import (
     make_cell_extracellular_geometry,
     make_disk_geometry,
     make_disk_membrane_geometry,
+    make_extracellular_annulus_geometry,
     register_geometry,
 )
 from vcell_fenics.backend.solver import SolverConfiguration, run
@@ -44,6 +47,8 @@ __all__ = [
     "BoundaryTerm",
     "CompileContext",
     "CompileError",
+    "CoupledGeometry",
+    "CoupledProblem",
     "DiscreteProblem",
     "Geometry",
     "LigandReceptorBinding",
@@ -54,6 +59,7 @@ __all__ = [
     "Term",
     "TermKind",
     "assemble",
+    "assemble_coupled",
     "clear_geometries",
     "compile_expression",
     "cross_validate",
@@ -61,6 +67,7 @@ __all__ = [
     "make_cell_extracellular_geometry",
     "make_disk_geometry",
     "make_disk_membrane_geometry",
+    "make_extracellular_annulus_geometry",
     "rebuild_on_mesh",
     "register_geometry",
     "run",

@@ -17,13 +17,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-from dolfinx.mesh import Mesh, MeshTags
+from dolfinx.mesh import EntityMap, Mesh, MeshTags
 from numpy.typing import NDArray
 
 from vcell_fenics.approaches.multicompartment.geometry import (
     MEMBRANE_TAG,
     OUTER_TAG,
     create_cell_extracellular,
+    create_extracellular_annulus,
 )
 from vcell_fenics.approaches.static.geometry import BOUNDARY_TAG, create_disk
 from vcell_fenics.approaches.submesh.geometry import create_disk_with_membrane
@@ -170,6 +171,74 @@ def make_disk_membrane_geometry(name: str, *, surface_subdomain: str, radius: fl
 
     submesh = create_disk_with_membrane(radius=radius, h=h).submesh
     return Geometry(name=name, subdomains={surface_subdomain: SubdomainGeometry(mesh=submesh, kind="surface")})
+
+
+@dataclass(frozen=True)
+class CoupledGeometry:
+    """A bulk-surface coupled geometry for cross-mesh assembly: a `bulk` volume
+    subdomain and a `surface` subdomain that *is* the bulk's boundary, related by an
+    `EntityMap` so a form on the bulk's interface facets can reference surface
+    functions (the §1.6.6 substrate). `interface` is the boundary label where bulk
+    and surface couple (a facet tag on the bulk); `outer` is the external boundary
+    (e.g. a reservoir). Distinct from `Geometry`: it carries the entity map and the
+    bulk facet tags the mixed-dimensional assembler needs."""
+
+    name: str
+    bulk_subdomain: str
+    surface_subdomain: str
+    bulk_mesh: Mesh
+    surface_mesh: Mesh
+    entity_map: EntityMap
+    facet_tags: MeshTags
+    interface: str
+    interface_tag: int
+    outer: str
+    outer_tag: int
+
+    def kind_of(self, subdomain: str) -> SubdomainKind | None:
+        if subdomain == self.bulk_subdomain:
+            return "volume"
+        if subdomain == self.surface_subdomain:
+            return "surface"
+        return None
+
+    def mesh_of(self, subdomain: str) -> Mesh:
+        if subdomain == self.bulk_subdomain:
+            return self.bulk_mesh
+        if subdomain == self.surface_subdomain:
+            return self.surface_mesh
+        raise KeyError(f"{subdomain!r} is not a subdomain of coupled geometry {self.name!r}")
+
+
+def make_extracellular_annulus_geometry(
+    name: str,
+    *,
+    extracellular: str,
+    membrane: str,
+    interface: str,
+    outer: str,
+    inner_radius: float = 0.5,
+    outer_radius: float = 1.0,
+    h: float = 0.1,
+) -> CoupledGeometry:
+    """The §1.6.6 coupled geometry: an annular `extracellular` bulk whose inner
+    boundary is the `membrane` surface subdomain (coupled at `interface`) and whose
+    outer boundary is `outer` (the reservoir)."""
+
+    annulus = create_extracellular_annulus(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
+    return CoupledGeometry(
+        name=name,
+        bulk_subdomain=extracellular,
+        surface_subdomain=membrane,
+        bulk_mesh=annulus.bulk_mesh,
+        surface_mesh=annulus.membrane_mesh,
+        entity_map=annulus.membrane_entity_map,
+        facet_tags=annulus.facet_tags,
+        interface=interface,
+        interface_tag=MEMBRANE_TAG,
+        outer=outer,
+        outer_tag=OUTER_TAG,
+    )
 
 
 # ---------------------------------------------------------------------------
