@@ -36,6 +36,7 @@ from vcell_fenics.backend.geometry import (
     register_geometry,
 )
 from vcell_fenics.backend.solver import SolverConfiguration, run
+from vcell_fenics.backend.unknown_motion import UnknownMotionProblem, assemble_unknown_motion
 from vcell_fenics.backend.weakform import WeakFormProblem, assemble_weak_form
 
 __all__ = [
@@ -55,9 +56,11 @@ __all__ = [
     "SubdomainGeometry",
     "Term",
     "TermKind",
+    "UnknownMotionProblem",
     "WeakFormProblem",
     "assemble",
     "assemble_coupled",
+    "assemble_unknown_motion",
     "assemble_weak_form",
     "clear_geometries",
     "compile_expression",
