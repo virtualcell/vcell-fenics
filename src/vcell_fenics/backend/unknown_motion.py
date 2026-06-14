@@ -24,16 +24,29 @@ form `σ H(x) inner(n(x), test)` evaluates to the correct weak force `inner(κ, 
 `η v + σ H n = 0` then drives mean-curvature flow (a circle shrinks as `r² = r₀² −
 2σt/η`).
 
+**Tangential redistribution (`redistribute=True`).** Pure normal motion crowds nodes
+where a non-circular membrane contracts, degrading the mesh until it tangles. For a
+*motion-only* curvature membrane this flag switches to the BGN scheme
+(`core/bgn_curve_mesh`): each step is one coupled (position, curvature) solve that
+follows the same flow *and* slides nodes tangentially to stay equidistributed, so the
+flow runs at a usable `dt`. It is a pure discretisation choice (the continuous
+solution is unchanged), so it is a backend argument, not a MathDescription field. The
+BGN mobility `m = σ/η` is read off the force balance (`_calibrate_mobility`), keeping
+it tied to the model's own parameters with no expression parsing. A co-moving receptor
+is refused: once the mesh redistributes, `v_mesh ≠ v_material` and the surface PDE
+needs the ALE advection term `−(v_mesh − v_material)·∇_Γ ρ`, a later increment.
+
 Scope (v1): one closed membrane (a codim-1 submesh, no bulk), one weak-form motion
 equation for a vector velocity, and at most one T2 receptor equation. Vector
-*expression* parameters, multiple receptors, and a moving membrane coupled to a bulk
-are later increments.
+*expression* parameters, multiple receptors, redistribution with a receptor, and a
+moving membrane coupled to a bulk are later increments.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
@@ -44,6 +57,7 @@ from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind, _MeshMotion
 from vcell_fenics.backend.geometry import Geometry, cross_validate
+from vcell_fenics.core.bgn_curve_mesh import bgn_redistribute_membrane
 from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, UnaryOp, VectorLiteral
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
@@ -70,8 +84,15 @@ class UnknownMotionProblem:
     _force_balance: LinearProblem
     _motion: _MeshMotion
     _curvature: _CurvatureProjection | None
+    _bgn: _BGNMotion | None = None
 
     def step(self) -> None:
+        # BGN redistribution (motion-only curvature flow) replaces the force-balance
+        # velocity solve and the normal mesh move with one coupled position step that
+        # also redistributes nodes tangentially (§ BGN; mobility calibrated at build).
+        if self._bgn is not None:
+            self._bgn.advance()
+            return
         if self._curvature is not None:
             self._curvature.project()  # mean-curvature vector on the current geometry
         self._force_balance.solve()  # force balance → velocity on the current membrane
@@ -107,10 +128,58 @@ class _CurvatureProjection:
         self._problem.solve()
 
 
-def assemble_unknown_motion(md: MathDescription, geometry: Geometry, *, dt: float) -> UnknownMotionProblem:
+class _BGNMotion:
+    """Mesh motion by the BGN curvature-flow step — the drop-in replacement for
+    `_MeshMotion` when tangential redistribution is requested for a motion-only
+    curvature membrane. Each `advance()` moves the membrane by one coupled
+    (position, curvature) solve that both follows the flow `V = −m κ` and keeps the
+    nodes equidistributed; `mobility` `m = σ/η` is calibrated from the force balance
+    at build time (`_calibrate_mobility`)."""
+
+    def __init__(self, mesh: Mesh, *, mobility: float, dt: float) -> None:
+        self._mesh = mesh
+        self._mobility = mobility
+        self._dt = dt
+
+    def advance(self) -> None:
+        bgn_redistribute_membrane(self._mesh, mobility=self._mobility, dt=self._dt)
+
+
+def _calibrate_mobility(curvature: _CurvatureProjection, force_balance: LinearProblem, velocity: fem.Function) -> float:
+    """The curvature-flow mobility `m = σ/η` implied by the force balance, read off
+    one solve: for surface-tension flow the solved velocity satisfies `v = −m κ⃗`
+    nodally (same mass matrix on both sides of `η v = −σ κ⃗`), so `m` is the least-
+    squares ratio `−(v·κ⃗)/(κ⃗·κ⃗)`. This keeps BGN's mobility tied to the model's
+    own parameters without parsing the force expression. Fails loudly on a flat
+    membrane (no curvature to calibrate against)."""
+
+    curvature.project()
+    force_balance.solve()
+    v = velocity.x.array
+    kappa = curvature.kappa.x.array
+    denom = float(np.dot(kappa, kappa))
+    if denom < 1e-14:
+        raise NotImplementedError(
+            "cannot calibrate the BGN mobility: the membrane has ~zero curvature, so the force balance "
+            "does not pin a curvature-flow speed. Redistribution is defined for mean-curvature flow."
+        )
+    return -float(np.dot(v, kappa)) / denom
+
+
+def assemble_unknown_motion(
+    md: MathDescription, geometry: Geometry, *, dt: float, redistribute: bool = False
+) -> UnknownMotionProblem:
     """Assemble the §1.10.8 unknown-motion model: a weak-form force balance for the
     membrane velocity (optionally curvature-driven) coupled to an optional T2 receptor
-    that dilutes with the solved motion."""
+    that dilutes with the solved motion.
+
+    `redistribute=True` switches a *motion-only* curvature membrane to the BGN scheme:
+    each step advances by curvature flow *and* redistributes nodes tangentially, so
+    the mesh stays well-shaped and the flow runs at a usable `dt`. It is a pure
+    discretisation choice (the continuous solution is unchanged), hence a backend flag
+    rather than a MathDescription field. v1 requires a curvature force balance and no
+    receptor — a co-moving species would need the ALE advection term that arises once
+    the mesh velocity differs from the material velocity."""
 
     validate_or_raise(md)
     geometry_errors = cross_validate(md, geometry)
@@ -163,11 +232,26 @@ def assemble_unknown_motion(md: MathDescription, geometry: Geometry, *, dt: floa
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
     )
 
+    # ---- optional BGN tangential redistribution (motion-only curvature flow) --
+    bgn = None
+    if redistribute:
+        if curvature is None:
+            raise NotImplementedError(
+                "redistribute=True requires a curvature (n(x)/H(x)) force balance — BGN tangential "
+                "redistribution is defined for mean-curvature flow."
+            )
+        if receptor_eqs:
+            raise NotImplementedError(
+                "redistribute=True is motion-only in v1: a co-moving receptor needs the ALE advection term "
+                "-(v_mesh - v_material)·∇_Γ ρ that arises when the mesh redistributes; deferred."
+            )
+        bgn = _BGNMotion(mesh, mobility=_calibrate_mobility(curvature, force_balance, velocity), dt=dt)
+
     # ---- mesh motion (owned here) + the optional receptor --------------------
     motion = _MeshMotion(mesh, velocity, dt_const)
     receptor = _build_receptor(receptor_eqs[0], md, mesh, dx, velocity, dt_const) if receptor_eqs else None
     receptor_var = receptor_eqs[0].variable if receptor_eqs else None
-    return UnknownMotionProblem(motion_var, velocity, receptor_var, receptor, force_balance, motion, curvature)
+    return UnknownMotionProblem(motion_var, velocity, receptor_var, receptor, force_balance, motion, curvature, bgn)
 
 
 def _build_receptor(
