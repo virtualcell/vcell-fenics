@@ -1,15 +1,13 @@
 """Formalism-driven mixed-dimensional assembly for bulk-surface coupled models.
 
-This generalises the hardcoded §1.6.6 solver (`binding.py`) into the `assemble()`
-path: a multi-subdomain MathDescription — one `volume` (bulk) subdomain and one
-`surface` subdomain that is the bulk's boundary, coupled through `trace(·)` in the
-surface sources and a Neumann BC on the bulk variable referencing the surface
-variables — is read structurally and assembled as a cross-mesh block system. Any
-diffusion / rate / source *expressions* and any number of surface species work,
-driven by the model rather than baked in.
+A multi-subdomain MathDescription — one `volume` (bulk) subdomain and one `surface`
+subdomain that is the bulk's boundary, coupled through `trace(·)` in the surface
+sources and a Neumann BC on the bulk variable referencing the surface variables (the
+§1.6.6 composable pattern) — is read structurally and assembled as a cross-mesh block
+system. Any diffusion / rate / source *expressions* and any number of surface species
+work, driven by the model rather than baked in.
 
-The mixed-dimensional mechanics are exactly those validated in `binding.py` (and the
-extensive comments there), now expressed declaratively with `ufl.extract_blocks`:
+The cross-mesh mechanics, expressed declaratively with `ufl.extract_blocks`:
 
 - The full residual is split into a **local** part (per-subdomain mass + diffusion,
   each on its own mesh) and a **coupling** part (the cross-subdomain source and BC
@@ -26,9 +24,22 @@ extensive comments there), now expressed declaratively with `ufl.extract_blocks`
   to the *bulk* mesh (the coupling integration domain); a surface-mesh constant on the
   bulk `ds` would trip ffcx's cross-mesh tabulation.
 
-Scope: one bulk + one surface-on-its-boundary, static (the §1.6.6 class). A moving
-surface, >2 subdomains, and interface (bulk-bulk) BCs reuse the same machinery but
-are not wired here.
+**Moving surface (conservative ALE).** When the surface has a prescribed velocity, the
+membrane and the bulk's interface boundary move by `dt·v` each step; both fields are
+treated as **co-moving with the deforming domain** (`v_phys = v_mesh`), so each gains a
+dilution term: the surface `ρ ∇_Γ·v_Γ` *and* the bulk `L ∇·v_mesh` (the volumetric
+analogue). Because both fields co-move with the membrane, the consumption flux there is
+the ordinary diffusive Neumann — there is **no moving-boundary relative-flux correction**
+(it would be needed only for a lab-fixed bulk field). With this pairing total ligand
+(bulk-free + membrane-bound) is conserved across the motion, which the mass-balance test
+checks. The meshes are advanced by `_CoupledMeshMotion` — the membrane directly, the
+bulk's interface boundary identically (outer boundary fixed, interior by harmonic
+extension); evaluating the same velocity at the same (coincident) nodes keeps them
+coincident so the topological entity map stays valid. The local block re-assembles each
+step on the deformed geometry.
+
+Scope: one bulk + one surface-on-its-boundary. >2 subdomains and interface (bulk-bulk)
+BCs reuse the same machinery but are not wired here.
 """
 
 from __future__ import annotations
@@ -40,9 +51,11 @@ import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.fem import petsc
+from dolfinx.fem.petsc import LinearProblem
 from dolfinx.mesh import Mesh
 from mpi4py import MPI
 from petsc4py import PETSc
+from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
@@ -53,6 +66,7 @@ from vcell_fenics.formalism.schema import (
     BCDirichlet,
     BCNeumann,
     MathDescription,
+    MotionPrescribedVelocity,
     ParameterConstant,
     TemplateEquation,
 )
@@ -169,9 +183,24 @@ def assemble_coupled(md: MathDescription, geometry: CoupledGeometry, *, dt: floa
     d_l = compile_expression(parse(bulk_eq.terms["diffusion"]), bulk_ctx)
     f_local = ufl.inner(u_l - ligand_prev, w_l) * dx + dt * d_l * ufl.inner(ufl.grad(u_l), ufl.grad(w_l)) * dx
     f_local += ufl.inner(u_r - surface_prev, w_r) * dx_s
+    # A moving membrane: the mandatory dilution term ρ ∇_Γ·v_Γ on every surface
+    # equation, and the meshes advance each step (`_CoupledMeshMotion`).
+    velocity_str = _surface_velocity(md, geometry.surface_subdomain)
+    motion = None if velocity_str is None else _CoupledMeshMotion(md, geometry, velocity_str, dt)
+    v_surf = compile_expression(parse(velocity_str), surf_ctx) if velocity_str is not None else None
+    if motion is not None:
+        # The bulk ligand co-moves with the deforming domain (conservative ALE,
+        # v_phys = v_mesh), so the ligand equation gains the bulk dilution term
+        # L ∇·v_mesh — the volumetric analogue of the surface ρ ∇_Γ·v_Γ. With it (and
+        # the standard diffusive Neumann at the co-moving membrane) total ligand is
+        # conserved; `dt·∇·v_mesh = ∇·(mesh displacement)`.
+        f_local += ufl.div(motion.bulk_displacement) * u_l * w_l * dx
+
     for k, eq in enumerate(surf_eqs):
         d_k = compile_expression(parse(eq.terms["diffusion"]), surf_ctx)
         f_local += dt * d_k * ufl.inner(ufl.grad(u_r[k]), ufl.grad(w_r[k])) * dx_s
+        if v_surf is not None:
+            f_local += dt * ufl.div(v_surf) * u_r[k] * w_r[k] * dx_s  # dilution (div on a submesh = ∇_Γ·)
         source = eq.terms.get("source")
         if source is not None and not _references(parse(source), {bulk_var}):
             # A purely-surface source (no bulk trace) stays local.
@@ -197,9 +226,14 @@ def assemble_coupled(md: MathDescription, geometry: CoupledGeometry, *, dt: floa
         if source is not None and _references(parse(source), {bulk_var}):
             f_coupling += -dt * compile_expression(parse(source), coupling_ctx) * w_r[k] * ds_int
 
-    # ---- assemble: A_local (once) + A_coupling (per step) --------------------
-    a_local = petsc.assemble_matrix(fem.form(ufl.extract_blocks(ufl.lhs(f_local)), entity_maps=emaps))
-    a_local.assemble()
+    # ---- assemble: A_local + A_coupling (per step) ---------------------------
+    # A_local is fixed for a static mesh (assemble once); for a moving membrane it
+    # re-assembles each step on the deformed geometry, so keep the form.
+    a_local_form = fem.form(ufl.extract_blocks(ufl.lhs(f_local)), entity_maps=emaps)
+    a_local_static = None
+    if motion is None:
+        a_local_static = petsc.assemble_matrix(a_local_form)
+        a_local_static.assemble()
     coupling_lhs = fem.form(ufl.extract_blocks(ufl.lhs(f_coupling)), entity_maps=emaps)
     rhs_local = fem.form(ufl.extract_blocks(ufl.rhs(f_local)), entity_maps=emaps)
     # The coupling is purely bilinear (no constant forcing) for §1.6.6, so its RHS is
@@ -221,6 +255,13 @@ def assemble_coupled(md: MathDescription, geometry: CoupledGeometry, *, dt: floa
     surface_prev.x.array[:] = surface.x.array
 
     def do_step() -> None:
+        if motion is not None:
+            motion.advance()  # move both meshes before re-assembling on the deformed geometry
+            a_local = petsc.assemble_matrix(a_local_form)
+            a_local.assemble()
+        else:
+            assert a_local_static is not None
+            a_local = a_local_static
         coupling = petsc.assemble_matrix(coupling_lhs)
         coupling.assemble()
         matrix = a_local.copy()
@@ -247,7 +288,10 @@ def assemble_coupled(md: MathDescription, geometry: CoupledGeometry, *, dt: floa
         surface.x.array[:n_r] = values[n_l : n_l + n_r]
         ligand_prev.x.array[:] = ligand.x.array
         surface_prev.x.array[:] = surface.x.array
-        for obj in (ksp, coupling, coupling_b, matrix, rhs, solution):
+        cleanup = [ksp, coupling, coupling_b, matrix, rhs, solution]
+        if motion is not None:
+            cleanup.append(a_local)  # the static matrix is reused, the moving one is fresh each step
+        for obj in cleanup:
             if obj is not None:
                 obj.destroy()
 
@@ -258,6 +302,90 @@ def _surface_symbols(surface_vars: list[str], u_r: UflExpr) -> dict[str, UflExpr
     """Bind each surface variable to its component of the surface vector trial."""
 
     return {name: u_r[k] for k, name in enumerate(surface_vars)}
+
+
+def _surface_velocity(md: MathDescription, surface_subdomain: str) -> str | None:
+    """The surface subdomain's prescribed-velocity expression string, or None when it
+    is static (no motion, or a literal-zero velocity)."""
+
+    sub = next((s for s in md.subdomains if s.name == surface_subdomain), None)
+    if sub is None or not isinstance(sub.motion, MotionPrescribedVelocity):
+        return None
+    node = parse(sub.motion.velocity)
+    if isinstance(node, Number) and node.value == 0.0:
+        return None
+    return sub.motion.velocity
+
+
+class _CoupledMeshMotion:
+    """Advances a coupled bulk + surface-on-its-boundary geometry under a prescribed
+    velocity. The surface membrane and the bulk's interface boundary move by `dt·v`;
+    the bulk's outer boundary is held fixed and its interior follows by harmonic
+    extension. Because both meshes evaluate the *same* velocity at the *same*
+    (coincident) nodes, they stay geometrically coincident, so the topological entity
+    map keeps the cross-mesh coupling valid."""
+
+    def __init__(self, md: MathDescription, geometry: CoupledGeometry, velocity: str, dt: float) -> None:
+        bulk, surf = geometry.bulk_mesh, geometry.surface_mesh
+        self._gdim = gdim = bulk.geometry.dim
+        self._bulk, self._surf = bulk, surf
+        tdim = bulk.topology.dim
+
+        v_bulk = compile_expression(
+            parse(velocity), CompileContext(bulk, {"x": ufl.SpatialCoordinate(bulk), **_const_params(md, bulk)})
+        )
+        v_surf = compile_expression(
+            parse(velocity), CompileContext(surf, {"x": ufl.SpatialCoordinate(surf), **_const_params(md, surf)})
+        )
+
+        # Bulk harmonic extension: ∇²d = 0 with d = dt·v on the interface boundary and
+        # d = 0 on the outer boundary (held fixed). Re-solved each step.
+        space_b = fem.functionspace(bulk, ("Lagrange", 1, (gdim,)))
+        self._bulk_disp = fem.Function(space_b)
+        trial, test = ufl.TrialFunction(space_b), ufl.TestFunction(space_b)
+        a = ufl.inner(ufl.grad(trial), ufl.grad(test)) * ufl.dx
+        rhs = ufl.inner(fem.Constant(bulk, np.zeros(gdim, dtype=PETSc.ScalarType)), test) * ufl.dx
+        bulk.topology.create_connectivity(tdim - 1, tdim)
+        self._interface_disp = fem.Function(space_b)
+        self._interface_expr = fem.Expression(dt * v_bulk, space_b.element.interpolation_points)
+        interface_dofs = fem.locate_dofs_topological(
+            space_b, tdim - 1, geometry.facet_tags.find(geometry.interface_tag)
+        )
+        outer_dofs = fem.locate_dofs_topological(space_b, tdim - 1, geometry.facet_tags.find(geometry.outer_tag))
+        bcs = [
+            fem.dirichletbc(self._interface_disp, interface_dofs),
+            fem.dirichletbc(fem.Function(space_b), outer_dofs),
+        ]
+        self._bulk_problem = LinearProblem(
+            a,
+            rhs,
+            u=self._bulk_disp,
+            bcs=bcs,
+            petsc_options_prefix=f"vcellfenics_coupled_motion_{id(self):x}_",
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        )
+        self._bulk_perm = cKDTree(space_b.tabulate_dof_coordinates()).query(bulk.geometry.x)[1]
+
+        # Membrane: dt·v directly (every node is on the boundary).
+        space_s = fem.functionspace(surf, ("Lagrange", 1, (gdim,)))
+        self._surf_disp = fem.Function(space_s)
+        self._surf_expr = fem.Expression(dt * v_surf, space_s.element.interpolation_points)
+        self._surf_perm = cKDTree(space_s.tabulate_dof_coordinates()).query(surf.geometry.x)[1]
+
+    @property
+    def bulk_displacement(self) -> fem.Function:
+        """The bulk mesh's nodal displacement this step (= dt·v_mesh); `∇·` of it is the
+        coefficient of the bulk dilution term `L ∇·v_mesh` in the ligand equation."""
+
+        return self._bulk_disp
+
+    def advance(self) -> None:
+        gdim = self._gdim
+        self._interface_disp.interpolate(self._interface_expr)
+        self._bulk_problem.solve()
+        self._bulk.geometry.x[:, :gdim] += self._bulk_disp.x.array.reshape((-1, gdim))[self._bulk_perm]
+        self._surf_disp.interpolate(self._surf_expr)
+        self._surf.geometry.x[:, :gdim] += self._surf_disp.x.array.reshape((-1, gdim))[self._surf_perm]
 
 
 def _interface_neumann(md: MathDescription, bulk_var: str, geometry: CoupledGeometry) -> BCNeumann | None:

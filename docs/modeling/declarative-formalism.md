@@ -642,7 +642,7 @@ Fixes the value of the variable on the boundary. `expression` is a scalar expres
 
 $$D \, \nabla u \cdot \mathbf{n} \;=\; h(\mathbf{x}, t)$$
 
-Fixes the *outward* normal flux on the boundary. $\mathbf{n}$ is the outward unit normal of the variable's home subdomain; positive $h$ means flux flowing out of the subdomain across the boundary. `expression` is a scalar expression. For variables governed by a template with non-isotropic diffusion, $D \, \nabla u \cdot \mathbf{n}$ generalises to $(D \nabla u) \cdot \mathbf{n}$ in the natural way.
+Fixes $D \, \nabla u \cdot \mathbf{n}$ on the boundary, where $\mathbf{n}$ is the outward unit normal of the variable's home subdomain. **Sign convention:** this is the natural BC of the diffusive weak form, so it enters as $\frac{\mathrm d}{\mathrm dt}\!\int_\Omega u = \int_\Gamma h$ — i.e. **positive $h$ is an influx** (a source adding to the subdomain), negative $h$ a sink. A *consumption* flux (binding, capture) is therefore written with a negative sign, e.g. `expression: "-(k_on * trace(L) * rho_f - k_off * rho_b)"`. (An earlier draft of this section described positive $h$ as "flux flowing out"; that contradicted the equation $D\nabla u\cdot\mathbf n = h$ and is corrected here.) `expression` is a scalar expression. For variables governed by a template with non-isotropic diffusion, $D \, \nabla u \cdot \mathbf{n}$ generalises to $(D \nabla u) \cdot \mathbf{n}$ in the natural way.
 
 ##### Robin
 
@@ -704,7 +704,7 @@ When a boundary is *itself* a subdomain that carries its own PDE — the canonic
 **The composable pattern, then, is:**
 
 - **Membrane equation source terms** reference bulk variables via `trace(·)`: e.g. `k_on * trace(L) * rho_f - k_off * rho_b`.
-- **Bulk BCs at the membrane** reference surface variables directly (no `trace` needed; the surface variable already lives on the membrane): e.g. a Neumann BC for L with expression `k_on * trace(L) * rho_f - k_off * rho_b`.
+- **Bulk BCs at the membrane** reference surface variables directly (no `trace` needed; the surface variable already lives on the membrane): e.g. a Neumann BC for L with expression `-(k_on * trace(L) * rho_f - k_off * rho_b)` — negated because binding *consumes* L and positive Neumann $h$ is an influx (§1.6.2).
 - **Mass conservation** — what is consumed from the bulk equals what is produced on the surface — is the user's responsibility, expressed by writing matched expressions in both places with the appropriate signs. The schema does *not* auto-balance.
 
 There is no dedicated "reaction" BC entity in v1; the composable form covers all cases. A future v2 may add a sugar template that desugars to the same two expressions a careful user would have written by hand, once enough use cases accumulate to justify standardising it.
@@ -764,13 +764,14 @@ math_description:
       kind: dirichlet
       expression: "L_reservoir"
 
-    # Coupling at the membrane: ligand flux out of the extracellular bulk
-    # equals the net binding rate produced on the membrane. Matched
-    # expression to the rho_b source above; user-enforced conservation.
+    # Coupling at the membrane: ligand is *consumed* from the extracellular bulk
+    # at the net binding rate, so the Neumann flux is the negated rate (positive h
+    # is an influx; §1.6.2 sign convention). Matched to the rho_b source above with
+    # the opposite sign — user-enforced conservation (ligand lost = receptor bound).
     - variable: L
       boundary: membrane
       kind: neumann
-      expression: "k_on * trace(L) * rho_f - k_off * rho_b"
+      expression: "-(k_on * trace(L) * rho_f - k_off * rho_b)"
 
     # rho_f and rho_b live on a closed membrane (no edge), so they need
     # no BCs of their own — the surface PDE on a closed manifold is
@@ -2109,7 +2110,7 @@ This backend is the canonical implementation of the formalism and the reference 
 - T1 (bulk RAD) and T2 (surface PDE with dilution), `temporality: time_dependent`, with: scalar variables and **coupled multi-species systems** (one solve over a vector space); the `diffusion` and `source` slots (a source linear in the unknowns, including cross-variable coupling); prescribed-**velocity** motion with **automatic dilution** `ρ ∇_Γ·v_Γ` and a per-step mesh advance guarded by a mesh-quality check; external **Dirichlet / Neumann / Robin** BCs on a labelled boundary (with the zero-Neumann no-flux default where none is declared); constant and expression parameters; spatially-varying ICs. Backward Euler, $P_1$ Lagrange (configurable), direct LU.
 - **ALE remeshing** (`src/vcell_fenics/core/`, `backend/ale.py`): conservative surface and bulk field remaps, a gmsh region remesher, a `rebuild_on_mesh` teardown+reassemble of the build-once IR, harmonic-extension bulk mesh-motion, and a `step_with_remeshing` / `run_with_remeshing` driver that turns the mesh-quality guard into remesh-and-continue for a moving membrane or bulk region (`docs/modeling/ale-remesh-driver.md`).
 - **Multi-compartment geometry** (`approaches/multicompartment/`, `make_cell_extracellular_geometry`): a concentric two-compartment cell (cytosol + extracellular, meeting at the membrane) with an *internal* interface boundary incident to both compartments, the substrate for interface BCs and bulk↔surface coupling. Plus `create_extracellular_annulus` — the §1.6.6 substrate (extracellular bulk + membrane inner boundary + outer reservoir).
-- **Mixed-dimensional bulk↔surface coupling through `assemble()`** (`backend/coupled.py`, dispatched by a `CoupledGeometry`): a multi-subdomain MathDescription — one `volume` bulk + one `surface` on its boundary, coupled by `trace(·)` in the surface sources and a Neumann BC on the bulk variable referencing the surface variables (the §1.6.6 composable pattern) — is read *structurally* and assembled as a two-mesh block system, returning a `CoupledProblem`. Any diffusion/rate/source expressions and any number of surface species work, driven by the model. Mechanics: the residual splits into a local part (per-mesh mass+diffusion) and a coupling part (the cross-subdomain terms on the bulk's interface facets via DOLFINx 0.10 `entity_maps`), assembled as two block matrices via `ufl.extract_blocks` and summed; bilinear coupling is linearised semi-implicitly by lagging the bulk variable. Verified: §1.6.6 run through `assemble()` reproduces receptor conservation, binding equilibrium, the reservoir Dirichlet, and ρ_f-non-negativity; the local-vs-coupling source split is exercised. (`backend/binding.py` remains as the hand-written reference for the same model.) Scope: one bulk + one surface-on-its-boundary, static; >2 subdomains, a moving surface, and interface (bulk-bulk) BCs reuse the same machinery but are not yet wired.
+- **Mixed-dimensional bulk↔surface coupling through `assemble()`** (`backend/coupled.py`, dispatched by a `CoupledGeometry`): a multi-subdomain MathDescription — one `volume` bulk + one `surface` on its boundary, coupled by `trace(·)` in the surface sources and a Neumann BC on the bulk variable referencing the surface variables (the §1.6.6 composable pattern) — is read *structurally* and assembled as a two-mesh block system, returning a `CoupledProblem`. Any diffusion/rate/source expressions and any number of surface species work, driven by the model. Mechanics: the residual splits into a local part (per-mesh mass+diffusion) and a coupling part (the cross-subdomain terms on the bulk's interface facets via DOLFINx 0.10 `entity_maps`), assembled as two block matrices via `ufl.extract_blocks` and summed; bilinear coupling is linearised semi-implicitly by lagging the bulk variable. **Moving membrane (conservative ALE):** when the surface has a prescribed velocity, both fields co-move with the deforming domain, so each gains a dilution term — the surface `ρ ∇_Γ·v_Γ` and the bulk `L ∇·v_mesh` — and the consumption flux at the co-moving membrane is the ordinary diffusive Neumann (no relative-flux correction). Verified: §1.6.6 through `assemble()` reproduces receptor conservation, binding equilibrium, the reservoir Dirichlet, ρ_f-non-negativity, and the local-vs-coupling source split; under membrane expansion the receptor total *and* (in a closed cell) the total ligand are conserved — the mass-balance gate on the moving-boundary flux. Scope: one bulk + one surface-on-its-boundary; >2 subdomains and interface (bulk-bulk) BCs reuse the same machinery but are not yet wired.
 - Visualization helpers — PyVista in-process, XDMF for ParaView (`src/vcell_fenics/viz.py`).
 
 The three v1 conformance models run **through the formalism** (`tests/test_backend_*.py`): bulk diffusion, the surface cos(kθ) eigenmode decay, and the dilution mass-balance with its negative control — plus the §1.4.5 two-species receptor model end-to-end. The bespoke single-physics prototypes that preceded the backend have been removed.
