@@ -188,25 +188,62 @@ def test_redistribute_requires_a_curvature_force_balance() -> None:
         assemble_unknown_motion(load_yaml(_MODEL), geometry, dt=0.04, redistribute=True)
 
 
-def test_redistribute_rejects_a_co_moving_receptor() -> None:
-    # A receptor on the redistributing membrane would need the ALE advection term
-    # (mesh velocity ≠ material velocity); v1 refuses it rather than silently drop it.
-    with_receptor = _CURVATURE_MODEL.replace(
-        "  parameters:",
-        """    - template: surface_pde_with_dilution
-      variable: rho
-      subdomain: mem
-      temporality: time_dependent
-      terms: { diffusion: "0.02" }
-      initial_condition: "1.0"
-  parameters:""",
-    ).replace(
-        "    - { name: v, subdomain: mem, type: vector }",
-        "    - { name: v, subdomain: mem, type: vector }\n    - { name: rho, subdomain: mem }",
-    )
+# --- redistribution WITH a co-moving receptor: the ALE coupling --------------------
+
+_CURVATURE_RECEPTOR_MODEL = f"""
+math_description:
+  geometry: g
+  subdomains:
+    - {{ name: mem, kind: surface, motion: {{ kind: unknown, variable: v }} }}
+  variables:
+    - {{ name: v, subdomain: mem, type: vector }}
+    - {{ name: rho, subdomain: mem }}
+  equations:
+    - {{ template: weak_form, variable: v, subdomain: mem, temporality: steady_state,
+        form: "(eta*inner(v, v_test) + sigma*H(x)*inner(n(x), v_test)) * dx_Gamma", initial_condition: "0" }}
+    - {{ template: surface_pde_with_dilution, variable: rho, subdomain: mem, temporality: time_dependent,
+        terms: {{ diffusion: "0.001" }}, initial_condition: "1.0 + 0.5*cos(2*theta(x))" }}
+  parameters:
+    - {{ name: eta, value: {_ETA} }}
+    - {{ name: sigma, value: {_SIGMA} }}
+"""
+
+
+def _curvature_receptor_problem(dt: float, *, deform: float = 1.0) -> UnknownMotionProblem:
+    geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.2, h=0.05)
+    problem = assemble_unknown_motion(load_yaml(_CURVATURE_RECEPTOR_MODEL), geometry, dt=dt, redistribute=True)
+    if deform != 1.0:  # squash the circle into an ellipse so nodes genuinely slide
+        problem.receptor.unknown.function_space.mesh.geometry.x[:, 1] *= deform  # type: ignore[union-attr]
+    return problem
+
+
+def test_redistribute_conserves_receptor_mass_under_renoding() -> None:
+    # The crux of the ALE coupling: on a redistributing (re-noded) membrane the surface
+    # PDE picks up an advection term; realised here as a conservative remap, total
+    # surface mass ∫_Γ ρ ds stays invariant even with a non-uniform ρ and heavy
+    # tangential node motion — at a dt where the non-redistribute path tangles.
+    problem = _curvature_receptor_problem(dt=0.02, deform=0.6)
+    mass0 = _receptor_mass(problem)
+    for _ in range(25):
+        problem.step()  # decomposed normal-flow + re-node-remap; no MeshQualityError
+
+    assert _receptor_mass(problem) == pytest.approx(mass0, rel=5e-3)
+
+
+def test_redistribute_with_receptor_uses_the_decomposed_path() -> None:
+    # A receptor on a redistributing membrane wires up the decomposed BGN+remap motion
+    # (not the motion-only combined-BGN path, and not a refusal).
+    problem = _curvature_receptor_problem(dt=0.02)
+    assert problem._bgn_receptor is not None
+    assert problem._bgn is None
+
+
+def test_redistribute_requires_a_curvature_force_balance_even_with_receptor() -> None:
+    # The known-answer `η v = f₀ x/r` model is not curvature flow — redistribute refuses
+    # it whether or not a receptor is present (it carries one).
     geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=0.1)
-    with pytest.raises(NotImplementedError, match=r"ALE advection|motion-only"):
-        assemble_unknown_motion(load_yaml(with_receptor), geometry, dt=0.02, redistribute=True)
+    with pytest.raises(NotImplementedError, match="curvature"):
+        assemble_unknown_motion(load_yaml(_MODEL), geometry, dt=0.04, redistribute=True)
 
 
 def test_curvature_unavailable_outside_mechanics() -> None:
