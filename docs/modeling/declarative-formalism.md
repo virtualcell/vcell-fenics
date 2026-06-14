@@ -642,7 +642,7 @@ Fixes the value of the variable on the boundary. `expression` is a scalar expres
 
 $$D \, \nabla u \cdot \mathbf{n} \;=\; h(\mathbf{x}, t)$$
 
-Fixes the *outward* normal flux on the boundary. $\mathbf{n}$ is the outward unit normal of the variable's home subdomain; positive $h$ means flux flowing out of the subdomain across the boundary. `expression` is a scalar expression. For variables governed by a template with non-isotropic diffusion, $D \, \nabla u \cdot \mathbf{n}$ generalises to $(D \nabla u) \cdot \mathbf{n}$ in the natural way.
+Fixes $D \, \nabla u \cdot \mathbf{n}$ on the boundary, where $\mathbf{n}$ is the outward unit normal of the variable's home subdomain. **Sign convention:** this is the natural BC of the diffusive weak form, so it enters as $\frac{\mathrm d}{\mathrm dt}\!\int_\Omega u = \int_\Gamma h$ — i.e. **positive $h$ is an influx** (a source adding to the subdomain), negative $h$ a sink. A *consumption* flux (binding, capture) is therefore written with a negative sign, e.g. `expression: "-(k_on * trace(L) * rho_f - k_off * rho_b)"`. (An earlier draft of this section described positive $h$ as "flux flowing out"; that contradicted the equation $D\nabla u\cdot\mathbf n = h$ and is corrected here.) `expression` is a scalar expression. For variables governed by a template with non-isotropic diffusion, $D \, \nabla u \cdot \mathbf{n}$ generalises to $(D \nabla u) \cdot \mathbf{n}$ in the natural way.
 
 ##### Robin
 
@@ -704,7 +704,7 @@ When a boundary is *itself* a subdomain that carries its own PDE — the canonic
 **The composable pattern, then, is:**
 
 - **Membrane equation source terms** reference bulk variables via `trace(·)`: e.g. `k_on * trace(L) * rho_f - k_off * rho_b`.
-- **Bulk BCs at the membrane** reference surface variables directly (no `trace` needed; the surface variable already lives on the membrane): e.g. a Neumann BC for L with expression `k_on * trace(L) * rho_f - k_off * rho_b`.
+- **Bulk BCs at the membrane** reference surface variables directly (no `trace` needed; the surface variable already lives on the membrane): e.g. a Neumann BC for L with expression `-(k_on * trace(L) * rho_f - k_off * rho_b)` — negated because binding *consumes* L and positive Neumann $h$ is an influx (§1.6.2).
 - **Mass conservation** — what is consumed from the bulk equals what is produced on the surface — is the user's responsibility, expressed by writing matched expressions in both places with the appropriate signs. The schema does *not* auto-balance.
 
 There is no dedicated "reaction" BC entity in v1; the composable form covers all cases. A future v2 may add a sugar template that desugars to the same two expressions a careful user would have written by hand, once enough use cases accumulate to justify standardising it.
@@ -764,13 +764,14 @@ math_description:
       kind: dirichlet
       expression: "L_reservoir"
 
-    # Coupling at the membrane: ligand flux out of the extracellular bulk
-    # equals the net binding rate produced on the membrane. Matched
-    # expression to the rho_b source above; user-enforced conservation.
+    # Coupling at the membrane: ligand is *consumed* from the extracellular bulk
+    # at the net binding rate, so the Neumann flux is the negated rate (positive h
+    # is an influx; §1.6.2 sign convention). Matched to the rho_b source above with
+    # the opposite sign — user-enforced conservation (ligand lost = receptor bound).
     - variable: L
       boundary: membrane
       kind: neumann
-      expression: "k_on * trace(L) * rho_f - k_off * rho_b"
+      expression: "-(k_on * trace(L) * rho_f - k_off * rho_b)"
 
     # rho_f and rho_b live on a closed membrane (no edge), so they need
     # no BCs of their own — the surface PDE on a closed manifold is
@@ -2106,26 +2107,30 @@ This backend is the canonical implementation of the formalism and the reference 
 
 - The full Part 2 layer: schema dataclasses, YAML/JSON loader + dumper, the expression parser → typed AST (`src/vcell_fenics/formalism/`), and the validation pass (`formalism/validator.py`) — every check of §1.11 except the geometry cross-check and BC-expression contents, which run at the backend boundary.
 - The formalism → DOLFINx backend (`src/vcell_fenics/backend/`, ADR 004): an expression→UFL compiler, a `DiscreteProblem` IR with backward-Euler lowering via a residual `ufl.lhs`/`ufl.rhs` split, a geometry adapter + name loader + §1.11.10 cross-check, and the `assemble` / `run` driver with a `SolverConfiguration`.
-- T1 (bulk RAD) and T2 (surface PDE with dilution), `temporality: time_dependent`, with: scalar variables and **coupled multi-species systems** (one solve over a vector space); the `diffusion` and `source` slots (a source linear in the unknowns, including cross-variable coupling); prescribed-**velocity** motion with **automatic dilution** `ρ ∇_Γ·v_Γ` and a per-step mesh advance guarded by a mesh-quality check; zero-Neumann external BC; constant and expression parameters; spatially-varying ICs. Backward Euler, $P_1$ Lagrange (configurable), direct LU.
+- T1 (bulk RAD) and T2 (surface PDE with dilution), `temporality: time_dependent`, with: scalar variables and **coupled multi-species systems** (one solve over a vector space); the `diffusion` and `source` slots (a source linear in the unknowns, including cross-variable coupling); prescribed-**velocity** motion with **automatic dilution** `ρ ∇_Γ·v_Γ` and a per-step mesh advance guarded by a mesh-quality check; external **Dirichlet / Neumann / Robin** BCs on a labelled boundary (with the zero-Neumann no-flux default where none is declared); constant and expression parameters; spatially-varying ICs. Backward Euler, $P_1$ Lagrange (configurable), direct LU.
+- **ALE remeshing** (`src/vcell_fenics/core/`, `backend/ale.py`): conservative surface and bulk field remaps, a gmsh region remesher, a `rebuild_on_mesh` teardown+reassemble of the build-once IR, harmonic-extension bulk mesh-motion, and a `step_with_remeshing` / `run_with_remeshing` driver that turns the mesh-quality guard into remesh-and-continue for a moving membrane or bulk region (`docs/modeling/ale-remesh-driver.md`).
+- **Multi-compartment geometry** (`approaches/multicompartment/`, `make_cell_extracellular_geometry`): a concentric two-compartment cell (cytosol + extracellular, meeting at the membrane) with an *internal* interface boundary incident to both compartments, the substrate for interface BCs and bulk↔surface coupling. Plus `create_extracellular_annulus` — the §1.6.6 substrate (extracellular bulk + membrane inner boundary + outer reservoir).
+- **Mixed-dimensional bulk↔surface coupling through `assemble()`** (`backend/coupled.py`, dispatched by a `CoupledGeometry`): a multi-subdomain MathDescription — one `volume` bulk + one `surface` on its boundary, coupled by `trace(·)` in the surface sources and a Neumann BC on the bulk variable referencing the surface variables (the §1.6.6 composable pattern) — is read *structurally* and assembled as a two-mesh block system, returning a `CoupledProblem`. Any diffusion/rate/source expressions and any number of surface species work, driven by the model. Mechanics: the residual splits into a local part (per-mesh mass+diffusion) and a coupling part (the cross-subdomain terms on the bulk's interface facets via DOLFINx 0.10 `entity_maps`), assembled as two block matrices via `ufl.extract_blocks` and summed; bilinear coupling is linearised semi-implicitly by lagging the bulk variable. **Moving membrane (conservative ALE):** when the surface has a prescribed velocity, both fields co-move with the deforming domain, so each gains a dilution term — the surface `ρ ∇_Γ·v_Γ` and the bulk `L ∇·v_mesh` — and the consumption flux at the co-moving membrane is the ordinary diffusive Neumann (no relative-flux correction). Verified: §1.6.6 through `assemble()` reproduces receptor conservation, binding equilibrium, the reservoir Dirichlet, ρ_f-non-negativity, and the local-vs-coupling source split; under membrane expansion the receptor total *and* (in a closed cell) the total ligand are conserved — the mass-balance gate on the moving-boundary flux. Scope: one bulk + one surface-on-its-boundary; >2 subdomains and interface (bulk-bulk) BCs reuse the same machinery but are not yet wired.
 - Visualization helpers — PyVista in-process, XDMF for ParaView (`src/vcell_fenics/viz.py`).
 
 The three v1 conformance models run **through the formalism** (`tests/test_backend_*.py`): bulk diffusion, the surface cos(kθ) eigenmode decay, and the dilution mass-balance with its negative control — plus the §1.4.5 two-species receptor model end-to-end. The bespoke single-physics prototypes that preceded the backend have been removed.
 
 - Convergence-rate verification (`tests/test_backend_convergence.py`): h-refinement against analytical diffusion eigenmodes confirms the P1 operator is **second-order in L2** on both the bulk path (cos(πx)cos(πy) on an exactly-meshed unit square) and the surface path (cos(kθ) on the circle membrane, where the O(h²) polygonal-geometry error matches the FE rate); dt-refinement confirms backward Euler is **first-order in time** by self-convergence on a fixed mesh, cross-checked against the closed-form decay. This is the order-of-accuracy axis the single-resolution reference tests cannot cover.
 
+**Weak-form escape hatch** (`backend/weakform.py`, `assemble_weak_form`): one `weak_form` equation governing a scalar or vector variable on a subdomain, with the residual `form` compiled to UFL — the variable, its implicit `<variable>_test`, the tensor-algebra (`inner`/`dot`/`outer`/`cross`) and first-order calculus (`grad`/`div`/`lapl` + `_surf`/`_beltrami`) operators, vector literals `[·,·]`, parameters, `x`, and the subdomain measure (`dx`/`dx_Gamma`). `partial_t(u)` lowers to the backward-Euler difference for a time-dependent form; steady-state forms solve directly; the residual is split with `ufl.lhs`/`rhs`. This is the **membrane-mechanics** route in v1 (T5–T7 are v2): verified by reproducing the T2 surface diffusion as a weak form, a scalar membrane force balance `α u − σ Δ_Γ u = f` (analytic), and a vector viscous balance `η v = f_active` (analytic). *Deferred:* the `n(x)`/`H(x)` geometric helpers (discrete curvature/normal), labelled-boundary measures `ds(·)`/`dS(·)`, BCs on a weak-form variable, coupled multi-equation weak forms, and unknown-motion mesh coupling (the §1.10.8 motion-drives-the-mesh case).
+
 **Punted in v1**:
 
 - Operator templates T3 (algebraic constraint), T4 (lumped ODE), T5–T7 (mechanics).
-- Weak-form escape hatch.
-- Boundary conditions beyond the implicit zero-Neumann (Dirichlet/Neumann/Robin/interface), and bulk↔surface coupling via `trace` (cross-subdomain solves).
-- Prescribed-displacement and **unknown** (mechanics-driven) motion; remeshing / field transfer (the mesh-quality guard currently fails loudly instead).
+- The two **interface** BC kinds (value-equality, flux-balance) — bulk-bulk coupling on an *internal* interface — and bulk↔surface coupling for >2 subdomains or a moving surface. The bulk↔surface composable pattern (§1.6.6) now runs through `assemble()` (`backend/coupled.py`); these remaining cases reuse the same cross-mesh block machinery but are not yet wired (the single-mesh `assemble()` branch still rejects interface BCs with `NotImplementedError`). External Dirichlet/Neumann/Robin are implemented. Time-dependent BC expressions are also deferred (the v1 backend has no `t` handle).
+- Prescribed-displacement and **unknown** (mechanics-driven) motion. (Remeshing / conservative field transfer is now implemented — see the ALE bullet above.)
 - Region-keyed parameter maps; advection (`relative_advection`) slots; non-linear sources.
 - The full §3.4 SolverConfiguration (linear/nonlinear solver, ALE, stabilisation knobs) and a YAML carrier for it; intermediate output-time snapshots.
 - A formal conformance-subset declaration.
 
 #### 3.6.2 What v1 conformance means for this backend
 
-The vcell-fenics backend claims conformance for a strict subset: T1 and T2 (including coupled multi-species), prescribed-velocity or no motion, the diffusion/source slots, zero-Neumann external BCs, no weak-form. Models within that subset run correctly and pass the conformance reference suite's relevant entries. Models outside that subset are not supported in v1; the assembler rejects them with a clear `NotImplementedError` at build time rather than silently producing wrong results.
+The vcell-fenics backend claims conformance for a strict subset: T1 and T2 (including coupled multi-species), prescribed-velocity or no motion, the diffusion/source slots, external Dirichlet/Neumann/Robin (and zero-Neumann default) BCs, no weak-form. Models within that subset run correctly and pass the conformance reference suite's relevant entries. Models outside that subset are not supported in v1; the assembler rejects them with a clear `NotImplementedError` at build time rather than silently producing wrong results.
 
 This honest scoping is deliberate. The formalism is broader than what v1 implements; the v1 backend is one slice. The roadmap to broader coverage is the same as the formalism's v2 roadmap (Appendix B) — driven by concrete use cases, not by speculative feature addition.
 

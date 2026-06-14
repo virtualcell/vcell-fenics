@@ -11,13 +11,25 @@ compiler assumes the expression has already passed validation (`formalism.valida
 so an unresolved name or unsupported construct is an internal error, raised as
 `CompileError` rather than returned as a diagnostic.
 
-Supported so far: numeric literals, name lookups (parameters, and `x` when the
-assembler binds it to a SpatialCoordinate), arithmetic (`+ - * / **`, unary `±`),
-coordinate indexing (`x[0]`), the standard scalar math functions, and the
-geometric helpers that expand to functions of `x` (`theta`, `r`). Calculus
-operators, `trace`, tensor algebra, multi-argument functions, the `n`/`H`/tangent/
-curvature helpers, and vector/tensor literals raise `CompileError` until the
-increments that add them.
+Supported so far: numeric literals, name lookups (parameters, `x` → SpatialCoordinate,
+and — in a weak form — variables, test functions, and measures the assembler binds),
+arithmetic (`+ - * / **`, unary `±`), coordinate indexing (`x[0]`), the standard
+scalar math functions, the geometric helpers `theta`/`r`, `trace(·)` (§1.8.2),
+**vector literals** `[a, b]`, **tensor-algebra** (`inner`/`dot`/`outer`/`cross`),
+**first-order calculus** (`grad`/`div`/`lapl` and the `_surf`/`_beltrami` variants,
+which on a codim-1 submesh are the same UFL calls), and **`partial_t(u)`** (resolved
+to the time-discretised derivative the assembler bound — the weak-form escape hatch).
+The `n(x)`/`H(x)`/tangent/curvature geometric helpers, multi-argument standard
+functions, and tensor literals raise `CompileError` until the increments that add them.
+
+`trace(u)` compiles to `u`'s UFL object unchanged: the cross-dimensional *restriction*
+of a bulk variable onto a lower-dimensional evaluation domain is realised by native
+mixed-dimensional assembly (entity maps relating the submeshes; §1.8.2 "trace
+evaluation is a backend concern"), not by a UFL wrapper. The compiler's only job is
+to resolve the name; the assembler that builds a cross-subdomain form provides the
+bulk variable's `Function` in the symbol table and the entity map at `fem.form` time.
+The validator has already enforced that the argument is a single declared variable on
+a strictly higher-dimensional subdomain (the direction rule), so the compiler trusts that.
 """
 
 from __future__ import annotations
@@ -31,7 +43,7 @@ from dolfinx.mesh import Mesh
 from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
-from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, Name, Number, UnaryOp
+from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, Name, Number, UnaryOp, VectorLiteral
 
 # Formalism standard functions that map to a single-argument UFL function
 # (§1.8.5). Multi-argument functions (atan2, min, max, pow) and the
@@ -49,6 +61,14 @@ _UFL_UNARY_FUNCTIONS: dict[str, Any] = {
     "abs": abs,
 }
 
+# Two-argument tensor-algebra operators (§1.8, TENSOR_ALGEBRA).
+_UFL_BINARY: dict[str, Any] = {"inner": ufl.inner, "dot": ufl.dot, "outer": ufl.outer, "cross": ufl.cross}
+
+# First-order calculus operators (§1.8). On a codim-1 submesh `ufl.grad` / `ufl.div`
+# are already the tangential (surface) operators, so the `_surf` variants are the
+# same UFL calls — the distinction is the mesh, not the operator.
+_UFL_CALCULUS: dict[str, Any] = {"grad": ufl.grad, "div": ufl.div, "grad_surf": ufl.grad, "div_surf": ufl.div}
+
 
 class CompileError(Exception):
     """A MathDescription expression could not be compiled to UFL. Indicates an
@@ -60,10 +80,14 @@ class CompileError(Exception):
 class CompileContext:
     """The symbol environment for compilation. `mesh` is needed to build
     `fem.Constant`s; `symbols` maps formalism names to UFL objects (parameters as
-    Constants in increment 0)."""
+    Constants, variables/test functions/measures in a weak-form context).
+    `time_derivatives` maps a variable name to the UFL object `partial_t(<var>)`
+    compiles to — the backend's time-discretised derivative (e.g. `(uⁿ⁺¹ − uⁿ)/dt`
+    for backward Euler) — populated only for a time-dependent weak form."""
 
     mesh: Mesh
     symbols: dict[str, UflExpr] = field(default_factory=dict)
+    time_derivatives: dict[str, UflExpr] = field(default_factory=dict)
 
 
 def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
@@ -100,12 +124,28 @@ def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
         if not isinstance(node.index, Number) or not node.index.value.is_integer():
             raise CompileError("index must be an integer literal, e.g. x[0]")
         return base[int(node.index.value)]
+    if isinstance(node, VectorLiteral):
+        return ufl.as_vector([compile_expression(c, ctx) for c in node.components])
     if isinstance(node, FunctionCall):
         return _compile_call(node, ctx)
     raise CompileError(f"{type(node).__name__} is not supported by the backend yet")
 
 
 def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
+    # `partial_t(<var>)` resolves to the backend's time-discretised derivative, so it
+    # is looked up by *name* (not compiled as an expression) — only valid in a
+    # time-dependent weak form where the assembler bound it (§1.5.4).
+    if node.callee == "partial_t":
+        if len(node.args) != 1 or not isinstance(node.args[0], Name):
+            raise CompileError("partial_t(...) takes a single variable name")
+        derivative = ctx.time_derivatives.get(node.args[0].name)
+        if derivative is None:
+            raise CompileError(
+                f"partial_t({node.args[0].name}) has no time derivative bound — it is only valid for a variable "
+                f"governed by a time-dependent weak-form equation"
+            )
+        return derivative
+
     args = [compile_expression(arg, ctx) for arg in node.args]
     # Geometric helpers that are sugar for functions of x (§1.8.4).
     if node.callee == "theta":
@@ -114,6 +154,25 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
     if node.callee == "r":
         x = args[0]
         return ufl.sqrt(ufl.dot(x, x))
+    if node.callee == "trace":
+        # The trace of a higher-dimensional variable onto a lower-dimensional
+        # evaluation domain (§1.8.2). At the UFL level this is the variable itself;
+        # the actual restriction is mixed-dimensional assembly's job (entity maps),
+        # so the compiler just returns the resolved argument. The validator has
+        # guaranteed a single variable-name argument crossing high → low dimension.
+        if len(args) != 1:
+            raise CompileError("trace(...) takes exactly one argument")
+        return args[0]
+    binary = _UFL_BINARY.get(node.callee)
+    if binary is not None:
+        if len(args) != 2:
+            raise CompileError(f"{node.callee}(...) takes two arguments")
+        return binary(args[0], args[1])
+    calculus = _UFL_CALCULUS.get(node.callee)
+    if calculus is not None:
+        return calculus(args[0])
+    if node.callee in ("lapl", "lapl_beltrami"):
+        return ufl.div(ufl.grad(args[0]))  # ∇·∇ — Beltrami on a submesh
     fn = _UFL_UNARY_FUNCTIONS.get(node.callee)
     if fn is not None:
         return fn(*args)

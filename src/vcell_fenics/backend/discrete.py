@@ -26,11 +26,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
-from dolfinx.mesh import Mesh
+from dolfinx.mesh import Mesh, exterior_facet_indices
 from mpi4py import MPI
+from petsc4py import PETSc
 from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
@@ -45,6 +47,9 @@ class TermKind(Enum):
     ADVECTION = "advection"
     DILUTION = "dilution"
     SOURCE = "source"
+    # Boundary contributions (integrated over a labelled boundary measure, not dx).
+    NEUMANN = "neumann"
+    ROBIN = "robin"
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,24 @@ class Term:
 
     kind: TermKind
     integrand: UflExpr | None = None
+
+
+@dataclass(frozen=True)
+class BoundaryTerm:
+    """A weak-form contribution integrated over a labelled boundary `measure` (a
+    restricted `ds`) — for non-zero Neumann and Robin BCs.
+
+    `integrand` is the *signed* residual contribution: the assembler bakes in the
+    sign and coefficients, so lowering just adds `dt · integrand · measure` to the
+    residual form. The implicit-in-`u` part of a Robin term lands in the bilinear
+    form via the same `ufl.lhs`/`rhs` split the `SOURCE` term relies on. Dirichlet
+    BCs are *strong* (they live in `DiscreteProblem.bcs`), not here; the implicit
+    zero-Neumann default is simply the absence of any boundary term.
+    """
+
+    kind: TermKind
+    integrand: UflExpr
+    measure: ufl.Measure
 
 
 @dataclass(frozen=True)
@@ -87,15 +110,18 @@ class BackwardEuler:
         trial, test, dt = problem.trial, problem.test, problem.dt
         # mass: (uⁿ⁺¹ − uⁿ)·w. `inner` so a mixed/vector space (coupled species)
         # sums its components; for a scalar space it is just the product.
-        residual = ufl.inner(trial - problem.previous, test)
+        form = ufl.inner(trial - problem.previous, test) * problem.dx
         for term in problem.terms:
             if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
                 continue
             if term.kind is TermKind.SOURCE:
-                residual = residual - dt * term.integrand  # +s on the PDE's RHS ⇒ −s in the residual
+                form = form - dt * term.integrand * problem.dx  # +s on the PDE's RHS ⇒ −s in the residual
             else:
-                residual = residual + dt * term.integrand  # diffusion, dilution, advection
-        form = residual * problem.dx
+                form = form + dt * term.integrand * problem.dx  # diffusion, dilution, advection
+        # Boundary contributions integrate over their own (restricted) measure; the
+        # assembler has baked the residual sign into each integrand.
+        for boundary in problem.boundary_terms:
+            form = form + dt * boundary.integrand * boundary.measure
         return ufl.lhs(form), ufl.rhs(form)
 
 
@@ -114,6 +140,54 @@ class MeshQualityError(RuntimeError):
     fails here. Remeshing / field transfer is future work (§3.3)."""
 
 
+class _HarmonicExtension:
+    """Extends a boundary displacement into a bulk mesh's interior by a vector
+    Laplace solve — the standard ALE mesh-motion fill (Approach A).
+
+    Given a displacement field whose *boundary* values are the prescribed dt·v, it
+    solves ∇²d = 0 with those values fixed on ∂Ω (Dirichlet) and overwrites the
+    field with the harmonic result. So interior nodes follow the moving boundary
+    *smoothly* rather than being dragged by the raw velocity formula — which for a
+    codim-0 mesh is both the physically right ALE choice (interior motion is a mesh
+    bookkeeping device, not a material velocity) and avoids interior singularities
+    of the boundary velocity expression (e.g. `x / r(x)` at the centre).
+
+    Bound to the mesh; the bilinear form re-assembles each solve, so a moving mesh
+    is handled automatically.
+    """
+
+    def __init__(self, space: fem.FunctionSpace) -> None:
+        mesh = space.mesh
+        tdim = mesh.topology.dim
+        mesh.topology.create_connectivity(tdim - 1, tdim)
+        facets = exterior_facet_indices(mesh.topology)
+        boundary_dofs = fem.locate_dofs_topological(space, tdim - 1, facets)
+        self._boundary = fem.Function(space)  # the prescribed boundary displacement (BC source)
+        self._solution = fem.Function(space)  # the harmonic result
+        bc = fem.dirichletbc(self._boundary, boundary_dofs)
+        u, w = ufl.TrialFunction(space), ufl.TestFunction(space)
+        a = ufl.inner(ufl.grad(u), ufl.grad(w)) * ufl.dx
+        zero = fem.Constant(mesh, np.zeros(mesh.geometry.dim, dtype=PETSc.ScalarType))
+        L = ufl.inner(zero, w) * ufl.dx
+        self._problem = LinearProblem(
+            a,
+            L,
+            u=self._solution,
+            bcs=[bc],
+            petsc_options_prefix=f"vcellfenics_ale_{id(self):x}_",
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        )
+
+    def fill(self, displacement: fem.Function) -> None:
+        """Replace `displacement`'s interior with the harmonic extension of its
+        boundary values (the boundary values themselves are preserved). Interior
+        values of the input are ignored — only the boundary DOFs feed the BC."""
+
+        self._boundary.x.array[:] = displacement.x.array
+        self._problem.solve()
+        displacement.x.array[:] = self._solution.x.array
+
+
 class _MeshMotion:
     """Advances mesh nodes by dt·velocity each step (prescribed motion, §1.10).
 
@@ -122,6 +196,12 @@ class _MeshMotion:
     one-time topological permutation maps interpolated values onto geometry rows.
     The permutation is invariant under motion (it is purely topological), so it
     is computed once from the initial coordinates and reused.
+
+    On a codim-0 (bulk) mesh the prescribed velocity only defines the *boundary*
+    motion; the interior is filled by harmonic extension (`_HarmonicExtension`) so
+    interior quality is preserved. On a codim-1 mesh (a membrane) every node is on
+    the boundary, so the interpolated dt·v moves them all directly — the original
+    behaviour, unchanged.
 
     After each move the mesh quality is checked (`MeshQualityError` on failure):
     a node-displacement scheme with no remeshing can only follow motions that
@@ -135,6 +215,9 @@ class _MeshMotion:
         self._displacement = fem.Function(space)
         self._expression = fem.Expression(dt * velocity, space.element.interpolation_points)
         self._geom_from_dof = cKDTree(space.tabulate_dof_coordinates()).query(mesh.geometry.x)[1]
+        # A bulk mesh (codim 0) has interior nodes to fill harmonically; a membrane
+        # (codim 1) is all boundary, so dt·v moves every node directly.
+        self._extension = _HarmonicExtension(space) if mesh.topology.dim == self._gdim else None
         # Per-cell volume form (DG0 test function integrates to each cell's
         # volume); re-assembling after a move reports the deformed cell sizes.
         self._cell_volume_form = fem.form(ufl.TestFunction(fem.functionspace(mesh, ("DG", 0))) * ufl.dx)
@@ -142,6 +225,8 @@ class _MeshMotion:
 
     def advance(self) -> None:
         self._displacement.interpolate(self._expression)
+        if self._extension is not None:
+            self._extension.fill(self._displacement)
         increment = self._displacement.x.array.reshape((-1, self._gdim))[self._geom_from_dof]
         self._mesh.geometry.x[:, : self._gdim] += increment
         ratio = self._cell_volume_ratio()
@@ -151,6 +236,13 @@ class _MeshMotion:
                 f"{_MAX_CELL_RATIO_GROWTH:g}x the initial {self._reference_ratio:.3g}. The backend moves nodes "
                 f"but does not remesh; reduce the step, the motion magnitude, or use a better-behaved velocity."
             )
+
+    def current_growth(self) -> float:
+        """The cell-size (max/min volume) ratio relative to the fresh reference
+        mesh: 1.0 when undistorted, rising as motion deforms the mesh. The ALE
+        driver polls this to decide when to remesh, below the hard limit `advance`
+        enforces."""
+        return self._cell_volume_ratio() / self._reference_ratio
 
     def _cell_volume_ratio(self) -> float:
         volumes = fem.assemble_vector(self._cell_volume_form).array
@@ -184,6 +276,8 @@ class DiscreteProblem:
     terms: tuple[Term, ...]
     scheme: BackwardEuler
     bcs: list[fem.DirichletBC]
+    # Non-zero Neumann / Robin contributions (Dirichlet BCs are strong, in `bcs`).
+    boundary_terms: tuple[BoundaryTerm, ...] = ()
     # Prescribed substrate velocity (a UFL vector field). When set, each step
     # advances the mesh by dt·velocity before solving — the moving-subdomain
     # protocol of §1.10. None means a static subdomain.
@@ -207,6 +301,21 @@ class DiscreteProblem:
 
     def term_kinds(self) -> set[TermKind]:
         return {term.kind for term in self.terms}
+
+    def boundary_kinds(self) -> set[TermKind]:
+        """The kinds of boundary term present (NEUMANN / ROBIN). Empty when every
+        boundary is the implicit zero-Neumann default or a strong Dirichlet."""
+
+        return {boundary.kind for boundary in self.boundary_terms}
+
+    def mesh_quality_growth(self) -> float:
+        """How far the mesh has distorted since this problem was built, as a
+        cell-size ratio growth factor (1.0 for a fresh or static mesh, larger as
+        prescribed motion deforms it). The ALE driver (`backend/ale.py`) remeshes
+        when this crosses a configured limit, kept well below the hard
+        `MeshQualityError` threshold `_MeshMotion.advance` enforces."""
+
+        return 1.0 if self._motion is None else self._motion.current_growth()
 
     def integrand_of(self, kind: TermKind) -> UflExpr:
         """The UFL integrand of the (unique) term of `kind`. For invariant tests

@@ -14,11 +14,19 @@ resolve to a region of matching kind, and the referenced geometry name must matc
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from dolfinx.mesh import Mesh
+import numpy as np
+from dolfinx.mesh import EntityMap, Mesh, MeshTags
+from numpy.typing import NDArray
 
-from vcell_fenics.approaches.static.geometry import create_disk
+from vcell_fenics.approaches.multicompartment.geometry import (
+    MEMBRANE_TAG,
+    OUTER_TAG,
+    create_cell_extracellular,
+    create_extracellular_annulus,
+)
+from vcell_fenics.approaches.static.geometry import BOUNDARY_TAG, create_disk
 from vcell_fenics.approaches.submesh.geometry import create_disk_with_membrane
 from vcell_fenics.formalism.schema import MathDescription, SubdomainKind
 from vcell_fenics.formalism.validator import Diagnostic
@@ -34,11 +42,41 @@ class SubdomainGeometry:
 
 
 @dataclass(frozen=True)
+class BoundaryGeometry:
+    """A labelled codim-1 boundary. `subdomains` lists the incident subdomain
+    class(es): one name for an *external* boundary, two for an *internal* interface
+    between two compartments. `facets` indexes the parent mesh's facets — for a
+    single-compartment geometry the parent *is* the subdomain mesh, so the facets
+    are equally on it. A boundary condition references the boundary by label."""
+
+    subdomains: tuple[str, ...]
+    facets: NDArray[np.int32]
+
+    @property
+    def is_internal(self) -> bool:
+        """An internal interface is incident to two compartments (`dS`-integrable);
+        an external boundary to one (`ds`-integrable)."""
+
+        return len(self.subdomains) == 2
+
+
+@dataclass(frozen=True)
 class Geometry:
-    """A named geometry: subdomain-class name → its mesh and kind."""
+    """A named geometry: subdomain-class name → its mesh and kind, plus optional
+    labelled boundaries for boundary conditions.
+
+    For a *multi-compartment* geometry the subdomain meshes are submeshes of a shared
+    `parent_mesh`; `cell_tags` marks each cell's compartment and `facet_tags` the
+    labelled curves. These let the (future) mixed-dimensional assembly relate the
+    compartments across an internal interface; for a single-compartment geometry they
+    are `None` and each subdomain mesh stands alone."""
 
     name: str
     subdomains: dict[str, SubdomainGeometry]
+    boundaries: dict[str, BoundaryGeometry] = field(default_factory=dict)
+    parent_mesh: Mesh | None = None
+    cell_tags: MeshTags | None = None
+    facet_tags: MeshTags | None = None
 
     def kind_of(self, subdomain: str) -> SubdomainKind | None:
         entry = self.subdomains.get(subdomain)
@@ -46,6 +84,9 @@ class Geometry:
 
     def mesh_of(self, subdomain: str) -> Mesh:
         return self.subdomains[subdomain].mesh
+
+    def boundary_of(self, boundary: str) -> BoundaryGeometry | None:
+        return self.boundaries.get(boundary)
 
 
 # ---------------------------------------------------------------------------
@@ -70,11 +111,58 @@ def clear_geometries() -> None:
     _REGISTRY.clear()
 
 
-def make_disk_geometry(name: str, *, volume_subdomain: str, radius: float = 1.0, h: float = 0.1) -> Geometry:
-    """A bundled 2D disk exposed as a single `volume` subdomain class."""
+def make_disk_geometry(
+    name: str, *, volume_subdomain: str, boundary: str | None = None, radius: float = 1.0, h: float = 0.1
+) -> Geometry:
+    """A bundled 2D disk exposed as a single `volume` subdomain class. When
+    `boundary` is given, the disk's outer circle is registered as a labelled
+    boundary under that name, so boundary conditions can target it."""
 
-    mesh = create_disk(radius=radius, h=h).mesh
-    return Geometry(name=name, subdomains={volume_subdomain: SubdomainGeometry(mesh=mesh, kind="volume")})
+    disk = create_disk(radius=radius, h=h)
+    subdomains = {volume_subdomain: SubdomainGeometry(mesh=disk.mesh, kind="volume")}
+    boundaries: dict[str, BoundaryGeometry] = {}
+    if boundary is not None:
+        facets = disk.facet_tags.find(BOUNDARY_TAG)
+        boundaries[boundary] = BoundaryGeometry(subdomains=(volume_subdomain,), facets=facets)
+    return Geometry(name=name, subdomains=subdomains, boundaries=boundaries)
+
+
+def make_cell_extracellular_geometry(
+    name: str,
+    *,
+    cytosol: str,
+    extracellular: str,
+    membrane: str,
+    interface: str,
+    outer: str,
+    inner_radius: float = 0.6,
+    outer_radius: float = 1.0,
+    h: float = 0.1,
+) -> Geometry:
+    """A concentric two-compartment cell: an inner-disk `cytosol` and outer-annulus
+    `extracellular` (both `volume`), plus the `membrane` between them as a `surface`
+    subdomain. The membrane is also registered as the internal boundary `interface`
+    (incident to both compartments); the outer circle is the external boundary
+    `outer` (incident to the extracellular space only)."""
+
+    cell = create_cell_extracellular(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
+    subdomains = {
+        cytosol: SubdomainGeometry(mesh=cell.cytosol_mesh, kind="volume"),
+        extracellular: SubdomainGeometry(mesh=cell.extracellular_mesh, kind="volume"),
+        membrane: SubdomainGeometry(mesh=cell.membrane_mesh, kind="surface"),
+    }
+    boundaries = {
+        interface: BoundaryGeometry(subdomains=(cytosol, extracellular), facets=cell.facet_tags.find(MEMBRANE_TAG)),
+        outer: BoundaryGeometry(subdomains=(extracellular,), facets=cell.facet_tags.find(OUTER_TAG)),
+    }
+    return Geometry(
+        name=name,
+        subdomains=subdomains,
+        boundaries=boundaries,
+        parent_mesh=cell.parent_mesh,
+        cell_tags=cell.cell_tags,
+        facet_tags=cell.facet_tags,
+    )
 
 
 def make_disk_membrane_geometry(name: str, *, surface_subdomain: str, radius: float = 1.0, h: float = 0.1) -> Geometry:
@@ -83,6 +171,74 @@ def make_disk_membrane_geometry(name: str, *, surface_subdomain: str, radius: fl
 
     submesh = create_disk_with_membrane(radius=radius, h=h).submesh
     return Geometry(name=name, subdomains={surface_subdomain: SubdomainGeometry(mesh=submesh, kind="surface")})
+
+
+@dataclass(frozen=True)
+class CoupledGeometry:
+    """A bulk-surface coupled geometry for cross-mesh assembly: a `bulk` volume
+    subdomain and a `surface` subdomain that *is* the bulk's boundary, related by an
+    `EntityMap` so a form on the bulk's interface facets can reference surface
+    functions (the §1.6.6 substrate). `interface` is the boundary label where bulk
+    and surface couple (a facet tag on the bulk); `outer` is the external boundary
+    (e.g. a reservoir). Distinct from `Geometry`: it carries the entity map and the
+    bulk facet tags the mixed-dimensional assembler needs."""
+
+    name: str
+    bulk_subdomain: str
+    surface_subdomain: str
+    bulk_mesh: Mesh
+    surface_mesh: Mesh
+    entity_map: EntityMap
+    facet_tags: MeshTags
+    interface: str
+    interface_tag: int
+    outer: str
+    outer_tag: int
+
+    def kind_of(self, subdomain: str) -> SubdomainKind | None:
+        if subdomain == self.bulk_subdomain:
+            return "volume"
+        if subdomain == self.surface_subdomain:
+            return "surface"
+        return None
+
+    def mesh_of(self, subdomain: str) -> Mesh:
+        if subdomain == self.bulk_subdomain:
+            return self.bulk_mesh
+        if subdomain == self.surface_subdomain:
+            return self.surface_mesh
+        raise KeyError(f"{subdomain!r} is not a subdomain of coupled geometry {self.name!r}")
+
+
+def make_extracellular_annulus_geometry(
+    name: str,
+    *,
+    extracellular: str,
+    membrane: str,
+    interface: str,
+    outer: str,
+    inner_radius: float = 0.5,
+    outer_radius: float = 1.0,
+    h: float = 0.1,
+) -> CoupledGeometry:
+    """The §1.6.6 coupled geometry: an annular `extracellular` bulk whose inner
+    boundary is the `membrane` surface subdomain (coupled at `interface`) and whose
+    outer boundary is `outer` (the reservoir)."""
+
+    annulus = create_extracellular_annulus(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
+    return CoupledGeometry(
+        name=name,
+        bulk_subdomain=extracellular,
+        surface_subdomain=membrane,
+        bulk_mesh=annulus.bulk_mesh,
+        surface_mesh=annulus.membrane_mesh,
+        entity_map=annulus.membrane_entity_map,
+        facet_tags=annulus.facet_tags,
+        interface=interface,
+        interface_tag=MEMBRANE_TAG,
+        outer=outer,
+        outer_tag=OUTER_TAG,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +274,18 @@ def cross_validate(md: MathDescription, geometry: Geometry) -> list[Diagnostic]:
                     f"subdomains[{i}]",
                     f"subdomain {subdomain.name!r} is declared kind {subdomain.kind!r} but the geometry "
                     f"provides {geom_kind!r} (§1.11.10)",
+                )
+            )
+    # Every BC's labelled boundary must resolve in the geometry — the §1.11.10 check
+    # the formalism validator deferred because a boundary is a geometry-side entity.
+    for i, bc in enumerate(md.boundary_conditions):
+        if geometry.boundary_of(bc.boundary) is None:
+            diagnostics.append(
+                Diagnostic(
+                    "error",
+                    f"boundary_conditions[{i}]",
+                    f"boundary {bc.boundary!r} has no matching labelled boundary in geometry "
+                    f"{geometry.name!r} (§1.11.10)",
                 )
             )
     return diagnostics

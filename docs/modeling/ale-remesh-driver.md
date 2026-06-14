@@ -1,12 +1,16 @@
 # ALE remesh driver (design sketch)
 
-**Status: forward-looking sketch.** This note designs the loop that lets an Approach-A
-(ALE explicit membrane) simulation survive large deformation by *remeshing and
-continuing* instead of failing when the mesh tangles. It rides on several pieces that are
-not built yet (see [Dependencies](#dependencies-what-this-rides-on)); the one ready
-component is the conservative surface-trace correction
-(`docs/modeling/conservative-surface-remap.md`), and this note shows exactly where it
-plugs in. Treat the pseudocode as shape, not API.
+**Status: implemented for the moving *membrane* (1D); the bulk Approach-A path is still a
+sketch.** As of 2026-06-11 the driver loop exists as `backend/ale.py` —
+`ALEState`, `step_with_remeshing`, `run_with_remeshing` — and runs the remesh-and-continue
+loop for a moving 1D membrane: it remeshes the deformed membrane as the boundary of a
+freshly meshed region and carries ρ across via the conservative surface remap. What is
+still a sketch is the genuine Approach-A case where ρ is a bulk *trace* on a 2D mesh whose
+interior nodes move by harmonic extension (needs bulk mesh-motion, not built, and would
+route the transfer through `correct_surface_trace`). The pseudocode below is the original
+design shape; the [Dependencies](#dependencies-what-this-rides-on) table and the closing
+note record what is built vs. outstanding. Treat the pseudocode as shape, not API — the
+real signatures are `step_with_remeshing(state, *, quality_limit, target_h)` etc.
 
 ## Where it sits, and what changes vs. today
 
@@ -103,18 +107,47 @@ def remesh(state, target_h):
 | Needed | Status |
 |---|---|
 | `correct_surface_trace` (boundary post-pass) | **built** — `core/surface_remap_trace.py` |
-| `BulkBoundaryTrace` boundary extraction | **built** — needs a `boundary_loop()` accessor added |
-| **Bulk-conservative interpolation** `transfer_bulk` | not built — the *bulk* sibling of the surface remap (supermesh / `libsupermesh`, or DOLFINx interpolation + global mass correction). DOLFINx's own non-matching interpolation is pointwise, **not** conservative. |
-| **Region remesher** `mesh_region(loop, h)` | partial — the repo drives gmsh for disks; meshing an arbitrary deformed polyline (with optional fixed boundary nodes) is more |
-| **`DiscreteProblem` rebuild path** | not built — the IR is build-once |
-| **Approach-A bulk mesh-motion** (harmonic-extension displacement PDE writing `geometry.x`) | not built — current motion is on the membrane submesh, not a bulk mesh |
+| `BulkBoundaryTrace` boundary extraction | **built** — `boundary_loop()` accessor added |
+| **Bulk-conservative interpolation** `transfer_bulk` | **built** — `core/bulk_remap.py` (supermesh kernel) + `core/bulk_remap_mesh.py` (`remap_bulk_function`, the DOLFINx-Function bridge with optional global mass correction) |
+| **Region remesher** `mesh_region(loop, h)` | **built** — `core/region_remesh.py`; meshes an arbitrary deformed polyline, with `fix_boundary_nodes` for the interior-only fast path |
+| **`DiscreteProblem` rebuild path** | **built** — `backend.rebuild_on_mesh(problem, md, new_mesh)`; teardown + reassemble on the new mesh with conservative transfer of **both** `unknown` and `previous` (scalar / vector, bulk / surface by tdim). This is `assemble_on(new)` + steps (c)+(d) of `remesh()` fused into one call. |
+| **Approach-A bulk mesh-motion** (harmonic-extension displacement PDE writing `geometry.x`) | **built** — `_HarmonicExtension` in `backend/discrete.py`; `_MeshMotion` selects it for a codim-0 (bulk) mesh: the prescribed velocity sets the boundary displacement, ∇²d=0 fills the interior, `geometry.x += d`. A codim-1 membrane keeps the direct-interpolation move. |
+| **The driver loop** `step_with_remeshing` / `run_with_remeshing` | **built (membrane + bulk)** — `backend/ale.py`; `_remesh` dispatches on codimension. Codim-1 membrane: remesh = `mesh_region` boundary. Codim-0 bulk: `BulkBoundaryTrace.boundary_loop()` → `mesh_region` (the bulk mesh directly), transfer via `remap_bulk_function`. Both run remesh-and-continue end-to-end. |
 
-The driver is mostly *glue over unbuilt pieces*; the trace correction is the one ready
-component, and step (d) above is exactly where it slots. The critical-path prerequisite is
-**bulk-conservative interpolation** (`transfer_bulk`) — the natural next `core/` increment,
-mirroring the surface remap already built (it is the FEM form of the 2D overlap remap the
-`../vcell-mbsolver` baseline does on Voronoi cells; see `approaches.md` "Related
-finite-volume / front-tracking work").
+As of 2026-06-11 the three `core/` field-transfer + meshing prerequisites and the
+`DiscreteProblem` rebuild path are all built — the surface-trace correction (step d), the
+bulk-conservative interpolation `transfer_bulk` (step c; `remap_bulk_function`, the FEM
+form of the 2D overlap remap the `../vcell-mbsolver` baseline does on Voronoi cells), the
+region remesher `mesh_region` (step b), and `backend.rebuild_on_mesh` (steps c+d fused:
+reassemble on the new mesh + conservatively transfer `unknown` and `previous`; subtleties
+1 and 2). `rebuild_on_mesh` currently calls the `core` remaps *directly* on the subdomain
+field rather than going through the bulk-remap-then-`correct_surface_trace` two-step — that
+two-step is the Approach-A path where ρ is a bulk *trace*; the v1 backend's fields are the
+subdomain's own DOFs (Approach-B-flavoured), so the direct remap is correct and conservative
+for it. The driver loop itself is now built (`backend/ale.py`) for the moving membrane — it polls
+`DiscreteProblem.mesh_quality_growth()` and, once distortion crosses `quality_limit`,
+remeshes the deformed membrane (order its loop → `mesh_region` → extract the boundary
+submesh) and `rebuild_on_mesh`es onto it; a step that tangles even a fresh mesh raises
+`StepTooLarge` (subtlety 5). The remesh trigger is *proactive on accumulated distortion*
+rather than the tentative look-ahead the pseudocode shows — simpler, and equivalent given
+the margin below the hard limit.
+
+Approach-A bulk mesh-motion is also built (`_HarmonicExtension` in `backend/discrete.py`):
+a moving codim-0 mesh moves its interior nodes by harmonic extension of the boundary
+displacement, so a prescribed boundary velocity gives a smooth interior fill (and interior
+singularities of the velocity formula, e.g. `x/r(x)` at the centre, are sidestepped). And
+the driver now drives it: `_remesh` dispatches on codimension, so a moving **bulk** region
+runs remesh-and-continue — the deformed boundary loop (`BulkBoundaryTrace.boundary_loop()`)
+is meshed directly into a fresh bulk mesh and the field transferred conservatively
+(`remap_bulk_function`). A moving **bulk-diffusion** problem now completes through
+`run_with_remeshing` with mass conserved across each remesh.
+
+What remains is the genuine Approach-A *physics*: ρ as a bulk boundary **trace** — a surface
+PDE living on bulk boundary facets, rather than the current independent-submesh T2 or plain
+bulk T1. That needs trace-restricted function spaces / mixed-dimensional assembly (a new
+modelling capability, v2-scale). Its remesh transfer would then route through
+`correct_surface_trace` (built, waiting) on top of the bulk transfer. The mesh-motion,
+remeshing, and conservative transfer machinery it would ride on are all in place.
 
 ## Verification plan (when built)
 

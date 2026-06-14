@@ -58,7 +58,7 @@ See `docs/research/2026-05-21-fenicsx-ecosystem.md` for full library-state detai
 
 **Representation.** The cell interior Ω(t) is a deforming bulk mesh. The membrane Γ(t) is the set of outer boundary facets marked at mesh-generation time. ρ is represented as a boundary trace — degrees of freedom on the volumetric function space restricted to the boundary facets.
 
-**Mesh motion.** Solve a mesh-displacement PDE each step (harmonic extension, or linear elasticity with Jacobian-based stiffening to resist tangling). Write the displacement into `mesh.geometry.x`. The Contri–Massing–Rangamani 2025 paper describes a two-step ALE redistribution scheme driven by surface-tangential velocities that maintains element quality without remeshing — use as the reference pattern.
+**Mesh motion.** Solve a mesh-displacement PDE each step (harmonic extension, or linear elasticity with Jacobian-based stiffening to resist tangling). Write the displacement into `mesh.geometry.x`. The Contri–Massing–Rangamani 2025 paper describes a two-step ALE redistribution scheme driven by surface-tangential velocities that maintains element quality without remeshing — use as the reference pattern. *Implemented:* the harmonic-extension variant lives in `backend/discrete.py` (`_HarmonicExtension`); `_MeshMotion` applies it to any moving codim-0 (bulk) subdomain — prescribed velocity sets the boundary displacement, ∇²d=0 fills the interior, `geometry.x += d` — so interior nodes follow the boundary smoothly and interior singularities of the velocity expression (e.g. `x/r(x)` at the centre) are sidestepped. Linear-elasticity / Jacobian-stiffened variants and the Contri two-step redistribution remain future options.
 
 **Strengths.**
 - Conceptually closest to a "physical" representation of a cell with a membrane.
@@ -136,6 +136,9 @@ src/vcell_fenics/
     surface_remap.py          #   conservative remap kernel (pure NumPy)        [done]
     surface_remap_mesh.py     #   DOLFINx Function bridge for membranes         [done]
     surface_remap_trace.py    #   Approach-A bulk-trace correction              [done]
+    bulk_remap.py             #   conservative bulk (2D area) remap kernel      [done]
+    bulk_remap_mesh.py        #   DOLFINx Function bridge for bulk fields       [done]
+    region_remesh.py          #   gmsh region remesher (polyline -> fresh mesh) [done]
     biochemistry.py           #   surface ρ RHS: surface Laplacian + reaction + dilution  [planned]
     mechanics/                #   constitutive laws                            [planned]
     time_integrators.py       #   [planned]
@@ -160,6 +163,17 @@ src/vcell_fenics/
 - `surface_remap_trace.py` — the **Approach-A trace correction**. Because ρ in A is a bulk *trace*, a conservative bulk (volume) remap does not conserve the surface integral. `BulkBoundaryTrace` maps bulk-boundary DOFs ↔ a boundary surface space; `correct_surface_trace(u_old, u_new)` gathers the old trace, surface-remaps it, and scatters the result over the new bulk function's boundary DOFs (interior untouched). With independent surface DOFs (Approach B) this step is unnecessary.
 
   *Scope:* serial, P1, single closed 2D membrane. Deferred: MPI/multi-rank, higher-order spaces, open arcs, P0 variant, 3D triangle-surface supermesh, and the ALE remesh *driver* that would call `correct_surface_trace` (depends on Approach A mesh-motion-with-remeshing, not yet built).
+
+**The conservative bulk remap (implemented).** The area sibling of the surface remap — it carries a P1 cytosolic field *c* from one 2D triangulation to another while preserving ∫_Ω c dx. This is the `transfer_bulk` prerequisite the ALE remesh driver sketch (`docs/modeling/ale-remesh-driver.md`) names on its critical path:
+
+- `bulk_remap.py` — the **kernel**. Pure NumPy + scipy.sparse, no DOLFINx: `supermesh_project_2d(old_verts, old_tris, c_old, new_verts, new_tris)` builds the supermesh by clipping each new triangle against bbox-overlapping old triangles (Sutherland–Hodgman), integrates the P1×P1 products with a degree-2 edge-midpoint rule, and returns `c_new = M⁻¹ B c_old` (M = true new-mesh mass matrix, B = mixed mass matrix). Conservation is structural (partition of unity), exact to round-off when the two meshes triangulate the same polygon. Isolated from DOLFINx so it can be tested on plain arrays.
+- `bulk_remap_mesh.py` — the **DOLFINx bridge**. Much simpler than the surface bridge: no loop-ordering, because for a P1 space on a triangle mesh the dof index *is* the vertex-array row and `V.dofmap.list` *is* the (n_cells, 3) triangle list. `remap_bulk_function(u_old, V_new, conserve=True)` reads `c_old` and `(verts, tris)` straight off `u_old`'s mesh, runs the kernel, writes `c_new` into a new `Function` on `V_new`, and (with `conserve=True`) rescales so the volume integral on the new mesh equals the old exactly — closing the geometric gap when the two meshes approximate the same domain (e.g. a disk) at different resolutions.
+
+  *Scope:* serial, P1, 2D triangle mesh. Deferred: MPI/multi-rank, higher-order spaces, 3D tetrahedra, broad-phase acceleration for large meshes.
+
+**The region remesher (implemented).** `region_remesh.py` — `mesh_region(loop, h)` drives gmsh (geo kernel: one point per loop vertex, straight segments, one plane surface) to produce a fresh uniform-quality 2D mesh of the region a closed polyline encloses. This is step (b) of the ALE remesh routine (`docs/modeling/ale-remesh-driver.md`) — meshing an *arbitrary deformed* boundary, not just the analytic disk the geometry helpers build. Because the boundary segments are straight, any nodes gmsh inserts along them stay on the polyline, so the meshed region is exactly the input polygon and its area is preserved to round-off. `fix_boundary_nodes=True` forces exactly the input vertices onto the boundary (Γ_new ⊂ Γ_old) — the interior-only fast path that lets `correct_surface_trace` be skipped (subtlety 3 of the driver sketch). `h` is the authoritative uniform size (gmsh's extend-from-boundary / from-points / from-curvature sizing is disabled, so a deformed boundary's non-uniform spacing is not inherited). The deformed loop itself is recovered from a live mesh via `BulkBoundaryTrace.boundary_loop()`.
+
+  *Scope:* serial, 2D, a single simple closed loop; the caller owns the self-intersection / pinch-off guard. Deferred: holes / multiple loops, 3D, MPI.
 
 **Shared abstractions worth investing in:**
 

@@ -36,8 +36,9 @@ from dolfinx import mesh as dmesh
 from numpy.typing import NDArray
 from scipy.spatial import cKDTree
 
-from vcell_fenics.core.surface_remap_mesh import remap_surface_function
+from vcell_fenics.core.surface_remap_mesh import ordered_membrane_loop, remap_surface_function
 
+Floats = NDArray[np.float64]
 Ints = NDArray[np.intp]
 
 
@@ -64,6 +65,16 @@ class BulkBoundaryTrace:
         bulk_xy = V_bulk.tabulate_dof_coordinates()[self._bulk_dofs]
         surf_xy = self.V_surf.tabulate_dof_coordinates()
         self._surf_for_bulk: Ints = cKDTree(surf_xy).query(bulk_xy)[1]
+
+    def boundary_loop(self) -> Floats:
+        """The bulk boundary Γ as an ordered (N, 2) polyline of its vertices.
+
+        Walks the boundary submesh into a single closed loop (reusing the membrane
+        loop-ordering). This is the deformed boundary the region remesher
+        (`mesh_region`) consumes — step (a)→(b) of the ALE remesh routine.
+        """
+        coords, _order = ordered_membrane_loop(self.V_surf)
+        return coords
 
     def gather(self, u_bulk: fem.Function) -> fem.Function:
         """Read the boundary trace of `u_bulk` into a surface `Function` on Γ."""
