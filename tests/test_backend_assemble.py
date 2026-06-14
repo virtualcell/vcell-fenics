@@ -137,13 +137,13 @@ def test_cross_validate_rejects_geometry_name_mismatch() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_unsupported_slot_raises() -> None:
-    # `relative_advection` is not in the supported subset yet (diffusion and
-    # source are). A vector advection field is still rejected loudly.
+def test_relative_advection_slot_is_supported() -> None:
+    # `relative_advection` (the Eulerian drift term) is now assembled; full
+    # verification of its physics lives in test_backend_advection.
     with_advection = _BULK_DIFFUSION.replace(
         'diffusion: "0.5"', 'diffusion: "0.5"\n        relative_advection: "[1.0, 0.0]"'
     )
     md = load_yaml(with_advection)
     geometry = make_disk_geometry("disk_2d", volume_subdomain="cytoplasm", h=0.4)
-    with pytest.raises(NotImplementedError, match="relative_advection"):
-        assemble(md, geometry, dt=0.05)
+    dp = assemble(md, geometry, dt=0.05)
+    assert TermKind.ADVECTION in dp.term_kinds()

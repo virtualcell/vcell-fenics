@@ -161,6 +161,14 @@ def _build_problem(
         if "diffusion" in eq.terms:
             diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
             terms.append(Term(TermKind.DIFFUSION, diffusion * ufl.dot(ufl.grad(u), ufl.grad(w))))
+        if "relative_advection" in eq.terms:
+            # Species drift *relative to the substrate/mesh* (§1.4 T1): the convective
+            # term w_rel·∇u. On a static mesh this is plain advection (the Eulerian-fluid
+            # setup, motion=none + fluid velocity here); on a mesh that moves at v_Ω it is
+            # the drift on top of the substrate motion the mesh already carries. `grad` on
+            # a (sub)mesh is the surface gradient, so the same term serves bulk and surface.
+            drift = compile_expression(parse(eq.terms["relative_advection"]), ctx)
+            terms.append(Term(TermKind.ADVECTION, ufl.dot(drift, ufl.grad(u)) * w))
         if velocity is not None:
             # Auto-dilution ρ ∇_Γ·v_Γ; div on a (sub)mesh is the surface divergence.
             terms.append(Term(TermKind.DILUTION, ufl.div(velocity) * u * w))
@@ -341,9 +349,11 @@ def _resolve_equations(md: MathDescription) -> list[TemplateEquation]:
             raise NotImplementedError(f"backend v1 supports templates {sorted(_SUPPORTED_TEMPLATES)}, not {template!r}")
         if eq.temporality != "time_dependent":
             raise NotImplementedError("backend v1 supports 'time_dependent' equations only")
-        unsupported = sorted(set(eq.terms) - {"diffusion", "source"})
+        unsupported = sorted(set(eq.terms) - {"diffusion", "source", "relative_advection"})
         if unsupported:
-            raise NotImplementedError(f"backend v1 supports the 'diffusion' and 'source' slots; got {unsupported}")
+            raise NotImplementedError(
+                f"backend supports the 'diffusion', 'source', and 'relative_advection' slots; got {unsupported}"
+            )
         equations.append(eq)
     subdomains = {eq.subdomain for eq in equations}
     if len(subdomains) != 1:
