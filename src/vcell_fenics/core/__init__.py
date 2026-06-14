@@ -13,6 +13,7 @@ mesh/`Function` machinery and can be tested without it. The DOLFINx bridge
 on top of that kernel.
 """
 
+from vcell_fenics.core.bgn_curve import bgn_curvature_flow_step, polygon_area
 from vcell_fenics.core.bulk_remap import supermesh_project_2d
 from vcell_fenics.core.bulk_remap_mesh import remap_bulk_function
 from vcell_fenics.core.region_remesh import mesh_region
@@ -27,9 +28,11 @@ from vcell_fenics.core.surface_remap_trace import BulkBoundaryTrace, correct_sur
 __all__ = [
     "BulkBoundaryTrace",
     "arclength_parameterization",
+    "bgn_curvature_flow_step",
     "correct_surface_trace",
     "mesh_region",
     "ordered_membrane_loop",
+    "polygon_area",
     "project_points_to_polyline_arclength",
     "remap_bulk_function",
     "remap_surface_function",
