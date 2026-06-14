@@ -32,14 +32,20 @@ follows the same flow *and* slides nodes tangentially to stay equidistributed, s
 flow runs at a usable `dt`. It is a pure discretisation choice (the continuous
 solution is unchanged), so it is a backend argument, not a MathDescription field. The
 BGN mobility `m = σ/η` is read off the force balance (`_calibrate_mobility`), keeping
-it tied to the model's own parameters with no expression parsing. A co-moving receptor
-is refused: once the mesh redistributes, `v_mesh ≠ v_material` and the surface PDE
-needs the ALE advection term `−(v_mesh − v_material)·∇_Γ ρ`, a later increment.
+it tied to the model's own parameters with no expression parsing.
+
+**Redistribution with a co-moving receptor** (`_BGNReceptorMotion`). Once the mesh
+slides tangentially, mesh velocity ≠ material velocity, so a surface species needs the
+ALE advection term `−(v_mesh − v_material)·∇_Γ ρ`. Rather than assemble that term
+(whose discrete mass conservation is delicate), the step is **decomposed** into the two
+motions BGN superposes — a normal flow handled by the existing dilution scheme, then a
+tangential re-node handled by a conservative surface remap — so total surface mass is
+conserved by construction (the remap *is* the discrete ALE advection). See that class.
 
 Scope (v1): one closed membrane (a codim-1 submesh, no bulk), one weak-form motion
 equation for a vector velocity, and at most one T2 receptor equation. Vector
-*expression* parameters, multiple receptors, redistribution with a receptor, and a
-moving membrane coupled to a bulk are later increments.
+*expression* parameters, multiple receptors, and a moving membrane coupled to a bulk
+are later increments.
 """
 
 from __future__ import annotations
@@ -52,12 +58,16 @@ from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
 from dolfinx.mesh import Mesh
 from petsc4py import PETSc
+from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind, _MeshMotion
 from vcell_fenics.backend.geometry import Geometry, cross_validate
+from vcell_fenics.core.bgn_curve import bgn_curvature_flow_step
 from vcell_fenics.core.bgn_curve_mesh import bgn_redistribute_membrane
+from vcell_fenics.core.surface_remap import arclength_parameterization, supermesh_remap_1d
+from vcell_fenics.core.surface_remap_mesh import ordered_membrane_loop
 from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, UnaryOp, VectorLiteral
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
@@ -85,8 +95,14 @@ class UnknownMotionProblem:
     _motion: _MeshMotion
     _curvature: _CurvatureProjection | None
     _bgn: _BGNMotion | None = None
+    _bgn_receptor: _BGNReceptorMotion | None = None
 
     def step(self) -> None:
+        # BGN redistribution with a co-moving receptor: the decomposed (normal-flow +
+        # dilution, then tangential re-node + conservative remap) step (see below).
+        if self._bgn_receptor is not None:
+            self._bgn_receptor.step()
+            return
         # BGN redistribution (motion-only curvature flow) replaces the force-balance
         # velocity solve and the normal mesh move with one coupled position step that
         # also redistributes nodes tangentially (§ BGN; mobility calibrated at build).
@@ -145,6 +161,91 @@ class _BGNMotion:
         bgn_redistribute_membrane(self._mesh, mobility=self._mobility, dt=self._dt)
 
 
+class _BGNReceptorMotion:
+    """BGN redistribution for a curvature membrane carrying a co-moving receptor.
+
+    Combined BGN cannot be paired with a conservative remap directly — it changes the
+    curve *and* re-nodes in one solve — so each step is **decomposed** into the two
+    motions BGN superposes, each handled by the machinery that conserves it:
+
+      1. the **normal** displacement `d_n` (the physical curvature flow) drives the
+         existing dilution scheme: the mesh moves by `d_n` and the receptor advances
+         with `ρ ∇_Γ·v` on the stretched membrane (mass conserved under area change);
+      2. the **tangential** displacement `d_t` (the re-noding) slides nodes along the
+         now-fixed curve and ρ is carried by a conservative surface remap — the
+         discrete ALE advection term (mass conserved under re-noding).
+
+    Using BGN's *normal* part (not the explicit force-balance velocity) for step 1 is
+    what keeps it stable at the large `dt` BGN allows; the explicit normal flow tangles
+    before the re-node can help. `d_n` is injected into the shared `velocity` Function,
+    which both `_MeshMotion` (the move + quality check) and the receptor's dilution term
+    read, so no new assembly is needed.
+    """
+
+    def __init__(
+        self,
+        *,
+        mobility: float,
+        dt: float,
+        curvature: _CurvatureProjection,
+        velocity: fem.Function,
+        motion: _MeshMotion,
+        receptor: DiscreteProblem,
+    ) -> None:
+        self._mesh = velocity.function_space.mesh
+        self._gdim = self._mesh.geometry.dim
+        self._scalar = fem.functionspace(self._mesh, ("Lagrange", 1))
+        self._mobility = mobility
+        self._dt = dt
+        self._curvature = curvature
+        self._velocity = velocity
+        self._motion = motion
+        self._receptor = receptor
+
+    def step(self) -> None:
+        coords, order = ordered_membrane_loop(self._scalar)  # loop order + dof permutation
+        self._curvature.project()
+        kappa = self._curvature.kappa.x.array.reshape(-1, self._gdim)[order]
+        normal = kappa / np.linalg.norm(kappa, axis=1, keepdims=True)
+        displacement = bgn_curvature_flow_step(coords, mobility=self._mobility, dt=self._dt) - coords
+        d_normal = np.sum(displacement * normal, axis=1, keepdims=True) * normal
+        d_tangential = displacement - d_normal
+
+        # Substep 1 — normal flow + dilution, via the existing machinery (velocity = d_n/dt).
+        n = len(coords)
+        normal_by_dof = np.zeros((n, self._gdim))
+        normal_by_dof[order] = d_normal
+        self._velocity.x.array[:] = (normal_by_dof / self._dt).reshape(-1)
+        self._motion.advance()  # move by d_n (BGN-stable) + mesh-quality check
+        self._receptor.step()  # advance ρ with ρ ∇_Γ·v on the stretched membrane
+
+        # Substep 2 — tangential re-node on the now-fixed curve + conservative ρ remap.
+        self._renode_and_remap(d_tangential, order)
+
+    def _renode_and_remap(self, d_tangential: np.ndarray, order_before: np.ndarray) -> None:
+        coords, order = ordered_membrane_loop(self._scalar)  # curve after the normal move
+        s_old, length = arclength_parameterization(coords, closed=True)
+        n = len(coords)
+        tangential_by_dof = np.zeros((n, self._gdim))
+        tangential_by_dof[order_before] = d_tangential
+        target = coords + tangential_by_dof[order]  # slide each node along the curve
+        s_new = arclength_parameterization(target, closed=True)[0]
+
+        # ρ (and ρ_prev) ride the re-noding by a conservative remap on the same curve.
+        sort = np.argsort(s_new)
+        for field in (self._receptor.unknown, self._receptor.previous):
+            remapped = supermesh_remap_1d(s_old, field.x.array[order], s_new[sort], length)
+            walk = np.empty_like(remapped)
+            walk[sort] = remapped
+            field.x.array[order] = walk
+
+        coords_all = self._scalar.tabulate_dof_coordinates()
+        displacement = np.zeros((n, self._gdim))
+        displacement[order] = target - coords
+        geom_from_dof = cKDTree(coords_all[:, : self._gdim]).query(self._mesh.geometry.x[:, : self._gdim])[1]
+        self._mesh.geometry.x[:, : self._gdim] += displacement[geom_from_dof]
+
+
 def _calibrate_mobility(curvature: _CurvatureProjection, force_balance: LinearProblem, velocity: fem.Function) -> float:
     """The curvature-flow mobility `m = σ/η` implied by the force balance, read off
     one solve: for surface-tension flow the solved velocity satisfies `v = −m κ⃗`
@@ -173,13 +274,13 @@ def assemble_unknown_motion(
     membrane velocity (optionally curvature-driven) coupled to an optional T2 receptor
     that dilutes with the solved motion.
 
-    `redistribute=True` switches a *motion-only* curvature membrane to the BGN scheme:
-    each step advances by curvature flow *and* redistributes nodes tangentially, so
-    the mesh stays well-shaped and the flow runs at a usable `dt`. It is a pure
-    discretisation choice (the continuous solution is unchanged), hence a backend flag
-    rather than a MathDescription field. v1 requires a curvature force balance and no
-    receptor — a co-moving species would need the ALE advection term that arises once
-    the mesh velocity differs from the material velocity."""
+    `redistribute=True` switches a curvature membrane to the BGN scheme: each step
+    advances by curvature flow *and* redistributes nodes tangentially, so the mesh stays
+    well-shaped and the flow runs at a usable `dt`. It is a pure discretisation choice
+    (the continuous solution is unchanged), hence a backend flag rather than a
+    MathDescription field. A co-moving receptor is supported via the decomposed
+    normal-flow-then-conservative-remap step (`_BGNReceptorMotion`); v1 requires a
+    curvature force balance and at most one receptor."""
 
     validate_or_raise(md)
     geometry_errors = cross_validate(md, geometry)
@@ -232,26 +333,33 @@ def assemble_unknown_motion(
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
     )
 
-    # ---- optional BGN tangential redistribution (motion-only curvature flow) --
-    bgn = None
+    # ---- mesh motion (owned here) + the optional receptor --------------------
+    motion = _MeshMotion(mesh, velocity, dt_const)
+    receptor = _build_receptor(receptor_eqs[0], md, mesh, dx, velocity, dt_const) if receptor_eqs else None
+    receptor_var = receptor_eqs[0].variable if receptor_eqs else None
+
+    # ---- optional BGN tangential redistribution ------------------------------
+    # Motion-only → combined BGN (`_bgn`); with a co-moving receptor → the decomposed
+    # normal-flow-then-re-node scheme (`_bgn_receptor`). The mobility m = σ/η is read
+    # off the force balance either way.
+    bgn = bgn_receptor = None
     if redistribute:
         if curvature is None:
             raise NotImplementedError(
                 "redistribute=True requires a curvature (n(x)/H(x)) force balance — BGN tangential "
                 "redistribution is defined for mean-curvature flow."
             )
-        if receptor_eqs:
-            raise NotImplementedError(
-                "redistribute=True is motion-only in v1: a co-moving receptor needs the ALE advection term "
-                "-(v_mesh - v_material)·∇_Γ ρ that arises when the mesh redistributes; deferred."
+        mobility = _calibrate_mobility(curvature, force_balance, velocity)
+        if receptor is not None:
+            bgn_receptor = _BGNReceptorMotion(
+                mobility=mobility, dt=dt, curvature=curvature, velocity=velocity, motion=motion, receptor=receptor
             )
-        bgn = _BGNMotion(mesh, mobility=_calibrate_mobility(curvature, force_balance, velocity), dt=dt)
+        else:
+            bgn = _BGNMotion(mesh, mobility=mobility, dt=dt)
 
-    # ---- mesh motion (owned here) + the optional receptor --------------------
-    motion = _MeshMotion(mesh, velocity, dt_const)
-    receptor = _build_receptor(receptor_eqs[0], md, mesh, dx, velocity, dt_const) if receptor_eqs else None
-    receptor_var = receptor_eqs[0].variable if receptor_eqs else None
-    return UnknownMotionProblem(motion_var, velocity, receptor_var, receptor, force_balance, motion, curvature, bgn)
+    return UnknownMotionProblem(
+        motion_var, velocity, receptor_var, receptor, force_balance, motion, curvature, bgn, bgn_receptor
+    )
 
 
 def _build_receptor(
