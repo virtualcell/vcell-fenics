@@ -113,9 +113,9 @@ def test_unresolved_name_raises() -> None:
 
 
 def test_unsupported_construct_raises() -> None:
-    # Vector literals are not in the supported subset yet.
+    # Tensor literals are not in the supported subset yet (vector literals now are).
     with pytest.raises(CompileError, match="not supported"):
-        compile_expression(parse("[1.0, 2.0]"), _ctx())
+        compile_expression(parse("[[1.0, 2.0], [3.0, 4.0]]"), _ctx())
 
 
 def test_unsupported_function_raises() -> None:

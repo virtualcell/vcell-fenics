@@ -36,6 +36,7 @@ from vcell_fenics.backend.geometry import (
     register_geometry,
 )
 from vcell_fenics.backend.solver import SolverConfiguration, run
+from vcell_fenics.backend.weakform import WeakFormProblem, assemble_weak_form
 
 __all__ = [
     "ALEState",
@@ -54,8 +55,10 @@ __all__ = [
     "SubdomainGeometry",
     "Term",
     "TermKind",
+    "WeakFormProblem",
     "assemble",
     "assemble_coupled",
+    "assemble_weak_form",
     "clear_geometries",
     "compile_expression",
     "cross_validate",
