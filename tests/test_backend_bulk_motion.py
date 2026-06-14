@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 import ufl
 from dolfinx import fem
+from mpi4py import MPI
 
 from vcell_fenics.backend import DiscreteProblem, assemble, make_disk_geometry
 from vcell_fenics.formalism import load_yaml
@@ -147,3 +148,53 @@ def test_nonuniform_motion_keeps_cells_valid() -> None:
     vols = _cell_volumes(dp)
     assert np.all(np.isfinite(dp.V.mesh.geometry.x))
     assert float(vols.min()) > 0.0  # no collapsed or inverted cell
+
+
+# ---------------------------------------------------------------------------
+# 5. translation — a co-moving bulk transports rigidly (the discriminator baseline)
+# ---------------------------------------------------------------------------
+
+_TRANSLATING_BULK = """
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - { name: cyto, kind: volume, motion: { kind: prescribed, velocity: "[0.5, 0.0]" } }
+  variables:
+    - { name: c, subdomain: cyto }
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: { diffusion: "0.0" }
+      initial_condition: "1.0 + 0.3*x[0]"
+"""
+
+
+def test_translation_transports_a_comoving_bulk_rigidly() -> None:
+    # A constant boundary velocity [0.5, 0] has a *constant* (hence harmonic) extension,
+    # so the whole bulk mesh translates rigidly. With the medium co-moving (v = mesh
+    # velocity, the closed-cell regime), ∇·v = 0 ⇒ no spurious dilution: area and ∫_Ω c
+    # are conserved and each material node carries its value. This is the volume baseline
+    # the Eulerian (static-medium) case will be discriminated against — there a lab-frame
+    # field would instead need the (u − v_mesh)·∇c convective term.
+    geom = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.12)
+    dp = assemble(load_yaml(_TRANSLATING_BULK), geom, dt=0.01)
+    mesh = dp.V.mesh
+
+    def _area() -> float:
+        local = fem.assemble_scalar(fem.form(1.0 * dp.dx))
+        return float(mesh.comm.allreduce(local, op=MPI.SUM))
+
+    center0 = mesh.geometry.x[:, :2].mean(axis=0)
+    c0 = dp.unknown.x.array.copy()
+    area0, mass0 = _area(), dp.total_mass()
+    for _ in range(50):
+        dp.step()
+
+    center1 = mesh.geometry.x[:, :2].mean(axis=0)
+    assert center1[0] - center0[0] == pytest.approx(0.5 * 0.01 * 50)  # rigid shift by v·t
+    assert abs(center1[1] - center0[1]) < 1e-12
+    assert _area() == pytest.approx(area0, rel=1e-12)  # rigid: area unchanged
+    assert dp.total_mass() == pytest.approx(mass0, rel=1e-12)  # no spurious dilution
+    assert np.abs(dp.unknown.x.array - c0).max() < 1e-10  # each material node keeps its value
