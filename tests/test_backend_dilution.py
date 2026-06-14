@@ -20,6 +20,7 @@ Three checks:
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import ufl
 from dolfinx import fem
@@ -182,3 +183,47 @@ def test_degenerate_motion_fails_loudly() -> None:
     with pytest.raises(MeshQualityError):
         for _ in range(5):
             dp.step()
+
+
+# ---------------------------------------------------------------------------
+# 5. Translation — a non-normal prescribed velocity transports rigidly.
+# ---------------------------------------------------------------------------
+
+_TRANSLATING_MEMBRANE = """
+math_description:
+  geometry: g
+  subdomains:
+    - { name: membrane, kind: surface, motion: { kind: prescribed, velocity: "[0.5, 0.0]" } }
+  variables:
+    - { name: rho, subdomain: membrane }
+  equations:
+    - template: surface_pde_with_dilution
+      variable: rho
+      subdomain: membrane
+      temporality: time_dependent
+      initial_condition: "1.0 + 0.5*cos(2*theta(x))"
+"""
+
+
+def test_translation_transports_rigidly_with_no_spurious_dilution() -> None:
+    # A constant velocity [0.5, 0] is *tangential*, not normal — the worry was whether
+    # the moving-surface machinery silently assumes normal motion. It does not: a rigid
+    # translation has ∇_Γ·v = 0, so the dilution term contributes nothing, the membrane
+    # length is unchanged, ∫_Γ ρ ds is conserved, and each (material) node carries its ρ
+    # value. This is the membrane checked against its static co-moving-frame solution.
+    geometry = make_disk_membrane_geometry("g", surface_subdomain="membrane", radius=1.0, h=0.05)
+    dp = assemble(load_yaml(_TRANSLATING_MEMBRANE), geometry, dt=0.01)
+    mesh = dp.V.mesh
+
+    center0 = mesh.geometry.x[:, :2].mean(axis=0)
+    rho0 = dp.unknown.x.array.copy()
+    mass0, length0 = dp.total_mass(), _measure(dp)
+    for _ in range(50):
+        dp.step()
+
+    center1 = mesh.geometry.x[:, :2].mean(axis=0)
+    assert center1[0] - center0[0] == pytest.approx(0.5 * 0.01 * 50)  # translated by v·t
+    assert abs(center1[1] - center0[1]) < 1e-12  # no drift off-axis
+    assert _measure(dp) == pytest.approx(length0, rel=1e-12)  # rigid: length unchanged
+    assert dp.total_mass() == pytest.approx(mass0, rel=1e-12)  # no spurious dilution
+    assert np.abs(dp.unknown.x.array - rho0).max() < 1e-10  # each material node keeps its ρ
