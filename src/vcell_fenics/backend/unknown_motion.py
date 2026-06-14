@@ -3,26 +3,31 @@
 The prescribed-motion path moves a subdomain by a *known* velocity expression. Here
 the velocity is **solved**: a `motion: { kind: unknown, variable: v }` subdomain wires
 its substrate velocity to a vector unknown governed by a force balance (a weak-form
-equation, §1.5, since mechanics templates are v2), and a surface species on the same
-membrane experiences the resulting motion through the standard T2 dilution. This is
-the path to genuine cell migration: the membrane moves under force, not by fiat.
+equation, §1.5, since mechanics templates are v2). An optional surface species on the
+same membrane experiences the resulting motion through the standard T2 dilution. This
+is the path to genuine cell migration: the membrane moves under force, not by fiat.
 
 The discretisation is **staggered** (quasi-static motion + the species): each step
 
-  1. solve the force balance for the velocity `v` on the current membrane,
-  2. move the membrane by `dt·v`,
-  3. advance the receptor T2 (mass + diffusion + dilution `ρ ∇_Γ·v`) on the moved
-     membrane.
+  1. (if the force balance uses curvature) re-project the mean-curvature vector,
+  2. solve the force balance for the velocity `v` on the current membrane,
+  3. move the membrane by `dt·v`,
+  4. (if present) advance the receptor T2 (mass + diffusion + dilution `ρ ∇_Γ·v`) on
+     the moved membrane.
 
-It reuses the existing machinery: the velocity is solved into a `Function`, which is
-handed to a `DiscreteProblem` as its `motion_velocity` — so the dilution term and the
-per-step `_MeshMotion` both read the freshly-solved field. The force balance and the
-receptor share the membrane mesh; both re-assemble on the deformed geometry each step.
+**Curvature forces.** `n(x)` (normal) and `H(x)` (mean curvature) are not pointwise
+on a discrete membrane (a polygon's curvature is vertex-concentrated). They are
+resolved from a *projected* mean-curvature vector κ = H·n — the weak surface Laplacian
+of position, `∫κ·φ ds = ∫∇_Γ X : ∇_Γ φ ds` — so `H(x)` = |κ|, `n(x)` = κ/|κ|, and a
+form `σ H(x) inner(n(x), test)` evaluates to the correct weak force `inner(κ, test)`.
+κ is re-projected on the deformed membrane each step. A surface-tension force balance
+`η v + σ H n = 0` then drives mean-curvature flow (a circle shrinks as `r² = r₀² −
+2σt/η`).
 
 Scope (v1): one closed membrane (a codim-1 submesh, no bulk), one weak-form motion
-equation for a vector velocity, and one T2 receptor equation. Vector *expression*
-parameters (declare `f_active` separately), multiple receptors, the `n(x)`/`H(x)`
-curvature helpers, and a moving membrane coupled to a bulk are later increments.
+equation for a vector velocity, and at most one T2 receptor equation. Vector
+*expression* parameters, multiple receptors, and a moving membrane coupled to a bulk
+are later increments.
 """
 
 from __future__ import annotations
@@ -37,8 +42,9 @@ from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
-from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind
+from vcell_fenics.backend.discrete import BackwardEuler, DiscreteProblem, Term, TermKind, _MeshMotion
 from vcell_fenics.backend.geometry import Geometry, cross_validate
+from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, UnaryOp, VectorLiteral
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
     MathDescription,
@@ -53,23 +59,58 @@ from vcell_fenics.formalism.validator import FormalismValidationError, validate_
 @dataclass
 class UnknownMotionProblem:
     """A mechanics-driven membrane: a solved velocity field that moves the membrane,
-    and a receptor species that dilutes with it. `step()` runs the staggered scheme;
-    `velocity` holds the solved motion field and `receptor.unknown` the species."""
+    and (optionally) a receptor species that dilutes with it. `step()` runs the
+    staggered scheme; `velocity` holds the solved motion field and `receptor.unknown`
+    the species (when present)."""
 
     motion_var: str
     velocity: fem.Function
-    receptor_var: str
-    receptor: DiscreteProblem
+    receptor_var: str | None
+    receptor: DiscreteProblem | None
     _force_balance: LinearProblem
+    _motion: _MeshMotion
+    _curvature: _CurvatureProjection | None
 
     def step(self) -> None:
-        self._force_balance.solve()  # solve the force balance on the current membrane
-        self.receptor.step()  # move the membrane by dt·v, then advance the receptor
+        if self._curvature is not None:
+            self._curvature.project()  # mean-curvature vector on the current geometry
+        self._force_balance.solve()  # force balance → velocity on the current membrane
+        self._motion.advance()  # move the membrane by dt·v
+        if self.receptor is not None:
+            self.receptor.step()  # advance the receptor (dilution from v) on the moved membrane
+
+
+class _CurvatureProjection:
+    """The projected mean-curvature vector κ = H·n on the membrane (the weak surface
+    Laplacian of position). `project()` re-solves it on the current geometry; the UFL
+    `mean_curvature` (|κ|) and `normal` (κ/|κ|) are what a form's `H(x)`/`n(x)` resolve
+    to."""
+
+    def __init__(self, mesh: Mesh) -> None:
+        gdim = mesh.geometry.dim
+        space = fem.functionspace(mesh, ("Lagrange", 1, (gdim,)))
+        self.kappa = fem.Function(space, name="curvature_vector")
+        trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
+        dx = ufl.Measure("dx", domain=mesh)
+        self._problem = LinearProblem(
+            ufl.inner(trial, test) * dx,
+            ufl.inner(ufl.grad(ufl.SpatialCoordinate(mesh)), ufl.grad(test)) * dx,
+            u=self.kappa,
+            petsc_options_prefix=f"vcellfenics_curvature_{id(self):x}_",
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        )
+        magnitude = ufl.sqrt(ufl.inner(self.kappa, self.kappa) + 1e-14)  # eps guards flat regions
+        self.mean_curvature: UflExpr = magnitude
+        self.normal: UflExpr = self.kappa / magnitude
+
+    def project(self) -> None:
+        self._problem.solve()
 
 
 def assemble_unknown_motion(md: MathDescription, geometry: Geometry, *, dt: float) -> UnknownMotionProblem:
     """Assemble the §1.10.8 unknown-motion model: a weak-form force balance for the
-    membrane velocity coupled to a T2 receptor that dilutes with the solved motion."""
+    membrane velocity (optionally curvature-driven) coupled to an optional T2 receptor
+    that dilutes with the solved motion."""
 
     validate_or_raise(md)
     geometry_errors = cross_validate(md, geometry)
@@ -84,14 +125,13 @@ def assemble_unknown_motion(md: MathDescription, geometry: Geometry, *, dt: floa
     mesh = geometry.mesh_of(subdomain)
     gdim = mesh.geometry.dim
     dx = ufl.Measure("dx", domain=mesh)
+    dt_const = fem.Constant(mesh, PETSc.ScalarType(float(dt)))  # type: ignore[operator]
 
     force_eqs = [eq for eq in md.equations if isinstance(eq, WeakFormEquation) and eq.variable == motion_var]
-    receptor_eqs = [
-        eq for eq in md.equations if isinstance(eq, TemplateEquation) and eq.subdomain == subdomain
-    ]
-    if len(force_eqs) != 1 or len(receptor_eqs) != 1:
+    receptor_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation) and eq.subdomain == subdomain]
+    if len(force_eqs) != 1 or len(receptor_eqs) > 1:
         raise NotImplementedError(
-            "v1 unknown motion needs one weak-form motion equation and one T2 receptor equation; "
+            "v1 unknown motion needs one weak-form motion equation and at most one T2 receptor equation; "
             f"got {len(force_eqs)} motion and {len(receptor_eqs)} receptor equations"
         )
 
@@ -107,7 +147,13 @@ def assemble_unknown_motion(md: MathDescription, geometry: Geometry, *, dt: floa
         "dx_Gamma": dx,
         **_const_params(md, mesh),
     }
-    force_form = compile_expression(parse(force_eqs[0].form), CompileContext(mesh, motion_symbols))
+    force_ast = parse(force_eqs[0].form)
+    curvature = None
+    if _uses_curvature(force_ast):
+        curvature = _CurvatureProjection(mesh)
+        motion_symbols["__normal__"] = curvature.normal
+        motion_symbols["__mean_curvature__"] = curvature.mean_curvature
+    force_form = compile_expression(force_ast, CompileContext(mesh, motion_symbols))
     force_balance = LinearProblem(
         ufl.lhs(force_form),
         ufl.rhs(force_form),
@@ -117,16 +163,19 @@ def assemble_unknown_motion(md: MathDescription, geometry: Geometry, *, dt: floa
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
     )
 
-    # ---- the receptor T2 solve, diluting with the solved velocity ------------
-    receptor = _build_receptor(receptor_eqs[0], md, mesh, dx, velocity, dt)
-    return UnknownMotionProblem(motion_var, velocity, receptor_eqs[0].variable, receptor, force_balance)
+    # ---- mesh motion (owned here) + the optional receptor --------------------
+    motion = _MeshMotion(mesh, velocity, dt_const)
+    receptor = _build_receptor(receptor_eqs[0], md, mesh, dx, velocity, dt_const) if receptor_eqs else None
+    receptor_var = receptor_eqs[0].variable if receptor_eqs else None
+    return UnknownMotionProblem(motion_var, velocity, receptor_var, receptor, force_balance, motion, curvature)
 
 
 def _build_receptor(
-    eq: TemplateEquation, md: MathDescription, mesh: Mesh, dx: ufl.Measure, velocity: fem.Function, dt: float
+    eq: TemplateEquation, md: MathDescription, mesh: Mesh, dx: ufl.Measure, velocity: fem.Function, dt: fem.Constant
 ) -> DiscreteProblem:
-    """A T2 surface PDE whose dilution and per-step mesh motion read the solved
-    velocity `Function` (so they update as the force balance re-solves each step)."""
+    """A T2 surface PDE whose dilution reads the solved velocity `Function` (so it
+    updates as the force balance re-solves). The mesh motion is owned by the
+    `UnknownMotionProblem`, so this problem carries no `_MeshMotion` of its own."""
 
     space = fem.functionspace(mesh, ("Lagrange", 1))
     trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
@@ -150,15 +199,32 @@ def _build_receptor(
         dx=dx,
         unknown=fem.Function(space, name=eq.variable),
         previous=fem.Function(space, name=f"{eq.variable}_old"),
-        dt=fem.Constant(mesh, PETSc.ScalarType(float(dt))),  # type: ignore[operator]
+        dt=dt,
         terms=tuple(terms),
         scheme=BackwardEuler(),
         bcs=[],
-        motion_velocity=velocity,
+        motion_velocity=None,  # the UnknownMotionProblem advances the mesh
     )
     if eq.initial_condition is not None:
         problem.interpolate_initial(compile_expression(parse(eq.initial_condition), ctx))
     return problem
+
+
+def _uses_curvature(node: Expr) -> bool:
+    """Whether the expression AST references `n(x)` or `H(x)` (so the assembler must
+    build and bind the curvature projection)."""
+
+    if isinstance(node, FunctionCall):
+        return node.callee in ("n", "H") or any(_uses_curvature(a) for a in node.args)
+    if isinstance(node, BinaryOp):
+        return _uses_curvature(node.left) or _uses_curvature(node.right)
+    if isinstance(node, UnaryOp):
+        return _uses_curvature(node.operand)
+    if isinstance(node, IndexAccess):
+        return _uses_curvature(node.base)
+    if isinstance(node, VectorLiteral):
+        return any(_uses_curvature(c) for c in node.components)
+    return False
 
 
 def _const_params(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:

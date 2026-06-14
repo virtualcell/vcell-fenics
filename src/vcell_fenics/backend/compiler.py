@@ -154,6 +154,19 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
     if node.callee == "r":
         x = args[0]
         return ufl.sqrt(ufl.dot(x, x))
+    # Surface normal / mean curvature (§1.8.4). On a discrete membrane these are not
+    # pointwise-defined (a polygon's curvature is vertex-concentrated), so they are
+    # resolved from a *projected* mean-curvature vector κ = H·n (the weak surface
+    # Laplacian of position) that the mechanics assembler binds: `n(x)` = κ/|κ|,
+    # `H(x)` = |κ|. Unavailable elsewhere.
+    if node.callee in ("n", "H"):
+        bound = ctx.symbols.get("__normal__" if node.callee == "n" else "__mean_curvature__")
+        if bound is None:
+            raise CompileError(
+                f"{node.callee}(x) (surface {'normal' if node.callee == 'n' else 'mean curvature'}) is only "
+                f"available where the curvature projection is bound — i.e. in a mechanics (force-balance) solve"
+            )
+        return bound
     if node.callee == "trace":
         # The trace of a higher-dimensional variable onto a lower-dimensional
         # evaluation domain (§1.8.2). At the UFL level this is the variable itself;

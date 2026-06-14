@@ -63,6 +63,7 @@ def _mean_radius(problem: UnknownMotionProblem) -> float:
 
 
 def _receptor_mass(problem: UnknownMotionProblem) -> float:
+    assert problem.receptor is not None
     mesh = problem.receptor.unknown.function_space.mesh
     return float(fem.assemble_scalar(fem.form(problem.receptor.unknown * ufl.dx(domain=mesh))).real)
 
@@ -97,6 +98,92 @@ def test_receptor_dilutes_under_solved_motion() -> None:
     assert _mean_radius(problem) > 1.2 * r0  # the membrane genuinely expanded
     # The mandatory dilution term keeps ∫_Γ ρ ds invariant under the solved expansion.
     assert _receptor_mass(problem) == pytest.approx(mass0, rel=1e-2)
+
+
+# --- curvature forces: n(x) / H(x) drive mean-curvature flow -------------------
+
+_SIGMA = 0.1
+
+_CURVATURE_MODEL = f"""
+math_description:
+  geometry: g
+  subdomains:
+    - name: mem
+      kind: surface
+      motion: {{ kind: unknown, variable: v }}
+  variables:
+    - {{ name: v, subdomain: mem, type: vector }}
+  equations:
+    - template: weak_form
+      variable: v
+      subdomain: mem
+      temporality: steady_state
+      form: "(eta*inner(v, v_test) + sigma*H(x)*inner(n(x), v_test)) * dx_Gamma"
+      initial_condition: "0"
+  parameters:
+    - {{ name: eta, value: {_ETA} }}
+    - {{ name: sigma, value: {_SIGMA} }}
+"""
+
+
+def _curvature_problem(dt: float, h: float = 0.05) -> UnknownMotionProblem:
+    geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=h)
+    return assemble_unknown_motion(load_yaml(_CURVATURE_MODEL), geometry, dt=dt)
+
+
+def test_curvature_force_gives_inward_velocity() -> None:
+    # Surface tension `η v + σ H n = 0` on a unit circle: H = 1/r = 1, n outward, so
+    # v = -(σ/η) n̂ — radially inward at speed σ/η. This pins n(x)/H(x) → the correct
+    # weak curvature vector (κ = H·n), not just its magnitude.
+    problem = _curvature_problem(dt=0.005)
+    problem._curvature.project()  # type: ignore[union-attr]
+    problem._force_balance.solve()
+
+    coords = problem.velocity.function_space.tabulate_dof_coordinates()[:, :2]
+    v = problem.velocity.x.array.reshape(-1, 2)
+    speeds = np.linalg.norm(v, axis=1)
+    assert speeds.mean() == pytest.approx(_SIGMA / _ETA, rel=2e-2)  # |v| = σ/(η r), r = 1
+
+    # The velocity is anti-parallel to the outward position (points inward).
+    radial = (v * coords).sum(axis=1) / np.linalg.norm(coords, axis=1)
+    assert np.all(radial < 0)
+    assert radial.mean() == pytest.approx(-_SIGMA / _ETA, rel=2e-2)
+
+
+def test_surface_tension_shrinks_circle() -> None:
+    # Mean-curvature flow of a circle: r² = r₀² − 2σt/η. Small dt keeps the membrane
+    # from degenerating (no tangential redistribution in v1).
+    dt, n_steps = 0.005, 20
+    problem = _curvature_problem(dt=dt)
+    r0 = _mean_radius(problem)
+    for _ in range(n_steps):
+        problem.step()
+
+    expected = np.sqrt(r0**2 - 2 * _SIGMA / _ETA * dt * n_steps)
+    assert _mean_radius(problem) == pytest.approx(expected, rel=2e-3)
+
+
+def test_curvature_unavailable_outside_mechanics() -> None:
+    # n(x)/H(x) are only bound where the curvature projection lives (a mechanics solve).
+    # A plain weak-form surface PDE that references them must fail to compile.
+    from vcell_fenics.backend import CompileError
+    from vcell_fenics.backend.weakform import assemble_weak_form
+
+    model = """
+math_description:
+  geometry: g
+  subdomains: [ { name: mem, kind: surface, motion: { kind: none } } ]
+  variables: [ { name: rho, subdomain: mem } ]
+  equations:
+    - template: weak_form
+      variable: rho
+      subdomain: mem
+      temporality: steady_state
+      form: "(rho*rho_test - H(x)*rho_test) * dx_Gamma"
+"""
+    geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=0.2)
+    with pytest.raises(CompileError, match=r"curvature projection|mechanics"):
+        assemble_weak_form(load_yaml(model), geometry, dt=0.04)
 
 
 def test_requires_an_unknown_motion_subdomain() -> None:
