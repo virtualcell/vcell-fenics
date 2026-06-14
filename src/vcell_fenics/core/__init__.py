@@ -14,6 +14,7 @@ on top of that kernel.
 """
 
 from vcell_fenics.core.bgn_curve import bgn_curvature_flow_step, polygon_area
+from vcell_fenics.core.bgn_curve_mesh import bgn_redistribute_membrane
 from vcell_fenics.core.bulk_remap import supermesh_project_2d
 from vcell_fenics.core.bulk_remap_mesh import remap_bulk_function
 from vcell_fenics.core.region_remesh import mesh_region
@@ -29,6 +30,7 @@ __all__ = [
     "BulkBoundaryTrace",
     "arclength_parameterization",
     "bgn_curvature_flow_step",
+    "bgn_redistribute_membrane",
     "correct_surface_trace",
     "mesh_region",
     "ordered_membrane_loop",

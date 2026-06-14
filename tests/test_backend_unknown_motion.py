@@ -126,9 +126,9 @@ math_description:
 """
 
 
-def _curvature_problem(dt: float, h: float = 0.05) -> UnknownMotionProblem:
+def _curvature_problem(dt: float, h: float = 0.05, *, redistribute: bool = False) -> UnknownMotionProblem:
     geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=h)
-    return assemble_unknown_motion(load_yaml(_CURVATURE_MODEL), geometry, dt=dt)
+    return assemble_unknown_motion(load_yaml(_CURVATURE_MODEL), geometry, dt=dt, redistribute=redistribute)
 
 
 def test_curvature_force_gives_inward_velocity() -> None:
@@ -151,8 +151,8 @@ def test_curvature_force_gives_inward_velocity() -> None:
 
 
 def test_surface_tension_shrinks_circle() -> None:
-    # Mean-curvature flow of a circle: r² = r₀² − 2σt/η. Small dt keeps the membrane
-    # from degenerating (no tangential redistribution in v1).
+    # Mean-curvature flow of a circle: r² = r₀² − 2σt/η. The default (non-redistribute)
+    # path needs a small dt to keep the membrane from degenerating.
     dt, n_steps = 0.005, 20
     problem = _curvature_problem(dt=dt)
     r0 = _mean_radius(problem)
@@ -161,6 +161,52 @@ def test_surface_tension_shrinks_circle() -> None:
 
     expected = np.sqrt(r0**2 - 2 * _SIGMA / _ETA * dt * n_steps)
     assert _mean_radius(problem) == pytest.approx(expected, rel=2e-3)
+
+
+def test_redistribute_runs_curvature_flow_at_large_dt() -> None:
+    # With redistribute=True the membrane uses the BGN scheme: it follows the same
+    # `r² = r₀² − 2σt/η` flow but with tangential redistribution, so it runs cleanly at
+    # a dt several× larger than the velocity-based path tolerates — and the mobility
+    # σ/η is read straight off the force balance (no parameter is passed to the bridge).
+    dt, n_steps = 0.02, 20
+    problem = _curvature_problem(dt=dt, redistribute=True)
+    r0 = _mean_radius(problem)
+    for _ in range(n_steps):
+        problem.step()  # no MeshQualityError despite the 4× step
+
+    expected = np.sqrt(r0**2 - 2 * _SIGMA / _ETA * dt * n_steps)
+    assert _mean_radius(problem) == pytest.approx(expected, rel=2e-3)
+    radii = np.linalg.norm(problem.velocity.function_space.mesh.geometry.x[:, :2], axis=1)
+    assert radii.std() < 1e-3  # stays round
+
+
+def test_redistribute_requires_a_curvature_force_balance() -> None:
+    # The known-answer `η v = f₀ x/r` force balance is not curvature flow, so there is
+    # no curvature projection to drive BGN — redistribute must refuse it.
+    geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=0.1)
+    with pytest.raises(NotImplementedError, match="curvature"):
+        assemble_unknown_motion(load_yaml(_MODEL), geometry, dt=0.04, redistribute=True)
+
+
+def test_redistribute_rejects_a_co_moving_receptor() -> None:
+    # A receptor on the redistributing membrane would need the ALE advection term
+    # (mesh velocity ≠ material velocity); v1 refuses it rather than silently drop it.
+    with_receptor = _CURVATURE_MODEL.replace(
+        "  parameters:",
+        """    - template: surface_pde_with_dilution
+      variable: rho
+      subdomain: mem
+      temporality: time_dependent
+      terms: { diffusion: "0.02" }
+      initial_condition: "1.0"
+  parameters:""",
+    ).replace(
+        "    - { name: v, subdomain: mem, type: vector }",
+        "    - { name: v, subdomain: mem, type: vector }\n    - { name: rho, subdomain: mem }",
+    )
+    geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=0.1)
+    with pytest.raises(NotImplementedError, match=r"ALE advection|motion-only"):
+        assemble_unknown_motion(load_yaml(with_receptor), geometry, dt=0.02, redistribute=True)
 
 
 def test_curvature_unavailable_outside_mechanics() -> None:
