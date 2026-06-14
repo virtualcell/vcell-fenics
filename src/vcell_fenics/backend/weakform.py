@@ -63,9 +63,7 @@ class WeakFormProblem:
             self.previous.x.array[:] = self.solution.x.array
 
 
-def assemble_weak_form(
-    md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: int = 1
-) -> WeakFormProblem:
+def assemble_weak_form(md: MathDescription, geometry: Geometry, *, dt: float, fe_degree: int = 1) -> WeakFormProblem:
     """Assemble the MathDescription's single weak-form equation against `geometry`.
 
     The form's residual is compiled to UFL and split into a backward-Euler linear
