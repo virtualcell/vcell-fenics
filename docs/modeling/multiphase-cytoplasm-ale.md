@@ -226,15 +226,17 @@ needs now.
 
 Each step is a known-answer check before the next is added:
 
-1. **One overdamped fluid phase on a moving mesh + a normal-matching interface BC.**
-   Proves the velocity-BC machinery and the mesh-vs-physical-velocity split in isolation.
-   *Done (fixed-domain isolation):* `backend/slip.py` — the perfect-slip Nitsche BC
-   (`v·n = g`, free tangential) on a screened vector Laplacian; verified that a manufactured
-   field is recovered to round-off, the no-penetration constraint tightens with the penalty,
-   and a tangential forcing slips where no-slip kills it (`test_backend_slip.py`).
-   *Remaining for this step:* combine with a moving mesh (the existing `_MeshMotion` +
-   `relative_advection`) and set `g = w·n`, then re-run the rotating-mesh discriminator with
-   the velocity *solved* rather than prescribed.
+1. **One overdamped fluid phase on a moving mesh + a normal-matching interface BC. ✓ done.**
+   Proved the velocity-BC machinery and the mesh-vs-physical-velocity split. `backend/slip.py`
+   — the perfect-slip Nitsche BC (`v·n = g`, free tangential, symmetric + non-symmetric
+   variants) on a screened vector Laplacian; a manufactured field is recovered to round-off,
+   the constraint tightens with the penalty, and a tangential forcing slips where no-slip
+   kills it (`test_backend_slip.py`). The **integration** then composes the slip solve, the
+   mesh motion, and `relative_advection`: each step solves `v` with `g = w·n`, transports a
+   species by `relative_advection = v − w`, and moves the mesh — the velocity-solved
+   rotating-mesh discriminator holds a lab-frame field static to the O(h) geometric floor
+   (`test_backend_slip_moving.py`). The accuracy floor is the discrete-normal facet-leakage
+   (a known limitation), confirmed to shrink under refinement.
 2. **Add the second (network) phase + interphase drag** (block solve). Verify: a 1D
    two-fluid Stokes flow with drag against an analytical two-phase velocity profile.
 3. **Incompressible mixture pressure** (Taylor–Hood or stabilised). Verify: a divergence-
