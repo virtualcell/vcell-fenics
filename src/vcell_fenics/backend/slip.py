@@ -115,8 +115,9 @@ def solve_overdamped_slip(
 
     space = fem.functionspace(mesh, ("Lagrange", 1, (mesh.geometry.dim,)))
     v, w = ufl.TrialFunction(space), ufl.TestFunction(space)
-    a = (viscosity * ufl.inner(ufl.grad(v), ufl.grad(w)) + screening * ufl.inner(v, w)) * ufl.dx
-    rhs = ufl.inner(forcing, w) * ufl.dx
+    dx = ufl.Measure("dx", domain=mesh)  # bound to the mesh so a zero `forcing` keeps its domain
+    a = (viscosity * ufl.inner(ufl.grad(v), ufl.grad(w)) + screening * ufl.inner(v, w)) * dx
+    rhs = ufl.inner(forcing, w) * dx
     a_bc, rhs_bc = nitsche_normal_slip(
         v, w, normal_velocity, mesh=mesh, ds=ufl.ds(domain=mesh), viscosity=viscosity, beta=beta, symmetric=symmetric
     )
