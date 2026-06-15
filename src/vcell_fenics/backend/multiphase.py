@@ -31,6 +31,7 @@ single-phase slip solve (the drag is the only coupling).
 from __future__ import annotations
 
 import basix
+import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
@@ -99,3 +100,91 @@ def solve_two_phase_overdamped(
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
     ).solve()
     return solution.sub(0).collapse(), solution.sub(1).collapse()
+
+
+def solve_two_phase_stokes(
+    mesh: Mesh,
+    *,
+    drag: float,
+    forcing_n: UflExpr,
+    forcing_s: UflExpr,
+    normal_velocity_n: UflExpr,
+    normal_velocity_s: UflExpr,
+    viscosity_n: float = 1.0,
+    viscosity_s: float = 1.0,
+    screening_n: float = 0.0,
+    screening_s: float = 0.0,
+    beta: float = 20.0,
+    symmetric: bool = True,
+) -> tuple[fem.Function, fem.Function, fem.Function]:
+    """The two-phase **incompressible** mixture — multiphase step 3c, the culmination of the
+    momentum machinery: the interphase-drag block of `solve_two_phase_overdamped` with the
+    Stokes pressure of `solve_incompressible_stokes`.
+
+    Two velocity fields `(v_n, v_s)` and one **mixture pressure** `p` enforcing
+    `∇·(v_n + v_s) = 0` (the simplest equal-volume-fraction incompressible mixture). Each
+    phase has the symmetric-gradient viscous stress, optional substrate friction, the
+    symmetric interphase drag `ξ(v_a − v_b)`, and its own Nitsche normal-slip BC whose
+    Stokes traction `2ν n·ε(v_a)·n − p` carries the **shared** pressure. Assembled over a
+    Taylor–Hood mixed element `[P2, P2, P1]` and solved with a pivoting (MUMPS) direct solve.
+
+    Returns `(v_n, v_s, p)`; the pressure is pinned at one dof. As with the single-phase
+    slip, a `screening` removes the rigid-rotation null mode of a pure no-penetration BC.
+
+    Verified (`tests/test_backend_multiphase.py`): a manufactured mixture (`v_n = [1,0]`,
+    `v_s = [−1,0]` so the sum is divergence-free; linear pressure) recovered to round-off,
+    and `∇·(v_n + v_s)` zero to round-off on a generic well-posed flow.
+    """
+
+    gdim = mesh.geometry.dim
+    p2 = basix.ufl.element("Lagrange", mesh.basix_cell(), 2, shape=(gdim,))
+    p1 = basix.ufl.element("Lagrange", mesh.basix_cell(), 1)
+    W = fem.functionspace(mesh, basix.ufl.mixed_element([p2, p2, p1]))
+    v_n, v_s, p = ufl.TrialFunctions(W)
+    w_n, w_s, q = ufl.TestFunctions(W)
+    dx = ufl.Measure("dx", domain=mesh)
+    ds = ufl.ds(domain=mesh)
+    n = ufl.FacetNormal(mesh)
+    h = ufl.CellDiameter(mesh)
+    theta = -1.0 if symmetric else 1.0
+
+    def strain(field: UflExpr) -> UflExpr:
+        return ufl.sym(ufl.grad(field))
+
+    a = (
+        2.0 * viscosity_n * ufl.inner(strain(v_n), strain(w_n))
+        + 2.0 * viscosity_s * ufl.inner(strain(v_s), strain(w_s))
+        + screening_n * ufl.inner(v_n, w_n)
+        + screening_s * ufl.inner(v_s, w_s)
+        + drag * ufl.inner(v_n - v_s, w_n)
+        + drag * ufl.inner(v_s - v_n, w_s)
+        - p * ufl.div(w_n + w_s)  # one mixture pressure, conjugate to the total velocity
+        - q * ufl.div(v_n + v_s)  # incompressible mixture
+    ) * dx
+    rhs = (ufl.inner(forcing_n, w_n) + ufl.inner(forcing_s, w_s)) * dx
+
+    # Per-phase Nitsche normal-slip; the Stokes traction carries the *shared* mixture pressure.
+    penalty = beta * 2.0 / h
+    for velocity, test, g, nu in (
+        (v_n, w_n, normal_velocity_n, viscosity_n),
+        (v_s, w_s, normal_velocity_s, viscosity_s),
+    ):
+        traction_v = 2.0 * nu * ufl.dot(ufl.dot(strain(velocity), n), n) - p
+        traction_w = 2.0 * nu * ufl.dot(ufl.dot(strain(test), n), n) - q
+        v_dot_n, w_dot_n = ufl.dot(velocity, n), ufl.dot(test, n)
+        a += (-traction_v * w_dot_n + theta * traction_w * v_dot_n + nu * penalty * v_dot_n * w_dot_n) * ds
+        rhs += (theta * traction_w * g + nu * penalty * g * w_dot_n) * ds
+
+    _, pressure_to_mixed = W.sub(2).collapse()
+    bc_pressure = fem.dirichletbc(fem.Function(W), np.array([pressure_to_mixed[0]], dtype=np.int32))
+
+    solution = fem.Function(W)
+    LinearProblem(
+        a,
+        rhs,
+        bcs=[bc_pressure],
+        u=solution,
+        petsc_options_prefix=f"vcellfenics_twophasestokes_{id(solution):x}_",
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
+    ).solve()
+    return solution.sub(0).collapse(), solution.sub(1).collapse(), solution.sub(2).collapse()

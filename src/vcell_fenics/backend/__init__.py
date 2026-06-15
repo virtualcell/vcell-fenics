@@ -35,7 +35,7 @@ from vcell_fenics.backend.geometry import (
     make_extracellular_annulus_geometry,
     register_geometry,
 )
-from vcell_fenics.backend.multiphase import solve_two_phase_overdamped
+from vcell_fenics.backend.multiphase import solve_two_phase_overdamped, solve_two_phase_stokes
 from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
 from vcell_fenics.backend.solver import SolverConfiguration, run
 from vcell_fenics.backend.stokes import solve_incompressible_stokes, solve_incompressible_stokes_slip
@@ -82,5 +82,6 @@ __all__ = [
     "solve_incompressible_stokes_slip",
     "solve_overdamped_slip",
     "solve_two_phase_overdamped",
+    "solve_two_phase_stokes",
     "step_with_remeshing",
 ]
