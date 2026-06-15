@@ -260,8 +260,14 @@ Each step is a known-answer check before the next is added:
    and the slip BC leaves a tangential boundary flow where no-slip kills it. *Caveat learnt:*
    a pure no-penetration BC on a rotationally-symmetric domain leaves **rigid rotation as a
    null mode** — a forcing aligned with it is inconsistent; a substrate-friction `screening`
-   (present in the real overdamped model) removes it. **3c remaining:** the **two-phase
-   incompressible mixture** (the drag block of step 2 with the pressure constraint).
+   (present in the real overdamped model) removes it. **3c ✓ done:** the **two-phase
+   incompressible mixture** — `solve_two_phase_stokes` (`backend/multiphase.py`): two
+   velocity fields + one **mixture pressure** enforcing `∇·(v_n + v_s) = 0`, the interphase
+   drag, and a per-phase Nitsche slip BC whose Stokes traction carries the *shared* pressure,
+   over a `[P2, P2, P1]` Taylor–Hood element. Verified: a manufactured mixture (`v_n=[1,0]`,
+   `v_s=[−1,0]` so the sum is divergence-free, linear pressure) recovered to round-off for
+   both Nitsche variants, and `∇·(v_n + v_s)` zero to round-off on a generic flow. **Step 3
+   complete.**
 4. **Membrane mechanical coupling** — cortex traction loads the membrane force balance.
    Verify: cortical tension drives a known shape change; total momentum balance.
 5. **(Later) Poroelastic swap** — reference configuration + `P(F)`, mesh pinned to the
