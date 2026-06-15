@@ -217,7 +217,7 @@ needs now.
 | Multi-field block solve (`MixedFunctionSpace` / `extract_blocks`) | **have** (`coupled.py`) |
 | Tangential redistribution (membrane), remap-on-remesh | **have** (`bgn_curve*`, `core/` remaps) |
 | Two coupled velocity blocks + interphase drag | new — extends block assembly |
-| **Interface velocity BCs** (normal-match / tangential slip), Nitsche or rotated frame | **first piece done** — `backend/slip.py` (`nitsche_normal_slip`, `solve_overdamped_slip`): perfect-slip `v·n = g`, free tangential, via symmetric Nitsche; verified (`test_backend_slip.py`). Stokes-traction / pressure variants pending |
+| **Interface velocity BCs** (normal-match / tangential slip), Nitsche or rotated frame | **first piece done** — `backend/slip.py` (`nitsche_normal_slip`, `solve_overdamped_slip`): perfect-slip `v·n = g`, free tangential, via Nitsche; **symmetric (L2-optimal) and non-symmetric penalty-free (no β to tune — robust for cut/weak-coercivity) variants** both verified (`test_backend_slip.py`). Stokes-traction / pressure variants pending |
 | Incompressible-mixture **pressure** (saddle point, stable elements e.g. Taylor–Hood) | new — first non-`P1` element |
 | Membrane force balance loaded by cortex traction | new — interface term on the existing surface mechanics |
 | Reference configuration + hyperelastic `P(F)` (poroelastic only) | new — deferred to the constitutive swap |

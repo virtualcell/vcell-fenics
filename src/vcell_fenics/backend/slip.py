@@ -25,6 +25,11 @@ used for both `v·n` and `g`, so a no-penetration (`g = 0`) or mesh-velocity-mat
 
 `β` is the dimensionless Nitsche penalty (≳ a few); the consistency terms make the scheme
 accurate (not merely penalty-limited), so a polynomial solution is recovered to round-off.
+The adjoint-term sign is selectable (`symmetric=`): the symmetric variant is L2-optimal
+but needs `β` above a threshold for coercivity; the **non-symmetric** variant is coercive
+for any `β ≥ 0`, so it runs penalty-free with no parameter to tune — the robust choice for
+cut/embedded interfaces or weakly-coercive (screening-free) operators. See
+`nitsche_normal_slip`.
 
 Scope: the consistency terms above are for the plain vector-Laplacian traction `ν ∇v·n`.
 A symmetric-gradient (Stokes) operator `ν(∇v + ∇vᵀ)` or a pressure term changes the
@@ -50,6 +55,7 @@ def nitsche_normal_slip(
     ds: ufl.Measure,
     viscosity: UflExpr | float = 1.0,
     beta: float = 20.0,
+    symmetric: bool = True,
 ) -> tuple[UflExpr, UflExpr]:
     """Nitsche terms enforcing `v·n = normal_velocity` weakly with free tangential
     traction (perfect slip), for the `-ν∇²v` viscous operator.
@@ -59,16 +65,30 @@ def nitsche_normal_slip(
     UFL expression): `0` for no penetration, or `ufl.dot(w_mesh, n)` to match a moving
     boundary. Use the boundary measure `ds` restricted to the interface where slip
     applies.
+
+    `symmetric` selects the adjoint-term sign (θ = −1 vs +1):
+
+    - `True` (default) — **symmetric** Nitsche: adjoint-consistent, so optimal in *L2*
+      as well as the energy norm, and the matrix stays symmetric. Needs `beta` above a
+      mesh/operator-dependent threshold for coercivity.
+    - `False` — **non-symmetric** Nitsche: coercive for *any* `beta ≥ 0`, so it runs
+      penalty-free (`beta=0`) with **no stabilisation parameter to tune** — robust where
+      the symmetric threshold is fragile (cut/embedded interfaces, weak coercivity, wide
+      viscosity contrast). The cost is a non-symmetric matrix (irrelevant under a direct
+      or GMRES solve) and possibly half-order-suboptimal L2 (the energy/derivative norm
+      stays optimal). Prefer this once the slip lands on cut cells or a screening-free
+      Stokes phase; the default suits the current drag-coercive solves.
     """
 
+    theta = -1.0 if symmetric else 1.0
     n = ufl.FacetNormal(mesh)
     h = ufl.CellDiameter(mesh)
     nu = viscosity
     dvn = ufl.dot(ufl.dot(ufl.grad(v), n), n)  # n·∇v·n — the normal traction direction
     dtn = ufl.dot(ufl.dot(ufl.grad(test), n), n)
     vn, tn = ufl.dot(v, n), ufl.dot(test, n)
-    a = (-nu * dvn * tn - nu * dtn * vn + (beta * nu / h) * vn * tn) * ds
-    rhs = (-nu * dtn * normal_velocity + (beta * nu / h) * normal_velocity * tn) * ds
+    a = (-nu * dvn * tn + theta * nu * dtn * vn + (beta * nu / h) * vn * tn) * ds
+    rhs = (theta * nu * dtn * normal_velocity + (beta * nu / h) * normal_velocity * tn) * ds
     return a, rhs
 
 
@@ -80,6 +100,7 @@ def solve_overdamped_slip(
     viscosity: float = 1.0,
     screening: float = 1.0,
     beta: float = 20.0,
+    symmetric: bool = True,
 ) -> fem.Function:
     """Solve the overdamped vector field `-ν∇²v + γv = f` on `mesh` with a Nitsche
     normal-slip BC `v·n = normal_velocity` (free tangential) on the whole boundary.
@@ -88,6 +109,8 @@ def solve_overdamped_slip(
     `ufl.SpatialCoordinate(mesh)` / `ufl.FacetNormal(mesh)`). A reference solver for the
     slip machinery — the screened vector Laplacian stands in for an inertia-free fluid
     momentum balance until the real Stokes/Brinkman operator and pressure land.
+    `symmetric` selects the Nitsche variant (see `nitsche_normal_slip`); the GMRES-capable
+    direct solve here is agnostic to the resulting (a)symmetry.
     """
 
     space = fem.functionspace(mesh, ("Lagrange", 1, (mesh.geometry.dim,)))
@@ -95,7 +118,7 @@ def solve_overdamped_slip(
     a = (viscosity * ufl.inner(ufl.grad(v), ufl.grad(w)) + screening * ufl.inner(v, w)) * ufl.dx
     rhs = ufl.inner(forcing, w) * ufl.dx
     a_bc, rhs_bc = nitsche_normal_slip(
-        v, w, normal_velocity, mesh=mesh, ds=ufl.ds(domain=mesh), viscosity=viscosity, beta=beta
+        v, w, normal_velocity, mesh=mesh, ds=ufl.ds(domain=mesh), viscosity=viscosity, beta=beta, symmetric=symmetric
     )
     solution = fem.Function(space, name="velocity")
     LinearProblem(

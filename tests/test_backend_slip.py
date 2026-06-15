@@ -84,6 +84,25 @@ def test_constraint_tightens_with_penalty() -> None:
     assert large < 2e-3  # ≪ the ~0.18 tangential boundary flow it coexists with
 
 
+def test_nonsymmetric_penalty_free_variant_matches_symmetric() -> None:
+    # The non-symmetric Nitsche is coercive without a penalty, so it runs penalty-free
+    # (beta=0, no parameter to tune) — robust for cut/embedded interfaces and weak
+    # coercivity later. On these drag-coercive problems it must agree with the symmetric
+    # default: recover a manufactured field exactly and discriminate slip identically.
+    mesh = _disk()
+    const = ufl.as_vector([1.0, 0.0])
+    n = ufl.FacetNormal(mesh)
+    vh = solve_overdamped_slip(mesh, forcing=const, normal_velocity=ufl.dot(const, n), symmetric=False, beta=0.0)
+    assert np.abs(vh.x.array.reshape(-1, 2) - np.array([1.0, 0.0])).max() < 1e-10  # still exact
+
+    x = ufl.SpatialCoordinate(mesh)
+    forcing = ufl.as_vector([-x[1], x[0]])
+    _, vt = _boundary_normal_tangential(
+        solve_overdamped_slip(mesh, forcing=forcing, normal_velocity=0.0 * x[0], symmetric=False, beta=0.0)
+    )
+    assert vt > 0.05  # the fluid still slips, penalty-free
+
+
 def test_slip_allows_tangential_flow_where_no_slip_forbids_it() -> None:
     # The physics check. A rotational forcing with no-penetration (v·n = 0): the slip BC
     # leaves a real tangential boundary flow; a no-slip BC (full Dirichlet v = 0, here a
