@@ -28,6 +28,7 @@ from vcell_fenics.backend import (
     make_disk_geometry,
     solve_incompressible_stokes,
     solve_incompressible_stokes_slip,
+    solve_incompressible_stokes_traction,
 )
 
 
@@ -130,3 +131,25 @@ def test_slip_allows_tangential_flow_where_no_slip_forbids_it() -> None:
     assert vn_slip < 1e-2  # no penetration
     assert vt_slip > 0.1  # the fluid slips along the boundary
     assert vt_slip > 50 * vt_noslip  # where no-slip kills the tangential flow
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — the membrane–cortex mechanical coupling (Laplace's law).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("radius", "gamma"), [(1.0, 0.5), (2.0, 0.5), (1.0, 1.2)])
+def test_membrane_tension_sets_the_bulk_pressure_by_laplace_law(radius: float, gamma: float) -> None:
+    # A tense membrane loads the enclosed fluid with the curvature traction σ·n = −γ κ n
+    # (κ = 1/R for a circle). At equilibrium the fluid is at rest and its pressure is the
+    # Laplace value p = γ κ = γ/R — the membrane–bulk mechanical coupling.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=radius, h=0.05 * radius).mesh_of("c")
+    n = ufl.FacetNormal(mesh)
+    kappa = 1.0 / radius
+    traction = -gamma * kappa * n
+
+    u, p = solve_incompressible_stokes_traction(mesh, traction=traction, screening=1.0)
+
+    assert np.abs(u.x.array).max() < 1e-9  # static equilibrium (no flow)
+    assert p.x.array.std() < 1e-9  # uniform interior pressure
+    assert p.x.array.mean() == pytest.approx(gamma / radius, rel=1e-9)  # Laplace's law
