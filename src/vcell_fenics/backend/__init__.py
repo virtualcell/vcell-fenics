@@ -21,7 +21,7 @@ from vcell_fenics.backend.discrete import (
     Term,
     TermKind,
 )
-from vcell_fenics.backend.fsi import enclosed_volume, step_prescribed_fsi
+from vcell_fenics.backend.fsi import enclosed_volume, step_force_balance_fsi, step_prescribed_fsi
 from vcell_fenics.backend.geometry import (
     BoundaryGeometry,
     CoupledGeometry,
@@ -42,6 +42,7 @@ from vcell_fenics.backend.solver import SolverConfiguration, run
 from vcell_fenics.backend.stokes import (
     solve_incompressible_stokes,
     solve_incompressible_stokes_slip,
+    solve_incompressible_stokes_surface_tension,
     solve_incompressible_stokes_traction,
 )
 from vcell_fenics.backend.stokes_hdiv import solve_incompressible_stokes_hdiv_slip
@@ -88,10 +89,12 @@ __all__ = [
     "solve_incompressible_stokes",
     "solve_incompressible_stokes_hdiv_slip",
     "solve_incompressible_stokes_slip",
+    "solve_incompressible_stokes_surface_tension",
     "solve_incompressible_stokes_traction",
     "solve_overdamped_slip",
     "solve_two_phase_overdamped",
     "solve_two_phase_stokes",
+    "step_force_balance_fsi",
     "step_prescribed_fsi",
     "step_with_remeshing",
 ]
