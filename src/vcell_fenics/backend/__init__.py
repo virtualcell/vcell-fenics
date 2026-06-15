@@ -21,6 +21,7 @@ from vcell_fenics.backend.discrete import (
     Term,
     TermKind,
 )
+from vcell_fenics.backend.fsi import enclosed_volume, step_prescribed_fsi
 from vcell_fenics.backend.geometry import (
     BoundaryGeometry,
     CoupledGeometry,
@@ -73,6 +74,7 @@ __all__ = [
     "clear_geometries",
     "compile_expression",
     "cross_validate",
+    "enclosed_volume",
     "load_geometry",
     "make_cell_extracellular_geometry",
     "make_disk_geometry",
@@ -90,5 +92,6 @@ __all__ = [
     "solve_overdamped_slip",
     "solve_two_phase_overdamped",
     "solve_two_phase_stokes",
+    "step_prescribed_fsi",
     "step_with_remeshing",
 ]
