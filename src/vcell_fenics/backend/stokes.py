@@ -7,10 +7,15 @@ phase: the symmetric-gradient viscous stress `2ν ε(v)` (ε = ½(∇v + ∇vᵀ
 system is a **saddle point** — the first in the codebase — and needs inf-sup-stable
 elements: **Taylor–Hood** (P2 velocity, P1 pressure).
 
-Weak form (strong Dirichlet velocity for now; the Nitsche normal-slip BC with the *Stokes*
-traction `(2ν ε(v) − p I)·n` is the next increment):
+Weak form (`solve_incompressible_stokes`, strong Dirichlet velocity):
 
     ∫ 2ν ε(u):ε(v) dx − ∫ p ∇·v dx − ∫ q ∇·u dx = ∫ f·v dx
+
+`solve_incompressible_stokes_slip` instead applies the Nitsche normal-slip BC `u·n = g`
+(free tangential) with the full **Stokes traction** `n·σ·n = 2ν n·ε(u)·n − p` — so the
+pressure, and the pressure test, enter the boundary terms. A pure no-penetration BC on a
+rotationally-symmetric domain leaves rigid rotation as a null mode, so that path takes an
+optional substrate-friction `screening` to make the (screened) problem coercive.
 
 Under all-Dirichlet velocity the pressure is determined only up to a constant, so one
 pressure dof is pinned to remove that null space (the field is physical up to the
@@ -86,6 +91,77 @@ def solve_incompressible_stokes(
         u=solution,
         petsc_options_prefix=f"vcellfenics_stokes_{id(solution):x}_",
         # Saddle-point system is indefinite ⇒ a pivoting direct factorisation (MUMPS).
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
+    ).solve()
+    return solution.sub(0).collapse(), solution.sub(1).collapse()
+
+
+def solve_incompressible_stokes_slip(
+    mesh: Mesh,
+    *,
+    forcing: UflExpr,
+    normal_velocity: UflExpr,
+    viscosity: float = 1.0,
+    screening: float = 0.0,
+    beta: float = 20.0,
+    symmetric: bool = True,
+) -> tuple[fem.Function, fem.Function]:
+    """Incompressible Stokes with a Nitsche **normal-slip** BC `u·n = normal_velocity`,
+    free tangential traction (perfect slip) — the membrane interface condition for a Stokes
+    phase.
+
+    Unlike the vector-Laplacian slip (`backend/slip.py`), the Nitsche consistency uses the
+    full **Stokes traction** `n·σ·n = 2ν n·ε(u)·n − p`, so the pressure enters the boundary
+    terms. `screening` (a substrate friction `γ`) makes the screened problem coercive and
+    removes the rigid-mode null space — a pure no-penetration BC on a rotationally-symmetric
+    domain otherwise leaves rigid rotation as a null mode. `symmetric` selects the Nitsche
+    variant as in `nitsche_normal_slip`. Returns `(u, p)` (Taylor–Hood P2/P1); the pressure
+    is pinned at one dof.
+    """
+
+    gdim = mesh.geometry.dim
+    p2 = basix.ufl.element("Lagrange", mesh.basix_cell(), 2, shape=(gdim,))
+    p1 = basix.ufl.element("Lagrange", mesh.basix_cell(), 1)
+    W = fem.functionspace(mesh, basix.ufl.mixed_element([p2, p1]))
+    (u, p) = ufl.TrialFunctions(W)
+    (v, q) = ufl.TestFunctions(W)
+    dx = ufl.Measure("dx", domain=mesh)
+    ds = ufl.ds(domain=mesh)
+    n = ufl.FacetNormal(mesh)
+    h = ufl.CellDiameter(mesh)
+    theta = -1.0 if symmetric else 1.0
+
+    def strain(field: UflExpr) -> UflExpr:
+        return ufl.sym(ufl.grad(field))
+
+    a = (
+        2.0 * viscosity * ufl.inner(strain(u), strain(v))
+        + screening * ufl.inner(u, v)
+        - p * ufl.div(v)
+        - q * ufl.div(u)
+    ) * dx
+    rhs = ufl.inner(forcing, v) * dx
+
+    # Nitsche normal-slip with the Stokes traction n·σ·n = 2ν n·ε·n − p (so p, and the
+    # pressure test q, enter the boundary terms); the tangential traction is left free.
+    traction_u = 2.0 * viscosity * ufl.dot(ufl.dot(strain(u), n), n) - p
+    traction_v = 2.0 * viscosity * ufl.dot(ufl.dot(strain(v), n), n) - q
+    u_n, v_n = ufl.dot(u, n), ufl.dot(v, n)
+    penalty = beta * 2.0 * viscosity / h
+    a += (-traction_u * v_n + theta * traction_v * u_n + penalty * u_n * v_n) * ds
+    rhs += (theta * traction_v * normal_velocity + penalty * normal_velocity * v_n) * ds
+
+    # Pin one pressure dof — the normal-velocity BC does not fix the pressure constant.
+    _, pressure_to_mixed = W.sub(1).collapse()
+    bc_pressure = fem.dirichletbc(fem.Function(W), np.array([pressure_to_mixed[0]], dtype=np.int32))
+
+    solution = fem.Function(W)
+    LinearProblem(
+        a,
+        rhs,
+        bcs=[bc_pressure],
+        u=solution,
+        petsc_options_prefix=f"vcellfenics_stokesslip_{id(solution):x}_",
         petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
     ).solve()
     return solution.sub(0).collapse(), solution.sub(1).collapse()

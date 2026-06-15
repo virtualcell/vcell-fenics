@@ -252,10 +252,16 @@ Each step is a known-answer check before the next is added:
    saddle-point system, on inf-sup-stable **Taylor–Hood** (P2/P1) elements with a pivoting
    (MUMPS) direct solve. Verified against a manufactured solution (div-free quadratic
    velocity + linear pressure recovered to round-off, `∇·u ≈ 0`; `test_backend_stokes.py`),
-   with a strong Dirichlet velocity BC. **3b remaining:** the Nitsche normal-slip BC with the
-   *Stokes* traction `(2ν ε(v) − p I)·n` (the pressure enters the boundary terms), then the
-   **two-phase incompressible mixture** (the drag block of step 2 with the pressure
-   constraint).
+   with a strong Dirichlet velocity BC. **3b ✓ done:** the Nitsche normal-slip BC with
+   the *Stokes* traction `n·σ·n = 2ν n·ε(u)·n − p` — the pressure (and the pressure test)
+   enter the boundary terms — `solve_incompressible_stokes_slip`. Verified: a slip-compatible
+   manufactured solution (constant `u` + linear `p`) recovered to round-off for both Nitsche
+   variants; a well-posed (null-mode-orthogonal) slip flow is divergence-free to round-off;
+   and the slip BC leaves a tangential boundary flow where no-slip kills it. *Caveat learnt:*
+   a pure no-penetration BC on a rotationally-symmetric domain leaves **rigid rotation as a
+   null mode** — a forcing aligned with it is inconsistent; a substrate-friction `screening`
+   (present in the real overdamped model) removes it. **3c remaining:** the **two-phase
+   incompressible mixture** (the drag block of step 2 with the pressure constraint).
 4. **Membrane mechanical coupling** — cortex traction loads the membrane force balance.
    Verify: cortical tension drives a known shape change; total momentum balance.
 5. **(Later) Poroelastic swap** — reference configuration + `P(F)`, mesh pinned to the
