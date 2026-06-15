@@ -38,7 +38,11 @@ from vcell_fenics.backend.geometry import (
 from vcell_fenics.backend.multiphase import solve_two_phase_overdamped, solve_two_phase_stokes
 from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
 from vcell_fenics.backend.solver import SolverConfiguration, run
-from vcell_fenics.backend.stokes import solve_incompressible_stokes, solve_incompressible_stokes_slip
+from vcell_fenics.backend.stokes import (
+    solve_incompressible_stokes,
+    solve_incompressible_stokes_slip,
+    solve_incompressible_stokes_traction,
+)
 from vcell_fenics.backend.unknown_motion import UnknownMotionProblem, assemble_unknown_motion
 from vcell_fenics.backend.weakform import WeakFormProblem, assemble_weak_form
 
@@ -80,6 +84,7 @@ __all__ = [
     "run_with_remeshing",
     "solve_incompressible_stokes",
     "solve_incompressible_stokes_slip",
+    "solve_incompressible_stokes_traction",
     "solve_overdamped_slip",
     "solve_two_phase_overdamped",
     "solve_two_phase_stokes",

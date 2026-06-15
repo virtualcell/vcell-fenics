@@ -17,6 +17,11 @@ pressure, and the pressure test, enter the boundary terms. A pure no-penetration
 rotationally-symmetric domain leaves rigid rotation as a null mode, so that path takes an
 optional substrate-friction `screening` to make the (screened) problem coercive.
 
+`solve_incompressible_stokes_traction` applies a **traction** (Neumann) BC `σ·n = t` — the
+membrane–cortex mechanical coupling (step 4): the membrane's surface mechanics load the
+bulk fluid as a boundary traction. A tense membrane gives `t = −γ κ n`, and the fluid
+returns the Laplace pressure `p = γ/R`.
+
 Under all-Dirichlet velocity the pressure is determined only up to a constant, so one
 pressure dof is pinned to remove that null space (the field is physical up to the
 constant). The saddle-point matrix is indefinite, so a direct LU with a pivoting solver
@@ -162,6 +167,62 @@ def solve_incompressible_stokes_slip(
         bcs=[bc_pressure],
         u=solution,
         petsc_options_prefix=f"vcellfenics_stokesslip_{id(solution):x}_",
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
+    ).solve()
+    return solution.sub(0).collapse(), solution.sub(1).collapse()
+
+
+def solve_incompressible_stokes_traction(
+    mesh: Mesh,
+    *,
+    traction: UflExpr,
+    forcing: UflExpr | None = None,
+    viscosity: float = 1.0,
+    screening: float = 1.0,
+) -> tuple[fem.Function, fem.Function]:
+    """Incompressible Stokes with a **traction** (Neumann) boundary condition `σ·n =
+    traction` — the membrane–cortex mechanical coupling (multiphase step 4).
+
+    The membrane's surface mechanics exert a force on the enclosed fluid; that force is the
+    boundary traction `σ·n` on the bulk Stokes phase. For a tense membrane the traction is
+    the curvature force `−γ κ n` (inward), and at equilibrium the fluid responds with the
+    Laplace pressure `p = γ κ = γ/R`. A traction BC is the *natural* BC of the Stokes weak
+    form, so it enters only the right-hand side (`∮ traction·v ds`) — no Nitsche needed; the
+    traction also fixes the pressure level (no constant null space to pin). A substrate
+    friction `screening` removes the rigid-body velocity null space.
+
+    `traction` (and the optional body `forcing`) are UFL expressions on `mesh` — build the
+    curvature traction with `ufl.FacetNormal(mesh)`. Returns `(u, p)` (Taylor–Hood P2/P1).
+    """
+
+    gdim = mesh.geometry.dim
+    p2 = basix.ufl.element("Lagrange", mesh.basix_cell(), 2, shape=(gdim,))
+    p1 = basix.ufl.element("Lagrange", mesh.basix_cell(), 1)
+    W = fem.functionspace(mesh, basix.ufl.mixed_element([p2, p1]))
+    (u, p) = ufl.TrialFunctions(W)
+    (v, q) = ufl.TestFunctions(W)
+    dx = ufl.Measure("dx", domain=mesh)
+    ds = ufl.ds(domain=mesh)
+
+    def strain(field: UflExpr) -> UflExpr:
+        return ufl.sym(ufl.grad(field))
+
+    a = (
+        2.0 * viscosity * ufl.inner(strain(u), strain(v))
+        + screening * ufl.inner(u, v)
+        - p * ufl.div(v)
+        - q * ufl.div(u)
+    ) * dx
+    rhs = ufl.inner(traction, v) * ds  # natural BC: σ·n = traction
+    if forcing is not None:
+        rhs += ufl.inner(forcing, v) * dx
+
+    solution = fem.Function(W)
+    LinearProblem(
+        a,
+        rhs,
+        u=solution,
+        petsc_options_prefix=f"vcellfenics_stokestraction_{id(solution):x}_",
         petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
     ).solve()
     return solution.sub(0).collapse(), solution.sub(1).collapse()

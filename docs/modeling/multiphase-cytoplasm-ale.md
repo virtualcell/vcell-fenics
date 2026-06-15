@@ -219,7 +219,7 @@ needs now.
 | Two coupled velocity blocks + interphase drag | **done** — `backend/multiphase.py` (`solve_two_phase_overdamped`), monolithic mixed-element block; verified (`test_backend_multiphase.py`) |
 | **Interface velocity BCs** (normal-match / tangential slip), Nitsche or rotated frame | **first piece done** — `backend/slip.py` (`nitsche_normal_slip`, `solve_overdamped_slip`): perfect-slip `v·n = g`, free tangential, via Nitsche; **symmetric (L2-optimal) and non-symmetric penalty-free (no β to tune — robust for cut/weak-coercivity) variants** both verified (`test_backend_slip.py`). Stokes-traction / pressure variants pending |
 | Incompressible-mixture **pressure** (saddle point, stable elements e.g. Taylor–Hood) | **single-phase done** — `backend/stokes.py` (`solve_incompressible_stokes`), Taylor–Hood P2/P1 + MUMPS, verified (`test_backend_stokes.py`); slip-with-Stokes-traction and the two-phase mixture pending |
-| Membrane force balance loaded by cortex traction | new — interface term on the existing surface mechanics |
+| Membrane force balance loaded by cortex traction | **static coupling done** — `solve_incompressible_stokes_traction` (traction/Neumann BC); Laplace's law verified (`test_backend_stokes.py`). The *dynamic* moving-membrane loop is the remaining integration |
 | Reference configuration + hyperelastic `P(F)` (poroelastic only) | new — deferred to the constitutive swap |
 
 ## 10. A staged, verifiable path (when we build it)
@@ -269,7 +269,15 @@ Each step is a known-answer check before the next is added:
    both Nitsche variants, and `∇·(v_n + v_s)` zero to round-off on a generic flow. **Step 3
    complete.**
 4. **Membrane mechanical coupling** — cortex traction loads the membrane force balance.
-   Verify: cortical tension drives a known shape change; total momentum balance.
+   **✓ done:** `solve_incompressible_stokes_traction` (`backend/stokes.py`) applies the
+   membrane's surface-mechanics force on the enclosed fluid as a **traction (Neumann) BC**
+   `σ·n = t` — the natural Stokes BC, so it enters only the RHS and also fixes the pressure
+   level. Verified by **Laplace's law**: a tense membrane's curvature traction `−γ κ n`
+   leaves the fluid at rest with the exact internal pressure `p = γ/R` (`test_backend_stokes.py`,
+   to round-off across radii and tensions) — the membrane–bulk mechanical balance.
+   With the bulk pressure now set by membrane tension, the staged momentum path is complete;
+   the remaining work is the *dynamic* coupling (the moving-membrane ALE loop driving the
+   two-phase bulk) and the constitutive/frame seams (§5–§6).
 5. **(Later) Poroelastic swap** — reference configuration + `P(F)`, mesh pinned to the
    network frame. Verify: a poroelastic relaxation / Biot consolidation known solution.
 
