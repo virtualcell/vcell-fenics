@@ -1,11 +1,15 @@
 """Prescribed-motion fluid–structure loop on a conservative (H(div)) bulk.
 
 The dynamic integration of the multiphase path (`docs/modeling/multiphase-cytoplasm-ale.md`):
-a moving membrane drives an incompressible bulk through the slip BC while the ALE mesh
-follows. This is the *foundation* step — the membrane motion is **prescribed** (the
-force-balance closure, where it is solved, is the next increment) — and it is built on the
-exactly mass-conserving H(div) Stokes (`backend/stokes_hdiv.py`) so the bulk stays
-divergence-free as the domain deforms.
+a moving membrane drives an incompressible bulk while the ALE mesh follows. Two steps:
+
+- `step_prescribed_fsi` — the **foundation**: the membrane motion is *prescribed*, the bulk
+  is the exactly mass-conserving H(div) Stokes (`backend/stokes_hdiv.py`), divergence-free
+  as the domain deforms.
+- `step_force_balance_fsi` — the **closure**: the membrane moves under its *own* surface
+  tension and the bulk pressure (no prescribed motion). On Taylor–Hood (continuous velocity)
+  so the ALE mesh can move by the solved `v` directly with `∮ v·n = 0` exact (an H(div)
+  velocity loses that when interpolated for the mesh — see `step_force_balance_fsi`).
 
 Each step:
 
@@ -44,7 +48,20 @@ from dolfinx.mesh import Mesh
 from scipy.spatial import cKDTree
 
 from vcell_fenics.backend.discrete import _HarmonicExtension
+from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tension
 from vcell_fenics.backend.stokes_hdiv import solve_incompressible_stokes_hdiv_slip
+
+
+def _advance_ale_mesh(mesh: Mesh, velocity: fem.Function, dt: float) -> None:
+    """Move `mesh` in place by `dt·velocity`: boundary nodes by the velocity directly, the
+    interior by harmonic extension (the ALE fill)."""
+    gdim = mesh.geometry.dim
+    lagrange = fem.functionspace(mesh, ("Lagrange", 1, (gdim,)))
+    displacement = fem.Function(lagrange)
+    displacement.interpolate(fem.Expression(dt * velocity, lagrange.element.interpolation_points))
+    _HarmonicExtension(lagrange).fill(displacement)  # boundary kept, interior harmonic
+    geom_from_dof = cKDTree(lagrange.tabulate_dof_coordinates()).query(mesh.geometry.x)[1]
+    mesh.geometry.x[:, :gdim] += displacement.x.array.reshape(-1, gdim)[geom_from_dof]
 
 
 def step_prescribed_fsi(
@@ -70,14 +87,31 @@ def step_prescribed_fsi(
     v, p = solve_incompressible_stokes_hdiv_slip(
         mesh, boundary_velocity=boundary_velocity, viscosity=viscosity, screening=screening
     )
+    _advance_ale_mesh(mesh, boundary_velocity, dt)
+    return v, p
 
-    gdim = mesh.geometry.dim
-    lagrange = fem.functionspace(mesh, ("Lagrange", 1, (gdim,)))
-    displacement = fem.Function(lagrange)
-    displacement.interpolate(fem.Expression(dt * boundary_velocity, lagrange.element.interpolation_points))
-    _HarmonicExtension(lagrange).fill(displacement)  # boundary kept, interior harmonic
-    geom_from_dof = cKDTree(lagrange.tabulate_dof_coordinates()).query(mesh.geometry.x)[1]
-    mesh.geometry.x[:, :gdim] += displacement.x.array.reshape(-1, gdim)[geom_from_dof]
+
+def step_force_balance_fsi(
+    mesh: Mesh,
+    *,
+    tension: float,
+    dt: float,
+    viscosity: float = 1.0,
+    screening: float = 1.0,
+) -> tuple[fem.Function, fem.Function]:
+    """Advance one **force-balance** FSI step, in place — the membrane moves under its *own*
+    surface tension and the bulk pressure, with no prescribed motion.
+
+    Solves the surface-tension Stokes (`backend/stokes.py`) for the fluid `v`, then moves the
+    membrane (and ALE mesh) by `dt·v`. The membrane is the material boundary, so it is carried
+    by the fluid; the pressure (the `∇·v = 0` multiplier) enforces `∮ v·n = 0`, so the enclosed
+    volume is **conserved automatically** — no prescribed-motion consistency to arrange. A
+    circle is a fixed point (Laplace `p = γ/R`, `v ≈ 0`); a perturbed shape relaxes toward the
+    minimal-perimeter circle at conserved area. Returns the fluid `(v, p)`.
+    """
+
+    v, p = solve_incompressible_stokes_surface_tension(mesh, tension=tension, viscosity=viscosity, screening=screening)
+    _advance_ale_mesh(mesh, v, dt)
     return v, p
 
 

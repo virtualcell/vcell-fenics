@@ -22,6 +22,13 @@ membrane–cortex mechanical coupling (step 4): the membrane's surface mechanics
 bulk fluid as a boundary traction. A tense membrane gives `t = −γ κ n`, and the fluid
 returns the Laplace pressure `p = γ/R`.
 
+`solve_incompressible_stokes_surface_tension` applies a uniform membrane **surface tension**
+`γ` through the curvature-free weak load `−γ ∮_Γ ∇_Γ·v ds = −γ ∮ inner(P, ∇v) ds` (with the
+surface projector `P = I − n⊗n`) — the force-balance FSI closure (`backend/fsi.py`), where
+the membrane moves under its *own* tension. No explicit curvature: the Laplace–Beltrami /
+continuous-surface-force identity moves the derivative onto the test function, so it works
+on a piecewise-linear boundary where the pointwise curvature is undefined.
+
 Under all-Dirichlet velocity the pressure is determined only up to a constant, so one
 pressure dof is pinned to remove that null space (the field is physical up to the
 constant). The saddle-point matrix is indefinite, so a direct LU with a pivoting solver
@@ -223,6 +230,62 @@ def solve_incompressible_stokes_traction(
         rhs,
         u=solution,
         petsc_options_prefix=f"vcellfenics_stokestraction_{id(solution):x}_",
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
+    ).solve()
+    return solution.sub(0).collapse(), solution.sub(1).collapse()
+
+
+def solve_incompressible_stokes_surface_tension(
+    mesh: Mesh,
+    *,
+    tension: float,
+    viscosity: float = 1.0,
+    screening: float = 1.0,
+) -> tuple[fem.Function, fem.Function]:
+    """Incompressible Stokes driven by a uniform membrane **surface tension** `γ`, for the
+    force-balance FSI closure (the membrane moves under its own tension + the bulk pressure).
+
+    The tension enters as the weak boundary load `−γ ∮_Γ ∇_Γ·v ds` — the Laplace–Beltrami /
+    continuous-surface-force form, so **no explicit curvature** is computed (the surface
+    divergence of the test velocity *is* the curvature force, integrated by parts). At
+    equilibrium a circle gives the Laplace pressure `p = γ/R` with `v ≈ 0`; out of equilibrium
+    the tension drives the shape toward minimal perimeter at fixed (incompressible) area.
+
+    Taylor–Hood (P2/P1), so the velocity is **continuous** — moving the ALE mesh by it
+    conserves area, since the constant-pressure mode enforces `∮ v·n = 0` exactly (an H(div)
+    velocity, being discontinuous, loses that when interpolated for the mesh motion). A
+    substrate-friction `screening` removes the rigid-body null space; the tension fixes the
+    pressure level, so no pin is needed. Returns `(u, p)`.
+    """
+
+    gdim = mesh.geometry.dim
+    p2 = basix.ufl.element("Lagrange", mesh.basix_cell(), 2, shape=(gdim,))
+    p1 = basix.ufl.element("Lagrange", mesh.basix_cell(), 1)
+    W = fem.functionspace(mesh, basix.ufl.mixed_element([p2, p1]))
+    (u, p) = ufl.TrialFunctions(W)
+    (v, q) = ufl.TestFunctions(W)
+    dx = ufl.Measure("dx", domain=mesh)
+    ds = ufl.ds(domain=mesh)
+    n = ufl.FacetNormal(mesh)
+
+    def strain(field: UflExpr) -> UflExpr:
+        return ufl.sym(ufl.grad(field))
+
+    a = (
+        2.0 * viscosity * ufl.inner(strain(u), strain(v))
+        + screening * ufl.inner(u, v)
+        - p * ufl.div(v)
+        - q * ufl.div(u)
+    ) * dx
+    surface_projection = ufl.Identity(gdim) - ufl.outer(n, n)  # P = I − n⊗n
+    rhs = -tension * ufl.inner(surface_projection, ufl.grad(v)) * ds  # −γ ∮ ∇_Γ·v ds
+
+    solution = fem.Function(W)
+    LinearProblem(
+        a,
+        rhs,
+        u=solution,
+        petsc_options_prefix=f"vcellfenics_stokestension_{id(solution):x}_",
         petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
     ).solve()
     return solution.sub(0).collapse(), solution.sub(1).collapse()
