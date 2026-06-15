@@ -217,7 +217,7 @@ needs now.
 | Multi-field block solve (`MixedFunctionSpace` / `extract_blocks`) | **have** (`coupled.py`) |
 | Tangential redistribution (membrane), remap-on-remesh | **have** (`bgn_curve*`, `core/` remaps) |
 | Two coupled velocity blocks + interphase drag | new — extends block assembly |
-| **Interface velocity BCs** (normal-match / tangential slip), Nitsche or rotated frame | **new — the main machinery gap** |
+| **Interface velocity BCs** (normal-match / tangential slip), Nitsche or rotated frame | **first piece done** — `backend/slip.py` (`nitsche_normal_slip`, `solve_overdamped_slip`): perfect-slip `v·n = g`, free tangential, via Nitsche; **symmetric (L2-optimal) and non-symmetric penalty-free (no β to tune — robust for cut/weak-coercivity) variants** both verified (`test_backend_slip.py`). Stokes-traction / pressure variants pending |
 | Incompressible-mixture **pressure** (saddle point, stable elements e.g. Taylor–Hood) | new — first non-`P1` element |
 | Membrane force balance loaded by cortex traction | new — interface term on the existing surface mechanics |
 | Reference configuration + hyperelastic `P(F)` (poroelastic only) | new — deferred to the constitutive swap |
@@ -228,8 +228,13 @@ Each step is a known-answer check before the next is added:
 
 1. **One overdamped fluid phase on a moving mesh + a normal-matching interface BC.**
    Proves the velocity-BC machinery and the mesh-vs-physical-velocity split in isolation.
-   Verify: a still-medium / rotating-mesh discriminator (the `relative_advection` test
-   pattern) now with the BC enforcing `v·n = w·n`.
+   *Done (fixed-domain isolation):* `backend/slip.py` — the perfect-slip Nitsche BC
+   (`v·n = g`, free tangential) on a screened vector Laplacian; verified that a manufactured
+   field is recovered to round-off, the no-penetration constraint tightens with the penalty,
+   and a tangential forcing slips where no-slip kills it (`test_backend_slip.py`).
+   *Remaining for this step:* combine with a moving mesh (the existing `_MeshMotion` +
+   `relative_advection`) and set `g = w·n`, then re-run the rotating-mesh discriminator with
+   the velocity *solved* rather than prescribed.
 2. **Add the second (network) phase + interphase drag** (block solve). Verify: a 1D
    two-fluid Stokes flow with drag against an analytical two-phase velocity profile.
 3. **Incompressible mixture pressure** (Taylor–Hood or stabilised). Verify: a divergence-

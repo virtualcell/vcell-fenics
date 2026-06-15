@@ -35,6 +35,7 @@ from vcell_fenics.backend.geometry import (
     make_extracellular_annulus_geometry,
     register_geometry,
 )
+from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
 from vcell_fenics.backend.solver import SolverConfiguration, run
 from vcell_fenics.backend.unknown_motion import UnknownMotionProblem, assemble_unknown_motion
 from vcell_fenics.backend.weakform import WeakFormProblem, assemble_weak_form
@@ -70,9 +71,11 @@ __all__ = [
     "make_disk_geometry",
     "make_disk_membrane_geometry",
     "make_extracellular_annulus_geometry",
+    "nitsche_normal_slip",
     "rebuild_on_mesh",
     "register_geometry",
     "run",
     "run_with_remeshing",
+    "solve_overdamped_slip",
     "step_with_remeshing",
 ]
