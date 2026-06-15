@@ -14,14 +14,22 @@ Each step:
   2. advance the ALE mesh by `dt·w` — boundary nodes by the prescribed velocity, the
      interior filled by harmonic extension.
 
-**Consistency requirement (a real FSI constraint, not a numerical nicety):** the prescribed
-boundary motion must be **volume-conserving on the *current* geometry**, `∮ w·n = 0`. An
-incompressible bulk forces `∮ v·n = 0`, so a `w` with non-zero net normal flux has *no*
-consistent fluid and the solve blows up. A **divergence-free** `w` guarantees `∮ w·n = 0`
-on *any* shape (`∮ w·n = ∫ ∇·w = 0`); a `w` that is volume-conserving only on the initial
-shape (e.g. `cos2θ·n` on a circle) loses that once the boundary deforms. The force-balance
-closure sidesteps this — there the normal motion is *solved* and is automatically
-consistent.
+**The volume-conservation condition is an artefact of *prescribing* the motion, not a
+constraint to babysit.** An incompressible bulk forces `∮ v·n = 0`, and the BC ties
+`v·n = w·n`, so a *prescribed* `w` with non-zero net normal flux makes the two demands
+contradict — the problem is genuinely **inconsistent** (no solution), and the solve blows
+up. That is over-determination, not numerical fragility, and the cure is a `w` that is
+actually consistent: a **divergence-free** `w` guarantees `∮ w·n = 0` on *any* shape
+(`∮ w·n = ∫ ∇·w = 0`), whereas a `w` volume-conserving only on the initial shape (e.g.
+`cos2θ·n` on a circle) loses that once the boundary deforms.
+
+In the real model the condition **enforces itself**: in the force-balance closure the
+normal motion is *solved*, and the pressure — the Lagrange multiplier for `∇·v = 0` — builds
+up to whatever makes `∮ v·n = 0`, so the enclosed volume is conserved *automatically and
+exactly*, with no source and no tuning. (Adding genuine water transport later generalises
+the balance to `dV/dt = ∫ s` for a volume source `s`, or `dV/dt = −∮ J` for a transmembrane
+flux `J` — conserved physics that *relaxes* the constraint when present, never slack that
+hides a leak; with `s = 0` this reduces to the strict, exactly-conservative case here.)
 
 Verified (`tests/test_backend_fsi.py`): the fluid is divergence-free to round-off at every
 step of a deforming loop, and the enclosed volume is conserved (to the O(dt) forward-Euler
@@ -51,9 +59,12 @@ def step_prescribed_fsi(
 
     Solves the conservative H(div) bulk for `v` (`v·n = boundary_velocity·n`, free
     tangential), then moves `mesh` by `dt·boundary_velocity` (boundary directly, interior by
-    harmonic extension). `boundary_velocity` is a vector `Function`; **it must be
-    volume-conserving on the current geometry** (`∮ w·n = 0` — use a divergence-free field).
-    Returns the exactly divergence-free `v` and its pressure `p`.
+    harmonic extension). `boundary_velocity` is a vector `Function`; because the motion is
+    *prescribed* here, it must be consistent with incompressibility — `∮ w·n = 0` on the
+    current geometry (use a divergence-free field); otherwise the bulk solve is
+    over-determined. (When the motion is *solved* — the force-balance closure — the pressure
+    enforces `∮ v·n = 0` itself and the volume is conserved automatically; see the module
+    docstring.) Returns the exactly divergence-free `v` and its pressure `p`.
     """
 
     v, p = solve_incompressible_stokes_hdiv_slip(
