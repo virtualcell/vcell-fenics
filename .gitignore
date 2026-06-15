@@ -131,3 +131,6 @@ dmypy.json
 
 # JetBrains IDE
 .idea/
+
+# ADIOS2 / VTX output
+*.bp/
