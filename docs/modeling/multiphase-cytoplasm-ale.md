@@ -216,7 +216,7 @@ needs now.
 | Weak-form escape hatch — overdamped force balances | **have** (`weakform.py`) |
 | Multi-field block solve (`MixedFunctionSpace` / `extract_blocks`) | **have** (`coupled.py`) |
 | Tangential redistribution (membrane), remap-on-remesh | **have** (`bgn_curve*`, `core/` remaps) |
-| Two coupled velocity blocks + interphase drag | new — extends block assembly |
+| Two coupled velocity blocks + interphase drag | **done** — `backend/multiphase.py` (`solve_two_phase_overdamped`), monolithic mixed-element block; verified (`test_backend_multiphase.py`) |
 | **Interface velocity BCs** (normal-match / tangential slip), Nitsche or rotated frame | **first piece done** — `backend/slip.py` (`nitsche_normal_slip`, `solve_overdamped_slip`): perfect-slip `v·n = g`, free tangential, via Nitsche; **symmetric (L2-optimal) and non-symmetric penalty-free (no β to tune — robust for cut/weak-coercivity) variants** both verified (`test_backend_slip.py`). Stokes-traction / pressure variants pending |
 | Incompressible-mixture **pressure** (saddle point, stable elements e.g. Taylor–Hood) | new — first non-`P1` element |
 | Membrane force balance loaded by cortex traction | new — interface term on the existing surface mechanics |
@@ -237,8 +237,15 @@ Each step is a known-answer check before the next is added:
    rotating-mesh discriminator holds a lab-frame field static to the O(h) geometric floor
    (`test_backend_slip_moving.py`). The accuracy floor is the discrete-normal facet-leakage
    (a known limitation), confirmed to shrink under refinement.
-2. **Add the second (network) phase + interphase drag** (block solve). Verify: a 1D
-   two-fluid Stokes flow with drag against an analytical two-phase velocity profile.
+2. **Add the second (network) phase + interphase drag** (block solve). ✓ done.
+   `backend/multiphase.py` (`solve_two_phase_overdamped`): two overdamped velocity fields
+   `(v_n, v_s)` with viscous + optional substrate friction + the symmetric interphase drag
+   `ξ(v_a − v_b)`, each with its own normal-slip BC, assembled monolithically over a mixed
+   element of two vector spaces. Verified (`test_backend_multiphase.py`): a manufactured
+   two-field solution recovered to round-off (block + drag + slip assembly); increasing `ξ`
+   **locks** the phases (slip `|v_n − v_s|` shrinks ~`1/ξ`); and `ξ = 0` decouples into the
+   independent single-phase slip solves (the drag is the only coupling). `-ν∇²` still stands
+   in for the viscous stress; the symmetric-gradient Stokes operator + pressure are step 3.
 3. **Incompressible mixture pressure** (Taylor–Hood or stabilised). Verify: a divergence-
    free benchmark.
 4. **Membrane mechanical coupling** — cortex traction loads the membrane force balance.
