@@ -35,6 +35,7 @@ from vcell_fenics.backend.geometry import (
     make_extracellular_annulus_geometry,
     register_geometry,
 )
+from vcell_fenics.backend.multiphase import solve_two_phase_overdamped
 from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
 from vcell_fenics.backend.solver import SolverConfiguration, run
 from vcell_fenics.backend.unknown_motion import UnknownMotionProblem, assemble_unknown_motion
@@ -77,5 +78,6 @@ __all__ = [
     "run",
     "run_with_remeshing",
     "solve_overdamped_slip",
+    "solve_two_phase_overdamped",
     "step_with_remeshing",
 ]
