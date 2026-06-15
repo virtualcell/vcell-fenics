@@ -218,7 +218,7 @@ needs now.
 | Tangential redistribution (membrane), remap-on-remesh | **have** (`bgn_curve*`, `core/` remaps) |
 | Two coupled velocity blocks + interphase drag | **done** — `backend/multiphase.py` (`solve_two_phase_overdamped`), monolithic mixed-element block; verified (`test_backend_multiphase.py`) |
 | **Interface velocity BCs** (normal-match / tangential slip), Nitsche or rotated frame | **first piece done** — `backend/slip.py` (`nitsche_normal_slip`, `solve_overdamped_slip`): perfect-slip `v·n = g`, free tangential, via Nitsche; **symmetric (L2-optimal) and non-symmetric penalty-free (no β to tune — robust for cut/weak-coercivity) variants** both verified (`test_backend_slip.py`). Stokes-traction / pressure variants pending |
-| Incompressible-mixture **pressure** (saddle point, stable elements e.g. Taylor–Hood) | new — first non-`P1` element |
+| Incompressible-mixture **pressure** (saddle point, stable elements e.g. Taylor–Hood) | **single-phase done** — `backend/stokes.py` (`solve_incompressible_stokes`), Taylor–Hood P2/P1 + MUMPS, verified (`test_backend_stokes.py`); slip-with-Stokes-traction and the two-phase mixture pending |
 | Membrane force balance loaded by cortex traction | new — interface term on the existing surface mechanics |
 | Reference configuration + hyperelastic `P(F)` (poroelastic only) | new — deferred to the constitutive swap |
 
@@ -246,8 +246,16 @@ Each step is a known-answer check before the next is added:
    **locks** the phases (slip `|v_n − v_s|` shrinks ~`1/ξ`); and `ξ = 0` decouples into the
    independent single-phase slip solves (the drag is the only coupling). `-ν∇²` still stands
    in for the viscous stress; the symmetric-gradient Stokes operator + pressure are step 3.
-3. **Incompressible mixture pressure** (Taylor–Hood or stabilised). Verify: a divergence-
-   free benchmark.
+3. **Incompressible mixture pressure** (Taylor–Hood or stabilised). **3a ✓ done:** single
+   incompressible Stokes — `backend/stokes.py` (`solve_incompressible_stokes`), the
+   symmetric-gradient stress `2ν ε(u)` + a pressure Lagrange multiplier `∇·u = 0`, the first
+   saddle-point system, on inf-sup-stable **Taylor–Hood** (P2/P1) elements with a pivoting
+   (MUMPS) direct solve. Verified against a manufactured solution (div-free quadratic
+   velocity + linear pressure recovered to round-off, `∇·u ≈ 0`; `test_backend_stokes.py`),
+   with a strong Dirichlet velocity BC. **3b remaining:** the Nitsche normal-slip BC with the
+   *Stokes* traction `(2ν ε(v) − p I)·n` (the pressure enters the boundary terms), then the
+   **two-phase incompressible mixture** (the drag block of step 2 with the pressure
+   constraint).
 4. **Membrane mechanical coupling** — cortex traction loads the membrane force balance.
    Verify: cortical tension drives a known shape change; total momentum balance.
 5. **(Later) Poroelastic swap** — reference configuration + `P(F)`, mesh pinned to the
