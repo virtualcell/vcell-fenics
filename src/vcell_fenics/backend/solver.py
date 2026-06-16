@@ -17,7 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from petsc4py import PETSc
+
 from vcell_fenics.backend.assemble import assemble
+from vcell_fenics.backend.diagnostics import SolveError, linear_step_failure_message
 from vcell_fenics.backend.discrete import DiscreteProblem
 from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
@@ -51,8 +54,12 @@ def run(md: MathDescription, geometry: Geometry, config: SolverConfiguration) ->
         integrate_discrete_problem(problem, t_final=config.t_final, dt_initial=config.dt)
     elif config.time_integration == "backward_euler":
         for n in range(round(config.t_final / config.dt)):
-            problem.set_time((n + 1) * config.dt)  # advance g(t) etc. to the step's time, then solve
-            problem.step()
+            time = (n + 1) * config.dt
+            problem.set_time(time)  # advance g(t) etc. to the step's time, then solve
+            try:
+                problem.step()  # MeshQualityError (a clear message already) propagates; PETSc failures translate
+            except PETSc.Error as original:
+                raise SolveError(linear_step_failure_message(time)) from original
     else:
         raise ValueError(
             f"time_integration must be 'backward_euler' or 'method_of_lines', not {config.time_integration!r}"

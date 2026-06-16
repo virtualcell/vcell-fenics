@@ -43,6 +43,7 @@ from dolfinx.mesh import Mesh
 from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
+from vcell_fenics.backend.diagnostics import SolveError, ts_failure_message
 from vcell_fenics.backend.discrete import DiscreteProblem, TermKind
 
 
@@ -216,7 +217,10 @@ def _run_time_stepper(
             on_time(0.0)
         fem_petsc.set_bc(state.x.petsc_vec, bcs)
         state.x.scatter_forward()
-    ts.solve(state.x.petsc_vec)
+    try:
+        ts.solve(state.x.petsc_vec)
+    except PETSc.Error as original:  # re-express the failure in model terms (see backend/diagnostics)
+        raise SolveError(ts_failure_message(ts)) from original
     state.x.scatter_forward()
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
     ts.destroy()
