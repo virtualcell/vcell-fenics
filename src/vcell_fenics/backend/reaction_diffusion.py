@@ -42,6 +42,7 @@ from dolfinx.mesh import Mesh
 from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
+from vcell_fenics.backend.discrete import DiscreteProblem, TermKind
 
 
 @dataclass
@@ -105,10 +106,38 @@ def integrate_reaction_diffusion(
             residual += ufl.dot(advection, ufl.grad(state[k])) * test[k]  # u·∇c_k (Eulerian advection)
     if reaction is not None:
         residual -= ufl.inner(reaction(state), test)  # − R(c)·v  (may be nonlinear)
-    residual_form = fem.form(residual * dx)
 
+    options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
+    steps, final_time = _run_time_stepper(state, rate, residual * dx, options)
+    return IntegrationResult(solution=state, steps=steps, time=final_time)
+
+
+@dataclass(frozen=True)
+class _TimeStepperOptions:
+    t_final: float
+    dt_initial: float | None
+    ts_type: str
+    rtol: float
+    atol: float
+    ksp_type: str
+    pc_type: str
+    ksp_rtol: float
+
+
+def _run_time_stepper(
+    state: fem.Function, rate: fem.Function, residual: UflExpr, options: _TimeStepperOptions
+) -> tuple[int, float]:
+    """Integrate the implicit residual `F(state, rate) = 0` to `options.t_final` with PETSc `TS`,
+    mutating `state` in place. `residual` is the UFL form of `F` (`rate` the time derivative `ċ`,
+    a `Function` TS supplies each step); the exact Jacobian `σ ∂F/∂rate + ∂F/∂state` comes from
+    `ufl.derivative`. Returns `(steps, final_time)`. Shared by the explicit-API integrator and
+    the DiscreteProblem (formalism) driver, so the `TS` wiring lives in exactly one place."""
+
+    space = state.function_space
+    mesh = space.mesh
+    residual_form = fem.form(residual)
     shift = fem.Constant(mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]  # petsc4py stubs ScalarType as a dtype
-    jacobian = shift * ufl.derivative(residual * dx, rate) + ufl.derivative(residual * dx, state)
+    jacobian = shift * ufl.derivative(residual, rate) + ufl.derivative(residual, state)
     jacobian_form = fem.form(jacobian)  # σ M + ∂F/∂c — exact (ufl.derivative)
     jacobian_matrix = fem_petsc.create_matrix(jacobian_form)
 
@@ -136,13 +165,13 @@ def integrate_reaction_diffusion(
 
     ts = PETSc.TS().create(mesh.comm)
     ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
-    ts.setType(ts_type)
+    ts.setType(options.ts_type)
     ts.setIFunction(evaluate_residual, fem.Function(space).x.petsc_vec)
     ts.setIJacobian(evaluate_jacobian, jacobian_matrix)
-    ts.setTimeStep(dt_initial if dt_initial is not None else t_final / 100.0)
-    ts.setMaxTime(t_final)
+    ts.setTimeStep(options.dt_initial if options.dt_initial is not None else options.t_final / 100.0)
+    ts.setMaxTime(options.t_final)
     ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-    ts.setTolerances(atol, rtol)
+    ts.setTolerances(options.atol, options.rtol)
     # Inner Newton (SNES) linear solver. The MOL default is a **Krylov solve (GMRES) with an
     # ILU preconditioner** — VCell's reaction-diffusion solver uses CVODE with SPGMR + ILU for
     # exactly this: ILU keeps the per-iteration cost low and convergence fast as the system
@@ -152,13 +181,66 @@ def integrate_reaction_diffusion(
     snes = ts.getSNES()
     snes.setUseEW(False)
     ksp = snes.getKSP()
-    ksp.setType(ksp_type)
-    ksp.setTolerances(rtol=ksp_rtol)
-    ksp.getPC().setType(pc_type)
+    ksp.setType(options.ksp_type)
+    ksp.setTolerances(rtol=options.ksp_rtol)
+    ksp.getPC().setType(options.pc_type)
     ts.setFromOptions()
 
     ts.solve(state.x.petsc_vec)
     state.x.scatter_forward()
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
     ts.destroy()
+    return steps, final_time
+
+
+def integrate_discrete_problem(
+    problem: DiscreteProblem,
+    *,
+    t_final: float,
+    dt_initial: float | None = None,
+    ts_type: str = "bdf",
+    rtol: float = 1.0e-6,
+    atol: float = 1.0e-8,
+    ksp_type: str = "gmres",
+    pc_type: str = "ilu",
+    ksp_rtol: float = 1.0e-9,
+) -> IntegrationResult:
+    """Integrate an assembled `DiscreteProblem` (a formalism MathDescription, via
+    `backend.assemble`) with the method-of-lines `TS` integrator instead of backward Euler.
+
+    The IR already carries the tagged spatial terms (diffusion, advection, source, …) built
+    against the trial function; this reuses them — substituting `trial → unknown` so the source
+    becomes a genuine nonlinear residual — and swaps the backward-Euler time term for `ċ·v`. So a
+    **nonlinear** reaction in the model's `source` slot is handled by the `TS` inner Newton,
+    where the backward-Euler driver would need it linear (or lagged). The `unknown` carries the
+    IC `assemble` applied and is integrated in place to `t_final`.
+
+    Fixed-domain only: a prescribed `motion_velocity` (moving subdomain) raises — the moving
+    cell uses the per-step Newton path (`backend/fsi.py`). Strong Dirichlet BCs are not yet wired
+    into the `TS` callbacks and also raise; natural / Neumann / Robin boundaries are supported
+    (they are part of the residual). Returns an `IntegrationResult`.
+    """
+
+    if problem.motion_velocity is not None:
+        raise NotImplementedError("method-of-lines is fixed-domain; a moving subdomain uses the per-step Newton path")
+    if problem.bcs:
+        raise NotImplementedError("method-of-lines does not yet support strong Dirichlet BCs (TS callback lifting)")
+    if TermKind.TIME_DERIVATIVE not in problem.term_kinds():
+        raise NotImplementedError("method-of-lines integrates time-dependent problems only")
+
+    state, trial, test, dx = problem.unknown, problem.trial, problem.test, problem.dx
+    rate = fem.Function(state.function_space)  # ċ
+    residual = ufl.inner(rate, test) * dx  # mass term ċ·v
+    for term in problem.terms:
+        if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
+            continue
+        integrand = ufl.replace(term.integrand, {trial: state})  # trial → unknown ⇒ a nonlinear residual
+        # Same signs as backward Euler: source on the PDE RHS ⇒ −source in the residual.
+        residual = residual - integrand * dx if term.kind is TermKind.SOURCE else residual + integrand * dx
+    for boundary in problem.boundary_terms:
+        residual = residual + ufl.replace(boundary.integrand, {trial: state}) * boundary.measure
+
+    options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
+    steps, final_time = _run_time_stepper(state, rate, residual, options)
+    problem.previous.x.array[:] = state.x.array
     return IntegrationResult(solution=state, steps=steps, time=final_time)

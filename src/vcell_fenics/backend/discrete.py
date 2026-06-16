@@ -284,18 +284,28 @@ class DiscreteProblem:
     motion_velocity: UflExpr | None = None
 
     def __post_init__(self) -> None:
+        # Compose the backward-Euler forms symbolically (cheap, no JIT). The DOLFINx
+        # `LinearProblem` (which form-compiles `a`/`L`) is built lazily on the first `step`, so a
+        # problem can be assembled and handed to an alternative integrator (the method-of-lines
+        # `TS`, `backend/reaction_diffusion.py`) without paying for — or, for a model with a
+        # nonlinear source that backward Euler cannot represent, failing on — the BE lowering.
         self._a, self._L = self.scheme.compose(self)
-        self._problem = LinearProblem(
-            self._a,
-            self._L,
-            u=self.unknown,
-            bcs=self.bcs,
-            petsc_options_prefix=f"vcellfenics_dp_{id(self):x}_",
-            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
-        )
+        self._problem: LinearProblem | None = None
         self._motion = (
             _MeshMotion(self.V.mesh, self.motion_velocity, self.dt) if self.motion_velocity is not None else None
         )
+
+    def _backward_euler_problem(self) -> LinearProblem:
+        if self._problem is None:
+            self._problem = LinearProblem(
+                self._a,
+                self._L,
+                u=self.unknown,
+                bcs=self.bcs,
+                petsc_options_prefix=f"vcellfenics_dp_{id(self):x}_",
+                petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+            )
+        return self._problem
 
     # -- inspection (structural verification, no solve) ----------------------
 
@@ -355,7 +365,7 @@ class DiscreteProblem:
         # the new configuration, so the dilution `div(velocity)` reflects it.
         if self._motion is not None:
             self._motion.advance()
-        self._problem.solve()
+        self._backward_euler_problem().solve()
         self.previous.x.array[:] = self.unknown.x.array
 
     def total_mass(self) -> float:
