@@ -127,6 +127,39 @@ def test_method_of_lines_handles_a_nonlinear_source() -> None:
     assert float(np.abs(values - values.mean()).max()) < 1e-6  # stays uniform
 
 
+# A pure-diffusion model with a Dirichlet boundary pinned to 3.0. Starting from 0, the field
+# relaxes to the harmonic extension of the boundary value — here the constant 3.0 everywhere.
+_DIRICHLET = """
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - { name: cyto, kind: volume, motion: { kind: none } }
+  variables:
+    - { name: c, subdomain: cyto }
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: { diffusion: "0.2" }
+      initial_condition: "0.0"
+  boundary_conditions:
+    - { kind: dirichlet, variable: c, boundary: wall, expression: "3.0" }
+"""
+
+
+def test_method_of_lines_imposes_a_dirichlet_boundary() -> None:
+    # Strong Dirichlet through the TS callbacks: the boundary dofs are pinned exactly to g, and
+    # the interior relaxes to the steady state (the constant 3.0 for a constant boundary value).
+    md = load_yaml(_DIRICHLET)
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", boundary="wall", radius=1.0, h=0.12)
+    solved = run(md, geometry, SolverConfiguration(dt=0.05, t_final=5.0, time_integration="method_of_lines"))
+    values = solved.unknown.x.array
+    boundary_dofs = solved.bcs[0].dof_indices()[0]
+    assert float(np.abs(values[boundary_dofs] - 3.0).max()) < 1e-12  # boundary pinned exactly to g
+    assert abs(float(values.mean()) - 3.0) < 0.05  # interior relaxes to the boundary value
+
+
 def test_method_of_lines_rejects_a_moving_subdomain() -> None:
     # Method-of-lines is fixed-domain; a prescribed-motion model must use the per-step path.
     md = load_yaml(_MOVING_MEMBRANE)

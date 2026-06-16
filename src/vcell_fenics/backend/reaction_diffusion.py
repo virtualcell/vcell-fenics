@@ -32,7 +32,7 @@ balance; and a bump advects at the prescribed speed.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import ufl
@@ -125,13 +125,22 @@ class _TimeStepperOptions:
 
 
 def _run_time_stepper(
-    state: fem.Function, rate: fem.Function, residual: UflExpr, options: _TimeStepperOptions
+    state: fem.Function,
+    rate: fem.Function,
+    residual: UflExpr,
+    options: _TimeStepperOptions,
+    bcs: Sequence[fem.DirichletBC] = (),
 ) -> tuple[int, float]:
     """Integrate the implicit residual `F(state, rate) = 0` to `options.t_final` with PETSc `TS`,
     mutating `state` in place. `residual` is the UFL form of `F` (`rate` the time derivative `ċ`,
     a `Function` TS supplies each step); the exact Jacobian `σ ∂F/∂rate + ∂F/∂state` comes from
     `ufl.derivative`. Returns `(steps, final_time)`. Shared by the explicit-API integrator and
-    the DiscreteProblem (formalism) driver, so the `TS` wiring lives in exactly one place."""
+    the DiscreteProblem (formalism) driver, so the `TS` wiring lives in exactly one place.
+
+    Strong Dirichlet `bcs` enter as algebraic constraints `x = g` on the boundary dofs: the IC
+    is seeded to satisfy them, the residual's boundary rows are overwritten with `x − g` (so the
+    inner Newton drives them to `g`), and the Jacobian is assembled with the bcs (boundary
+    rows/columns zeroed, unit diagonal). The boundary dofs then stay at `g` for the whole run."""
 
     space = state.function_space
     mesh = space.mesh
@@ -153,6 +162,8 @@ def _run_time_stepper(
             local.set(0.0)
             fem_petsc._assemble_vector_array(local.array_w, residual_form)  # type: ignore[attr-defined]
         result.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)  # type: ignore[arg-type]
+        if bcs:  # boundary residual rows ← x − g, so Newton holds the dofs at g
+            fem_petsc.set_bc(result, bcs, x0=state.x.petsc_vec, alpha=-1.0)
 
     def evaluate_jacobian(
         _ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, sigma: float, mat: PETSc.Mat, _pre: PETSc.Mat
@@ -160,7 +171,7 @@ def _run_time_stepper(
         _set_state(x, x_dot)
         shift.value = sigma
         mat.zeroEntries()
-        fem_petsc.assemble_matrix(mat, jacobian_form)  # type: ignore[arg-type]  # in-place into a preallocated Mat
+        fem_petsc.assemble_matrix(mat, jacobian_form, bcs=bcs)  # type: ignore[arg-type, misc]  # in-place; bcs zero boundary rows/cols
         mat.assemble()
 
     ts = PETSc.TS().create(mesh.comm)
@@ -186,6 +197,9 @@ def _run_time_stepper(
     ksp.getPC().setType(options.pc_type)
     ts.setFromOptions()
 
+    if bcs:  # make the initial state consistent with the Dirichlet boundary values
+        fem_petsc.set_bc(state.x.petsc_vec, bcs)
+        state.x.scatter_forward()
     ts.solve(state.x.petsc_vec)
     state.x.scatter_forward()
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
@@ -216,15 +230,13 @@ def integrate_discrete_problem(
     IC `assemble` applied and is integrated in place to `t_final`.
 
     Fixed-domain only: a prescribed `motion_velocity` (moving subdomain) raises — the moving
-    cell uses the per-step Newton path (`backend/fsi.py`). Strong Dirichlet BCs are not yet wired
-    into the `TS` callbacks and also raise; natural / Neumann / Robin boundaries are supported
-    (they are part of the residual). Returns an `IntegrationResult`.
+    cell uses the per-step Newton path (`backend/fsi.py`). All boundary kinds are supported:
+    natural / Neumann / Robin enter the residual, and strong **Dirichlet** BCs (`problem.bcs`)
+    are imposed as algebraic constraints in the `TS` callbacks. Returns an `IntegrationResult`.
     """
 
     if problem.motion_velocity is not None:
         raise NotImplementedError("method-of-lines is fixed-domain; a moving subdomain uses the per-step Newton path")
-    if problem.bcs:
-        raise NotImplementedError("method-of-lines does not yet support strong Dirichlet BCs (TS callback lifting)")
     if TermKind.TIME_DERIVATIVE not in problem.term_kinds():
         raise NotImplementedError("method-of-lines integrates time-dependent problems only")
 
@@ -241,6 +253,6 @@ def integrate_discrete_problem(
         residual = residual + ufl.replace(boundary.integrand, {trial: state}) * boundary.measure
 
     options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
-    steps, final_time = _run_time_stepper(state, rate, residual, options)
+    steps, final_time = _run_time_stepper(state, rate, residual, options, bcs=problem.bcs)
     problem.previous.x.array[:] = state.x.array
     return IntegrationResult(solution=state, steps=steps, time=final_time)
