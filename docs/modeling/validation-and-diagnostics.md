@@ -1,0 +1,222 @@
+# Model validation and runtime diagnostics — a strategy
+
+**Status:** design note, no code beyond what already exists (`formalism/validator.py`).
+Captures the strategy and a growing registry of known failure modes; the build order in
+§7 is the implementation plan.
+
+## 1. The problem, and why it is harder for us than for VCell
+
+A modeler should learn that a model is wrong **as early as possible**, with a message that
+points at *their model* — not at a PETSc reason code three layers down. Virtual Cell does
+this well, and the reason is structural: VCell models are built from **templated reactions
+and equations**, and the platform is constructed so that a model that *parses* is, by and
+large, a model that is **well-posed**. The space of expressible models is deliberately
+narrow enough that consistency can be guaranteed by construction.
+
+We have made a different bet. The declarative formalism keeps the templated core
+(`docs/modeling/declarative-formalism.md` §1.4, templates T1/T2/…) **but also** opens a
+**weak-form escape hatch** (§1.5): arbitrary UFL residual terms, so a user can express
+physics no template covers (mechanics, active stress, custom couplings). On top of that the
+backend spans moving meshes (ALE), saddle points (Stokes), mixed-dimensional coupling, and
+multiple time integrators. That expressiveness is the whole point of the project — but it
+means **we cannot guarantee well-posedness a priori the way VCell can.** An arbitrary weak
+form can be inconsistent, unstable, or ill-posed in ways no symbolic check will catch.
+
+So the strategy cannot be "make every model provably correct before it runs." It has to be:
+
+> **Validation strength degrades gracefully as expressiveness grows.** A fully templated
+> model should get close to VCell's a-priori guarantee. An escape-hatch model gets weaker
+> static guarantees and leans harder on **runtime diagnostics** that translate a solver
+> failure back into a model-level explanation.
+
+The two halves — strong static checks for the templated subset, good runtime translation
+for everything — are complementary, not alternatives.
+
+## 2. The organizing idea — the *assumed solution class*
+
+The single most useful lens: **every discretization choice carries implicit assumptions
+about the solution** — the function space it lives in, its regularity, its conservation
+structure, the null spaces of the operator, the compatibility of the boundary data. A large
+fraction of real failures are not "bugs" but the **model violating an assumption the chosen
+discretization makes about its own solution.**
+
+The user's example is exactly this class: *boundary conditions not consistent with the
+assumed solution class.* A pure no-penetration BC `v·n = 0` on a rotationally symmetric
+disk leaves **rigid rotation as a null mode** of the viscous operator; a forcing aligned
+with it has no solution, and the symptom is a divergence that *grows under mesh refinement*
+— the classic signature of an inconsistent (rather than merely inaccurate) problem. Nothing
+about the BC is malformed; it is inconsistent with the *solution class* the operator admits.
+
+Framing validation as **"does the model respect the assumptions of its discretization?"**
+unifies most of the registry in §6 and tells us where checks belong:
+
+- assumptions that are **structural and symbolic** (a saddle point needs inf-sup-stable
+  elements; a moving surface density needs the dilution term) → **build-time** checks;
+- assumptions that depend on **data and geometry** (is this forcing in the operator's null
+  space? does this prescribed motion conserve volume on *this* shape?) → sometimes
+  build-time with the geometry in hand, often only **runtime**;
+- assumptions about **regularity and conditioning** (is the Jacobian non-singular here? is
+  the reaction too stiff for this `dt`?) → almost always **runtime**.
+
+## 3. The validation pipeline
+
+Validation is a pipeline of layers, run in order, each catching a class the earlier ones
+cannot. The guarantee weakens as we move down — and, crucially, **down the list is also the
+direction of increasing expressiveness**, which is why the escape hatch forfeits the upper
+guarantees and must be served by the lower (runtime) layers.
+
+| Layer | Catches | When | Status |
+|---|---|---|---|
+| Schema / parser | malformed documents, syntax errors | build | **have** (`formalism/schema`, `expr`) |
+| Typed AST + vocabulary | undefined names, arity, type mismatch, reserved-name collisions | build | **have** (`formalism/validator.py` §2.5) |
+| Template structural consistency | the VCell-style guarantee, *for templated equations* | build | **partial** — T1/T2 are consistent by construction; not all templates exist |
+| **Dimensional / units** | unit mismatches (a huge class of silent modeling errors) | build | **not built** |
+| **Discretization compatibility** | inf-sup, element/BC mismatch, missing conservation term, BC ↔ solution-class consistency | build (+ geometry) | **ad hoc** — flagged by hand (CLAUDE.md flags the dilution trap) |
+| **Runtime-failure translation** | SNES divergence, singular/ill-conditioned Jacobian, mesh tangling, NaN/Inf, step collapse | solve | **not built** — failures surface as raw PETSc/FFCx errors |
+
+The first two layers exist and are solid (the `Diagnostic` / `validate_or_raise`
+machinery). The three bold rows are the work this note is about.
+
+## 4. Build-time validation — extending the existing pass
+
+The foundation is already the right shape: `formalism/validator.py` emits
+`Diagnostic(severity, path, message)` objects keyed to a path into the model
+(`equations[1].terms`), with `error` / `warning` severities and a `validate_or_raise`
+gate. New static checks are **new methods on `_Validator`** producing diagnostics — no new
+machinery, just more rules. Two new layers belong here.
+
+**Dimensional / units (highest a-priori value).** Most silent modeling errors are unit
+mismatches — a rate constant in the wrong units, a diffusivity that is off by a length²
+factor, a flux that does not balance. VCell carries units on every quantity and checks them;
+we do not yet. The increment: attach (optional) units to parameters and variables, infer
+units bottom-up through the expression AST (the same walk that already does type inference,
+§2.5), and emit a diagnostic when an operator combines incompatible units or a term's units
+do not match its slot. This is **symbolic and template-agnostic** — it works on escape-hatch
+weak forms too, because units compose through `+`, `*`, `grad`, `∫…dx` regardless of what
+the term *means*. High value, self-contained, does not need the geometry or a solve.
+
+**Discretization compatibility (the "assumed solution class" checks).** These encode the
+structural assumptions of §2. Many are cheap symbolic checks once we know the chosen
+elements/scheme:
+
+- a moving-surface density equation **must** carry the `ρ ∇_Γ·v_Γ` dilution term (its
+  absence is the single most common subtle bug in this problem class — CLAUDE.md already
+  flags it for humans; make it a diagnostic);
+- a saddle-point system (incompressible Stokes) **must** use inf-sup-stable elements;
+  a like-order velocity/pressure pair is a build-time error, not a runtime surprise;
+- a pure no-penetration / all-Neumann problem on a symmetric domain has a **rigid-body null
+  space**; warn unless a screening / pin / constraint removes it;
+- a prescribed boundary motion into an incompressible bulk must satisfy `∮ w·n = 0` on the
+  *current* geometry — checkable once the geometry is in hand;
+- a nonlinear (non-affine) `source` is incompatible with the backward-Euler `lhs/rhs`
+  split; the model is fine, but the **integrator choice** is not — emit a diagnostic that
+  names the fix (method-of-lines, or lag the term) rather than letting `ufl.lhs` throw an
+  arity mismatch deep in form compilation.
+
+The last point generalizes: several "errors" are really **model × discretization**
+incompatibilities. The diagnostic should name *both* sides and the resolution.
+
+## 5. Runtime diagnostics — translating the unanticipated
+
+For escape-hatch models we *cannot* rule out failure up front, so the second pillar is
+**catching solver failures and re-expressing them in model terms.** Today a bad model
+surfaces as `petsc4py.PETSc.Error: error code 91`, `SNES_DIVERGED_LINE_SEARCH`, an FFCx
+`ArityMismatch`, or a `MeshQualityError` — none of which mention the model. The plan:
+
+1. **Wrap the solve.** A thin layer around the `run` / integrator entry points catches the
+   known failure types and maps each to a model-level message with as much localization as
+   we can afford:
+   - `SNES`/`TS` non-convergence → *"the nonlinear solve failed at t ≈ 0.31; the reaction
+     `k·A·B` is likely stiff — try `method_of_lines`, reduce `dt`, or check rate
+     constants."* (We have the time, the residual norm history, the SNES reason.)
+   - singular / ill-conditioned Jacobian → *"the operator has a null space — a likely
+     rigid-body or constant mode is unconstrained; add a screening term, a Dirichlet pin, or
+     a constraint."*
+   - `MeshQualityError` → already a good model-level message; keep and enrich it with the
+     step and the offending cell.
+   - `NaN`/`Inf` in the residual → *"a term produced a non-finite value at step k — a
+     division by a quantity that reached zero, or `**` of a negative base?"*
+2. **Cheap diagnostic probes on failure.** When a solve fails, run inexpensive probes to
+   localize before reporting: assemble each tagged term's contribution and report which term
+   carries the blow-up; evaluate the residual at the IC to catch an inconsistent start;
+   check the Jacobian's smallest singular value / a near-null vector to *name* the
+   unconstrained mode. The IR's tagged-term structure (ADR 004) is exactly what makes
+   per-term attribution possible.
+3. **Pre-flight checks at `t = 0`.** Before stepping, evaluate the residual and Jacobian
+   once and run the geometry-dependent §4 checks (null space, BC-data consistency) that
+   could not run without the assembled operator. Catch the inconsistent problem *before* the
+   first expensive step, and report it as a model issue.
+
+Runtime diagnostics are where the escape hatch is *paid for*: because we let users write
+arbitrary physics, the discipline is that when it goes wrong, the failure is **explained in
+their terms**, not the solver's.
+
+## 6. A registry of common problems
+
+A structured, growing catalog of known failure modes — the user's suggestion, and the
+connective tissue between §4/§5 and reality. Each entry is **both documentation and the
+spec for a check**: the *Detection* column says whether it is an a-priori diagnostic or a
+runtime signature, which is exactly what an implementer needs. Seeded from the failures
+already hit while building the backend (so it is real, not hypothetical); it should grow
+every time a new class is diagnosed.
+
+| # | Problem | Assumption violated (solution class) | Detection | Message / fix |
+|---|---|---|---|---|
+| 1 | Missing surface dilution `ρ ∇_Γ·v_Γ` on a moving membrane | density on a stretching surface must dilute (mass conservation) | **a-priori** (motion≠none ⇒ require the term) | "add the dilution term; a moving surface density without it does not conserve mass" |
+| 2 | Missing bulk dilution `c ∇·v_carrier` on a compressible carrier | a species on a compressing phase must concentrate | **a-priori** for the FSI species path | bulk analogue of #1 |
+| 3 | No-penetration / all-Neumann BC on a symmetric domain | the operator has a rigid-body / constant **null space** | **runtime** (singular Jacobian / near-null vector) → could be **a-priori** with geometry | "unconstrained rigid-body or constant mode — add screening, a pin, or a constraint" |
+| 4 | Forcing aligned with the null mode | RHS must be in the range (orthogonal to the null space) | **runtime** (divergence grows under refinement) | "forcing is inconsistent with the constrained problem's null space" |
+| 5 | Prescribed boundary motion with `∮ w·n ≠ 0` into an incompressible bulk | incompressibility forces `∮ v·n = 0`; the motion over-determines it | **a-priori with geometry** (`∮ w·n` on the current shape) | "prescribed motion is not volume-consistent on this shape; use a divergence-free field or the force-balance closure" |
+| 6 | Like-order velocity/pressure for incompressible Stokes | saddle point needs an **inf-sup-stable** pair | **a-priori** (element check) | "use Taylor–Hood (P2/P1) or another inf-sup-stable pair" |
+| 7 | Nonlinear `source` under backward Euler | the `lhs/rhs` split assumes the residual is **affine** in the unknown | **a-priori** (AST non-affinity) | "this reaction is nonlinear; use `method_of_lines` or lag the term — backward Euler cannot split it" |
+| 8 | Stiff reaction with an explicit / lagged treatment | step bounded by the reaction time scale; lag can go negative | **runtime** (step rejection / negative concentration) | "stiff kinetics — use the implicit (method-of-lines) path" |
+| 9 | Crank–Nicolson on a stiff nonlinear problem | CN is A- but not **L-stable** → rings / diverges | **runtime** (`DIVERGED_NONLINEAR_SOLVE`) | "use BDF (the L-stable default) for stiff problems" |
+| 10 | Prescribed motion that tangles the mesh | node-moving with no remeshing assumes the motion keeps cells valid | **runtime** (`MeshQualityError`, already good) | reduce the step / motion, or enable remeshing |
+| 11 | BC built from a *smooth* normal instead of the discrete facet normal | Nitsche consistency assumes `g` and `v·n` use the **same** normal | **runtime** (penalty error grows with β) | "build boundary data from the discrete `FacetNormal`" |
+| 12 | Time-dependent algebraic BC with symmetric (row+column) elimination | the Jacobian must stay consistent with the un-lifted residual when `x_bc ≠ g` | **a-priori** (a backend invariant — fixed: zero rows only) | internal; the backend keeps the columns |
+| 13 | IC inconsistent with a Dirichlet boundary | a DAE needs a **consistent** initial state | **a-priori** (seed the IC to `g`, already done) | internal; the backend seeds the boundary |
+| 14 | Sub-inf-sup-threshold Nitsche penalty `β` | symmetric Nitsche needs `β` above a coercivity threshold | **runtime** (loss of coercivity) → heuristic a-priori bound | raise `β`, or use the penalty-free non-symmetric variant |
+
+Patterns worth seeing across the table: most rows are an **assumption of the
+discretization** (null space, inf-sup, affinity, L-stability, regularity); the *Detection*
+column splits cleanly into **a-priori** (structural, often template/geometry checks) and
+**runtime** (the failure has a recognizable signature). Several rows (3, 5, 8) are
+**a-priori-with-geometry** — checkable at the `t = 0` pre-flight (§5.3) but not from the
+model alone — which is exactly the boundary between VCell's guarantee and ours.
+
+## 7. A staged plan
+
+Highest value first, each increment self-contained:
+
+1. **The registry itself** (this note) — near-zero cost, immediate value as documentation,
+   and the spec for everything below. Keep it growing.
+2. **Runtime-failure translation** (§5.1) — wrap the solve, map the handful of known
+   failure types to model-level messages. High value precisely for escape-hatch models, and
+   it needs no new theory — just catching and re-phrasing. **Build this first after the
+   registry.**
+3. **A-priori discretization checks** (§4, rows 1, 6, 7) — the cheap symbolic ones
+   (require-dilution, inf-sup element pair, nonlinear-source-vs-backward-Euler). New
+   `_Validator` methods; immediate, and they turn three runtime surprises into build-time
+   errors with named fixes.
+4. **The `t = 0` pre-flight** (§5.3) — assemble once, run the geometry-dependent null-space
+   / consistency checks (rows 3, 4, 5) before stepping. Needs the assembled operator but no
+   solve.
+5. **Dimensional / units** (§4) — the largest single class of silent errors, but the biggest
+   build (a units representation + inference). Sequence it when the modeling surface is
+   stable enough to be worth annotating.
+
+## 8. Non-goals — the honest boundary
+
+- We will **not** recover VCell's full a-priori guarantee for **escape-hatch** models. That
+  is the deliberate cost of arbitrary weak forms; the mitigation is §5, not a promise we
+  cannot keep.
+- Validation will **not** prove well-posedness, stability, or convergence in general — those
+  are undecidable for arbitrary PDEs. We catch *known* failure classes and explain the rest
+  when they occur.
+- The templated subset is where we *can* aim high: a fully templated model should approach
+  "parses ⇒ well-posed," and the §4 checks are how we get there.
+
+Related: `docs/modeling/declarative-formalism.md` (§1.5 escape hatch, §2.5 validation),
+`docs/decisions/004-discreteproblem-ir.md` (the tagged-term IR that makes per-term runtime
+attribution possible), `docs/modeling/approaches.md` (where the discretization assumptions
+of each approach live).
