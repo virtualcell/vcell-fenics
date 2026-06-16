@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import ufl
@@ -134,6 +135,7 @@ def _run_time_stepper(
     options: _TimeStepperOptions,
     bcs: Sequence[fem.DirichletBC] = (),
     on_time: Callable[[float], None] | None = None,
+    localize: Callable[[], str | None] | None = None,
 ) -> tuple[int, float]:
     """Integrate the implicit residual `F(state, rate) = 0` to `options.t_final` with PETSc `TS`,
     mutating `state` in place. `residual` is the UFL form of `F` (`rate` the time derivative `ċ`,
@@ -228,7 +230,8 @@ def _run_time_stepper(
     finite = bool(mesh.comm.allreduce(bool(np.isfinite(preflight.array).all()), op=MPI.LAND))
     preflight.destroy()
     if not finite:
-        raise SolveError(preflight_failure_message())
+        culprit = localize() if localize is not None else None  # attribute it to a term, if we can
+        raise SolveError(preflight_failure_message(culprit) if culprit else preflight_failure_message())
 
     try:
         ts.solve(state.x.petsc_vec)
@@ -238,6 +241,33 @@ def _run_time_stepper(
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
     ts.destroy()
     return steps, final_time
+
+
+def _localize_nonfinite_term(problem: DiscreteProblem) -> str | None:
+    """Attribute a non-finite residual to a tagged term (ADR-004): assemble each term's
+    contribution at the current state and name the first that is non-finite. If the state (the
+    initial condition) is itself non-finite, *that* is the culprit, not a term. Returns a phrase
+    like `"the source term"` / `"the initial condition"`, or None if nothing localises (the
+    caller then falls back to the generic message). Cheap, and only run on a pre-flight failure."""
+
+    mesh = problem.V.mesh
+
+    def finite(array: np.typing.NDArray[Any]) -> bool:
+        return bool(mesh.comm.allreduce(bool(np.isfinite(array).all()), op=MPI.LAND))
+
+    if not finite(problem.unknown.x.array):
+        return "the initial condition"
+    state, trial, dx = problem.unknown, problem.trial, problem.dx
+    for term in problem.terms:
+        if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
+            continue
+        contribution = fem_petsc.assemble_vector(fem.form(ufl.replace(term.integrand, {trial: state}) * dx))
+        contribution.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)  # type: ignore[arg-type]
+        term_finite = finite(contribution.array)
+        contribution.destroy()
+        if not term_finite:
+            return f"the {term.kind.value} term"
+    return None
 
 
 def integrate_discrete_problem(
@@ -286,6 +316,14 @@ def integrate_discrete_problem(
         residual = residual + ufl.replace(boundary.integrand, {trial: state}) * boundary.measure
 
     options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
-    steps, final_time = _run_time_stepper(state, rate, residual, options, bcs=problem.bcs, on_time=problem.set_time)
+    steps, final_time = _run_time_stepper(
+        state,
+        rate,
+        residual,
+        options,
+        bcs=problem.bcs,
+        on_time=problem.set_time,
+        localize=lambda: _localize_nonfinite_term(problem),  # attribute a pre-flight failure to a tagged term
+    )
     problem.previous.x.array[:] = state.x.array
     return IntegrationResult(solution=state, steps=steps, time=final_time)

@@ -38,15 +38,16 @@ def nonlinear_backward_euler_message() -> str:
     )
 
 
-def preflight_failure_message() -> str:
-    """The message for a residual that is already non-finite at the initial condition — caught by
-    the `t = 0` pre-flight, before any step is attempted."""
+def preflight_failure_message(culprit: str = "the residual") -> str:
+    """The message for something non-finite at the initial condition — caught by the `t = 0`
+    pre-flight before any step. `culprit` localizes the cause: the default `"the residual"`, or a
+    specific `"the source term"` / `"the initial condition"` from the per-term probe."""
 
     return (
-        "the residual is non-finite (NaN/Inf) at the initial condition (t = 0), before any step — "
-        "the initial condition, or a term evaluated at it (a division by a quantity that is zero "
-        "at t=0, or a fractional power / logarithm of a non-positive value), produced NaN/Inf. "
-        "Check the initial condition and the source / reaction terms."
+        f"{culprit} is non-finite (NaN/Inf) at the initial condition (t = 0), before any step — a "
+        f"division by a quantity that is zero at t=0, or a fractional power / logarithm of a "
+        f"non-positive value, produced NaN/Inf. Check the initial condition and the source / "
+        f"reaction terms."
     )
 
 
