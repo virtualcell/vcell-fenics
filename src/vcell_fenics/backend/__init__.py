@@ -49,6 +49,7 @@ from vcell_fenics.backend.multiphase import (
     solve_two_phase_stokes,
     solve_two_phase_stokes_surface_tension,
 )
+from vcell_fenics.backend.reaction_diffusion import IntegrationResult, integrate_reaction_diffusion
 from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
 from vcell_fenics.backend.solver import SolverConfiguration, run
 from vcell_fenics.backend.stokes import (
@@ -72,6 +73,7 @@ __all__ = [
     "CoupledProblem",
     "DiscreteProblem",
     "Geometry",
+    "IntegrationResult",
     "MeshQualityError",
     "SolverConfiguration",
     "StepTooLarge",
@@ -88,6 +90,7 @@ __all__ = [
     "compile_expression",
     "cross_validate",
     "enclosed_volume",
+    "integrate_reaction_diffusion",
     "load_geometry",
     "make_cell_extracellular_geometry",
     "make_disk_geometry",
