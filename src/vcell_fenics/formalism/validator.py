@@ -137,6 +137,25 @@ def _space_admits_second_derivative(space: str) -> bool:
     return True
 
 
+def _references_divergence(node: Expr) -> bool:
+    """Whether the expression contains a divergence operator (`div` / `div_surf`) anywhere — the
+    structural marker of a dilution term `ρ ∇_Γ·v_Γ`."""
+
+    if isinstance(node, FunctionCall):
+        return node.callee in ("div", "div_surf") or any(_references_divergence(a) for a in node.args)
+    if isinstance(node, BinaryOp):
+        return _references_divergence(node.left) or _references_divergence(node.right)
+    if isinstance(node, UnaryOp):
+        return _references_divergence(node.operand)
+    if isinstance(node, IndexAccess):
+        return _references_divergence(node.base) or _references_divergence(node.index)
+    if isinstance(node, VectorLiteral):
+        return any(_references_divergence(c) for c in node.components)
+    if isinstance(node, TensorLiteral):
+        return any(_references_divergence(row) for row in node.rows)
+    return False  # Name, Number — no operator
+
+
 @dataclass(frozen=True, slots=True)
 class Diagnostic:
     """One validation finding. `path` is an attribute path into the
@@ -212,6 +231,9 @@ class _Validator:
     def _error(self, path: str, message: str) -> None:
         self._diagnostics.append(Diagnostic("error", path, message))
 
+    def _warn(self, path: str, message: str) -> None:
+        self._diagnostics.append(Diagnostic("warning", path, message))
+
     # -- driver --------------------------------------------------------------
 
     def run(self) -> list[Diagnostic]:
@@ -222,6 +244,7 @@ class _Validator:
         self._check_equations()
         self._check_boundary_conditions()
         self._check_expressions()
+        self._check_dilution_on_moving_weak_forms()
         return self._diagnostics
 
     def _build_indices(self) -> None:
@@ -383,6 +406,40 @@ class _Validator:
             )
 
     # -- §1.11.7 boundary-condition consistency ------------------------------
+
+    def _check_dilution_on_moving_weak_forms(self) -> None:
+        """Registry #1 of docs/modeling/validation-and-diagnostics.md: a co-moving density on a
+        moving subdomain needs the dilution term `ρ ∇_Γ·v_Γ` (bulk: `c ∇·v`) for mass
+        conservation. A *templated* equation gets it automatically (the backend adds it whenever
+        the subdomain moves); a *weak-form* escape-hatch equation does not. So warn when a
+        time-dependent, scalar weak form on a moving subdomain references no divergence operator
+        at all — a strong sign the dilution term was forgotten. Heuristic (the term could in
+        principle be written without an explicit `div`), so a **warning**, not an error; and
+        gated to scalar densities, since a vector weak form is a momentum balance that needs no
+        dilution."""
+
+        moving = (MotionPrescribedVelocity, MotionPrescribedDisplacement, MotionUnknown)
+        for i, eq in enumerate(self._md.equations):
+            if not isinstance(eq, WeakFormEquation) or eq.temporality != "time_dependent":
+                continue
+            subdomain = self._subdomain_by_name.get(eq.subdomain)
+            if subdomain is None or not isinstance(subdomain.motion, moving):
+                continue
+            variable = self._var_by_key.get((eq.variable, eq.subdomain))
+            if variable is None or variable.type != "scalar":  # dilution is for densities, not a momentum balance
+                continue
+            form = self._parse(eq.form, f"equations[{i}].form")
+            if form is None or _references_divergence(form):
+                continue
+            self._warn(
+                f"equations[{i}].form",
+                f"weak form for the density {eq.variable!r} on the moving subdomain "
+                f"{eq.subdomain!r} references no divergence operator — a co-moving density needs a "
+                f"dilution term (e.g. {eq.variable} * div_surf(<motion velocity>) * "
+                f"{eq.variable}_test, inlining the subdomain's velocity) for mass conservation, "
+                f"which the backend does not add to a weak form (unlike a template). Confirm it is "
+                f"intended.",
+            )
 
     def _check_boundary_conditions(self) -> None:
         weak_form_vars = {(eq.variable, eq.subdomain) for eq in self._md.equations if isinstance(eq, WeakFormEquation)}

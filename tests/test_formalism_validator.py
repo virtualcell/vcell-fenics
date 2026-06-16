@@ -218,3 +218,67 @@ def test_validate_or_raise_raises_on_error() -> None:
     with pytest.raises(FormalismValidationError) as exc:
         validate_or_raise(bad)
     assert exc.value.errors
+
+
+# ---------------------------------------------------------------------------
+# Require-dilution warning (validation-and-diagnostics.md registry #1): a
+# time-dependent scalar weak form on a moving subdomain that references no
+# divergence operator likely forgot the dilution term ρ ∇_Γ·v_Γ.
+# ---------------------------------------------------------------------------
+
+
+def _moving_weak_form_model(form: str, *, moving: bool = True, vtype: str = "scalar") -> str:
+    motion = '{ kind: prescribed, velocity: "rate * x / r(x)" }' if moving else "{ kind: none }"
+    return f"""
+math_description:
+  geometry: disk_membrane
+  subdomains:
+    - {{ name: membrane, kind: surface, motion: {motion} }}
+  variables:
+    - {{ name: rho, subdomain: membrane, type: {vtype} }}
+  parameters:
+    - {{ name: rate, value: 1.0 }}
+    - {{ name: D, value: 0.1 }}
+  equations:
+    - template: weak_form
+      variable: rho
+      subdomain: membrane
+      temporality: time_dependent
+      form: "{form}"
+      initial_condition: "0"
+"""
+
+
+def _warnings(model_yaml: str) -> list[str]:
+    return [d.message for d in validate(load_yaml(model_yaml)) if d.severity == "warning"]
+
+
+_DT_DIFF = "partial_t(rho) * rho_test + D * inner(grad_surf(rho), grad_surf(rho_test))"
+_DILUTION = " + rho * div_surf(rate * x / r(x)) * rho_test"
+
+
+def test_moving_density_weak_form_without_dilution_warns() -> None:
+    messages = _warnings(_moving_weak_form_model(_DT_DIFF))
+    assert len(messages) == 1
+    assert "dilution" in messages[0] and "div_surf" in messages[0]
+
+
+def test_moving_density_weak_form_with_dilution_is_quiet() -> None:
+    assert _warnings(_moving_weak_form_model(_DT_DIFF + _DILUTION)) == []
+
+
+def test_static_density_weak_form_is_quiet() -> None:
+    # Nothing moves, so nothing dilutes — no warning even without a divergence operator.
+    assert _warnings(_moving_weak_form_model(_DT_DIFF, moving=False)) == []
+
+
+def test_moving_vector_weak_form_is_quiet() -> None:
+    # A vector weak form is a momentum balance, not a co-moving density — no dilution expected.
+    momentum = "partial_t(rho) * inner(rho, rho_test) + D * inner(grad_surf(rho), grad_surf(rho_test))"
+    assert _warnings(_moving_weak_form_model(momentum, vtype="vector")) == []
+
+
+def test_dilution_warning_does_not_block_validation() -> None:
+    # The check is a warning, not an error — validate_or_raise still passes (returns the warning).
+    warnings = validate_or_raise(load_yaml(_moving_weak_form_model(_DT_DIFF)))
+    assert len(warnings) == 1 and warnings[0].severity == "warning"
