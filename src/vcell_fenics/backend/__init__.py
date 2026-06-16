@@ -13,7 +13,7 @@ from vcell_fenics.backend.ale import ALEState, StepTooLarge, run_with_remeshing,
 from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
 from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
 from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
-from vcell_fenics.backend.diagnostics import SolveError
+from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
 from vcell_fenics.backend.discrete import (
     BackwardEuler,
     BoundaryTerm,
@@ -80,6 +80,7 @@ __all__ = [
     "Geometry",
     "IntegrationResult",
     "MeshQualityError",
+    "NonlinearTermError",
     "SolveError",
     "SolverConfiguration",
     "StepTooLarge",

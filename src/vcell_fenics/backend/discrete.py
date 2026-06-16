@@ -34,8 +34,10 @@ from dolfinx.mesh import Mesh, exterior_facet_indices
 from mpi4py import MPI
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
+from ufl.algorithms.check_arities import ArityMismatch, check_form_arity
 
 from vcell_fenics.backend._typing import UflExpr
+from vcell_fenics.backend.diagnostics import NonlinearTermError, nonlinear_backward_euler_message
 
 
 class TermKind(Enum):
@@ -303,6 +305,15 @@ class DiscreteProblem:
 
     def _backward_euler_problem(self) -> LinearProblem:
         if self._problem is None:
+            # Backward Euler can only assemble a residual affine in the unknown (`ufl.lhs/rhs`).
+            # A nonlinear term (e.g. a `c*c` source) makes `_a` non-affine; check the arity here,
+            # in pure UFL *before* `fem.form` / FFCx, so the modeler gets a named fix instead of a
+            # deep arity-mismatch traceback (and we never form-compile the bad form — which would
+            # poison the JIT cache). The method-of-lines integrator handles such terms via Newton.
+            try:
+                check_form_arity(self._a, self._a.arguments())
+            except ArityMismatch as nonlinear:
+                raise NonlinearTermError(nonlinear_backward_euler_message()) from nonlinear
             self._problem = LinearProblem(
                 self._a,
                 self._L,
