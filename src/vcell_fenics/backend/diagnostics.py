@@ -20,6 +20,24 @@ class SolveError(RuntimeError):
     model* went wrong rather than a bare reason code."""
 
 
+class NonlinearTermError(RuntimeError):
+    """A model term is nonlinear in the unknown, but the chosen integrator (backward Euler) can
+    only assemble terms *affine* in the unknown. A build-time check (registry #7) — raised before
+    form compilation, so the modeler sees a named fix instead of a deep UFL/FFCx arity mismatch."""
+
+
+def nonlinear_backward_euler_message() -> str:
+    """The fix-oriented message for a nonlinear term under backward Euler."""
+
+    return (
+        "a term is nonlinear in the unknown (e.g. a product like c*c, or a function of c such as "
+        "exp(c) or c/(1+c)) — backward Euler can only assemble terms affine in the unknown, so it "
+        "cannot lower this model. Use the method-of-lines integrator "
+        "(SolverConfiguration(time_integration='method_of_lines'), which handles nonlinear "
+        "reactions via Newton), or linearise / lag the term."
+    )
+
+
 def ts_failure_message(ts: PETSc.TS) -> str:
     """A model-level message for a failed PETSc `TS` (method-of-lines) solve, from its and its
     inner `SNES`'s converged reasons and the time it reached."""
