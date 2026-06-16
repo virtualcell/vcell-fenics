@@ -21,6 +21,9 @@ a moving membrane drives an incompressible bulk while the ALE mesh follows. Two 
 - `step_two_phase_fsi_with_reacting_species` — the `n`-species generalisation: several volume
   species in one vector space, each transported by the flow, coupled by a linear **reaction**
   `R(c)` (the §1.4.5 coupled-source pattern, here on the moving two-phase cell).
+- `step_two_phase_fsi_with_nonlinear_species` — the same, but **fully implicit (Newton)**: the
+  reaction may be *nonlinear* (e.g. bilinear mass-action `A + B ⇌ C`). The residual is solved by
+  PETSc SNES with the exact `ufl.derivative` Jacobian — no lagging, no reaction-stiffness cap.
 
 Each step:
 
@@ -57,7 +60,7 @@ from collections.abc import Callable, Sequence
 
 import ufl
 from dolfinx import fem
-from dolfinx.fem.petsc import LinearProblem
+from dolfinx.fem.petsc import LinearProblem, NonlinearProblem
 from dolfinx.mesh import Mesh
 from scipy.spatial import cKDTree
 
@@ -351,6 +354,93 @@ def step_two_phase_fsi_with_reacting_species(
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
     ).solve()
     species.x.array[:] = updated.x.array
+    _apply_displacement(mesh, displacement)
+    return v_n, v_s, p
+
+
+def step_two_phase_fsi_with_nonlinear_species(
+    mesh: Mesh,
+    species: fem.Function,
+    *,
+    tension: float,
+    drag: float,
+    dt: float,
+    diffusivities: Sequence[float],
+    reaction: Callable[[fem.Function], UflExpr] | None = None,
+    carrier: str = "mixture",
+    frame: str = "mixture",
+    viscosity_n: float = 1.0,
+    viscosity_s: float = 1.0,
+    screening_n: float = 1.0,
+    screening_s: float = 1.0,
+    newton_rtol: float = 1.0e-9,
+) -> tuple[fem.Function, fem.Function, fem.Function]:
+    """Advance one reacting-species FSI step with a **fully implicit (Newton) backward Euler** —
+    the same transport as `step_two_phase_fsi_with_reacting_species` but the reaction may be
+    **nonlinear** in the species (e.g. a bilinear mass-action `A + B ⇌ C`, rate `k·A·B`).
+
+    The linear sibling lands the reaction in the implicit matrix via `ufl.lhs`/`ufl.rhs`, which
+    requires the source to be affine in the unknown. Here the residual `F(c)` is built with `c`
+    the **solution `Function`** and the reaction verbatim, the exact Jacobian is taken with
+    `ufl.derivative(F, c)`, and PETSc SNES (Newton line search) solves the nonlinear system each
+    step — L-stable backward Euler, so no reaction-stiffness `dt` cap and no lagging. (This is
+    "Option 1" in the time-integration design discussion; the method-of-lines / adaptive-BDF
+    alternative — PETSc `TS` — would better suit a *fixed*-domain RDA, for VCell comparison.)
+
+    `species` is a vector P1 `Function` (its `n` components), used both as the previous step and
+    the Newton initial guess and **mutated in place** to the new step. `reaction` is a callable
+    `c ↦ R(c)` returning a length-`n` UFL vector; it may be nonlinear. `newton_rtol` is the SNES
+    relative tolerance. Other arguments match the linear sibling. Returns `(v_n, v_s, p)`.
+    """
+
+    space = species.function_space
+    n_species = space.dofmap.index_map_bs  # block size = component count (num_sub_spaces is 0 for n=1)
+    if len(diffusivities) != n_species:
+        raise ValueError(f"diffusivities has length {len(diffusivities)}, but there are {n_species} species")
+
+    v_n, v_s, p = solve_two_phase_stokes_surface_tension(
+        mesh,
+        tension=tension,
+        drag=drag,
+        viscosity_n=viscosity_n,
+        viscosity_s=viscosity_s,
+        screening_n=screening_n,
+        screening_s=screening_s,
+    )
+    carrier_velocity = _phase_velocity(carrier, v_n, v_s)
+    displacement = _harmonic_displacement(mesh, _phase_velocity(frame, v_n, v_s), dt)
+    relative_advection = carrier_velocity - displacement / dt  # v_carrier − w
+
+    previous = fem.Function(space)
+    previous.x.array[:] = species.x.array  # backward-Euler previous; `species` is the unknown (warm start)
+    q = ufl.TestFunction(space)
+    dx = ufl.Measure("dx", domain=mesh)
+    residual = ufl.inner(species - previous, q) / dt + ufl.div(carrier_velocity) * ufl.inner(species, q)
+    for k in range(n_species):
+        residual += diffusivities[k] * ufl.dot(ufl.grad(species[k]), ufl.grad(q[k]))  # per-species diffusion
+        residual += ufl.dot(relative_advection, ufl.grad(species[k])) * q[k]  # relative advection
+    if reaction is not None:
+        residual -= ufl.inner(reaction(species), q)  # reaction — may be NONLINEAR in `species`
+    form = residual * dx
+    jacobian = ufl.derivative(form, species)  # exact symbolic Jacobian — the FEniCSx win
+
+    problem = NonlinearProblem(
+        form,
+        species,
+        J=jacobian,
+        petsc_options_prefix=f"vcellfenics_fsinewton_{id(species):x}_",
+        petsc_options={
+            "snes_type": "newtonls",
+            "snes_rtol": newton_rtol,
+            "snes_atol": 1.0e-12,
+            "ksp_type": "preonly",
+            "pc_type": "lu",
+        },
+    )
+    problem.solve()  # modifies `species` in place
+    reason = problem.solver.getConvergedReason()
+    if reason <= 0:  # type: ignore[operator]  # petsc4py stubs ConvergedReason without comparison
+        raise RuntimeError(f"Newton (SNES) did not converge: reason {reason}")
     _apply_displacement(mesh, displacement)
     return v_n, v_s, p
 

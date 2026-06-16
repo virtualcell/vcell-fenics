@@ -52,6 +52,17 @@ space) coupled by a linear reaction `R(c)`, transported by the same flow:
 13. **Detailed-balance equilibrium** — a uniform `A, B` relaxes to `A/B = k_off/k_on`.
 14. **Linear decay matches backward Euler** — a uniform decaying species follows the exact
     `c₀/(1 + k·dt)^steps`, staying uniform.
+
+`step_two_phase_fsi_with_nonlinear_species` is the fully implicit (Newton) variant — the
+reaction may be **nonlinear** (e.g. bilinear mass-action `A + B ⇌ C`), solved by PETSc SNES with
+the exact `ufl.derivative` Jacobian, no lagging:
+
+15. **Bilinear equilibrium** — `A + B ⇌ C` reaches detailed balance `C/(A·B) = k_f/k_r`, the
+    nonlinear reaction the linear `lhs/rhs` path cannot assemble.
+16. **Consistency with the linear path** — on a *linear* reaction it reproduces the
+    `lhs/rhs` solve to round-off (Newton converges in one iteration).
+17. **Invariants conserved on the moving cell** — `∫(A+C)` and `∫(B+C)` are held to O(dt) as the
+    membrane relaxes.
 """
 
 from __future__ import annotations
@@ -69,6 +80,7 @@ from vcell_fenics.backend import (
     step_force_balance_fsi,
     step_prescribed_fsi,
     step_two_phase_fsi,
+    step_two_phase_fsi_with_nonlinear_species,
     step_two_phase_fsi_with_reacting_species,
     step_two_phase_fsi_with_species,
 )
@@ -448,3 +460,89 @@ def test_reacting_species_validates_diffusivity_count() -> None:
     c = fem.Function(fem.functionspace(mesh, ("Lagrange", 1, (2,))))
     with pytest.raises(ValueError, match="diffusivities has length"):
         step_two_phase_fsi_with_reacting_species(mesh, c, tension=0.5, drag=1.0, dt=0.02, diffusivities=[0.01])
+
+
+# --- fully implicit (Newton) path for a nonlinear (bilinear mass-action) reaction ---
+
+
+def _mass_action_reaction(k_forward: float, k_reverse: float):  # type: ignore[no-untyped-def]
+    # A + B ⇌ C: rate r = k_f·A·B − k_r·C — BILINEAR ⇒ nonlinear in the unknowns, so the linear
+    # lhs/rhs path cannot assemble it; the Newton path takes the source verbatim.
+    def reaction(c):  # type: ignore[no-untyped-def]
+        r = k_forward * c[0] * c[1] - k_reverse * c[2]
+        return ufl.as_vector([-r, -r, r])
+
+    return reaction
+
+
+def test_nonlinear_species_reaches_bilinear_equilibrium() -> None:
+    # A + B ⇌ C relaxes to detailed balance C/(A·B) = k_f/k_r — the canonical nonlinear reaction
+    # the linear path cannot handle, solved exactly by Newton. Steady state is dt-independent
+    # (it is where the reaction residual vanishes), so a few large steps suffice.
+    k_forward, k_reverse = 2.0, 0.5
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.18).mesh_of("c")
+    c = fem.Function(fem.functionspace(mesh, ("Lagrange", 1, (3,))))
+    values = c.x.array.reshape(-1, 3)
+    values[:, 0], values[:, 1], values[:, 2] = 1.0, 1.0, 0.0  # A = B = 1, C = 0
+    for _ in range(40):
+        step_two_phase_fsi_with_nonlinear_species(
+            mesh,
+            c,
+            tension=0.5,
+            drag=1.0,
+            dt=0.2,
+            diffusivities=[0.0, 0.0, 0.0],
+            reaction=_mass_action_reaction(k_forward, k_reverse),
+        )
+    a, b, conc_c = (float(values[:, k].mean()) for k in range(3))
+    assert float(abs(values[:, 2] - conc_c).max()) < 1e-9  # fields stay uniform
+    assert abs(conc_c / (a * b) - k_forward / k_reverse) < 1e-2  # bilinear detailed balance
+
+
+def test_nonlinear_species_matches_linear_path_on_a_linear_reaction() -> None:
+    # On a *linear* reaction (A ⇌ B) the Newton path reproduces the linear lhs/rhs solve to
+    # round-off — Newton converges in one iteration, confirming the implicit path is consistent.
+    def linear(c):  # type: ignore[no-untyped-def]
+        r = 2.0 * c[0] - 0.5 * c[1]
+        return ufl.as_vector([-r, r])
+
+    newton_mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(newton_mesh, a=1.3)
+    linear_mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(linear_mesh, a=1.3)
+    newton_c = _two_species(newton_mesh, lambda x: 1.0 + 0.3 * x[0])
+    linear_c = _two_species(linear_mesh, lambda x: 1.0 + 0.3 * x[0])
+    for _ in range(15):
+        step_two_phase_fsi_with_nonlinear_species(
+            newton_mesh, newton_c, tension=0.5, drag=1.0, dt=0.02, diffusivities=[0.01, 0.01], reaction=linear
+        )
+        step_two_phase_fsi_with_reacting_species(
+            linear_mesh, linear_c, tension=0.5, drag=1.0, dt=0.02, diffusivities=[0.01, 0.01], reaction=linear
+        )
+    assert float(abs(newton_c.x.array - linear_c.x.array).max()) < 1e-10  # same answer to round-off
+
+
+def test_nonlinear_species_conserves_invariants_on_the_moving_cell() -> None:
+    # A + B ⇌ C on the relaxing cell: the reaction conserves A+C and B+C pointwise, conservative
+    # transport conserves each integral, so ∫(A+C) and ∫(B+C) are held to O(dt) as it deforms.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(mesh, a=1.3)
+    c = fem.Function(fem.functionspace(mesh, ("Lagrange", 1, (3,))))
+    values = c.x.array.reshape(-1, 3)
+    values[:, 0], values[:, 1], values[:, 2] = 1.0, 0.8, 0.0
+    a_plus_c0 = _total_species(c[0], mesh) + _total_species(c[2], mesh)
+    b_plus_c0 = _total_species(c[1], mesh) + _total_species(c[2], mesh)
+    for _ in range(20):
+        step_two_phase_fsi_with_nonlinear_species(
+            mesh,
+            c,
+            tension=0.5,
+            drag=1.0,
+            dt=0.02,
+            diffusivities=[0.01, 0.01, 0.01],
+            reaction=_mass_action_reaction(2.0, 0.5),
+        )
+    a_plus_c = _total_species(c[0], mesh) + _total_species(c[2], mesh)
+    b_plus_c = _total_species(c[1], mesh) + _total_species(c[2], mesh)
+    assert abs(a_plus_c - a_plus_c0) / a_plus_c0 < 5e-3  # ∫(A+C) conserved
+    assert abs(b_plus_c - b_plus_c0) / b_plus_c0 < 5e-3  # ∫(B+C) conserved
