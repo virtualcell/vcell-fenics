@@ -21,12 +21,24 @@ by the solved `v` directly with `∮ v·n = 0` exact.
 5. **Relaxation** — a perturbed (elliptical) shape relaxes toward the minimal-perimeter
    circle: the perimeter decreases monotonically and the area is conserved to O(dt), with the
    pressure enforcing `∮ v·n = 0` automatically (no prescribed-motion consistency to arrange).
+
+`step_two_phase_fsi` is the same closure for a **two-phase** (network + solvent) incompressible
+mixture with interphase drag: the membrane tension loads the mixture, the mesh follows a chosen
+*frame* phase (the mixture average conserves volume via the shared pressure).
+
+6. **Two-phase Laplace fixed point** — a circle is an equilibrium: the *physical* mixture
+   pressure `2p = γ/R` (p is the multiplier conjugate to the total velocity), both phases at
+   rest, area held.
+7. **Two-phase relaxation** — a perturbed ellipse relaxes toward the circle, area conserved.
+8. **Drag locks the phases** — with asymmetric phase viscosities the relative slip
+   `|v_n − v_s|` shrinks as the interphase drag `ξ` grows.
 """
 
 from __future__ import annotations
 
 import math
 
+import pytest
 import ufl
 from dolfinx import fem
 
@@ -35,6 +47,7 @@ from vcell_fenics.backend import (
     make_disk_geometry,
     step_force_balance_fsi,
     step_prescribed_fsi,
+    step_two_phase_fsi,
 )
 
 
@@ -140,3 +153,74 @@ def _perimeter_of_initial_ellipse(area0: float, a: float) -> float:
     semi_major, semi_minor = a * math.sqrt(area0 / math.pi), math.sqrt(area0 / math.pi) / a
     h = ((semi_major - semi_minor) / (semi_major + semi_minor)) ** 2
     return math.pi * (semi_major + semi_minor) * (1.0 + 3.0 * h / (10.0 + math.sqrt(4.0 - 3.0 * h)))
+
+
+# --- two-phase force-balance closure: a tense membrane bounding a network + solvent mixture ---
+
+
+def test_two_phase_circle_is_a_laplace_fixed_point() -> None:
+    # A circle bounding the two-phase mixture is an equilibrium. The *physical* mixture pressure
+    # is 2p = γ/R (p is the multiplier conjugate to the TOTAL velocity, so each phase feels −p·I
+    # and the two phases together give the Laplace stress); both phases are at rest.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    area0 = enclosed_volume(mesh)
+    v_n, v_s, p = step_two_phase_fsi(mesh, tension=0.5, drag=1.0, dt=0.02)
+    p_integral = fem.assemble_scalar(fem.form(p * ufl.dx(domain=p.function_space.mesh)))
+    physical_pressure = 2.0 * float(p_integral.real) / area0
+    assert abs(physical_pressure - 0.5) < 2e-2  # Laplace law: 2p = γ/R
+    assert max(abs(v_n.x.array).max(), abs(v_s.x.array).max()) < 5e-2  # equilibrium, no flow
+    assert abs(v_n.x.array - v_s.x.array).max() < 1e-10  # symmetric load ⇒ phases identical
+    assert abs(enclosed_volume(mesh) - area0) / area0 < 1e-3  # fixed point, area held
+
+
+def test_two_phase_ellipse_relaxes_toward_the_circle() -> None:
+    # The two-phase mixture relaxes exactly like the single phase: tension drives the shape to
+    # minimal perimeter, the mixture pressure enforces ∮(v_n+v_s)·n=0 ⇒ the mixture-average
+    # frame conserves area to O(dt).
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(mesh, a=1.3)
+    area0 = enclosed_volume(mesh)
+    circle_perimeter = 2.0 * math.pi * math.sqrt(area0 / math.pi)
+
+    perimeter = _perimeter(mesh)
+    for _ in range(25):
+        step_two_phase_fsi(mesh, tension=0.5, drag=1.0, dt=0.02)
+        nxt = _perimeter(mesh)
+        assert nxt < perimeter + 1e-9  # monotone decrease toward the circle
+        perimeter = nxt
+
+    assert perimeter < _perimeter_of_initial_ellipse(area0, a=1.3)  # actually relaxed
+    assert perimeter > circle_perimeter - 1e-3  # toward, not past, the circle
+    assert abs(enclosed_volume(mesh) - area0) / area0 < 1e-2  # area conserved to O(dt)
+
+
+def _relative_phase_slip(drag: float) -> float:
+    # Asymmetric phase viscosities make the two phases *want* to move differently; the
+    # interphase drag opposes that. Returns |v_n − v_s| / |v|, the relative slip after one step.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(mesh, a=1.3)
+    v_n, v_s, _ = step_two_phase_fsi(mesh, tension=0.5, drag=drag, dt=0.02, viscosity_n=2.0, viscosity_s=0.4)
+    speed = max(abs(v_n.x.array).max(), abs(v_s.x.array).max())
+    return float(abs(v_n.x.array - v_s.x.array).max() / speed)
+
+
+def test_two_phase_drag_locks_the_phases() -> None:
+    # The interphase drag is the genuine two-phase coupling: as ξ grows, the phases lock
+    # together (relative slip → 0). Asymmetric viscosities are needed — the symmetric ½/½
+    # tension load alone gives v_n ≡ v_s for any drag.
+    weak = _relative_phase_slip(drag=0.1)
+    strong = _relative_phase_slip(drag=100.0)
+    assert weak > 0.5  # at weak drag the phases slip substantially
+    assert strong < 0.5 * weak  # strong drag locks them together
+
+
+def test_two_phase_frame_selects_the_mesh_velocity() -> None:
+    # The mesh frame is the model's one genuine fork (§6); the network frame runs and returns
+    # the three fields, and an unknown frame is rejected loudly.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(mesh, a=1.2)
+    v_n, _v_s, p = step_two_phase_fsi(mesh, tension=0.5, drag=1.0, dt=0.02, frame="network")
+    assert v_n.x.array.size > 0 and p.x.array.size > 0
+
+    with pytest.raises(ValueError, match="frame must be"):
+        step_two_phase_fsi(mesh, tension=0.5, drag=1.0, dt=0.02, frame="cytoskeleton")
