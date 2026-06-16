@@ -282,3 +282,66 @@ def test_dilution_warning_does_not_block_validation() -> None:
     # The check is a warning, not an error — validate_or_raise still passes (returns the warning).
     warnings = validate_or_raise(load_yaml(_moving_weak_form_model(_DT_DIFF)))
     assert len(warnings) == 1 and warnings[0].severity == "warning"
+
+
+# ---------------------------------------------------------------------------
+# Inf-sup element-pair warning (registry #6): an incompressible saddle point
+# (a pressure enforcing ∇·v = 0) needs a higher-order velocity than pressure.
+# ---------------------------------------------------------------------------
+
+
+def _stokes_model(v_space: str, p_space: str, *, extra_var: str = "", extra_eq: str = "") -> str:
+    return f"""
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - {{ name: cyto, kind: volume, motion: {{ kind: none }} }}
+  variables:
+    - {{ name: v, subdomain: cyto, type: vector, space: {v_space} }}
+    - {{ name: p, subdomain: cyto, type: scalar, space: {p_space} }}{extra_var}
+  equations:
+    - template: weak_form
+      variable: v
+      subdomain: cyto
+      temporality: steady_state
+      form: "inner(grad(v), grad(v_test)) - p * div(v_test)"
+    - template: weak_form
+      variable: p
+      subdomain: cyto
+      temporality: steady_state
+      form: "div(v) * p_test"{extra_eq}
+"""
+
+
+def _infsup_warnings(model_yaml: str) -> list[str]:
+    return [d.message for d in validate(load_yaml(model_yaml)) if d.severity == "warning" and "inf-sup" in d.message]
+
+
+def test_taylor_hood_pair_is_inf_sup_stable() -> None:
+    assert _infsup_warnings(_stokes_model("lagrange_p2", "lagrange_p1")) == []
+
+
+def test_equal_order_velocity_pressure_warns() -> None:
+    messages = _infsup_warnings(_stokes_model("lagrange_p1", "lagrange_p1"))
+    assert len(messages) == 1
+    assert "Taylor" in messages[0] and "lagrange_p1" in messages[0]
+
+
+def test_velocity_lower_order_than_pressure_warns() -> None:
+    assert len(_infsup_warnings(_stokes_model("lagrange_p1", "lagrange_p2"))) == 1
+
+
+def test_evolving_scalar_with_div_is_not_mistaken_for_a_pressure() -> None:
+    # A conservative-form transport scalar references div(v) but evolves in time (partial_t),
+    # so it is a density, not a pressure multiplier — only the genuine pressure is flagged.
+    extra_var = "\n    - { name: c, subdomain: cyto, type: scalar, space: lagrange_p1 }"
+    extra_eq = """
+    - template: weak_form
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      form: "partial_t(c) * c_test + div(v) * c_test"
+      initial_condition: "0"
+"""
+    messages = _infsup_warnings(_stokes_model("lagrange_p1", "lagrange_p1", extra_var=extra_var, extra_eq=extra_eq))
+    assert len(messages) == 1  # the p1/p1 pressure only; the evolving c is not flagged
