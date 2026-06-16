@@ -18,6 +18,9 @@ a moving membrane drives an incompressible bulk while the ALE mesh follows. Two 
   the moving cell. The volume is Eulerian, so the species rides a physical phase while the mesh
   moves at the bookkeeping velocity; the transport is `relative_advection` plus the bulk
   dilution `c ∇·v_carrier` (the volume analogue of the mandatory surface `ρ ∇_Γ·v_Γ`).
+- `step_two_phase_fsi_with_reacting_species` — the `n`-species generalisation: several volume
+  species in one vector space, each transported by the flow, coupled by a linear **reaction**
+  `R(c)` (the §1.4.5 coupled-source pattern, here on the moving two-phase cell).
 
 Each step:
 
@@ -49,6 +52,8 @@ integration error, which refines with dt), where the Taylor–Hood Nitsche slip 
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable, Sequence
 
 import ufl
 from dolfinx import fem
@@ -267,6 +272,85 @@ def step_two_phase_fsi_with_species(
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
     ).solve()
     species.x.array[:] = updated.x.array  # in place: the new step becomes next step's previous
+    _apply_displacement(mesh, displacement)
+    return v_n, v_s, p
+
+
+def step_two_phase_fsi_with_reacting_species(
+    mesh: Mesh,
+    species: fem.Function,
+    *,
+    tension: float,
+    drag: float,
+    dt: float,
+    diffusivities: Sequence[float],
+    reaction: Callable[[UflExpr], UflExpr] | None = None,
+    carrier: str = "mixture",
+    frame: str = "mixture",
+    viscosity_n: float = 1.0,
+    viscosity_s: float = 1.0,
+    screening_n: float = 1.0,
+    screening_s: float = 1.0,
+) -> tuple[fem.Function, fem.Function, fem.Function]:
+    """Advance one two-phase FSI step carrying **multiple reacting volume species** `c`, in place.
+
+    The `n`-species generalisation of `step_two_phase_fsi_with_species`: the species live in one
+    **vector P1 space** (component `k` ↔ species `k`, the coupled-multispecies pattern of
+    `backend/assemble.py`), each transported by the same flow (`relative_advection` + the bulk
+    dilution `c_k ∇·v_carrier`) with its own diffusivity, plus an inter-species **reaction**
+
+        ∂c_k/∂t|_mesh + (v_carrier − w)·∇c_k + c_k ∇·v_carrier = D_k ∇²c_k + R_k(c)
+
+    `reaction` is a callable `c ↦ R(c)` mapping the vector trial `c` to a length-`n` UFL vector of
+    source rates — e.g. for `A ⇌ B` with `r = k_on·c[0] − k_off·c[1]`, return
+    `ufl.as_vector([-r, r])`. It must be **linear (affine) in `c`**: the residual is split with
+    `ufl.lhs`/`ufl.rhs`, so a linear reaction lands in the implicit bilinear form (the §1.4.5
+    trick) and the step is unconditionally stable; a *bilinear* mass-action `A + B → C` is
+    nonlinear and would need a lagged (semi-implicit) treatment — deferred.
+
+    `species` is a vector P1 `Function` (its `n` components are the species), mutated in place;
+    `diffusivities` is the per-species `D_k` (length `n`); `carrier`/`frame` are phase names.
+    Returns `(v_n, v_s, p)`. A conservative reaction (rows of `R` summing to zero, e.g. `A ⇌ B`)
+    plus an incompressible mixture carrier conserves the total `∫Σ_k c_k`. No-flux boundary.
+    """
+
+    space = species.function_space
+    n_species = space.dofmap.index_map_bs  # block size = component count (num_sub_spaces is 0 for n=1)
+    if len(diffusivities) != n_species:
+        raise ValueError(f"diffusivities has length {len(diffusivities)}, but there are {n_species} species")
+
+    v_n, v_s, p = solve_two_phase_stokes_surface_tension(
+        mesh,
+        tension=tension,
+        drag=drag,
+        viscosity_n=viscosity_n,
+        viscosity_s=viscosity_s,
+        screening_n=screening_n,
+        screening_s=screening_s,
+    )
+    carrier_velocity = _phase_velocity(carrier, v_n, v_s)
+    displacement = _harmonic_displacement(mesh, _phase_velocity(frame, v_n, v_s), dt)
+    relative_advection = carrier_velocity - displacement / dt  # v_carrier − w
+
+    c, q = ufl.TrialFunction(space), ufl.TestFunction(space)
+    dx = ufl.Measure("dx", domain=mesh)
+    integrand = ufl.inner(c - species, q) / dt + ufl.div(carrier_velocity) * ufl.inner(c, q)  # ∂_t + dilution
+    for k in range(n_species):
+        integrand += diffusivities[k] * ufl.dot(ufl.grad(c[k]), ufl.grad(q[k]))  # per-species diffusion
+        integrand += ufl.dot(relative_advection, ufl.grad(c[k])) * q[k]  # relative advection
+    if reaction is not None:
+        integrand -= ufl.inner(reaction(c), q)  # inter-species reaction (must be linear in c)
+    residual = integrand * dx
+
+    updated = fem.Function(space)
+    LinearProblem(
+        ufl.lhs(residual),
+        ufl.rhs(residual),
+        u=updated,
+        petsc_options_prefix=f"vcellfenics_fsireact_{id(updated):x}_",
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+    ).solve()
+    species.x.array[:] = updated.x.array
     _apply_displacement(mesh, displacement)
     return v_n, v_s, p
 
