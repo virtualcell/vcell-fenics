@@ -40,10 +40,11 @@ import ufl
 from dolfinx import fem
 from dolfinx.fem import petsc as fem_petsc
 from dolfinx.mesh import Mesh
+from mpi4py import MPI
 from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
-from vcell_fenics.backend.diagnostics import SolveError, ts_failure_message
+from vcell_fenics.backend.diagnostics import SolveError, preflight_failure_message, ts_failure_message
 from vcell_fenics.backend.discrete import DiscreteProblem, TermKind
 
 
@@ -212,11 +213,23 @@ def _run_time_stepper(
     ksp.getPC().setType(options.pc_type)
     ts.setFromOptions()
 
+    if on_time is not None:
+        on_time(0.0)  # evaluate g(t), time-dependent terms etc. at the initial time
     if bcs:  # make the initial state consistent with the Dirichlet boundary values g(t=0)
-        if on_time is not None:
-            on_time(0.0)
         fem_petsc.set_bc(state.x.petsc_vec, bcs)
         state.x.scatter_forward()
+
+    # t = 0 pre-flight: catch a model that is already broken at the initial condition (a non-finite
+    # residual — a divide-by-zero, a fractional power / log of a non-positive value at the IC)
+    # before the adaptive solve grinds on it. (For a time-dependent problem the implicit operator
+    # is mass-regularised, so the null-space classes — registry #3/#4 — belong to a steady solver.)
+    preflight = fem_petsc.assemble_vector(residual_form)
+    preflight.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)  # type: ignore[arg-type]
+    finite = bool(mesh.comm.allreduce(bool(np.isfinite(preflight.array).all()), op=MPI.LAND))
+    preflight.destroy()
+    if not finite:
+        raise SolveError(preflight_failure_message())
+
     try:
         ts.solve(state.x.petsc_vec)
     except PETSc.Error as original:  # re-express the failure in model terms (see backend/diagnostics)

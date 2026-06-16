@@ -194,7 +194,14 @@ surfaces as `petsc4py.PETSc.Error: error code 91`, `SNES_DIVERGED_LINE_SEARCH`, 
 3. **Pre-flight checks at `t = 0`.** Before stepping, evaluate the residual and Jacobian
    once and run the geometry-dependent §4 checks (null space, BC-data consistency) that
    could not run without the assembled operator. Catch the inconsistent problem *before* the
-   first expensive step, and report it as a model issue.
+   first expensive step, and report it as a model issue. *(Done for the time-dependent
+   integrators: a **non-finite residual at the initial condition** — a divide-by-zero, or a
+   fractional power / log of a non-positive value at the IC — is caught before any step and
+   reported as `SolveError(preflight_failure_message())`. The **null-space** classes (rows
+   3/4/5) belong to a **steady / saddle-point** solver: a time-dependent operator is
+   mass-regularised — `σM + K` is non-singular even when `K` has a constant or rigid-body null
+   space — so those singularities do not arise on the integrator path, and the pre-flight
+   null-space check lands when steady solves do.)*
 
 Runtime diagnostics are where the escape hatch is *paid for*: because we let users write
 arbitrary physics, the discipline is that when it goes wrong, the failure is **explained in
@@ -249,9 +256,10 @@ Highest value first, each increment self-contained:
    `NonlinearTermError` via a pre-FFCx UFL arity check at backward-Euler lowering; Row 1 — a
    `_Validator` warning for a moving-subdomain weak form without a divergence operator; Row 6 —
    a `_Validator` warning for an equal-/low-order velocity/pressure saddle point.)*
-4. **The `t = 0` pre-flight** (§5.3) — assemble once, run the geometry-dependent null-space
-   / consistency checks (rows 3, 4, 5) before stepping. Needs the assembled operator but no
-   solve.
+4. **The `t = 0` pre-flight** (§5.3) — assemble once, run the geometry-dependent
+   consistency checks before stepping. *(The non-finite-residual-at-IC check is done in the
+   time-dependent integrators; the null-space checks (rows 3/4/5) wait for a steady /
+   saddle-point solver, where the operator can actually be singular.)*
 5. **Dimensional / units** (§4) — the largest single class of silent errors, but the biggest
    build (a units representation + inference). Sequence it when the modeling surface is
    stable enough to be worth annotating.
