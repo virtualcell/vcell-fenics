@@ -38,6 +38,18 @@ def nonlinear_backward_euler_message() -> str:
     )
 
 
+def preflight_failure_message() -> str:
+    """The message for a residual that is already non-finite at the initial condition — caught by
+    the `t = 0` pre-flight, before any step is attempted."""
+
+    return (
+        "the residual is non-finite (NaN/Inf) at the initial condition (t = 0), before any step — "
+        "the initial condition, or a term evaluated at it (a division by a quantity that is zero "
+        "at t=0, or a fractional power / logarithm of a non-positive value), produced NaN/Inf. "
+        "Check the initial condition and the source / reaction terms."
+    )
+
+
 def ts_failure_message(ts: PETSc.TS) -> str:
     """A model-level message for a failed PETSc `TS` (method-of-lines) solve, from its and its
     inner `SNES`'s converged reasons and the time it reached."""

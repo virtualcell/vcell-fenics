@@ -9,7 +9,11 @@ rather than a deep UFL arity mismatch.
 
 from __future__ import annotations
 
+import dolfinx.mesh
 import pytest
+import ufl
+from dolfinx import fem
+from mpi4py import MPI
 from petsc4py import PETSc
 from ufl.algorithms.check_arities import ArityMismatch
 
@@ -17,6 +21,7 @@ from vcell_fenics.backend import (
     NonlinearTermError,
     SolveError,
     SolverConfiguration,
+    integrate_reaction_diffusion,
     make_disk_geometry,
     run,
 )
@@ -108,3 +113,45 @@ def test_method_of_lines_still_accepts_the_same_nonlinear_source() -> None:
     geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.2)
     solved = run(md, geometry, SolverConfiguration(dt=0.05, t_final=5.0, time_integration="method_of_lines"))
     assert abs(float(solved.unknown.x.array.mean()) - 1.0) < 1e-2
+
+
+# ---------------------------------------------------------------------------
+# t = 0 pre-flight (validation-and-diagnostics.md §5.3): a model already broken
+# at the initial condition (a non-finite residual) is caught before any step.
+# ---------------------------------------------------------------------------
+
+
+def _unit_square_species() -> tuple[dolfinx.mesh.Mesh, fem.Function]:
+    mesh = dolfinx.mesh.create_unit_square(MPI.COMM_WORLD, 8, 8)
+    return mesh, fem.Function(fem.functionspace(mesh, ("Lagrange", 1, (1,))))
+
+
+def test_preflight_catches_a_nonfinite_residual_at_the_ic() -> None:
+    # A reaction 1/c with the initial condition c = 0 is non-finite at t = 0; the pre-flight
+    # raises before the adaptive solve grinds on it. The message names the initial condition
+    # (distinguishing it from a mid-solve blow-up, which reports "at t ≈ …").
+    mesh, c = _unit_square_species()  # c = 0
+    with pytest.raises(SolveError) as excinfo:
+        integrate_reaction_diffusion(
+            mesh, c, diffusivities=[0.1], t_final=1.0, reaction=lambda u: ufl.as_vector([1.0 / u[0]])
+        )
+    assert "non-finite" in str(excinfo.value)
+    assert "initial condition" in str(excinfo.value)
+
+
+def test_preflight_catches_a_nonfinite_initial_condition() -> None:
+    mesh, c = _unit_square_species()
+    c.x.array[:] = 1.0
+    c.x.array[3] = float("inf")  # a broken IC value
+    with pytest.raises(SolveError, match="initial condition"):
+        integrate_reaction_diffusion(mesh, c, diffusivities=[0.1], t_final=1.0)
+
+
+def test_preflight_lets_a_well_posed_model_through() -> None:
+    # The pre-flight is transparent to a finite model — it integrates normally.
+    mesh, c = _unit_square_species()
+    c.x.array[:] = 2.0
+    integrate_reaction_diffusion(
+        mesh, c, diffusivities=[0.1], t_final=0.5, reaction=lambda u: ufl.as_vector([-0.5 * u[0]])
+    )
+    assert float(c.x.array.mean()) < 2.0  # it decayed; no spurious pre-flight failure
