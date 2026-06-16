@@ -10,6 +10,10 @@ a moving membrane drives an incompressible bulk while the ALE mesh follows. Two 
   tension and the bulk pressure (no prescribed motion). On Taylor–Hood (continuous velocity)
   so the ALE mesh can move by the solved `v` directly with `∮ v·n = 0` exact (an H(div)
   velocity loses that when interpolated for the mesh — see `step_force_balance_fsi`).
+- `step_two_phase_fsi` — the closure for a **two-phase** (network + solvent) incompressible
+  mixture with interphase drag: the membrane tension loads the mixture and the mesh follows a
+  chosen *frame* phase (§6 of the design note). The mixture-average frame conserves volume via
+  the shared mixture pressure, just as the single-phase closure does.
 
 Each step:
 
@@ -47,14 +51,17 @@ from dolfinx import fem
 from dolfinx.mesh import Mesh
 from scipy.spatial import cKDTree
 
+from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.discrete import _HarmonicExtension
+from vcell_fenics.backend.multiphase import solve_two_phase_stokes_surface_tension
 from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tension
 from vcell_fenics.backend.stokes_hdiv import solve_incompressible_stokes_hdiv_slip
 
 
-def _advance_ale_mesh(mesh: Mesh, velocity: fem.Function, dt: float) -> None:
+def _advance_ale_mesh(mesh: Mesh, velocity: UflExpr, dt: float) -> None:
     """Move `mesh` in place by `dt·velocity`: boundary nodes by the velocity directly, the
-    interior by harmonic extension (the ALE fill)."""
+    interior by harmonic extension (the ALE fill). `velocity` is any UFL expression — a solved
+    `Function`, or e.g. a mixture average `0.5·(v_n + v_s)`."""
     gdim = mesh.geometry.dim
     lagrange = fem.functionspace(mesh, ("Lagrange", 1, (gdim,)))
     displacement = fem.Function(lagrange)
@@ -113,6 +120,54 @@ def step_force_balance_fsi(
     v, p = solve_incompressible_stokes_surface_tension(mesh, tension=tension, viscosity=viscosity, screening=screening)
     _advance_ale_mesh(mesh, v, dt)
     return v, p
+
+
+def step_two_phase_fsi(
+    mesh: Mesh,
+    *,
+    tension: float,
+    drag: float,
+    dt: float,
+    viscosity_n: float = 1.0,
+    viscosity_s: float = 1.0,
+    screening_n: float = 1.0,
+    screening_s: float = 1.0,
+    frame: str = "mixture",
+) -> tuple[fem.Function, fem.Function, fem.Function]:
+    """Advance one **two-phase** force-balance FSI step, in place — a tense membrane bounding a
+    two-phase (network + solvent) incompressible mixture, with no prescribed motion.
+
+    Solves the surface-tension two-phase Stokes mixture (`backend/multiphase.py`) for the phase
+    velocities `(v_n, v_s)` and the mixture pressure `p`, then moves the ALE mesh by `dt` times
+    the **frame** velocity. `drag` is the interphase friction `ξ(v_n − v_s)`; `frame` selects
+    which velocity carries the mesh — the *one genuine fork* of the multiphase model
+    (`docs/modeling/multiphase-cytoplasm-ale.md` §6):
+
+    - `"mixture"` (default) — the volume-averaged `0.5·(v_n + v_s)`. The mixture pressure
+      enforces `∮(v_n + v_s)·n = 0`, so `∮ v_mix·n = 0` and the enclosed **volume is conserved
+      automatically**, exactly as in the single-phase closure.
+    - `"network"` / `"solvent"` — follow `v_n` / `v_s` (the membrane attached to the cortex, or
+      to the solvent). Volume is then conserved only insofar as that phase's normal flux
+      vanishes; use when one phase is the material boundary.
+
+    A circle is a fixed point (Laplace `p = γ/R`, both phases at rest, drag inactive); a
+    perturbed shape relaxes toward the minimal-perimeter circle. Returns `(v_n, v_s, p)`.
+    """
+
+    v_n, v_s, p = solve_two_phase_stokes_surface_tension(
+        mesh,
+        tension=tension,
+        drag=drag,
+        viscosity_n=viscosity_n,
+        viscosity_s=viscosity_s,
+        screening_n=screening_n,
+        screening_s=screening_s,
+    )
+    frame_velocity = {"mixture": 0.5 * (v_n + v_s), "network": v_n, "solvent": v_s}.get(frame)
+    if frame_velocity is None:
+        raise ValueError(f"frame must be 'mixture', 'network', or 'solvent', not {frame!r}")
+    _advance_ale_mesh(mesh, frame_velocity, dt)
+    return v_n, v_s, p
 
 
 def enclosed_volume(mesh: Mesh) -> float:

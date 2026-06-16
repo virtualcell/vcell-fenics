@@ -21,7 +21,12 @@ from vcell_fenics.backend.discrete import (
     Term,
     TermKind,
 )
-from vcell_fenics.backend.fsi import enclosed_volume, step_force_balance_fsi, step_prescribed_fsi
+from vcell_fenics.backend.fsi import (
+    enclosed_volume,
+    step_force_balance_fsi,
+    step_prescribed_fsi,
+    step_two_phase_fsi,
+)
 from vcell_fenics.backend.geometry import (
     BoundaryGeometry,
     CoupledGeometry,
@@ -36,7 +41,11 @@ from vcell_fenics.backend.geometry import (
     make_extracellular_annulus_geometry,
     register_geometry,
 )
-from vcell_fenics.backend.multiphase import solve_two_phase_overdamped, solve_two_phase_stokes
+from vcell_fenics.backend.multiphase import (
+    solve_two_phase_overdamped,
+    solve_two_phase_stokes,
+    solve_two_phase_stokes_surface_tension,
+)
 from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
 from vcell_fenics.backend.solver import SolverConfiguration, run
 from vcell_fenics.backend.stokes import (
@@ -94,7 +103,9 @@ __all__ = [
     "solve_overdamped_slip",
     "solve_two_phase_overdamped",
     "solve_two_phase_stokes",
+    "solve_two_phase_stokes_surface_tension",
     "step_force_balance_fsi",
     "step_prescribed_fsi",
+    "step_two_phase_fsi",
     "step_with_remeshing",
 ]

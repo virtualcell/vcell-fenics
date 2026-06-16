@@ -22,6 +22,11 @@ the incompressible-mixture pressure land (step 3, the first saddle-point system)
 block is assembled monolithically over a mixed element of two vector spaces and solved
 directly.
 
+`solve_two_phase_stokes` adds the symmetric-gradient stress and the **incompressible-mixture
+pressure** (step 3c, the saddle point); `solve_two_phase_stokes_surface_tension` drives that
+mixture with a **membrane surface tension** instead of prescribed slip — the bulk side of the
+two-phase force-balance FSI closure (`backend/fsi.py`).
+
 Verified (`tests/test_backend_multiphase.py`): a manufactured two-field solution is
 recovered to round-off (block + drag + slip assembly); increasing `ξ` **locks** the
 phases (the slip `|v_n − v_s| → 0`); and at `ξ = 0` each phase reduces to the independent
@@ -185,6 +190,68 @@ def solve_two_phase_stokes(
         bcs=[bc_pressure],
         u=solution,
         petsc_options_prefix=f"vcellfenics_twophasestokes_{id(solution):x}_",
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
+    ).solve()
+    return solution.sub(0).collapse(), solution.sub(1).collapse(), solution.sub(2).collapse()
+
+
+def solve_two_phase_stokes_surface_tension(
+    mesh: Mesh,
+    *,
+    tension: float,
+    drag: float,
+    viscosity_n: float = 1.0,
+    viscosity_s: float = 1.0,
+    screening_n: float = 1.0,
+    screening_s: float = 1.0,
+) -> tuple[fem.Function, fem.Function, fem.Function]:
+    """The two-phase incompressible mixture driven by a **membrane surface tension** `γ`, for
+    the two-phase force-balance FSI closure (`backend/fsi.py`): the membrane moves under its
+    own tension while the bulk is the network + solvent mixture of `solve_two_phase_stokes`.
+
+    Like `solve_incompressible_stokes_surface_tension` but for the two-phase mixture: the
+    tension enters as the curvature-free weak load `−γ ∮_Γ ∇_Γ·v ds`, split by **equal volume
+    fraction** (½ each) over the two phase test velocities so the *total* boundary load is the
+    single Laplace traction — at a circle this gives the mixture pressure `p = γ/R` with both
+    phases at rest, and the drag `ξ(v_n − v_s)` inactive. No slip BC (the membrane is free,
+    the natural BC); a substrate `screening_*` removes each phase's rigid-body null space and
+    the tension fixes the pressure level (no pin needed). Returns `(v_n, v_s, p)`.
+    """
+
+    gdim = mesh.geometry.dim
+    p2 = basix.ufl.element("Lagrange", mesh.basix_cell(), 2, shape=(gdim,))
+    p1 = basix.ufl.element("Lagrange", mesh.basix_cell(), 1)
+    W = fem.functionspace(mesh, basix.ufl.mixed_element([p2, p2, p1]))
+    v_n, v_s, p = ufl.TrialFunctions(W)
+    w_n, w_s, q = ufl.TestFunctions(W)
+    dx = ufl.Measure("dx", domain=mesh)
+    ds = ufl.ds(domain=mesh)
+    n = ufl.FacetNormal(mesh)
+
+    def strain(field: UflExpr) -> UflExpr:
+        return ufl.sym(ufl.grad(field))
+
+    a = (
+        2.0 * viscosity_n * ufl.inner(strain(v_n), strain(w_n))
+        + 2.0 * viscosity_s * ufl.inner(strain(v_s), strain(w_s))
+        + screening_n * ufl.inner(v_n, w_n)
+        + screening_s * ufl.inner(v_s, w_s)
+        + drag * ufl.inner(v_n - v_s, w_n)
+        + drag * ufl.inner(v_s - v_n, w_s)
+        - p * ufl.div(w_n + w_s)  # one mixture pressure, conjugate to the total velocity
+        - q * ufl.div(v_n + v_s)  # incompressible mixture
+    ) * dx
+    surface_projection = ufl.Identity(gdim) - ufl.outer(n, n)  # P = I − n⊗n
+    # Tension splits ½/½ over the phases ⇒ the total boundary load is the single Laplace traction.
+    tension_load = ufl.inner(surface_projection, ufl.grad(w_n)) + ufl.inner(surface_projection, ufl.grad(w_s))
+    rhs = -0.5 * tension * tension_load * ds
+
+    solution = fem.Function(W)
+    LinearProblem(
+        a,
+        rhs,
+        u=solution,
+        petsc_options_prefix=f"vcellfenics_twophasetension_{id(solution):x}_",
         petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "mumps"},
     ).solve()
     return solution.sub(0).collapse(), solution.sub(1).collapse(), solution.sub(2).collapse()
