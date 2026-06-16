@@ -211,7 +211,7 @@ every time a new class is diagnosed.
 
 | # | Problem | Assumption violated (solution class) | Detection | Message / fix |
 |---|---|---|---|---|
-| 1 | Missing surface dilution `ρ ∇_Γ·v_Γ` on a moving membrane | density on a stretching surface must dilute (mass conservation) | **a-priori** (motion≠none ⇒ require the term) | "add the dilution term; a moving surface density without it does not conserve mass" |
+| 1 | Missing surface dilution `ρ ∇_Γ·v_Γ` on a moving membrane | density on a stretching surface must dilute (mass conservation) | **a-priori** — *done* for the escape hatch (a validator **warning**: a time-dependent scalar weak form on a moving subdomain with no `div`/`div_surf`). Templated equations get it automatically (the backend adds it whenever the subdomain moves), so the gap is weak-form-only | "add the dilution term; a moving surface density without it does not conserve mass" |
 | 2 | Missing bulk dilution `c ∇·v_carrier` on a compressible carrier | a species on a compressing phase must concentrate | **a-priori** for the FSI species path | bulk analogue of #1 |
 | 3 | No-penetration / all-Neumann BC on a symmetric domain | the operator has a rigid-body / constant **null space** | **runtime** (singular Jacobian / near-null vector) → could be **a-priori** with geometry | "unconstrained rigid-body or constant mode — add screening, a pin, or a constraint" |
 | 4 | Forcing aligned with the null mode | RHS must be in the range (orthogonal to the null space) | **runtime** (divergence grows under refinement) | "forcing is inconsistent with the constrained problem's null space" |
@@ -246,8 +246,9 @@ Highest value first, each increment self-contained:
 3. **A-priori discretization checks** (§4, rows 1, 6, 7) — the cheap symbolic ones
    (require-dilution, inf-sup element pair, nonlinear-source-vs-backward-Euler). They turn
    runtime surprises into build-time errors with named fixes. *(Row 7 done —
-   `NonlinearTermError` via a pre-FFCx UFL arity check at backward-Euler lowering. Rows 1 and 6
-   remain — as `_Validator` methods.)*
+   `NonlinearTermError` via a pre-FFCx UFL arity check at backward-Euler lowering. Row 1 done —
+   a `_Validator` warning for a moving-subdomain weak form without a divergence operator. Row 6,
+   the inf-sup element pair, remains.)*
 4. **The `t = 0` pre-flight** (§5.3) — assemble once, run the geometry-dependent null-space
    / consistency checks (rows 3, 4, 5) before stepping. Needs the assembled operator but no
    solve.
