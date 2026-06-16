@@ -176,10 +176,10 @@ def _build_problem(
             source = compile_expression(parse(eq.terms["source"]), CompileContext(mesh, {**ctx.symbols, **var_trials}))
             terms.append(Term(TermKind.SOURCE, source * w))
 
-    bcs, boundary_terms = (
+    bcs, boundary_terms, dirichlet_refreshers = (
         _build_boundary_conditions(md, equations, geometry, mesh, V, components, ctx)
         if geometry is not None
-        else ([], [])
+        else ([], [], [])
     )
 
     names = ",".join(eq.variable for eq in equations)
@@ -197,6 +197,8 @@ def _build_problem(
         bcs=bcs,
         boundary_terms=tuple(boundary_terms),
         motion_velocity=velocity,
+        time=ctx.symbols["t"],
+        dirichlet_refreshers=tuple(dirichlet_refreshers),
     )
 
 
@@ -211,16 +213,16 @@ def _build_boundary_conditions(
     V: fem.FunctionSpace,
     components: list[tuple[UflExpr, UflExpr]],
     ctx: CompileContext,
-) -> tuple[list[fem.DirichletBC], list[BoundaryTerm]]:
+) -> tuple[list[fem.DirichletBC], list[BoundaryTerm], list[tuple[fem.Function, fem.Expression]]]:
     """Translate the MathDescription's boundary conditions into strong Dirichlet BCs
-    and weak Neumann / Robin boundary terms.
+    and weak Neumann / Robin boundary terms, plus the Dirichlet `(value, expression)`
+    refreshers a driver re-interpolates to track a time-dependent `g(t)`.
 
     Scope (v1): external Dirichlet / Neumann / Robin on a labelled boundary of *this*
     solve's subdomain. The two interface kinds need an internal boundary between two
     subdomains (multi-compartment geometry) and raise `NotImplementedError`.
-    Expressions are compiled against `ctx` (`x` + constant parameters); a BC
-    referencing another variable or time `t` is out of the v1 subset and surfaces as
-    a `CompileError`.
+    Expressions are compiled against `ctx` (`x`, `t`, and constant parameters); a BC
+    referencing another variable is out of the v1 subset and surfaces as a `CompileError`.
     """
 
     subdomain = equations[0].subdomain
@@ -231,6 +233,7 @@ def _build_boundary_conditions(
 
     bcs: list[fem.DirichletBC] = []
     boundary_terms: list[BoundaryTerm] = []
+    dirichlet_refreshers: list[tuple[fem.Function, fem.Expression]] = []
     for bc in md.boundary_conditions:
         if isinstance(bc, BCInterfaceValueEquality | BCInterfaceFluxBalance):
             raise NotImplementedError(
@@ -256,7 +259,9 @@ def _build_boundary_conditions(
         k = var_index[bc.variable]
         u, w = components[k]
         if isinstance(bc, BCDirichlet):
-            bcs.append(_dirichlet_bc(bc, V, n, k, fdim, bgeo.facets, ctx))
+            dirichlet, refresher = _dirichlet_bc(bc, V, n, k, fdim, bgeo.facets, ctx)
+            bcs.append(dirichlet)
+            dirichlet_refreshers.append(refresher)
         elif isinstance(bc, BCNeumann):
             # D∇u·n = h ⇒ the weak boundary term ∫_Γ h·v ds enters the residual as −h·v.
             h = compile_expression(parse(bc.expression), ctx)
@@ -268,26 +273,32 @@ def _build_boundary_conditions(
             h = compile_expression(parse(bc.expression), ctx)
             integrand = (alpha / beta) * u * w - (h / beta) * w
             boundary_terms.append(BoundaryTerm(TermKind.ROBIN, integrand, _restricted_ds(mesh, bgeo.facets)))
-    return bcs, boundary_terms
+    return bcs, boundary_terms, dirichlet_refreshers
 
 
 def _dirichlet_bc(
     bc: BCDirichlet, V: fem.FunctionSpace, n: int, k: int, fdim: int, facets: np.ndarray, ctx: CompileContext
-) -> fem.DirichletBC:
+) -> tuple[fem.DirichletBC, tuple[fem.Function, fem.Expression]]:
     """A strong Dirichlet BC u = g on the labelled boundary. For a coupled vector
-    space the constraint is applied on the k-th component subspace."""
+    space the constraint is applied on the k-th component subspace.
+
+    Returns the BC and a `(value, expression)` refresher: re-interpolating `value`
+    from `expression` re-evaluates `g` against the (mutable) compile context, so a
+    `g(t)` tracks the bound time Constant once the driver advances it."""
 
     g = compile_expression(parse(bc.expression), ctx)
     if n == 1:
         value = fem.Function(V, name=f"{bc.variable}_bc")
-        value.interpolate(fem.Expression(g, V.element.interpolation_points))
-        return fem.dirichletbc(value, fem.locate_dofs_topological(V, fdim, facets))
+        expression = fem.Expression(g, V.element.interpolation_points)
+        value.interpolate(expression)
+        return fem.dirichletbc(value, fem.locate_dofs_topological(V, fdim, facets)), (value, expression)
     sub = V.sub(k)
     sub_space, _ = sub.collapse()
     value = fem.Function(sub_space, name=f"{bc.variable}_bc")
-    value.interpolate(fem.Expression(g, sub_space.element.interpolation_points))
+    expression = fem.Expression(g, sub_space.element.interpolation_points)
+    value.interpolate(expression)
     dofs = fem.locate_dofs_topological((sub, sub_space), fdim, facets)
-    return fem.dirichletbc(value, dofs, sub)
+    return fem.dirichletbc(value, dofs, sub), (value, expression)
 
 
 def _restricted_ds(mesh: Mesh, facets: np.ndarray) -> ufl.Measure:
@@ -380,7 +391,13 @@ def _motion_velocity(md: MathDescription, subdomain: str, ctx: CompileContext) -
 
 
 def _compile_context(md: MathDescription, mesh: Mesh) -> CompileContext:
-    symbols: dict[str, UflExpr] = {"x": ufl.SpatialCoordinate(mesh)}
+    # `t` is bound to a mutable time Constant: expressions outside the IC (which the validator
+    # forbids `t` in) may reference it, and the driver advances it each step — e.g. a
+    # time-dependent Dirichlet value g(t). It stays 0 unless a step updates it.
+    symbols: dict[str, UflExpr] = {
+        "x": ufl.SpatialCoordinate(mesh),
+        "t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
+    }
     for p in md.parameters:
         if not isinstance(p, ParameterConstant):
             raise NotImplementedError("backend v1 supports constant parameters only")

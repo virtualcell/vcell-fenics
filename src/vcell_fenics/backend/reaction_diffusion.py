@@ -35,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.fem import petsc as fem_petsc
@@ -130,6 +131,7 @@ def _run_time_stepper(
     residual: UflExpr,
     options: _TimeStepperOptions,
     bcs: Sequence[fem.DirichletBC] = (),
+    on_time: Callable[[float], None] | None = None,
 ) -> tuple[int, float]:
     """Integrate the implicit residual `F(state, rate) = 0` to `options.t_final` with PETSc `TS`,
     mutating `state` in place. `residual` is the UFL form of `F` (`rate` the time derivative `ċ`,
@@ -149,6 +151,11 @@ def _run_time_stepper(
     jacobian = shift * ufl.derivative(residual, rate) + ufl.derivative(residual, state)
     jacobian_form = fem.form(jacobian)  # σ M + ∂F/∂c — exact (ufl.derivative)
     jacobian_matrix = fem_petsc.create_matrix(jacobian_form)
+    # Dirichlet dofs zero only the Jacobian *rows* (not columns) so the Jacobian stays
+    # consistent with the un-lifted residual when a boundary value moves (a time-dependent
+    # g(t) leaves x_bc ≠ g at the start of each step). Symmetric (row+column) elimination
+    # would need the residual lifted and breaks the line search here.
+    bc_dofs = np.concatenate([bc.dof_indices()[0] for bc in bcs]).astype(np.int32) if bcs else None
 
     def _set_state(x: PETSc.Vec, x_dot: PETSc.Vec) -> None:
         x.copy(state.x.petsc_vec)
@@ -156,7 +163,9 @@ def _run_time_stepper(
         x_dot.copy(rate.x.petsc_vec)
         rate.x.petsc_vec.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)
 
-    def evaluate_residual(_ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+    def evaluate_residual(_ts: PETSc.TS, t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+        if on_time is not None:  # advance g(t) etc. to the stage time before assembling/applying BCs
+            on_time(t)
         _set_state(x, x_dot)
         with result.localForm() as local:
             local.set(0.0)
@@ -166,13 +175,17 @@ def _run_time_stepper(
             fem_petsc.set_bc(result, bcs, x0=state.x.petsc_vec, alpha=-1.0)
 
     def evaluate_jacobian(
-        _ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, sigma: float, mat: PETSc.Mat, _pre: PETSc.Mat
+        _ts: PETSc.TS, t: float, x: PETSc.Vec, x_dot: PETSc.Vec, sigma: float, mat: PETSc.Mat, _pre: PETSc.Mat
     ) -> None:
+        if on_time is not None:
+            on_time(t)
         _set_state(x, x_dot)
         shift.value = sigma
         mat.zeroEntries()
-        fem_petsc.assemble_matrix(mat, jacobian_form, bcs=bcs)  # type: ignore[arg-type, misc]  # in-place; bcs zero boundary rows/cols
+        fem_petsc.assemble_matrix(mat, jacobian_form)  # type: ignore[arg-type]  # in-place into a preallocated Mat
         mat.assemble()
+        if bc_dofs is not None:
+            mat.zeroRowsLocal(bc_dofs, diag=1.0)  # type: ignore[arg-type]  # ndarray of local rows → identity (cols kept)
 
     ts = PETSc.TS().create(mesh.comm)
     ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
@@ -183,6 +196,7 @@ def _run_time_stepper(
     ts.setMaxTime(options.t_final)
     ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
     ts.setTolerances(options.atol, options.rtol)
+    ts.setMaxSNESFailures(-1)  # let the adaptive controller cut the step and retry when Newton fails
     # Inner Newton (SNES) linear solver. The MOL default is a **Krylov solve (GMRES) with an
     # ILU preconditioner** — VCell's reaction-diffusion solver uses CVODE with SPGMR + ILU for
     # exactly this: ILU keeps the per-iteration cost low and convergence fast as the system
@@ -197,7 +211,9 @@ def _run_time_stepper(
     ksp.getPC().setType(options.pc_type)
     ts.setFromOptions()
 
-    if bcs:  # make the initial state consistent with the Dirichlet boundary values
+    if bcs:  # make the initial state consistent with the Dirichlet boundary values g(t=0)
+        if on_time is not None:
+            on_time(0.0)
         fem_petsc.set_bc(state.x.petsc_vec, bcs)
         state.x.scatter_forward()
     ts.solve(state.x.petsc_vec)
@@ -253,6 +269,6 @@ def integrate_discrete_problem(
         residual = residual + ufl.replace(boundary.integrand, {trial: state}) * boundary.measure
 
     options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
-    steps, final_time = _run_time_stepper(state, rate, residual, options, bcs=problem.bcs)
+    steps, final_time = _run_time_stepper(state, rate, residual, options, bcs=problem.bcs, on_time=problem.set_time)
     problem.previous.x.array[:] = state.x.array
     return IntegrationResult(solution=state, steps=steps, time=final_time)

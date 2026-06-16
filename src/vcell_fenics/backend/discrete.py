@@ -282,6 +282,12 @@ class DiscreteProblem:
     # advances the mesh by dt·velocity before solving — the moving-subdomain
     # protocol of §1.10. None means a static subdomain.
     motion_velocity: UflExpr | None = None
+    # The bound time Constant `t` (compile context). A driver advances it via
+    # `set_time` so a time-dependent expression — e.g. a Dirichlet g(t) — tracks it.
+    time: fem.Constant | None = None
+    # (value, expression) pairs for each Dirichlet BC: re-interpolating the value from
+    # its expression re-evaluates g against the (advanced) time Constant.
+    dirichlet_refreshers: tuple[tuple[fem.Function, fem.Expression], ...] = ()
 
     def __post_init__(self) -> None:
         # Compose the backward-Euler forms symbolically (cheap, no JIT). The DOLFINx
@@ -367,6 +373,19 @@ class DiscreteProblem:
             self._motion.advance()
         self._backward_euler_problem().solve()
         self.previous.x.array[:] = self.unknown.x.array
+
+    def set_time(self, t: float) -> None:
+        """Advance the bound time `t` and refresh any time-dependent boundary values.
+
+        Sets the compile context's time Constant and re-interpolates each Dirichlet value
+        Function, so a `g(t)` reflects the new time. With no time-dependent expressions it is a
+        cheap no-op refresh. The driver calls this each step (the backward-Euler loop) or each
+        `TS` callback (method-of-lines), so the same model works under either integrator."""
+
+        if self.time is not None:
+            self.time.value = t
+        for value, expression in self.dirichlet_refreshers:
+            value.interpolate(expression)
 
     def total_mass(self) -> float:
         local = fem.assemble_scalar(fem.form(self.unknown * self.dx))

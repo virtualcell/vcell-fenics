@@ -50,7 +50,8 @@ def run(md: MathDescription, geometry: Geometry, config: SolverConfiguration) ->
     if config.time_integration == "method_of_lines":
         integrate_discrete_problem(problem, t_final=config.t_final, dt_initial=config.dt)
     elif config.time_integration == "backward_euler":
-        for _ in range(round(config.t_final / config.dt)):
+        for n in range(round(config.t_final / config.dt)):
+            problem.set_time((n + 1) * config.dt)  # advance g(t) etc. to the step's time, then solve
             problem.step()
     else:
         raise ValueError(
