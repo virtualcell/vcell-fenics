@@ -155,3 +155,32 @@ def test_preflight_lets_a_well_posed_model_through() -> None:
         mesh, c, diffusivities=[0.1], t_final=0.5, reaction=lambda u: ufl.as_vector([-0.5 * u[0]])
     )
     assert float(c.x.array.mean()) < 2.0  # it decayed; no spurious pre-flight failure
+
+
+# A singular forcing (1/0.0) is non-finite at t=0 — but only the SOURCE term, not diffusion —
+# so the per-term probe (ADR-004 tagged terms) can attribute the failure to it.
+_SINGULAR_SOURCE = """
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - { name: cyto, kind: volume, motion: { kind: none } }
+  variables:
+    - { name: c, subdomain: cyto }
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: { diffusion: "0.1", source: "1.0 / 0.0" }
+      initial_condition: "1.0"
+"""
+
+
+def test_preflight_localizes_a_nonfinite_term_to_the_source() -> None:
+    # The pre-flight failure is attributed to the specific tagged term that is non-finite — the
+    # source — rather than the generic "the residual", since the state and diffusion are finite.
+    md = load_yaml(_SINGULAR_SOURCE)
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.2)
+    with pytest.raises(SolveError, match="the source term is non-finite") as excinfo:
+        run(md, geometry, SolverConfiguration(dt=0.05, t_final=1.0, time_integration="method_of_lines"))
+    assert "initial condition" in str(excinfo.value)  # still localised in time

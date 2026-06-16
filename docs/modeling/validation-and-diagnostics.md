@@ -190,7 +190,11 @@ surfaces as `petsc4py.PETSc.Error: error code 91`, `SNES_DIVERGED_LINE_SEARCH`, 
    carries the blow-up; evaluate the residual at the IC to catch an inconsistent start;
    check the Jacobian's smallest singular value / a near-null vector to *name* the
    unconstrained mode. The IR's tagged-term structure (ADR 004) is exactly what makes
-   per-term attribution possible.
+   per-term attribution possible. *(Done for the pre-flight: `_localize_nonfinite_term`
+   assembles each `DiscreteProblem` term at the IC and names the non-finite one — "the source
+   term is non-finite at t=0" rather than "the residual is non-finite" — or "the initial
+   condition" if the state itself is bad. Wired as the `localize` hook of the pre-flight; the
+   Jacobian-null-vector probe waits for the steady solver where the Jacobian can be singular.)*
 3. **Pre-flight checks at `t = 0`.** Before stepping, evaluate the residual and Jacobian
    once and run the geometry-dependent §4 checks (null space, BC-data consistency) that
    could not run without the assembled operator. Catch the inconsistent problem *before* the
