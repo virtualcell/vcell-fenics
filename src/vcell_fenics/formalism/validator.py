@@ -156,6 +156,66 @@ def _references_divergence(node: Expr) -> bool:
     return False  # Name, Number — no operator
 
 
+def _div_of_vector_variable(node: Expr, vector_vars: frozenset[str]) -> str | None:
+    """The name of a vector variable appearing as a bare `div(v)` / `div_surf(v)` — the
+    incompressibility-constraint signature `∫ q ∇·v` of a saddle point — or None. Requires the
+    argument to be the bare variable (not an expression like `div(c*v)` or `div(-D grad(c))`, so
+    a conservative-flux transport term is not mistaken for a pressure constraint)."""
+
+    if isinstance(node, FunctionCall):
+        if (
+            node.callee in ("div", "div_surf")
+            and len(node.args) == 1
+            and isinstance(node.args[0], Name)
+            and node.args[0].name in vector_vars
+        ):
+            return node.args[0].name
+        for argument in node.args:
+            found = _div_of_vector_variable(argument, vector_vars)
+            if found is not None:
+                return found
+        return None
+    if isinstance(node, BinaryOp):
+        return _div_of_vector_variable(node.left, vector_vars) or _div_of_vector_variable(node.right, vector_vars)
+    if isinstance(node, UnaryOp):
+        return _div_of_vector_variable(node.operand, vector_vars)
+    if isinstance(node, IndexAccess):
+        return _div_of_vector_variable(node.base, vector_vars) or _div_of_vector_variable(node.index, vector_vars)
+    if isinstance(node, VectorLiteral):
+        return next((r for c in node.components if (r := _div_of_vector_variable(c, vector_vars))), None)
+    if isinstance(node, TensorLiteral):
+        return next((r for row in node.rows if (r := _div_of_vector_variable(row, vector_vars))), None)
+    return None
+
+
+def _references_partial_t_of(node: Expr, variable: str) -> bool:
+    """Whether the expression contains `partial_t(variable)` — i.e. the variable evolves in time
+    (so it is not a pure Lagrange-multiplier constraint like a pressure)."""
+
+    if isinstance(node, FunctionCall):
+        if node.callee == "partial_t" and len(node.args) == 1 and isinstance(node.args[0], Name):
+            return node.args[0].name == variable
+        return any(_references_partial_t_of(a, variable) for a in node.args)
+    if isinstance(node, BinaryOp):
+        return _references_partial_t_of(node.left, variable) or _references_partial_t_of(node.right, variable)
+    if isinstance(node, UnaryOp):
+        return _references_partial_t_of(node.operand, variable)
+    if isinstance(node, IndexAccess):
+        return _references_partial_t_of(node.base, variable) or _references_partial_t_of(node.index, variable)
+    if isinstance(node, VectorLiteral):
+        return any(_references_partial_t_of(c, variable) for c in node.components)
+    if isinstance(node, TensorLiteral):
+        return any(_references_partial_t_of(row, variable) for row in node.rows)
+    return False
+
+
+def _lagrange_order(space: str) -> int | None:
+    """The polynomial order of a `lagrange_pN` space hint, or None for an unrecognised hint."""
+
+    match = re.fullmatch(r"lagrange_p(\d+)", space)
+    return int(match.group(1)) if match is not None else None
+
+
 @dataclass(frozen=True, slots=True)
 class Diagnostic:
     """One validation finding. `path` is an attribute path into the
@@ -245,6 +305,7 @@ class _Validator:
         self._check_boundary_conditions()
         self._check_expressions()
         self._check_dilution_on_moving_weak_forms()
+        self._check_inf_sup_element_pair()
         return self._diagnostics
 
     def _build_indices(self) -> None:
@@ -439,6 +500,47 @@ class _Validator:
                 f"{eq.variable}_test, inlining the subdomain's velocity) for mass conservation, "
                 f"which the backend does not add to a weak form (unlike a template). Confirm it is "
                 f"intended.",
+            )
+
+    def _check_inf_sup_element_pair(self) -> None:
+        """Registry #6 of docs/modeling/validation-and-diagnostics.md: an incompressible saddle
+        point (a pressure enforcing `∇·v = 0`) needs an **inf-sup-stable** velocity/pressure pair
+        — the velocity a higher-order space than the pressure (Taylor–Hood, e.g. P2/P1). An
+        equal-order pair gives spurious pressure oscillations unless stabilised.
+
+        The saddle-point pressure is detected structurally: a *scalar* weak form whose residual
+        contains a bare `div(v)`/`div_surf(v)` for a *vector variable* `v` and does **not** evolve
+        the pressure in time (no `partial_t(p)` — it is a constraint, not a transported density).
+        A warning (the inference is structural); both elements are read from the `space` hints."""
+
+        vector_vars_by_subdomain: dict[str, frozenset[str]] = {}
+        for (name, subdomain), var in self._var_by_key.items():
+            if var.type == "vector":
+                vector_vars_by_subdomain[subdomain] = vector_vars_by_subdomain.get(subdomain, frozenset()) | {name}
+
+        for i, eq in enumerate(self._md.equations):
+            if not isinstance(eq, WeakFormEquation):
+                continue
+            pressure = self._var_by_key.get((eq.variable, eq.subdomain))
+            if pressure is None or pressure.type != "scalar":
+                continue
+            form = self._parse(eq.form, f"equations[{i}].form")
+            if form is None or _references_partial_t_of(form, eq.variable):
+                continue  # an evolving scalar is a density, not a pressure multiplier
+            velocity_name = _div_of_vector_variable(form, vector_vars_by_subdomain.get(eq.subdomain, frozenset()))
+            if velocity_name is None:
+                continue
+            velocity = self._var_by_key[(velocity_name, eq.subdomain)]
+            velocity_order, pressure_order = _lagrange_order(velocity.space), _lagrange_order(pressure.space)
+            if velocity_order is None or pressure_order is None or velocity_order > pressure_order:
+                continue  # unrecognised hint, or a stable Taylor–Hood pair
+            self._warn(
+                f"equations[{i}].form",
+                f"the velocity {velocity_name!r} ({velocity.space}) and pressure {eq.variable!r} "
+                f"({pressure.space}) form an incompressible saddle point but are not an "
+                f"inf-sup-stable pair — the velocity must be a higher-order space than the "
+                f"pressure (Taylor–Hood, e.g. lagrange_p2 velocity / lagrange_p1 pressure). An "
+                f"equal-order pair gives spurious pressure oscillations unless stabilised.",
             )
 
     def _check_boundary_conditions(self) -> None:

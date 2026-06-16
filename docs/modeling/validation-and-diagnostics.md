@@ -216,7 +216,7 @@ every time a new class is diagnosed.
 | 3 | No-penetration / all-Neumann BC on a symmetric domain | the operator has a rigid-body / constant **null space** | **runtime** (singular Jacobian / near-null vector) → could be **a-priori** with geometry | "unconstrained rigid-body or constant mode — add screening, a pin, or a constraint" |
 | 4 | Forcing aligned with the null mode | RHS must be in the range (orthogonal to the null space) | **runtime** (divergence grows under refinement) | "forcing is inconsistent with the constrained problem's null space" |
 | 5 | Prescribed boundary motion with `∮ w·n ≠ 0` into an incompressible bulk | incompressibility forces `∮ v·n = 0`; the motion over-determines it | **a-priori with geometry** (`∮ w·n` on the current shape) | "prescribed motion is not volume-consistent on this shape; use a divergence-free field or the force-balance closure" |
-| 6 | Like-order velocity/pressure for incompressible Stokes | saddle point needs an **inf-sup-stable** pair | **a-priori** (element check) | "use Taylor–Hood (P2/P1) or another inf-sup-stable pair" |
+| 6 | Like-order velocity/pressure for incompressible Stokes | saddle point needs an **inf-sup-stable** pair | **a-priori** — *done* (a validator **warning**): a scalar weak form with a bare `div(v)` of a vector variable and no `partial_t` is a pressure multiplier; its `space` must be a higher order than the velocity's | "use Taylor–Hood (P2/P1) or another inf-sup-stable pair" |
 | 7 | Nonlinear `source` under backward Euler | the `lhs/rhs` split assumes the residual is **affine** in the unknown | **a-priori** — *done* (`NonlinearTermError`): a pure-UFL `check_form_arity` on the composed bilinear form, before FFCx, so no cache-poisoning arity traceback | "this reaction is nonlinear; use `method_of_lines` or lag the term — backward Euler cannot split it" |
 | 8 | Stiff reaction with an explicit / lagged treatment | step bounded by the reaction time scale; lag can go negative | **runtime** (step rejection / negative concentration) | "stiff kinetics — use the implicit (method-of-lines) path" |
 | 9 | Crank–Nicolson on a stiff nonlinear problem | CN is A- but not **L-stable** → rings / diverges | **runtime** (`DIVERGED_NONLINEAR_SOLVE`) | "use BDF (the L-stable default) for stiff problems" |
@@ -245,10 +245,10 @@ Highest value first, each increment self-contained:
    re-phrasing. **Build this first after the registry.** *(Done — `backend/diagnostics.py`.)*
 3. **A-priori discretization checks** (§4, rows 1, 6, 7) — the cheap symbolic ones
    (require-dilution, inf-sup element pair, nonlinear-source-vs-backward-Euler). They turn
-   runtime surprises into build-time errors with named fixes. *(Row 7 done —
-   `NonlinearTermError` via a pre-FFCx UFL arity check at backward-Euler lowering. Row 1 done —
-   a `_Validator` warning for a moving-subdomain weak form without a divergence operator. Row 6,
-   the inf-sup element pair, remains.)*
+   runtime surprises into build-time errors with named fixes. *(**All done.** Row 7 —
+   `NonlinearTermError` via a pre-FFCx UFL arity check at backward-Euler lowering; Row 1 — a
+   `_Validator` warning for a moving-subdomain weak form without a divergence operator; Row 6 —
+   a `_Validator` warning for an equal-/low-order velocity/pressure saddle point.)*
 4. **The `t = 0` pre-flight** (§5.3) — assemble once, run the geometry-dependent null-space
    / consistency checks (rows 3, 4, 5) before stepping. Needs the assembled operator but no
    solve.
