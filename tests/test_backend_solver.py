@@ -160,6 +160,40 @@ def test_method_of_lines_imposes_a_dirichlet_boundary() -> None:
     assert abs(float(values.mean()) - 3.0) < 0.05  # interior relaxes to the boundary value
 
 
+# A diffusion model whose Dirichlet boundary ramps in time: g(t) = 1 + 2t. At t the boundary
+# must equal 1 + 2t exactly (not the frozen g(0) = 1), on either integrator.
+_TIME_DEPENDENT_DIRICHLET = """
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - { name: cyto, kind: volume, motion: { kind: none } }
+  variables:
+    - { name: c, subdomain: cyto }
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: { diffusion: "0.2" }
+      initial_condition: "1.0"
+  boundary_conditions:
+    - { kind: dirichlet, variable: c, boundary: wall, expression: "1.0 + 2.0 * t" }
+"""
+
+
+@pytest.mark.parametrize("time_integration", ["method_of_lines", "backward_euler"])
+def test_time_dependent_dirichlet_tracks_g_of_t(time_integration: str) -> None:
+    # The boundary value g(t) = 1 + 2t is advanced each step (the bound time Constant) and the
+    # boundary dofs track it exactly — to g(t_final) = 3.0, not the frozen g(0) = 1. Works on
+    # both the TS callbacks and the backward-Euler step loop.
+    md = load_yaml(_TIME_DEPENDENT_DIRICHLET)
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", boundary="wall", radius=1.0, h=0.12)
+    solved = run(md, geometry, SolverConfiguration(dt=0.02, t_final=1.0, time_integration=time_integration))
+    boundary_dofs = solved.bcs[0].dof_indices()[0]
+    assert float(np.abs(solved.unknown.x.array[boundary_dofs] - 3.0).max()) < 1e-12  # tracked g(1) = 3.0
+    assert float(solved.unknown.x.array.min()) > 1.0  # the interior rose above the initial 1.0
+
+
 def test_method_of_lines_rejects_a_moving_subdomain() -> None:
     # Method-of-lines is fixed-domain; a prescribed-motion model must use the per-step path.
     md = load_yaml(_MOVING_MEMBRANE)
