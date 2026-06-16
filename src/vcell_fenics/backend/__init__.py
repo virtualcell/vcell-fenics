@@ -26,6 +26,8 @@ from vcell_fenics.backend.fsi import (
     step_force_balance_fsi,
     step_prescribed_fsi,
     step_two_phase_fsi,
+    step_two_phase_fsi_with_nonlinear_species,
+    step_two_phase_fsi_with_reacting_species,
     step_two_phase_fsi_with_species,
 )
 from vcell_fenics.backend.geometry import (
@@ -108,6 +110,8 @@ __all__ = [
     "step_force_balance_fsi",
     "step_prescribed_fsi",
     "step_two_phase_fsi",
+    "step_two_phase_fsi_with_nonlinear_species",
+    "step_two_phase_fsi_with_reacting_species",
     "step_two_phase_fsi_with_species",
     "step_with_remeshing",
 ]
