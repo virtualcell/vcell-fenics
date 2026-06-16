@@ -32,6 +32,17 @@ mixture with interphase drag: the membrane tension loads the mixture, the mesh f
 7. **Two-phase relaxation** — a perturbed ellipse relaxes toward the circle, area conserved.
 8. **Drag locks the phases** — with asymmetric phase viscosities the relative slip
    `|v_n − v_s|` shrinks as the interphase drag `ξ` grows.
+
+`step_two_phase_fsi_with_species` carries a **co-moving volume species** `c` through the moving
+cell: the species rides a physical phase (`carrier`) while the mesh moves at the bookkeeping
+velocity, transported by `relative_advection` + the bulk dilution `c ∇·v_carrier`.
+
+9.  **Uniform stays uniform on the incompressible mixture** — the divergence-free mixture
+    carrier injects no spurious source, so a constant species stays constant (round-off).
+10. **Conserved during relaxation** — `∫c` is held to O(dt) as the membrane relaxes.
+11. **Dilution does real work (bulk analogue of `ρ ∇_Γ·v_Γ`)** — a uniform species on the
+    *compressible* network phase concentrates/dilutes (mass conserved); the negative control
+    that drops `c ∇·v_carrier` leaves it spuriously uniform.
 """
 
 from __future__ import annotations
@@ -41,6 +52,7 @@ import math
 import pytest
 import ufl
 from dolfinx import fem
+from dolfinx.fem.petsc import LinearProblem
 
 from vcell_fenics.backend import (
     enclosed_volume,
@@ -48,7 +60,10 @@ from vcell_fenics.backend import (
     step_force_balance_fsi,
     step_prescribed_fsi,
     step_two_phase_fsi,
+    step_two_phase_fsi_with_species,
 )
+from vcell_fenics.backend.fsi import _apply_displacement, _harmonic_displacement, _phase_velocity
+from vcell_fenics.backend.multiphase import solve_two_phase_stokes_surface_tension
 
 
 def _divergence_free_strain(mesh, rate: float) -> fem.Function:  # type: ignore[no-untyped-def]
@@ -222,5 +237,111 @@ def test_two_phase_frame_selects_the_mesh_velocity() -> None:
     v_n, _v_s, p = step_two_phase_fsi(mesh, tension=0.5, drag=1.0, dt=0.02, frame="network")
     assert v_n.x.array.size > 0 and p.x.array.size > 0
 
-    with pytest.raises(ValueError, match="frame must be"):
+    with pytest.raises(ValueError, match="must be 'mixture'"):
         step_two_phase_fsi(mesh, tension=0.5, drag=1.0, dt=0.02, frame="cytoskeleton")
+
+
+# --- a co-moving volume species carried through the moving two-phase cell ---
+
+
+def _total_species(c, mesh) -> float:  # type: ignore[no-untyped-def]
+    from mpi4py import MPI
+
+    local = fem.assemble_scalar(fem.form(c * ufl.dx(domain=mesh)))
+    return float(mesh.comm.allreduce(local, op=MPI.SUM))
+
+
+def _uniform_species(mesh) -> fem.Function:  # type: ignore[no-untyped-def]
+    c = fem.Function(fem.functionspace(mesh, ("Lagrange", 1)))
+    c.x.array[:] = 1.0
+    return c
+
+
+def test_co_moving_species_uniform_on_mixture_stays_uniform() -> None:
+    # The mixture carrier is divergence-free, so its dilution vanishes and a constant species
+    # stays constant — the coupling injects no spurious source.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    c = _uniform_species(mesh)
+    for _ in range(10):
+        step_two_phase_fsi_with_species(mesh, c, tension=0.5, drag=1.0, dt=0.02, diffusivity=0.0)
+    assert float(abs(c.x.array - 1.0).max()) < 1e-10  # stays uniform to round-off
+
+
+def test_co_moving_species_conserved_on_mixture_during_relaxation() -> None:
+    # A non-uniform species riding the (incompressible, no-transmembrane-flux) mixture is
+    # transported as the membrane relaxes with ∫c held to the O(dt) integration error.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(mesh, a=1.3)
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    c = fem.Function(space)
+    c.interpolate(fem.Expression(1.0 + 0.5 * ufl.SpatialCoordinate(mesh)[0], space.element.interpolation_points))
+    mass0 = _total_species(c, mesh)
+    for _ in range(20):
+        step_two_phase_fsi_with_species(mesh, c, tension=0.5, drag=1.0, dt=0.02, diffusivity=0.01)
+    assert abs(_total_species(c, mesh) - mass0) / mass0 < 5e-3  # ∫c conserved, O(dt)
+
+
+def _uniform_on_network(*, with_dilution: bool) -> tuple[float, float]:
+    # One controlled experiment: a uniform species on the *compressible* network phase (asymmetric
+    # viscosities ⇒ ∇·v_n ≠ 0), advanced by an identical loop with the dilution term toggled.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(mesh, a=1.3)
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    c = _uniform_species(mesh)
+    mass0 = _total_species(c, mesh)
+    for _ in range(20):
+        v_n, v_s, _ = solve_two_phase_stokes_surface_tension(
+            mesh, tension=0.5, drag=0.2, viscosity_n=4.0, viscosity_s=0.25
+        )
+        carrier = _phase_velocity("network", v_n, v_s)
+        displacement = _harmonic_displacement(mesh, carrier, 0.02)
+        trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
+        dx = ufl.Measure("dx", domain=mesh)
+        a = (trial / 0.02 * test + ufl.dot(carrier - displacement / 0.02, ufl.grad(trial)) * test) * dx
+        if with_dilution:
+            a = a + trial * ufl.div(carrier) * test * dx
+        updated = fem.Function(space)
+        LinearProblem(
+            a,
+            c / 0.02 * test * dx,
+            u=updated,
+            petsc_options_prefix=f"vcellfenics_test_{id(updated):x}_",
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        ).solve()
+        c.x.array[:] = updated.x.array
+        _apply_displacement(mesh, displacement)
+    return abs(_total_species(c, mesh) - mass0) / mass0, float(abs(c.x.array - 1.0).max())
+
+
+def test_co_moving_species_dilutes_under_compressible_network() -> None:
+    # The bulk dilution c ∇·v_carrier is the volume analogue of the mandatory surface ρ ∇_Γ·v_Γ:
+    # on a compressible phase it makes a uniform species concentrate/dilute while ∫c is conserved.
+    # The negative control (drop the dilution) leaves the species spuriously uniform.
+    mass_drift, deviation = _uniform_on_network(with_dilution=True)
+    assert deviation > 1e-4  # the species responds to the network's compression
+    assert mass_drift < 5e-3  # mass conserved — it redistributes, it does not leak
+
+    _, control_deviation = _uniform_on_network(with_dilution=False)
+    assert control_deviation < 1e-9  # without the dilution it ignores the compression entirely
+
+
+def test_co_moving_species_through_public_step_matches_with_dilution() -> None:
+    # The public step includes the dilution: a uniform species on the compressible network
+    # concentrates (matching the controlled with-dilution loop), not stays uniform.
+    mesh = make_disk_geometry("g", volume_subdomain="c", radius=1.0, h=0.06).mesh_of("c")
+    _stretch_into_ellipse(mesh, a=1.3)
+    c = _uniform_species(mesh)
+    for _ in range(20):
+        step_two_phase_fsi_with_species(
+            mesh,
+            c,
+            tension=0.5,
+            drag=0.2,
+            dt=0.02,
+            diffusivity=0.0,
+            carrier="network",
+            frame="network",
+            viscosity_n=4.0,
+            viscosity_s=0.25,
+        )
+    assert float(abs(c.x.array - 1.0).max()) > 1e-4  # the public step dilutes (includes c∇·v)
