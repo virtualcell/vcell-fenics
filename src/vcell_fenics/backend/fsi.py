@@ -14,6 +14,10 @@ a moving membrane drives an incompressible bulk while the ALE mesh follows. Two 
   mixture with interphase drag: the membrane tension loads the mixture and the mesh follows a
   chosen *frame* phase (§6 of the design note). The mixture-average frame conserves volume via
   the shared mixture pressure, just as the single-phase closure does.
+- `step_two_phase_fsi_with_species` — the same, **carrying a co-moving volume species** through
+  the moving cell. The volume is Eulerian, so the species rides a physical phase while the mesh
+  moves at the bookkeeping velocity; the transport is `relative_advection` plus the bulk
+  dilution `c ∇·v_carrier` (the volume analogue of the mandatory surface `ρ ∇_Γ·v_Γ`).
 
 Each step:
 
@@ -48,6 +52,7 @@ from __future__ import annotations
 
 import ufl
 from dolfinx import fem
+from dolfinx.fem.petsc import LinearProblem
 from dolfinx.mesh import Mesh
 from scipy.spatial import cKDTree
 
@@ -58,17 +63,32 @@ from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tens
 from vcell_fenics.backend.stokes_hdiv import solve_incompressible_stokes_hdiv_slip
 
 
-def _advance_ale_mesh(mesh: Mesh, velocity: UflExpr, dt: float) -> None:
-    """Move `mesh` in place by `dt·velocity`: boundary nodes by the velocity directly, the
-    interior by harmonic extension (the ALE fill). `velocity` is any UFL expression — a solved
-    `Function`, or e.g. a mixture average `0.5·(v_n + v_s)`."""
+def _harmonic_displacement(mesh: Mesh, velocity: UflExpr, dt: float) -> fem.Function:
+    """The ALE mesh displacement `dt·w`: `dt·velocity` on the boundary, harmonically extended
+    into the interior. `w = displacement/dt` is the **mesh velocity** field — the geometric
+    bookkeeping velocity, which the species transport needs as the frame to advect relative to.
+    `velocity` is any UFL expression (a solved `Function` or e.g. `0.5·(v_n + v_s)`)."""
     gdim = mesh.geometry.dim
     lagrange = fem.functionspace(mesh, ("Lagrange", 1, (gdim,)))
     displacement = fem.Function(lagrange)
     displacement.interpolate(fem.Expression(dt * velocity, lagrange.element.interpolation_points))
     _HarmonicExtension(lagrange).fill(displacement)  # boundary kept, interior harmonic
-    geom_from_dof = cKDTree(lagrange.tabulate_dof_coordinates()).query(mesh.geometry.x)[1]
+    return displacement
+
+
+def _apply_displacement(mesh: Mesh, displacement: fem.Function) -> None:
+    """Move `mesh` in place by a P1 vector `displacement` field (permuting dof order → geometry
+    node order, since they differ for a P1 vector field)."""
+    gdim = mesh.geometry.dim
+    dof_coords = displacement.function_space.tabulate_dof_coordinates()
+    geom_from_dof = cKDTree(dof_coords).query(mesh.geometry.x)[1]
     mesh.geometry.x[:, :gdim] += displacement.x.array.reshape(-1, gdim)[geom_from_dof]
+
+
+def _advance_ale_mesh(mesh: Mesh, velocity: UflExpr, dt: float) -> None:
+    """Move `mesh` in place by `dt·velocity`: boundary nodes by the velocity directly, the
+    interior by harmonic extension (the ALE fill)."""
+    _apply_displacement(mesh, _harmonic_displacement(mesh, velocity, dt))
 
 
 def step_prescribed_fsi(
@@ -163,10 +183,91 @@ def step_two_phase_fsi(
         screening_n=screening_n,
         screening_s=screening_s,
     )
-    frame_velocity = {"mixture": 0.5 * (v_n + v_s), "network": v_n, "solvent": v_s}.get(frame)
-    if frame_velocity is None:
-        raise ValueError(f"frame must be 'mixture', 'network', or 'solvent', not {frame!r}")
-    _advance_ale_mesh(mesh, frame_velocity, dt)
+    _advance_ale_mesh(mesh, _phase_velocity(frame, v_n, v_s), dt)
+    return v_n, v_s, p
+
+
+def _phase_velocity(phase: str, v_n: fem.Function, v_s: fem.Function) -> UflExpr:
+    """Select a velocity by phase name: the volume-averaged `"mixture"`, the `"network"` `v_n`,
+    or the `"solvent"` `v_s`. Raises on an unknown name."""
+    velocity = {"mixture": 0.5 * (v_n + v_s), "network": v_n, "solvent": v_s}.get(phase)
+    if velocity is None:
+        raise ValueError(f"phase must be 'mixture', 'network', or 'solvent', not {phase!r}")
+    return velocity
+
+
+def step_two_phase_fsi_with_species(
+    mesh: Mesh,
+    species: fem.Function,
+    *,
+    tension: float,
+    drag: float,
+    dt: float,
+    diffusivity: float,
+    carrier: str = "mixture",
+    frame: str = "mixture",
+    viscosity_n: float = 1.0,
+    viscosity_s: float = 1.0,
+    screening_n: float = 1.0,
+    screening_s: float = 1.0,
+) -> tuple[fem.Function, fem.Function, fem.Function]:
+    """Advance one two-phase FSI step **carrying a co-moving volume species** `c`, in place.
+
+    Solves the surface-tension mixture (`(v_n, v_s, p)`), transports the species, then moves the
+    ALE mesh by the `frame` velocity. The volume is **Eulerian** — it has no material points, so
+    the species rides a *physical phase* (`carrier`) while the mesh moves at the bookkeeping
+    velocity `w` (the harmonic extension of the `frame` velocity). The ALE transport is
+
+        ∂c/∂t|_mesh + (v_carrier − w)·∇c + c ∇·v_carrier = D ∇²c
+
+    — the **relative advection** `(v_carrier − w)·∇c` (`backend/assemble.py`'s term, here on the
+    solved flow) plus the **bulk dilution** `c ∇·v_carrier`, the volume analogue of the
+    mandatory surface dilution `ρ ∇_Γ·v_Γ`. With `carrier = "mixture"` the carrier is
+    divergence-free so the dilution vanishes and `∫c` is conserved; with a single phase
+    (`"network"`/`"solvent"`) the dilution is what keeps `∫c` conserved as that phase compresses.
+
+    `species` is a scalar P1 `Function` on `mesh`, mutated in place (its current values are the
+    backward-Euler previous step). `diffusivity` is `D`; `carrier`/`frame` are phase names
+    (`"mixture"`/`"network"`/`"solvent"`). Returns `(v_n, v_s, p)`. A no-flux (natural) boundary
+    is assumed; when the carrier matches the frame, `v_carrier·n = w·n` on the boundary so there
+    is no transmembrane flux and `∫c` is conserved exactly.
+    """
+
+    v_n, v_s, p = solve_two_phase_stokes_surface_tension(
+        mesh,
+        tension=tension,
+        drag=drag,
+        viscosity_n=viscosity_n,
+        viscosity_s=viscosity_s,
+        screening_n=screening_n,
+        screening_s=screening_s,
+    )
+    carrier_velocity = _phase_velocity(carrier, v_n, v_s)
+    displacement = _harmonic_displacement(mesh, _phase_velocity(frame, v_n, v_s), dt)
+    mesh_velocity = displacement / dt  # w = dt·w / dt
+
+    space = species.function_space
+    c, q = ufl.TrialFunction(space), ufl.TestFunction(space)
+    dx = ufl.Measure("dx", domain=mesh)
+    relative_advection = carrier_velocity - mesh_velocity
+    a = (
+        c / dt * q
+        + diffusivity * ufl.inner(ufl.grad(c), ufl.grad(q))
+        + ufl.dot(relative_advection, ufl.grad(c)) * q  # (v_carrier − w)·∇c
+        + c * ufl.div(carrier_velocity) * q  # bulk dilution c ∇·v_carrier
+    ) * dx
+    rhs = species / dt * q * dx
+
+    updated = fem.Function(space)
+    LinearProblem(
+        a,
+        rhs,
+        u=updated,
+        petsc_options_prefix=f"vcellfenics_fsispecies_{id(updated):x}_",
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+    ).solve()
+    species.x.array[:] = updated.x.array  # in place: the new step becomes next step's previous
+    _apply_displacement(mesh, displacement)
     return v_n, v_s, p
 
 
