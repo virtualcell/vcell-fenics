@@ -30,7 +30,56 @@ So the strategy cannot be "make every model provably correct before it runs." It
 > failure back into a model-level explanation.
 
 The two halves — strong static checks for the templated subset, good runtime translation
-for everything — are complementary, not alternatives.
+for everything — are complementary, not alternatives. But there is a stronger move available
+than treating the escape hatch as a permanent user-facing surface we can only mitigate — see
+§1.1.
+
+## 1.1 The architectural resolution — templates are the user surface, weak forms are the compiler
+
+The framing above quietly assumes the modeler *authors* weak-form terms directly, and that we
+must therefore live with un-guaranteeable models. A better architecture **dissolves the
+tension instead of mitigating it**: treat the weak-form layer as an **intermediate
+representation — a compilation target — not an authoring surface.** The user never (or only in
+an explicit expert mode) writes raw weak forms; they work with **well-posed templates**, and
+those templates *expand* into weak-form terms underneath.
+
+This recovers VCell's guarantee where it matters — at the surface the modeler touches:
+
+- **A problem-generation layer is the front door.** Concretely, a VCell import (the
+  `../pyvcell` integration target) emits models built only from **well-posed templates** —
+  VCell already guarantees that on its side. Templates, not weak forms, are the unit of
+  authoring. A fully templated model is well-posed by construction, exactly as in VCell.
+- **New physics enters as a new template, authored once by an expert**, and *that* template
+  is what compiles to weak-form terms in this formalism. The expressiveness of the escape
+  hatch is still used — but as the *implementation* of a template, paid for once at authoring
+  time, not re-incurred by every modeler. The template carries a well-posedness contract; the
+  weak-form expansion is an implementation detail behind it.
+- **Maturation pipeline — "solidify" proven templates back into the formal layer.** A template
+  begins as an expert-authored weak-form expansion (flexible, fast to prototype). After it has
+  earned trust through use, it is *solidified*: promoted to **first-class formal support** — its
+  own tagged term kinds (ADR 004), dedicated validation rules, dimensional signatures, dedicated
+  diagnostics — so it no longer rides the generic escape hatch. The path is **weak-form
+  expansion → reusable template → first-class formal construct**, in increasing order of
+  guarantee and decreasing order of flexibility. Physics matures *toward* the formal layer over
+  time, rather than each model re-deriving it.
+
+What this does to the strategy:
+
+- The **a-priori guarantee is recovered at the user layer** — because the user layer is
+  templates, not arbitrary weak forms. The strong static checks (§4) apply to the templated
+  surface, which is now *the* surface.
+- The escape hatch's weaker guarantees and the **runtime diagnostics (§5) become primarily a
+  template-author's tool** — used while developing and hardening a new template, and as a
+  backstop — rather than something an end modeler routinely hits. (This reframes the layer just
+  built: it serves the author hardening physics, plus the rare expert-mode user.)
+- **Raw weak-form authoring still exists**, but as a clearly-marked, unsupported expert mode —
+  the place new templates are prototyped — never the default surface, and never carrying a
+  well-posedness promise.
+
+The rest of this note still holds; this section changes *who* each layer serves and *where*
+the guarantee lives, not the layers themselves. §2–§6 describe the machinery; §1.1 says the
+templated surface is the one that must be excellent, and the weak-form layer is the compiler
+behind it.
 
 ## 2. The organizing idea — the *assumed solution class*
 
@@ -191,9 +240,9 @@ Highest value first, each increment self-contained:
 1. **The registry itself** (this note) — near-zero cost, immediate value as documentation,
    and the spec for everything below. Keep it growing.
 2. **Runtime-failure translation** (§5.1) — wrap the solve, map the handful of known
-   failure types to model-level messages. High value precisely for escape-hatch models, and
-   it needs no new theory — just catching and re-phrasing. **Build this first after the
-   registry.**
+   failure types to model-level messages. High value for **template authors** hardening new
+   physics (and the rare expert-mode user), and it needs no new theory — just catching and
+   re-phrasing. **Build this first after the registry.** *(Done — `backend/diagnostics.py`.)*
 3. **A-priori discretization checks** (§4, rows 1, 6, 7) — the cheap symbolic ones
    (require-dilution, inf-sup element pair, nonlinear-source-vs-backward-Euler). New
    `_Validator` methods; immediate, and they turn three runtime surprises into build-time
@@ -207,14 +256,18 @@ Highest value first, each increment self-contained:
 
 ## 8. Non-goals — the honest boundary
 
-- We will **not** recover VCell's full a-priori guarantee for **escape-hatch** models. That
-  is the deliberate cost of arbitrary weak forms; the mitigation is §5, not a promise we
-  cannot keep.
-- Validation will **not** prove well-posedness, stability, or convergence in general — those
-  are undecidable for arbitrary PDEs. We catch *known* failure classes and explain the rest
-  when they occur.
-- The templated subset is where we *can* aim high: a fully templated model should approach
-  "parses ⇒ well-posed," and the §4 checks are how we get there.
+- We will **not** recover VCell's a-priori guarantee for **raw weak-form** authoring — but per
+  §1.1 that is an explicit *expert mode*, not the user surface. At the **templated** surface
+  (the front door — VCell import, the template library) the guarantee *is* recoverable, and
+  that is where we aim for "parses ⇒ well-posed." The escape hatch is the compiler's input
+  language, not the modeler's.
+- Validation will **not** prove well-posedness, stability, or convergence for an *arbitrary*
+  weak form — those are undecidable in general. The discipline that makes this acceptable is
+  §1.1: arbitrary weak forms are written by template *authors*, once, with the runtime
+  diagnostics (§5) and the registry (§6) as their tools — not by end modelers on every model.
+- The cost is borne at **template-authoring** time, not modeling time. A new template must be
+  shown well-posed by its author (helped by §4–§6); once solidified (§1.1) it carries that
+  guarantee for everyone who uses it.
 
 Related: `docs/modeling/declarative-formalism.md` (§1.5 escape hatch, §2.5 validation),
 `docs/decisions/004-discreteproblem-ir.md` (the tagged-term IR that makes per-term runtime
