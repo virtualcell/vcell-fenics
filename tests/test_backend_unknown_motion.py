@@ -39,14 +39,14 @@ math_description:
       variable: v
       subdomain: mem
       temporality: steady_state
-      form: "(eta*inner(v, v_test) - inner(f0 * x / r(x), v_test)) * dx_Gamma"
+      form: "(eta*inner(v, v_test) - inner(f0 * geom.x / geom.radius, v_test)) * dx_Gamma"
       initial_condition: "0"
     - template: surface_pde_with_dilution
       variable: rho
       subdomain: mem
       temporality: time_dependent
       terms: {{ diffusion: "0.02" }}
-      initial_condition: "1.0 + 0.3*cos(2*theta(x))"
+      initial_condition: "1.0 + 0.3*cos(2*geom.azimuth)"
   parameters:
     - {{ name: eta, value: {_ETA} }}
     - {{ name: f0, value: {_F0} }}
@@ -118,7 +118,7 @@ math_description:
       variable: v
       subdomain: mem
       temporality: steady_state
-      form: "(eta*inner(v, v_test) + sigma*H(x)*inner(n(x), v_test)) * dx_Gamma"
+      form: "(eta*inner(v, v_test) + sigma*geom.mean_curvature*inner(geom.normal, v_test)) * dx_Gamma"
       initial_condition: "0"
   parameters:
     - {{ name: eta, value: {_ETA} }}
@@ -200,9 +200,10 @@ math_description:
     - {{ name: rho, subdomain: mem }}
   equations:
     - {{ template: weak_form, variable: v, subdomain: mem, temporality: steady_state,
-        form: "(eta*inner(v, v_test) + sigma*H(x)*inner(n(x), v_test)) * dx_Gamma", initial_condition: "0" }}
+        form: "(eta*inner(v, v_test) + sigma*geom.mean_curvature*inner(geom.normal, v_test)) * dx_Gamma",
+        initial_condition: "0" }}
     - {{ template: surface_pde_with_dilution, variable: rho, subdomain: mem, temporality: time_dependent,
-        terms: {{ diffusion: "0.001" }}, initial_condition: "1.0 + 0.5*cos(2*theta(x))" }}
+        terms: {{ diffusion: "0.001" }}, initial_condition: "1.0 + 0.5*cos(2*geom.azimuth)" }}
   parameters:
     - {{ name: eta, value: {_ETA} }}
     - {{ name: sigma, value: {_SIGMA} }}
@@ -262,7 +263,7 @@ math_description:
       variable: rho
       subdomain: mem
       temporality: steady_state
-      form: "(rho*rho_test - H(x)*rho_test) * dx_Gamma"
+      form: "(rho*rho_test - geom.mean_curvature*rho_test) * dx_Gamma"
 """
     geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=0.2)
     with pytest.raises(CompileError, match=r"curvature projection|mechanics"):

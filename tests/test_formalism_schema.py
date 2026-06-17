@@ -92,7 +92,7 @@ def test_motion_union_isinstance_narrowing() -> None:
     sub_prescribed = Subdomain(
         name="membrane",
         kind="surface",
-        motion=MotionPrescribedVelocity(velocity="r_dot * x / r(x)"),
+        motion=MotionPrescribedVelocity(velocity="r_dot * geom.x / geom.radius"),
     )
     sub_unknown = Subdomain(
         name="membrane2",
@@ -139,7 +139,7 @@ def test_parameter_expression_with_subdomain_scope() -> None:
         name="f_active",
         type="vector",
         subdomain="membrane",
-        expression="[f0 * cos(theta(x)), 0]",
+        expression="[f0 * cos(geom.azimuth), 0]",
     )
     assert p.kind == "expression"
     assert isinstance(p, ParameterExpression)
@@ -150,7 +150,7 @@ def test_parameter_expression_with_subdomain_scope() -> None:
 def test_parameter_expression_default_scope_is_none() -> None:
     p = ParameterExpression(
         name="L_reservoir",
-        expression="1.0 + 0.5 * sin(omega * t)",
+        expression="1.0 + 0.5 * sin(omega * sim.t)",
     )
     assert p.type == "scalar"
     assert p.subdomain is None
@@ -179,7 +179,7 @@ def test_constructs_section_1_4_5_two_species_membrane() -> None:
             Subdomain(
                 name="membrane",
                 kind="surface",
-                motion=MotionPrescribedVelocity(velocity="r_dot * x / r(x)"),
+                motion=MotionPrescribedVelocity(velocity="r_dot * geom.x / geom.radius"),
             ),
         ],
         variables=[
@@ -196,7 +196,7 @@ def test_constructs_section_1_4_5_two_species_membrane() -> None:
                     "diffusion": "0.1",
                     "source": "k_on * rho_inactive - k_off * rho_active",
                 },
-                initial_condition="1.0 + 0.5 * cos(2 * theta(x))",
+                initial_condition="1.0 + 0.5 * cos(2 * geom.azimuth)",
             ),
             TemplateEquation(
                 template="surface_pde_with_dilution",
@@ -305,7 +305,7 @@ def test_constructs_section_1_6_6_ligand_receptor() -> None:
 def test_constructs_section_2_7_end_to_end() -> None:
     weak_form = (
         "( eta * inner(v_membrane, v_membrane_test)"
-        " + sigma_T * H(x) * inner(n(x), v_membrane_test)"
+        " + sigma_T * geom.mean_curvature * inner(geom.normal, v_membrane_test)"
         " - inner(f_active, v_membrane_test)"
         ") * dx_Gamma"
     )
@@ -331,7 +331,7 @@ def test_constructs_section_2_7_end_to_end() -> None:
                 name="f_active",
                 type="vector",
                 subdomain="membrane",
-                expression="[f0 * cos(theta(x)), 0]",
+                expression="[f0 * cos(geom.azimuth), 0]",
             ),
         ],
         equations=[
@@ -348,7 +348,7 @@ def test_constructs_section_2_7_end_to_end() -> None:
                 subdomain="membrane",
                 temporality="time_dependent",
                 terms={"diffusion": "0.05", "source": "-k_off * rho"},
-                initial_condition="1.0 + 0.3 * cos(2 * theta(x))",
+                initial_condition="1.0 + 0.3 * cos(2 * geom.azimuth)",
             ),
         ],
     )
@@ -380,7 +380,7 @@ def test_all_bc_kinds_construct() -> None:
     bcs: list[BoundaryCondition] = [
         BCDirichlet(variable="u", boundary="outer", expression="0"),
         BCNeumann(variable="u", boundary="outer", expression="0"),
-        BCRobin(variable="u", boundary="outer", alpha="1.0", beta="0.5", expression="g(x, t)"),
+        BCRobin(variable="u", boundary="outer", alpha="1.0", beta="0.5", expression="g(geom.x, sim.t)"),
         # Default partition coefficient k is "1".
         BCInterfaceValueEquality(
             variable="u_left",

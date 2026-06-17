@@ -178,8 +178,8 @@ def assemble_coupled(md: MathDescription, geometry: CoupledGeometry, *, dt: floa
     emaps = [geometry.entity_map]
 
     # ---- local residual (per-mesh mass + diffusion) --------------------------
-    bulk_ctx = CompileContext(bulk_mesh, {"x": ufl.SpatialCoordinate(bulk_mesh), **_const_params(md, bulk_mesh)})
-    surf_ctx = CompileContext(surf_mesh, {"x": ufl.SpatialCoordinate(surf_mesh), **_const_params(md, surf_mesh)})
+    bulk_ctx = CompileContext(bulk_mesh, {"geom.x": ufl.SpatialCoordinate(bulk_mesh), **_const_params(md, bulk_mesh)})
+    surf_ctx = CompileContext(surf_mesh, {"geom.x": ufl.SpatialCoordinate(surf_mesh), **_const_params(md, surf_mesh)})
     d_l = compile_expression(parse(bulk_eq.terms["diffusion"]), bulk_ctx)
     f_local = ufl.inner(u_l - ligand_prev, w_l) * dx + dt * d_l * ufl.inner(ufl.grad(u_l), ufl.grad(w_l)) * dx
     f_local += ufl.inner(u_r - surface_prev, w_r) * dx_s
@@ -213,7 +213,7 @@ def assemble_coupled(md: MathDescription, geometry: CoupledGeometry, *, dt: floa
         bulk_var: ligand_prev,
         **_surface_symbols(surface_vars, u_r),
         **_const_params(md, bulk_mesh),
-        "x": ufl.SpatialCoordinate(bulk_mesh),
+        "geom.x": ufl.SpatialCoordinate(bulk_mesh),
     }
     coupling_ctx = CompileContext(bulk_mesh, coupling_symbols)
     zero = fem.Constant(bulk_mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]  # bulk-ds, bulk constant ok
@@ -332,10 +332,10 @@ class _CoupledMeshMotion:
         tdim = bulk.topology.dim
 
         v_bulk = compile_expression(
-            parse(velocity), CompileContext(bulk, {"x": ufl.SpatialCoordinate(bulk), **_const_params(md, bulk)})
+            parse(velocity), CompileContext(bulk, {"geom.x": ufl.SpatialCoordinate(bulk), **_const_params(md, bulk)})
         )
         v_surf = compile_expression(
-            parse(velocity), CompileContext(surf, {"x": ufl.SpatialCoordinate(surf), **_const_params(md, surf)})
+            parse(velocity), CompileContext(surf, {"geom.x": ufl.SpatialCoordinate(surf), **_const_params(md, surf)})
         )
 
         # Bulk harmonic extension: ∇²d = 0 with d = dt·v on the interface boundary and

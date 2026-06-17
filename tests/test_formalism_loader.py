@@ -54,7 +54,7 @@ def test_loads_section_1_4_5_two_species_membrane() -> None:
     assert len(md.subdomains) == 1
     assert md.subdomains[0].name == "membrane"
     assert isinstance(md.subdomains[0].motion, MotionPrescribedVelocity)
-    assert md.subdomains[0].motion.velocity == "r_dot * x / r(x)"
+    assert md.subdomains[0].motion.velocity == "r_dot * geom.x / geom.radius"
     assert [v.name for v in md.variables] == ["rho_active", "rho_inactive"]
     # All variables default to scalar / lagrange_p1.
     assert all(v.type == "scalar" and v.space == "lagrange_p1" for v in md.variables)
@@ -107,7 +107,7 @@ def test_loads_section_2_7_end_to_end() -> None:
     assert isinstance(f_active, ParameterExpression)
     assert f_active.type == "vector"
     assert f_active.subdomain == "membrane"
-    assert f_active.expression == "[f0 * cos(theta(x)), 0]"
+    assert f_active.expression == "[f0 * cos(geom.azimuth), 0]"
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +383,7 @@ def test_load_yaml_treats_singleline_existing_path_as_file() -> None:
 
 
 def test_expression_parameter_no_subdomain_round_trips() -> None:
-    # `L_reservoir = "1.0 + 0.5 * sin(omega * t)"` from the §1.6.6 example
+    # `L_reservoir = "1.0 + 0.5 * sin(omega * sim.t)"` from the §1.6.6 example
     # text. No geometric helpers → no subdomain scope required.
     md = MathDescription(
         geometry="cell",
@@ -391,7 +391,7 @@ def test_expression_parameter_no_subdomain_round_trips() -> None:
         variables=[Variable(name="L", subdomain="extracellular")],
         parameters=[
             ParameterExpression(name="omega", expression="2 * 3.14159"),
-            ParameterExpression(name="L_reservoir", expression="1.0 + 0.5 * sin(omega * t)"),
+            ParameterExpression(name="L_reservoir", expression="1.0 + 0.5 * sin(omega * sim.t)"),
         ],
         equations=[
             TemplateEquation(

@@ -63,7 +63,7 @@ def test_time_dependent_weak_form_reproduces_surface_diffusion() -> None:
     model = _model(
         temporality="time_dependent",
         form="(partial_t(rho) * rho_test + D * inner(grad(rho), grad(rho_test))) * dx_Gamma",
-        ic="1.0 + 0.5 * cos(2 * theta(x))",
+        ic="1.0 + 0.5 * cos(2 * geom.azimuth)",
         params="{ name: D, value: 0.1 }",
     )
     problem = assemble_weak_form(load_yaml(model), _geom(0.05, r), dt=dt)
@@ -95,7 +95,7 @@ def test_membrane_elastic_foundation_force_balance() -> None:
     model = _model(
         variable="u",
         temporality="steady_state",
-        form="(alpha*u*u_test + sigma*inner(grad(u),grad(u_test)) - f0*cos(2*theta(x))*u_test) * dx_Gamma",
+        form="(alpha*u*u_test + sigma*inner(grad(u),grad(u_test)) - f0*cos(2*geom.azimuth)*u_test) * dx_Gamma",
         params="{ name: alpha, value: 2.0 }, { name: sigma, value: 0.5 }, { name: f0, value: 1.0 }",
     )
     problem = assemble_weak_form(load_yaml(model), _geom(0.04, r), dt=1.0)
@@ -117,7 +117,7 @@ def test_vector_viscous_force_balance() -> None:
         variable="v",
         vtype="vector",
         temporality="steady_state",
-        form="(eta*inner(v, v_test) - inner([f0*cos(theta(x)), 0], v_test)) * dx_Gamma",
+        form="(eta*inner(v, v_test) - inner([f0*cos(geom.azimuth), 0], v_test)) * dx_Gamma",
         params="{ name: eta, value: 1.0 }, { name: f0, value: 0.3 }",
     )
     problem = assemble_weak_form(load_yaml(model), _geom(0.05), dt=1.0)

@@ -130,7 +130,8 @@ class ParameterExpression:
 
     `expression` is a raw string in the §1.8 vocabulary, evaluated in the
     surrounding context at every use site. `subdomain` is required if the
-    expression body references any geometric helper (n, H, theta, …); the
+    expression body references any subdomain-relative geometry quantity
+    (geom.normal, geom.mean_curvature, geom.azimuth, …); the
     validator enforces this (§1.11.10) and rejects uses from incompatible
     contexts.
     """

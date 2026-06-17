@@ -46,7 +46,7 @@ math_description:
       kind: surface
       motion:
         kind: prescribed
-        velocity: "r_dot * x / r(x)"
+        velocity: "r_dot * geom.x / geom.radius"
   variables:
     - { name: rho, subdomain: membrane }
   equations:
@@ -201,7 +201,7 @@ math_description:
       variable: rho
       subdomain: membrane
       temporality: time_dependent
-      initial_condition: "1.0 + 0.5*cos(2*theta(x))"
+      initial_condition: "1.0 + 0.5*cos(2*geom.azimuth)"
 """
 
 

@@ -91,8 +91,12 @@ def parse(source: str) -> Expr:
 # Order matters: "**" before "*". Numbers accept optional fraction and a
 # signed scientific exponent; a leading sign is the parser's unary-minus job,
 # not the lexer's, so it is not part of the number pattern.
+# A name is an identifier, optionally a dotted *qualified* name (`geom.x`, `sim.t`) — the
+# namespaced built-ins of ADR 006. Each dotted segment is a separate identifier, so `geom.x`
+# is a single name token (and `geom.x[0]` is that token indexed). The number pattern is tried
+# first for a leading digit, so a dot only joins identifiers, never digits.
 _NUMBER_RE = re.compile(r"(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
-_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _OPERATORS = ("**", "+", "-", "*", "/", "(", ")", "[", "]", ",")
 
 

@@ -31,7 +31,7 @@ Expression-level checks (parse + AST walk):
 - Parameter expressions — no variable references, acyclic parameter graph, a
   `subdomain:` scope when geometric helpers appear, and scope-compatible use
   sites (§1.8.3, §1.11.3, §2.2.3).
-- Initial conditions — no references to `t` or to state variables (§1.11.8).
+- Initial conditions — no references to `sim.t` or to state variables (§1.11.8).
 - Weak forms — `partial_t(governed)` present iff `time_dependent`, and the
   `<governed>_test` function referenced at least once (§1.9.5, §2.3.5).
 - Operator usage — the narrow rule (no calculus on the slot's own variable) and
@@ -87,13 +87,15 @@ from vcell_fenics.formalism.schema import (
 from vcell_fenics.formalism.templates import REGISTRY
 from vcell_fenics.formalism.vocabulary import (
     CALCULUS_OPERATORS,
-    GEOMETRIC_HELPERS,
+    GEOMETRY_MEMBERS,
     MEASURES,
+    QUALIFIED_BUILTINS,
+    RESERVED_CALLABLES,
     RESERVED_NAMES,
+    SCOPED_GEOMETRY_NAMES,
+    SIMULATION_MEMBERS,
     STANDARD_FUNCTIONS,
     TENSOR_ALGEBRA,
-    TIME_DERIVATIVE,
-    TRACE,
 )
 
 Severity = Literal["error", "warning"]
@@ -102,10 +104,8 @@ Severity = Literal["error", "warning"]
 # the trace direction rule (§1.8.2) compare dimensions without the ambient d.
 _KIND_RANK: dict[str, int] = {"point": 0, "curve": 1, "surface": 2, "volume": 3}
 
-# Names that may appear only as a call's callee, never as a bare value.
-_CALLABLE_NAMES: frozenset[str] = (
-    STANDARD_FUNCTIONS | GEOMETRIC_HELPERS | CALCULUS_OPERATORS | TENSOR_ALGEBRA | TRACE | TIME_DERIVATIVE
-)
+# Names that may appear only as a call's callee, never as a bare value (operators/functions).
+_CALLABLE_NAMES: frozenset[str] = RESERVED_CALLABLES
 
 _ExprKind = Literal["motion", "parameter", "term_slot", "initial_condition", "weak_form"]
 
@@ -744,7 +744,7 @@ class _Validator:
             for arg in node.args:
                 self._walk(arg, ctx)
             return
-        if callee in STANDARD_FUNCTIONS or callee in GEOMETRIC_HELPERS or callee in TENSOR_ALGEBRA:
+        if callee in STANDARD_FUNCTIONS or callee in TENSOR_ALGEBRA:
             for arg in node.args:
                 self._walk(arg, ctx)
             return
@@ -769,11 +769,8 @@ class _Validator:
         if nm in self._param_names:
             self._check_param_use_site(nm, ctx)
             return
-        if nm == "t":
-            if ctx.kind == "initial_condition":
-                self._error(ctx.path, "initial condition may not reference time t (§1.11.8)")
-            return
-        if nm == "x":
+        if "." in nm:  # a namespaced built-in: geom.* / sim.* (ADR 006)
+            self._resolve_qualified_name(nm, ctx)
             return
         if nm in MEASURES:
             self._error(ctx.path, f"measure {nm!r} is only valid in a weak-form 'form:' expression (§2.3.4)")
@@ -801,6 +798,28 @@ class _Validator:
             return
         self._error(ctx.path, f"unknown name {nm!r}")
 
+    def _resolve_qualified_name(self, nm: str, ctx: _ExprContext) -> None:
+        """Validate a namespaced built-in `geom.*` / `sim.*` (ADR 006): reject an unknown member
+        and `sim.t` in an initial condition (§1.11.8); otherwise accept. Availability of the
+        mechanics-only quantities (`geom.normal` / `geom.mean_curvature`) and the parameter-scope
+        rule for subdomain-relative geometry (§2.2.3) are enforced elsewhere."""
+
+        root, _, member = nm.partition(".")
+        if root == "geom":
+            if member not in GEOMETRY_MEMBERS:
+                members = ", ".join(f"geom.{m}" for m in sorted(GEOMETRY_MEMBERS))
+                self._error(ctx.path, f"unknown geometry quantity {nm!r}; valid members are {members}")
+            return
+        if root == "sim":
+            if member not in SIMULATION_MEMBERS:
+                members = ", ".join(f"sim.{m}" for m in sorted(SIMULATION_MEMBERS))
+                self._error(ctx.path, f"unknown simulation quantity {nm!r}; valid members are {members}")
+                return
+            if member == "t" and ctx.kind == "initial_condition":
+                self._error(ctx.path, "initial condition may not reference time sim.t (§1.11.8)")
+            return
+        self._error(ctx.path, f"unknown name {nm!r}")
+
     def _reject_variable_in_restricted_context(self, nm: str, ctx: _ExprContext) -> bool:
         """Emit the right diagnostic when a variable is referenced where
         variables are disallowed (parameter expressions, ICs). Returns True iff
@@ -809,8 +828,8 @@ class _Validator:
         if ctx.kind == "parameter":
             self._error(
                 ctx.path,
-                f"parameter expression may not reference the variable {nm!r}; parameters depend only on t, x, "
-                f"geometric helpers, and other parameters (§1.8.3)",
+                f"parameter expression may not reference the variable {nm!r}; parameters depend only on sim.t, "
+                f"geom.* quantities, and other parameters (§1.8.3)",
             )
             return True
         if ctx.kind == "initial_condition":
@@ -947,7 +966,9 @@ class _Validator:
         return any(self._contains_partial_t_of(child, var) for child in self._children(node))
 
     def _uses_geometric_helper(self, node: Expr) -> bool:
-        if isinstance(node, FunctionCall) and node.callee in GEOMETRIC_HELPERS:
+        # Subdomain-relative geometry (`geom.normal`, `geom.radius`, …, but not the globally
+        # available `geom.x`) requires a `subdomain:` scope where it appears (§2.2.3).
+        if isinstance(node, Name) and node.name in SCOPED_GEOMETRY_NAMES:
             return True
         return any(self._uses_geometric_helper(child) for child in self._children(node))
 
@@ -1095,10 +1116,6 @@ class _Validator:
                 if arg_type not in ("scalar", "error"):
                     self._error(ctx.path, f"{callee}(...) requires scalar arguments, got {arg_type} (§1.11.5)")
             return "scalar"
-        if callee in GEOMETRIC_HELPERS:
-            for a in args:
-                self._infer(a, ctx)
-            return "vector" if callee in ("n", "tangent") else "scalar"
         return "error"  # unknown function or measure — already handled in the resolution walk
 
     def _calculus_type(self, callee: str, args: tuple[Expr, ...], ctx: _ExprContext) -> _Type:
@@ -1142,10 +1159,17 @@ class _Validator:
                 return local.type
         if nm in self._param_names:
             return self._param_type(nm)
-        if nm == "t":
-            return "scalar"
-        if nm == "x":
+        if "." in nm:  # a namespaced built-in: geom.* / sim.* (ADR 006)
+            return self._qualified_type(nm)
+        return "error"
+
+    def _qualified_type(self, nm: str) -> _Type:
+        # geom.x, geom.normal, geom.tangent are vectors; the curvatures, radius, azimuth, and the
+        # sim.* quantities are scalars. Unknown members are already diagnosed in the resolution walk.
+        if nm in ("geom.x", "geom.normal", "geom.tangent"):
             return "vector"
+        if nm in QUALIFIED_BUILTINS:
+            return "scalar"
         return "error"
 
     def _param_type(self, nm: str) -> _Type:

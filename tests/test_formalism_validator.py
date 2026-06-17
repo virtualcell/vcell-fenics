@@ -72,9 +72,18 @@ def test_steady_state_motion_variable_may_have_ic() -> None:
 
 def test_reserved_name_as_parameter_is_rejected() -> None:
     md = _load("section_1_4_5.yaml")
-    # `r` is the radial geometric helper (§1.8.4) — reserved.
-    bad = dataclasses.replace(md, parameters=[*md.parameters, ParameterConstant(name="r", value=1.0)])
+    # The bare value namespace belongs to the user (ADR 006): only the namespace roots `geom`/`sim`
+    # are reserved. `r` is now a legal user name; `geom` is not.
+    bad = dataclasses.replace(md, parameters=[*md.parameters, ParameterConstant(name="geom", value=1.0)])
     assert any("reserved name" in m for m in _errors(bad))
+
+
+def test_user_may_take_a_former_helper_name() -> None:
+    # The collision that motivated ADR 006: short physical names (`r`, `phi`, `theta`, `n`, `x`, …)
+    # were reserved geometric helpers; they are now the user's to take.
+    md = _load("section_1_4_5.yaml")
+    ok = dataclasses.replace(md, parameters=[*md.parameters, ParameterConstant(name="r", value=1.0)])
+    assert not any("reserved name" in m for m in _errors(ok))
 
 
 def test_parameter_shadowing_a_variable_is_rejected() -> None:
@@ -228,7 +237,7 @@ def test_validate_or_raise_raises_on_error() -> None:
 
 
 def _moving_weak_form_model(form: str, *, moving: bool = True, vtype: str = "scalar") -> str:
-    motion = '{ kind: prescribed, velocity: "rate * x / r(x)" }' if moving else "{ kind: none }"
+    motion = '{ kind: prescribed, velocity: "rate * geom.x / geom.radius" }' if moving else "{ kind: none }"
     return f"""
 math_description:
   geometry: disk_membrane
@@ -254,7 +263,7 @@ def _warnings(model_yaml: str) -> list[str]:
 
 
 _DT_DIFF = "partial_t(rho) * rho_test + D * inner(grad_surf(rho), grad_surf(rho_test))"
-_DILUTION = " + rho * div_surf(rate * x / r(x)) * rho_test"
+_DILUTION = " + rho * div_surf(rate * geom.x / geom.radius) * rho_test"
 
 
 def test_moving_density_weak_form_without_dilution_warns() -> None:

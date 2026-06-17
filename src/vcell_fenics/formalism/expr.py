@@ -66,11 +66,12 @@ class IndexAccess:
 @dataclass(frozen=True, slots=True)
 class FunctionCall:
     """A call `callee(arg, ...)`. Covers every callable in the vocabulary
-    (§2.3.4): standard functions (`sin`, `if`, …), geometric helpers
-    (`n`, `H`, `theta`, …), calculus operators (`grad`, `lapl_beltrami`, …),
-    `trace`, tensor algebra (`inner`, `outer`, `cross`), `partial_t`, and the
-    parametrised measures (`ds(<boundary>)`, …). The callee is kept as a raw
-    name; the validator dispatches on it."""
+    (§2.3.4): standard functions (`sin`, `if`, …), calculus operators
+    (`grad`, `lapl_beltrami`, …), `trace`, tensor algebra (`inner`, `outer`,
+    `cross`), `partial_t`, and the parametrised measures (`ds(<boundary>)`, …).
+    Geometric quantities are namespaced *values* (`geom.normal`, `geom.azimuth`;
+    ADR 006), not calls, so they parse as `Name`, not `FunctionCall`. The callee
+    is kept as a raw name; the validator dispatches on it."""
 
     callee: str
     args: tuple[Expr, ...]

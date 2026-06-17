@@ -99,7 +99,7 @@ math_description:
       temporality: time_dependent
       terms:
         diffusion: "{diffusion}"
-      initial_condition: "cos({PI} * x[0]) * cos({PI} * x[1])"
+      initial_condition: "cos({PI} * geom.x[0]) * cos({PI} * geom.x[1])"
 """)
 
 
@@ -120,7 +120,7 @@ math_description:
       temporality: time_dependent
       terms:
         diffusion: "{diffusion}"
-      initial_condition: "cos({k} * theta(x))"
+      initial_condition: "cos({k} * geom.azimuth)"
 """)
 
 

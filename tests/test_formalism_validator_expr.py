@@ -156,14 +156,14 @@ def test_parameter_expression_cycle_is_rejected() -> None:
 
 
 def test_parameter_expression_with_helper_needs_scope() -> None:
-    md = _surface_model(parameters=[ParameterExpression(name="p", expression="theta(x)")])
+    md = _surface_model(parameters=[ParameterExpression(name="p", expression="geom.azimuth")])
     assert any("declares no 'subdomain:' scope" in m for m in _errors(md))
 
 
 def test_scoped_parameter_helper_is_accepted_on_its_subdomain() -> None:
     md = _surface_model(
         source="p * rho",
-        parameters=[ParameterExpression(name="p", expression="theta(x)", subdomain="membrane")],
+        parameters=[ParameterExpression(name="p", expression="geom.azimuth", subdomain="membrane")],
     )
     assert validate(md) == []
 
@@ -179,7 +179,7 @@ def test_scoped_parameter_used_from_wrong_subdomain_is_rejected() -> None:
             Variable(name="c", subdomain="cyto"),
             Variable(name="rho", subdomain="membrane"),
         ],
-        parameters=[ParameterExpression(name="curv", expression="H(x)", subdomain="membrane")],
+        parameters=[ParameterExpression(name="curv", expression="geom.mean_curvature", subdomain="membrane")],
         equations=[
             TemplateEquation(
                 template="bulk_radv_diff",
@@ -208,7 +208,8 @@ def test_scoped_parameter_used_from_wrong_subdomain_is_rejected() -> None:
 
 
 def test_ic_referencing_time_is_rejected() -> None:
-    assert any("may not reference time t" in m for m in _errors(_surface_model(ic="t")))
+    # Time is `sim.t` (ADR 006); bare `t` is now a free user name, so the IC restriction is on it.
+    assert any("may not reference time sim.t" in m for m in _errors(_surface_model(ic="sim.t")))
 
 
 def test_ic_referencing_state_variable_is_rejected() -> None:

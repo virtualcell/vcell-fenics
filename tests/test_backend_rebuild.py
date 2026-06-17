@@ -52,14 +52,14 @@ math_description:
       subdomain: membrane
       temporality: time_dependent
       terms: { diffusion: "0.1" }
-      initial_condition: "1.0 + 0.5 * cos(2 * theta(x))"
+      initial_condition: "1.0 + 0.5 * cos(2 * geom.azimuth)"
 """
 
 _MOVING_MEMBRANE = """
 math_description:
   geometry: disk_membrane
   subdomains:
-    - { name: membrane, kind: surface, motion: { kind: prescribed, velocity: "r_dot * x / r(x)" } }
+    - { name: membrane, kind: surface, motion: { kind: prescribed, velocity: "r_dot * geom.x / geom.radius" } }
   variables:
     - { name: rho, subdomain: membrane }
   equations:
@@ -67,7 +67,7 @@ math_description:
       variable: rho
       subdomain: membrane
       temporality: time_dependent
-      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"
+      initial_condition: "1.0 + 0.3 * cos(2 * geom.azimuth)"
   parameters:
     - { name: r_dot, value: 1.0 }
 """
@@ -85,7 +85,7 @@ math_description:
       subdomain: cytoplasm
       temporality: time_dependent
       terms: { diffusion: "0.2" }
-      initial_condition: "1.0 + 0.3 * x[0]"
+      initial_condition: "1.0 + 0.3 * geom.x[0]"
 """
 
 _SECTION_1_4_5 = Path(__file__).parent / "fixtures" / "section_1_4_5.yaml"

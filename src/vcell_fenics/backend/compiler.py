@@ -3,24 +3,26 @@
 This is the `AST → UFL` stage of the pipeline (ADR 004). It walks the syntactic
 AST from `formalism.expr` and emits UFL, resolving each `Name` through a
 `CompileContext` whose symbol table maps formalism names to concrete UFL objects
-(parameters → `fem.Constant`, and — in later increments — variables → the
-solution `Function`, `x` → `SpatialCoordinate`, helpers and calculus operators).
+(parameters → `fem.Constant`, the namespaced built-ins `geom.x` → `SpatialCoordinate` and
+`sim.t` → time Constant, variables → the solution `Function`, and calculus operators).
 
 UFL is itself the expression IR; there is no second representation here. The
 compiler assumes the expression has already passed validation (`formalism.validator`),
 so an unresolved name or unsupported construct is an internal error, raised as
 `CompileError` rather than returned as a diagnostic.
 
-Supported so far: numeric literals, name lookups (parameters, `x` → SpatialCoordinate,
-and — in a weak form — variables, test functions, and measures the assembler binds),
-arithmetic (`+ - * / **`, unary `±`), coordinate indexing (`x[0]`), the standard
-scalar math functions, the geometric helpers `theta`/`r`, `trace(·)` (§1.8.2),
-**vector literals** `[a, b]`, **tensor-algebra** (`inner`/`dot`/`outer`/`cross`),
-**first-order calculus** (`grad`/`div`/`lapl` and the `_surf`/`_beltrami` variants,
-which on a codim-1 submesh are the same UFL calls), and **`partial_t(u)`** (resolved
-to the time-discretised derivative the assembler bound — the weak-form escape hatch).
-The `n(x)`/`H(x)`/tangent/curvature geometric helpers, multi-argument standard
-functions, and tensor literals raise `CompileError` until the increments that add them.
+Supported so far: numeric literals, name lookups (parameters, the namespaced built-ins
+`geom.x` → SpatialCoordinate and `sim.t` → time Constant, and — in a weak form — variables,
+test functions, and measures the assembler binds), arithmetic (`+ - * / **`, unary `±`),
+coordinate indexing (`geom.x[0]`), the standard scalar math functions, the geometry quantities
+`geom.radius`/`geom.azimuth` (sugar for functions of position) and `geom.normal`/
+`geom.mean_curvature` (bound by a mechanics solve), `trace(·)` (§1.8.2), **vector literals**
+`[a, b]`, **tensor-algebra** (`inner`/`dot`/`outer`/`cross`), **first-order calculus**
+(`grad`/`div`/`lapl` and the `_surf`/`_beltrami` variants, which on a codim-1 submesh are the
+same UFL calls), and **`partial_t(u)`** (resolved to the time-discretised derivative the
+assembler bound — the weak-form escape hatch). The `geom.tangent`/`geom.curvature1`/
+`geom.curvature2` quantities, multi-argument standard functions, and tensor literals raise
+`CompileError` until the increments that add them.
 
 `trace(u)` compiles to `u`'s UFL object unchanged: the cross-dimensional *restriction*
 of a bulk variable onto a lower-dimensional evaluation domain is realised by native
@@ -98,6 +100,8 @@ def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
         # callable scalar alias at runtime.
         return fem.Constant(ctx.mesh, PETSc.ScalarType(node.value))  # type: ignore[operator]
     if isinstance(node, Name):
+        if "." in node.name:  # a namespaced built-in: geom.* / sim.* (ADR 006)
+            return _resolve_qualified(node.name, ctx)
         try:
             return ctx.symbols[node.name]
         except KeyError:
@@ -131,6 +135,43 @@ def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
     raise CompileError(f"{type(node).__name__} is not supported by the backend yet")
 
 
+def _resolve_qualified(name: str, ctx: CompileContext) -> UflExpr:
+    """Resolve a namespaced built-in quantity `geom.*` / `sim.*` to its UFL object (ADR 006).
+
+    `geom.x` (position) and `sim.t` (time) are bound directly in the symbol table by the
+    assembler; the curvilinear `geom.radius` / `geom.azimuth` are sugar for functions of the
+    position field; `geom.normal` / `geom.mean_curvature` resolve to the projected surface normal
+    and mean curvature a mechanics assembler binds (on a discrete membrane these are not
+    pointwise-defined — they come from a weak projection κ = H·n — so they are unavailable
+    outside a force-balance solve)."""
+
+    root, _, member = name.partition(".")
+    if root == "geom":
+        if member == "x":
+            return ctx.symbols["geom.x"]
+        if member == "radius":
+            x = ctx.symbols["geom.x"]
+            return ufl.sqrt(ufl.dot(x, x))
+        if member == "azimuth":
+            x = ctx.symbols["geom.x"]
+            return ufl.atan2(x[1], x[0])
+        if member in ("normal", "mean_curvature"):
+            bound = ctx.symbols.get("__normal__" if member == "normal" else "__mean_curvature__")
+            if bound is None:
+                quantity = "normal" if member == "normal" else "mean curvature"
+                raise CompileError(
+                    f"geom.{member} (surface {quantity}) is only available where the curvature projection is "
+                    f"bound — i.e. in a mechanics (force-balance) solve"
+                )
+            return bound
+        raise CompileError(f"geom.{member} is not supported by the backend yet")
+    if root == "sim":
+        if member == "t":
+            return ctx.symbols["sim.t"]
+        raise CompileError(f"sim.{member} is not supported by the backend yet")
+    raise CompileError(f"unresolved name {name!r} (not in the compile context)")
+
+
 def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
     # `partial_t(<var>)` resolves to the backend's time-discretised derivative, so it
     # is looked up by *name* (not compiled as an expression) — only valid in a
@@ -147,26 +188,6 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
         return derivative
 
     args = [compile_expression(arg, ctx) for arg in node.args]
-    # Geometric helpers that are sugar for functions of x (§1.8.4).
-    if node.callee == "theta":
-        x = args[0]
-        return ufl.atan2(x[1], x[0])
-    if node.callee == "r":
-        x = args[0]
-        return ufl.sqrt(ufl.dot(x, x))
-    # Surface normal / mean curvature (§1.8.4). On a discrete membrane these are not
-    # pointwise-defined (a polygon's curvature is vertex-concentrated), so they are
-    # resolved from a *projected* mean-curvature vector κ = H·n (the weak surface
-    # Laplacian of position) that the mechanics assembler binds: `n(x)` = κ/|κ|,
-    # `H(x)` = |κ|. Unavailable elsewhere.
-    if node.callee in ("n", "H"):
-        bound = ctx.symbols.get("__normal__" if node.callee == "n" else "__mean_curvature__")
-        if bound is None:
-            raise CompileError(
-                f"{node.callee}(x) (surface {'normal' if node.callee == 'n' else 'mean curvature'}) is only "
-                f"available where the curvature projection is bound — i.e. in a mechanics (force-balance) solve"
-            )
-        return bound
     if node.callee == "trace":
         # The trace of a higher-dimensional variable onto a lower-dimensional
         # evaluation domain (§1.8.2). At the UFL level this is the variable itself;

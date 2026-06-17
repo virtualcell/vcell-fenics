@@ -69,7 +69,7 @@ def _cell_volumes(dp: DiscreteProblem) -> np.ndarray:
 
 
 def test_boundary_follows_prescribed_motion() -> None:
-    dp = _problem("x", dt=0.1)  # velocity = position ⇒ each node moves dt·x outward
+    dp = _problem("geom.x", dt=0.1)  # velocity = position ⇒ each node moves dt·x outward
     boundary = _radii(dp) > 0.99  # nodes that start on the unit-circle boundary
 
     for _ in range(5):
@@ -85,7 +85,7 @@ def test_boundary_follows_prescribed_motion() -> None:
 
 
 def test_affine_motion_preserves_cell_ratio_exactly() -> None:
-    dp = _problem("x", dt=0.1)
+    dp = _problem("geom.x", dt=0.1)
     vols = _cell_volumes(dp)
     ratio_before = vols.max() / vols.min()
 
@@ -112,7 +112,7 @@ def test_harmonic_fill_smooths_the_interior_instead_of_dragging() -> None:
     # ∂Ω, so the smooth fill is dt·x and a node's displacement scales with its radius
     # — the centre barely moves while the boundary moves by dt.
     dt = 0.05
-    dp = _problem("x / r(x)", dt=dt)
+    dp = _problem("geom.x / geom.radius", dt=dt)
     xy = dp.V.mesh.geometry.x[:, :2]
     centre = int(np.argmin(np.linalg.norm(xy, axis=1)))  # node nearest the origin
     edge = int(np.argmax(np.linalg.norm(xy, axis=1)))  # a boundary node
@@ -140,7 +140,7 @@ def test_harmonic_fill_smooths_the_interior_instead_of_dragging() -> None:
 def test_nonuniform_motion_keeps_cells_valid() -> None:
     # Angle-dependent radial speed: a non-affine boundary motion that distorts the
     # mesh. Harmonic extension keeps the interior valid (no inverted cells).
-    dp = _problem("(1.0 + 0.5 * cos(2 * theta(x))) * x / r(x)", dt=0.03)
+    dp = _problem("(1.0 + 0.5 * cos(2 * geom.azimuth)) * geom.x / geom.radius", dt=0.03)
 
     for _ in range(10):
         dp.step()
@@ -167,7 +167,7 @@ math_description:
       subdomain: cyto
       temporality: time_dependent
       terms: { diffusion: "0.0" }
-      initial_condition: "1.0 + 0.3*x[0]"
+      initial_condition: "1.0 + 0.3*geom.x[0]"
 """
 
 

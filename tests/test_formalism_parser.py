@@ -62,16 +62,18 @@ def test_whitespace_is_insignificant() -> None:
 
 
 def test_index_access_on_coordinate() -> None:
-    assert parse("x[0]") == IndexAccess(base=Name(name="x"), index=Number(value=0.0))
+    # `geom.x` is a single qualified name token (ADR 006), indexed by component.
+    assert parse("geom.x[0]") == IndexAccess(base=Name(name="geom.x"), index=Number(value=0.0))
 
 
 def test_vector_literal() -> None:
-    assert parse("[f0 * cos(theta(x)), 0]") == VectorLiteral(
+    # `geom.azimuth` parses as a qualified Name (a value), not a `theta(x)` call.
+    assert parse("[f0 * cos(geom.azimuth), 0]") == VectorLiteral(
         components=(
             BinaryOp(
                 op="*",
                 left=Name(name="f0"),
-                right=FunctionCall(callee="cos", args=(FunctionCall(callee="theta", args=(Name(name="x"),)),)),
+                right=FunctionCall(callee="cos", args=(Name(name="geom.azimuth"),)),
             ),
             Number(value=0.0),
         )
@@ -188,20 +190,20 @@ def test_leading_unary_minus_on_term() -> None:
 
 
 FIXTURE_EXPRESSIONS = [
-    "r_dot * x / r(x)",
+    "r_dot * geom.x / geom.radius",
     "k_on * rho_inactive - k_off * rho_active",
-    "1.0 + 0.5 * cos(2 * theta(x))",
+    "1.0 + 0.5 * cos(2 * geom.azimuth)",
     "-k_on * rho_inactive + k_off * rho_active",
     "0.5",
     "-(k_on * trace(L) * rho_f - k_off * rho_b)",
     "k_on * trace(L) * rho_f - k_off * rho_b",
     "L_reservoir",
-    "[f0 * cos(theta(x)), 0]",
-    "1.0 + 0.3 * cos(2 * theta(x))",
+    "[f0 * cos(geom.azimuth), 0]",
+    "1.0 + 0.3 * cos(2 * geom.azimuth)",
     # The §2.7 weak-form residual: multi-line, _test functions, dx_Gamma measure.
     """
     ( eta * inner(v_membrane, v_membrane_test)
-      + sigma_T * H(x) * inner(n(x), v_membrane_test)
+      + sigma_T * geom.mean_curvature * inner(geom.normal, v_membrane_test)
       - inner(f_active, v_membrane_test)
     ) * dx_Gamma
     """,
