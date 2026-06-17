@@ -34,15 +34,17 @@ import requests
 
 _DEFAULT_OUT = Path(__file__).resolve().parent.parent / "vcml_biomodels"
 
-# The VCML-download endpoint has moved before; the generated client's path 500'd, so we
-# call the REST API directly (reusing the OAuth token, like list_biomodels does) and probe
-# a few path/Accept variants, pinning the first that works. Ordered by likelihood.
+# The VCML-download endpoint is `/api/v1/bioModel/{id}/vcml_download`, and it @Produces
+# `text/xml` ONLY — `application/xml` 500s with NotAcceptableException, which is why the
+# generated client (and an earlier guess) failed. We call the REST API directly (reusing
+# the OAuth token, like list_biomodels) with the confirmed combo first, keeping the others
+# as fallbacks in case the API shifts again; the first combo returning real VCML is pinned.
 _VCML_PATH_TEMPLATES = (
     "/api/v1/bioModel/{id}/vcml_download",
     "/api/v1/bioModel/{id}/biomodel.vcml",
     "/api/v1/bioModel/{id}/vcml",
 )
-_ACCEPT_HEADERS = ("application/xml", "text/xml", "*/*")
+_ACCEPT_HEADERS = ("text/xml", "*/*", "application/xml")
 
 
 def _slug(name: str) -> str:
@@ -54,6 +56,11 @@ def _slug(name: str) -> str:
 def _looks_like_vcml(text: str) -> bool:
     head = text.lstrip()[:400].lower()
     return "<vcml" in head or "<biomodel" in head or ("<?xml" in head and "vcml" in head)
+
+
+def _snippet(text: str, n: int = 200) -> str:
+    """A one-line body snippet — strip CR/LF (VCML uses \\r\\n, which clobbers terminal output)."""
+    return text.replace("\r", " ").replace("\n", " ").strip()[:n]
 
 
 def _fetch_vcml(
@@ -79,8 +86,7 @@ def _fetch_vcml(
         if resp.status_code == 200 and _looks_like_vcml(resp.text):
             pinned["path"], pinned["accept"] = path_template, accept
             return resp.text, ""
-        body = resp.text.replace("\n", " ")[:300]
-        last = f"{path_template} [{accept}] -> HTTP {resp.status_code}: {body}"
+        last = f"{path_template} [{accept}] -> HTTP {resp.status_code}: {_snippet(resp.text)}"
     return None, last
 
 
@@ -102,8 +108,7 @@ def _diagnose(host: str, token: str | None, model_ids: list[str], timeout: float
                     continue
                 ok = "OK " if (resp.status_code == 200 and _looks_like_vcml(resp.text)) else "   "
                 ct = resp.headers.get("content-type", "?")
-                body = resp.text.replace("\n", " ").strip()[:200]
-                print(f"  {ok}{path_template} [{accept}] -> {resp.status_code} ct={ct}  {body}")
+                print(f"  {ok}{path_template} [{accept}] -> {resp.status_code} ct={ct}  {_snippet(resp.text)}")
 
 
 def main() -> int:
