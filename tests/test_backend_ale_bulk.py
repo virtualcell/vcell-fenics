@@ -32,7 +32,7 @@ from vcell_fenics.backend import (
 from vcell_fenics.formalism import load_yaml
 
 
-def _model(velocity: str, *, ic: str = "1.0 + 0.3 * x[0]") -> str:
+def _model(velocity: str, *, ic: str = "1.0 + 0.3 * geom.x[0]") -> str:
     return f"""
 math_description:
   geometry: disk_2d
@@ -52,7 +52,7 @@ math_description:
 
 # Angle-dependent radial speed: a non-affine bulk motion whose harmonic interior
 # fill still distorts over time (the curve stays a simple radial graph).
-_DISTORTING = "(1.0 + 0.7 * cos(2 * theta(x))) * x / r(x)"
+_DISTORTING = "(1.0 + 0.7 * cos(2 * geom.azimuth)) * geom.x / geom.radius"
 
 
 def _geom(h: float = 0.18):  # type: ignore[no-untyped-def]

@@ -68,7 +68,7 @@ from vcell_fenics.core.bgn_curve import bgn_curvature_flow_step
 from vcell_fenics.core.bgn_curve_mesh import bgn_redistribute_membrane
 from vcell_fenics.core.surface_remap import arclength_parameterization, supermesh_remap_1d
 from vcell_fenics.core.surface_remap_mesh import ordered_membrane_loop
-from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, UnaryOp, VectorLiteral
+from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, Name, UnaryOp, VectorLiteral
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
     MathDescription,
@@ -310,7 +310,7 @@ def assemble_unknown_motion(
     velocity = fem.Function(velocity_space, name=motion_var)
     v_trial, v_test = ufl.TrialFunction(velocity_space), ufl.TestFunction(velocity_space)
     motion_symbols: dict[str, UflExpr] = {
-        "x": ufl.SpatialCoordinate(mesh),
+        "geom.x": ufl.SpatialCoordinate(mesh),
         motion_var: v_trial,
         f"{motion_var}_test": v_test,
         "dx": dx,
@@ -371,7 +371,7 @@ def _build_receptor(
 
     space = fem.functionspace(mesh, ("Lagrange", 1))
     trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
-    ctx = CompileContext(mesh, {"x": ufl.SpatialCoordinate(mesh), **_const_params(md, mesh)})
+    ctx = CompileContext(mesh, {"geom.x": ufl.SpatialCoordinate(mesh), **_const_params(md, mesh)})
 
     diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
     terms = [
@@ -403,11 +403,13 @@ def _build_receptor(
 
 
 def _uses_curvature(node: Expr) -> bool:
-    """Whether the expression AST references `n(x)` or `H(x)` (so the assembler must
-    build and bind the curvature projection)."""
+    """Whether the expression AST references `geom.normal` or `geom.mean_curvature` (so the
+    assembler must build and bind the curvature projection)."""
 
+    if isinstance(node, Name):
+        return node.name in ("geom.normal", "geom.mean_curvature")
     if isinstance(node, FunctionCall):
-        return node.callee in ("n", "H") or any(_uses_curvature(a) for a in node.args)
+        return any(_uses_curvature(a) for a in node.args)
     if isinstance(node, BinaryOp):
         return _uses_curvature(node.left) or _uses_curvature(node.right)
     if isinstance(node, UnaryOp):

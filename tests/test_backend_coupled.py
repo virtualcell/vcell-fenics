@@ -203,7 +203,7 @@ def test_local_surface_source_is_not_coupling() -> None:
 # moving-boundary relative-flux correction). The defining checks are conservation across
 # the motion — receptor total, and (in a *closed* extracellular space) total ligand.
 
-_MOVING = "0.2 * x / r(x)"  # radial membrane expansion
+_MOVING = "0.2 * geom.x / geom.radius"  # radial membrane expansion
 
 
 def _membrane_length(problem: CoupledProblem) -> float:

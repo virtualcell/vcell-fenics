@@ -62,7 +62,7 @@ def test_cos_mode_decays_at_analytical_rate_and_conserves_mass() -> None:
     T = dt * n_steps
     expected_decay = np.exp(-D * (k**2) / (r**2) * T)
 
-    md = load_yaml(_surface_model(diffusion=str(D), ic="1.0 + 0.5 * cos(2 * theta(x))"))
+    md = load_yaml(_surface_model(diffusion=str(D), ic="1.0 + 0.5 * cos(2 * geom.azimuth)"))
     geometry = make_disk_membrane_geometry("disk_membrane", surface_subdomain="membrane", radius=r, h=0.05)
     dp = assemble(md, geometry, dt=dt)
 

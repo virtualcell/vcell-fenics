@@ -267,7 +267,7 @@ The motion variable lives on the same subdomain whose motion it represents. The 
 
 When a variable's subdomain has `motion.kind` of `prescribed` or `unknown`, the value field is defined on the deforming manifold. The semantic conventions:
 
-- **Spatial coordinates and geometric helpers** (`x`, `n(x)`, `H(x)`, etc.) evaluate against the current (deformed) configuration at every time step.
+- **Spatial coordinates and geometry quantities** (`geom.x`, `geom.normal`, `geom.mean_curvature`, etc.) evaluate against the current (deformed) configuration at every time step.
 - **Time derivative `∂_t u`** in an operator template's `∂_t` slot is the partial-time derivative at fixed lab-frame coordinate (Eulerian convention). The template writes the equation in conservation form $\partial_t u + \nabla \cdot (u \mathbf{v}_\Omega) = \ldots$ where $\mathbf{v}_\Omega$ is the substrate velocity from `subdomain.motion`; expanding the flux divergence yields the compression / dilution term $u \nabla \cdot \mathbf{v}_\Omega$ automatically. Full discussion in §1.10.5.
 - **Initial conditions** are evaluated on the initial (t=0) configuration. For subdomains with `motion.kind = unknown`, the initial configuration is determined by the motion variable's initial condition (a displacement field at t=0).
 
@@ -306,7 +306,7 @@ For `temporality = steady_state`, the `∂_t u` term is omitted.
 |---|---|---|---|
 | `diffusion` | scalar or symmetric tensor on Ω | no | D (omit ⇒ 0, pure reaction or advection) |
 | `relative_advection` | vector field on Ω | no | **w**, the species' drift relative to the substrate. Default 0. |
-| `source` | scalar expression | no | s. May depend on u, x, t, parameters, traces of variables on other subdomains (§1.8). |
+| `source` | scalar expression | no | s. May depend on u, `geom.x`, `sim.t`, parameters, traces of variables on other subdomains (§1.8). |
 
 The substrate velocity **v_Ω** is not a slot — it comes from `subdomain.motion` (§1.10). When the bulk is static (no motion), the `∇ · (u v_Ω)` term vanishes; when it is moving, the compression contribution `u ∇ · v_Ω` is included automatically and cannot be forgotten. The Eulerian-vs-Lagrangian distinction is therefore a modelling choice expressed entirely through `subdomain.motion`:
 
@@ -384,7 +384,7 @@ These exist on the roadmap because mechanics-driven cell migration is the projec
   - The equation's own variable (e.g. `u` in T1).
   - Other variables in the same MathDescription, via traces / restrictions when they live on a different subdomain (mechanism in §1.8).
   - The time variable `t`.
-  - Spatial coordinates `x`, plus geometric helpers (the outward unit normal `n(x)`, tangent basis, mean curvature `H(x)`, etc.) — provided as built-in functions; full list in §2.
+  - Spatial coordinates `geom.x`, plus geometry quantities (the outward unit normal `geom.normal`, tangent basis, mean curvature `geom.mean_curvature`, etc.) — provided as built-in functions; full list in §2.
   - Named parameters (constants declared in the MathDescription).
 - Optional slots default to zero. There is no magic inference of non-zero values from elsewhere: what is not written is not there.
 - The schema enforces type compatibility (a vector-typed slot cannot hold a scalar expression).
@@ -404,7 +404,7 @@ math_description:
       kind: surface
       motion:
         kind: prescribed
-        velocity: "r_dot * x / r(x)"    # uniform radial expansion in R^2 (r(x) = |x|, §1.8.4)
+        velocity: "r_dot * geom.x / geom.radius"    # uniform radial expansion in R^2 (geom.radius = |geom.x|, §1.8.4)
 
   variables:
     - { name: rho_active,   type: scalar, subdomain: membrane }
@@ -418,7 +418,7 @@ math_description:
       terms:
         diffusion: 0.1
         source: "k_on * rho_inactive - k_off * rho_active"
-      initial_condition: "1.0 + 0.5 * cos(2 * theta(x))"
+      initial_condition: "1.0 + 0.5 * cos(2 * geom.azimuth)"
 
     - template: surface_pde_with_dilution
       variable: rho_inactive
@@ -479,7 +479,7 @@ The form is a residual expression: the equation is `form = 0` for all admissible
 - **The governed variable**, written by its declared name (e.g. `v_membrane` for the §1.10.8 motion variable).
 - **The variable's test function**, written as `<variable>_test` (e.g. `v_membrane_test`). The user does not declare the test function; it is implicit, has the same function-space as the governed variable, and is the function the equation is satisfied against.
 - **Other variables**, including via `trace(·)` when they live on a different subdomain (§1.8.2). Calculus operators (`grad`, `div`, `lapl`, `grad_surf`, `div_surf`, `lapl_beltrami`) may be applied to **any** variable — the narrow rule of §1.8.5 does *not* apply to the weak-form escape hatch. The user is writing UFL and is responsible for the resulting equation's well-posedness.
-- **Parameters, time `t`, spatial coordinates `x`, geometric helpers** (`n(x)`, `H(x)`, etc.) per §1.8.
+- **Parameters, time `sim.t`, position `geom.x`, geometry quantities** (`geom.normal`, `geom.mean_curvature`, etc.) per §1.8.
 - **Standard functions** (`sin`, `cos`, `exp`, `if`, …) per §1.8.5.
 - **Integration measures**:
 
@@ -573,7 +573,7 @@ math_description:
       temporality: steady_state
       form: |
         ( eta * inner(v_membrane, v_membrane_test)
-          + sigma_T * H(x) * inner(n(x), v_membrane_test)
+          + sigma_T * geom.mean_curvature * inner(geom.normal, v_membrane_test)
           - inner(f_active, v_membrane_test)
         ) * dx_Gamma
       initial_condition: "0"      # zero default (memory decision 11c)
@@ -588,7 +588,7 @@ math_description:
       terms:
         diffusion: 0.05
         source: "-k_off * rho"
-      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"
+      initial_condition: "1.0 + 0.3 * cos(2 * geom.azimuth)"
 
   parameters:
     - { name: eta,     value: 1.0  }
@@ -597,15 +597,15 @@ math_description:
     - { name: f0,      value: 0.3  }              # active-traction amplitude
     - name: f_active                              # polarised active traction (vector)
       type: vector
-      subdomain: membrane                         # uses theta(x) — scope required (§2.2.3)
-      expression: "[f0 * cos(theta(x)), 0]"
+      subdomain: membrane                         # uses geom.azimuth — scope required (§2.2.3)
+      expression: "[f0 * cos(geom.azimuth), 0]"
 ```
 
 What this example demonstrates:
 
 - **The weak-form equation is a residual that integrates to zero.** The expression following `form:` is the entire residual; the convention is that the assembled equation reads "form = 0 for all `v_membrane_test`."
 - **Test function is implicit.** `v_membrane_test` is the test function for `v_membrane`, in the same function space. The user did not declare it.
-- **`f_active` is an expression-valued parameter (§2.2.3), not a state variable.** It carries a vector-valued expression body (`[f0 * cos(theta(x)), 0]`) and is referenced from the form as a bare name. Because the body uses `theta(x)`, the parameter declares `subdomain: membrane` (§1.11.10). At assembly time the parameter resolves to its expression's value at the current point — the same mechanism that lets `L_reservoir = "1.0 + 0.5 * sin(omega * t)"` carry time-varying boundary data.
+- **`f_active` is an expression-valued parameter (§2.2.3), not a state variable.** It carries a vector-valued expression body (`[f0 * cos(geom.azimuth), 0]`) and is referenced from the form as a bare name. Because the body uses `geom.azimuth`, the parameter declares `subdomain: membrane` (§1.11.10). At assembly time the parameter resolves to its expression's value at the current point — the same mechanism that lets `L_reservoir = "1.0 + 0.5 * sin(omega * sim.t)"` carry time-varying boundary data.
 - **No automatic compression term.** The membrane has unknown motion, but because this is a weak-form equation, the auto-dilution that T2 would apply does **not** apply here. The force-balance equation has no time derivative anyway, so there is nothing to reconcile — but if the user had wanted a transient force balance with `partial_t(v_membrane)` on a moving substrate, they would have had to write the appropriate Eulerian / material-derivative terms themselves.
 - **Steady-state weak form is fine.** Mechanics at low Reynolds is quasi-static; the membrane velocity at each instant is determined by the instantaneous force balance, not by inertia. `temporality: steady_state` makes this explicit — the equation has no time derivative and is solved as an algebraic problem at each time step.
 - **Two equations coexisting cleanly.** The motion equation (weak-form, steady) and the receptor equation (T2 template, time-dependent) share the membrane subdomain. The T2 equation reads `membrane.motion.variable = v_membrane` and uses that variable's solved value at each time step to compute its own dilution term. Composability across template and weak-form paths is direct.
@@ -790,7 +790,7 @@ What this example demonstrates:
 - **Composable bulk-surface coupling.** The Neumann BC for L at the membrane and the source terms for $\rho_f$ and $\rho_b$ all reference the same constitutive expression $k_{on}\, \mathrm{trace}(L)\, \rho_f - k_{off}\, \rho_b$. The user writes it three times with correct signs; the formalism does not auto-balance. If the signs are wrong, mass is not conserved — there is no schema-level check for that.
 - **`trace(L)` versus `rho_f`.** L is a bulk variable; on the membrane its value is the boundary trace, written `trace(L)`. $\rho_f$ already lives on the membrane and is referenced directly.
 - **Zero-Neumann default applies nowhere here**, because every external boundary touched by every variable has an explicit BC — but if `extracellular` had a second outer boundary that we did not declare, it would default to no-flux.
-- **Time-varying reservoir is a one-line swap.** `L_reservoir` is a constant here, but to model a pulse-stimulation experiment it can be replaced by an expression-valued parameter (§2.2.3) — e.g. `{ name: L_reservoir, type: scalar, expression: "1.0 + 0.5 * sin(omega * t)" }` (with `omega` added as another parameter). The Dirichlet BC declaration does not change; the value it delivers becomes time-varying automatically because the parameter resolves to its expression at every evaluation.
+- **Time-varying reservoir is a one-line swap.** `L_reservoir` is a constant here, but to model a pulse-stimulation experiment it can be replaced by an expression-valued parameter (§2.2.3) — e.g. `{ name: L_reservoir, type: scalar, expression: "1.0 + 0.5 * sin(omega * sim.t)" }` (with `omega` added as another parameter). The Dirichlet BC declaration does not change; the value it delivers becomes time-varying automatically because the parameter resolves to its expression at every evaluation.
 
 If the membrane were itself moving (replace `motion.velocity: "0"` with a real expression), the dilution term in both surface PDEs picks up automatically from `membrane.motion`; the BC structure does not change.
 
@@ -808,9 +808,9 @@ Each variable's IC appears as the `initial_condition` field on its governing equ
 
 An initial condition is a typed expression evaluated at $t = 0$ on the variable's subdomain. Its type must match the variable's `type` (scalar IC for scalar variable, vector IC for vector variable, symmetric-tensor IC for tensor variable).
 
-The evaluation context is the **reference configuration**: the geometry's initial mesh, with no motion applied. For subdomains with `motion.kind` of `prescribed` or `unknown` (§1.10), the reference configuration is what the geometry provides; the motion field's effect on positions is applied for $t > 0$, not at $t = 0$. Geometric helpers (`n(x)`, `H(x)`, etc.) in IC expressions therefore evaluate against the reference configuration.
+The evaluation context is the **reference configuration**: the geometry's initial mesh, with no motion applied. For subdomains with `motion.kind` of `prescribed` or `unknown` (§1.10), the reference configuration is what the geometry provides; the motion field's effect on positions is applied for $t > 0$, not at $t = 0$. Geometric helpers (`geom.normal`, `geom.mean_curvature`, etc.) in IC expressions therefore evaluate against the reference configuration.
 
-Spatial coordinates `x` in an IC expression refer to the reference configuration's coordinate. There is no IC equivalent of "current configuration coordinates" — at $t = 0$ the two coincide.
+Spatial coordinates `geom.x` in an IC expression refer to the reference configuration's coordinate. There is no IC equivalent of "current configuration coordinates" — at $t = 0$ the two coincide.
 
 #### 1.7.3 Vocabulary restrictions
 
@@ -818,9 +818,9 @@ IC expressions use the §1.8 vocabulary with two restrictions:
 
 - **No references to other state variables.** An IC expression for variable $u$ may not reference any other variable in the MathDescription (whether via `trace(·)`, by bare name, or otherwise). This avoids ordering ambiguity — what does "$u(\mathbf{x}, 0) = 0.5 \cdot v(\mathbf{x}, 0)$" mean if $v$ is itself defined by an IC that references $u$? Worse, it avoids cycles. v1 sidesteps both concerns by forbidding the references; if a concrete use case demands coupled ICs, v2 may relax with topological-sort resolution.
 
-- **No bare reference to time `t`.** ICs are evaluated at $t = 0$ by definition; a bare `t` in an IC expression has no useful meaning beyond a constant substitution. The schema rejects bare `t` in IC expressions to catch the misconception cleanly (a user writing `initial_condition: "exp(-t)"` likely meant a *forcing* expression, not an IC, and should be told). This rule applies to the IC expression directly; if the IC references a parameter (§2.2.3) whose body expression contains `t`, the parameter is evaluated at $t = 0$ in the usual way — referencing such a parameter from an IC is permitted and produces the parameter's value at $t = 0$.
+- **No bare reference to time `sim.t`.** ICs are evaluated at $t = 0$ by definition; a bare `sim.t` in an IC expression has no useful meaning beyond a constant substitution. The schema rejects `sim.t` in IC expressions to catch the misconception cleanly (a user writing `initial_condition: "exp(-sim.t)"` likely meant a *forcing* expression, not an IC, and should be told). This rule applies to the IC expression directly; if the IC references a parameter (§2.2.3) whose body expression contains `sim.t`, the parameter is evaluated at $t = 0$ in the usual way — referencing such a parameter from an IC is permitted and produces the parameter's value at $t = 0$.
 
-What IC expressions **may** reference: the spatial coordinate `x` and its accessors (`x[0]`, `theta(x)`, `r(x)`, …); named parameters, including region-keyed parameter maps (§1.2.5); geometric helpers (`n(x)`, `H(x)`, principal curvatures, tangent basis); standard functions (`sin`, `cos`, `exp`, `if`, `step`, etc.).
+What IC expressions **may** reference: the spatial coordinate `geom.x` and its accessors (`geom.x[0]`, `geom.azimuth`, `geom.radius`, …); named parameters, including region-keyed parameter maps (§1.2.5); geometry quantities (`geom.normal`, `geom.mean_curvature`, principal curvatures, tangent basis); standard functions (`sin`, `cos`, `exp`, `if`, `step`, etc.).
 
 #### 1.7.4 Type matching
 
@@ -832,7 +832,7 @@ The IC's value type must match the variable's `type`:
 | `vector` | vector in $\mathbb{R}^d$ |
 | `symmetric_tensor` | symmetric $d \times d$ tensor |
 
-No implicit broadcasting. A scalar where a vector is expected is an error; the user must write the broadcast explicitly (e.g. `0.0 * n(x)` for the zero vector along normal, or `[0.0, 0.0]` for an explicit 2D vector).
+No implicit broadcasting. A scalar where a vector is expected is an error; the user must write the broadcast explicitly (e.g. `0.0 * geom.normal` for the zero vector along normal, or `[0.0, 0.0]` for an explicit 2D vector).
 
 #### 1.7.5 Compatibility with Dirichlet boundary conditions
 
@@ -909,31 +909,36 @@ The concrete syntactic carrier — parsable string, Python AST, SymPy expression
 
 #### 1.8.3 Time, space, and parameters
 
+Built-in quantities are **namespaced** under `geom.*` (geometry) and `sim.*` (simulation); the bare
+identifier namespace belongs to the user (ADR 006). So time is `sim.t` and the position is `geom.x`
+— a modeller is free to name a variable or parameter `x`, `t`, `r`, `phi`, … without collision.
+
 | Symbol | Meaning | Type |
 |---|---|---|
-| `t` | The time variable. Reserved name; equals current solver time, $t = 0$ in IC expressions. | scalar |
-| `x` | Spatial coordinate at the evaluation point, in the embedding-space dimension. | vector in $\mathbb{R}^d$ |
-| `<param_name>` | A named parameter declared in the MathDescription. May resolve to a constant, to the value of an expression in `t` / `x` / helpers / other parameters, or to a region-keyed value (§2.2.3). | scalar, vector, or symmetric tensor — per the parameter's declared type |
+| `sim.t` | The time. Equals current solver time, $t = 0$ in IC expressions (where it is disallowed). | scalar |
+| `geom.x` | Spatial coordinate at the evaluation point, in the embedding-space dimension. | vector in $\mathbb{R}^d$ |
+| `<param_name>` | A named parameter declared in the MathDescription. May resolve to a constant, to the value of an expression in `sim.t` / `geom.*` / other parameters, or to a region-keyed value (§2.2.3). | scalar, vector, or symmetric tensor — per the parameter's declared type |
 
-Component access on `x` is by index: `x[0]`, `x[1]`, `x[2]`. Named coordinate accessors derived from `x` are listed under geometric helpers (§1.8.4).
+Component access on `geom.x` is by index: `geom.x[0]`, `geom.x[1]`, `geom.x[2]`. The curvilinear
+accessors derived from `geom.x` are listed under geometric quantities (§1.8.4).
 
 **Parameter resolution at evaluation time.** A bare-name reference to a parameter is replaced by the parameter's value at the current evaluation point. For **constant** parameters the value is the declared scalar. For **expression-valued** parameters (§2.2.3) the value is the parameter's body expression evaluated against the surrounding context — same `x`, same `t`, same subdomain. For **region-keyed** parameters the value is the entry corresponding to the current region. From the call-site's perspective the parameter is just a typed value at a point; the declaration form determines how that value is computed.
 
-Expression-valued parameters may carry an optional `subdomain:` scope (§2.2.3) and must declare one if their body references a geometric helper. A reference from outside the scoping subdomain is a validation error (§1.11.10).
+Expression-valued parameters may carry an optional `subdomain:` scope (§2.2.3) and must declare one if their body references a subdomain-relative geometry quantity (anything under `geom.*` except `geom.x`). A reference from outside the scoping subdomain is a validation error (§1.11.10).
 
-#### 1.8.4 Geometric helpers
+#### 1.8.4 Geometric quantities (`geom.*`)
 
-Available in expressions evaluated on subdomains for which the relevant notion is defined:
+Namespaced geometry quantities (ADR 006), addressed as `geom.<member>`. Available in expressions evaluated on subdomains for which the relevant notion is defined:
 
-| Helper | Meaning | Defined where |
+| Quantity | Meaning | Defined where |
 |---|---|---|
-| `n(x)` | Outward unit normal. On a boundary or codim-1 subdomain, the outward direction relative to the home subdomain. | codim-1 entities |
-| `H(x)` | Mean curvature. | codim-1 entities embedded in higher-dim space |
-| `kappa1(x)`, `kappa2(x)` | Principal curvatures. | codim-1 surfaces in 3D |
-| `tangent(x)` | Tangent unit vector. | 1-curves in 2D, or codim-2 edges in 3D |
-| `theta(x)`, `phi(x)`, `r(x)` | Polar / spherical accessors. Sugar for `atan2(x[1], x[0])`, etc. | any subdomain |
+| `geom.normal` | Outward unit normal. On a boundary or codim-1 subdomain, the outward direction relative to the home subdomain. | codim-1 entities |
+| `geom.mean_curvature` | Mean curvature. | codim-1 entities embedded in higher-dim space |
+| `geom.curvature1`, `geom.curvature2` | Principal curvatures. | codim-1 surfaces in 3D |
+| `geom.tangent` | Tangent unit vector. | 1-curves in 2D, or codim-2 edges in 3D |
+| `geom.radius`, `geom.azimuth` | Polar accessors. Sugar for `sqrt(dot(geom.x, geom.x))` and `atan2(geom.x[1], geom.x[0])`. | any subdomain |
 
-For subdomains with `motion.kind` of `prescribed` or `unknown` (§1.10.6), geometric helpers are evaluated against the current (deformed) configuration at every time step. For `unknown` motion the $t = 0$ configuration comes from the motion variable's initial condition (§1.7, §1.10); for `prescribed` motion the $t = 0$ configuration is the reference configuration (no displacement has yet been applied). At any $t > 0$, `n(x)`, `H(x)`, principal curvatures, and the tangent basis reflect the deformed shape — a moving membrane's outward normal is the *current* outward normal, not the reference one.
+`geom.x` (position) is available everywhere; the quantities above are subdomain-relative. For subdomains with `motion.kind` of `prescribed` or `unknown` (§1.10.6), these are evaluated against the current (deformed) configuration at every time step. For `unknown` motion the $t = 0$ configuration comes from the motion variable's initial condition (§1.7, §1.10); for `prescribed` motion the $t = 0$ configuration is the reference configuration (no displacement has yet been applied). At any $t > 0$, `geom.normal`, `geom.mean_curvature`, the principal curvatures, and the tangent basis reflect the deformed shape — a moving membrane's outward normal is the *current* outward normal, not the reference one.
 
 #### 1.8.5 Standard functions and calculus operators
 
@@ -962,11 +967,12 @@ The validator (§1.11) enforces this by walking the expression AST: if any `grad
 
 #### 1.8.6 Variable, parameter, and bare-name resolution
 
-A **bare name** (no `trace(·)`, no calculus operator) in an expression resolves in this order:
+Built-in quantities are **namespaced** (`geom.*`, `sim.*`; §1.8.3, ADR 006), so they are never bare — a bare name belongs to the user. A **bare name** (no `trace(·)`, no calculus operator) in an expression resolves in this order:
 
 1. **Local variable** — a variable defined on the same subdomain as the expression's evaluation context. Resolves to the function value at the current point.
 2. **Named parameter** — a top-level parameter declared in the MathDescription. Resolves to the parameter's value at the current point: a constant if declared so, the body expression evaluated in context if expression-valued, or the per-region value if region-keyed (§2.2.3, §1.8.3).
-3. **Reserved name** — `t` (time), `x` (space), or a name from the geometric-helper or standard-function tables.
+
+(A qualified name `geom.<member>` / `sim.<member>` resolves to the corresponding built-in quantity; a bare operator/function name like `sin` or `grad` is valid only in call position, `name(...)`.)
 
 A name that matches none of the above is an error (caught by §1.11). A variable defined on a *different* subdomain than the expression's evaluation context may not be referenced by bare name — higher-dimensional variables must go through `trace(·)`; lower-dimensional variables cannot be referenced inside an expression at all (§1.8.7), and the coupling must be expressed structurally via a boundary condition.
 
@@ -992,7 +998,7 @@ Every slot has a declared type; expressions in that slot must produce a matching
 | Robin coefficient fields `alpha`, `beta`, `expression` ($\alpha$, $\beta$, $h$) | three scalars |
 | Interface value-equality partition coefficient $k$ | scalar |
 
-Type mismatches are validation errors. A scalar where a vector is expected is **not** implicitly broadcast; the user must write the broadcast explicitly (e.g., `c * n(x)` to turn a scalar `c` into a vector along the outward normal). The **one exception is the numeric literal `0`**, which is the zero of whichever type a slot expects — `velocity: "0"` and a vector variable's `initial_condition: "0"` are both accepted as the zero vector, so a zero default need not be spelled `[0, 0]`. Any *other* scalar (a nonzero literal, a named scalar, an expression) in a vector or tensor slot is still a no-broadcast error.
+Type mismatches are validation errors. A scalar where a vector is expected is **not** implicitly broadcast; the user must write the broadcast explicitly (e.g., `c * geom.normal` to turn a scalar `c` into a vector along the outward normal). The **one exception is the numeric literal `0`**, which is the zero of whichever type a slot expects — `velocity: "0"` and a vector variable's `initial_condition: "0"` are both accepted as the zero vector, so a zero default need not be spelled `[0, 0]`. Any *other* scalar (a nonzero literal, a named scalar, an expression) in a vector or tensor slot is still a no-broadcast error.
 
 ### 1.9 Temporality, mixed systems, and DAE structure
 
@@ -1098,7 +1104,7 @@ Every subdomain carries a `motion` field whose `kind` is one of:
 
 | Kind | Meaning |
 |---|---|
-| `none` | Subdomain is static. Default when `motion` is omitted. Substrate velocity is zero everywhere; compression / dilution terms in operator templates vanish; geometric helpers (`n`, `H`, etc.) evaluate against the initial (and only) configuration. |
+| `none` | Subdomain is static. Default when `motion` is omitted. Substrate velocity is zero everywhere; compression / dilution terms in operator templates vanish; geometric quantities (`geom.normal`, `geom.mean_curvature`, etc.) evaluate against the initial (and only) configuration. |
 | `prescribed` | Subdomain moves according to an expression the user supplies. The expression may be a velocity field or a displacement field (§1.10.2); the formalism converts internally. The substrate velocity feeds compression / dilution terms automatically. |
 | `unknown` | Subdomain moves according to a motion variable solved by an equation in the same MathDescription. The motion variable is a regular vector variable (§1.3.4); the equation governing it is any equation that produces a matching vector field on the right subdomain. This is the mechanics-driven-migration path; it is the central capability v1 builds toward even though v1's template library does not yet include mechanics templates (T5–T7). |
 
@@ -1115,8 +1121,8 @@ Either form may be used; not both at once:
 
 The two forms are mathematically equivalent: a displacement field uniquely determines a velocity field (by time-differentiation along the reference point), and a velocity field uniquely determines a displacement field (by time-integration along the material point, given the reference configuration). The form a modeller picks should match the natural specification of the motion they intend:
 
-- **Velocity form is natural for**: radial expansion (`r_dot * x / |x|`), fluid-driven motion, prescribed steady flow.
-- **Displacement form is natural for**: rigid translations (`[v_x, v_y, v_z] * t`), oscillations (`A * sin(omega * t) * e_1`), prescribed wall deformations.
+- **Velocity form is natural for**: radial expansion (`r_dot * geom.x / geom.radius`), fluid-driven motion, prescribed steady flow.
+- **Displacement form is natural for**: rigid translations (`[v_x, v_y, v_z] * sim.t`), oscillations (`A * sin(omega * sim.t) * e_1`), prescribed wall deformations.
 
 The backend's job is to convert as needed for its assembly; the user does not need to do this conversion.
 
@@ -1160,7 +1166,7 @@ The **reference configuration** is the initial mesh as loaded from the geometry.
 
 Users may override the IC to specify a non-zero initial displacement (a deformed starting configuration) or initial velocity (an in-progress motion). The schema accepts this; the validator enforces type-compatibility (vector IC for vector variable, etc.).
 
-**ICs for other variables on the moving subdomain** are evaluated on the initial (t=0) configuration. For unknown-motion subdomains, that is the configuration produced by the motion variable's IC, which by default is the reference configuration. Composability is direct: writing `initial_condition: "1.0 + 0.5 * cos(2 * theta(x))"` for a receptor density refers to angular coordinate $\theta$ on the *initial* membrane — exactly what the modeller intends.
+**ICs for other variables on the moving subdomain** are evaluated on the initial (t=0) configuration. For unknown-motion subdomains, that is the configuration produced by the motion variable's IC, which by default is the reference configuration. Composability is direct: writing `initial_condition: "1.0 + 0.5 * cos(2 * geom.azimuth)"` for a receptor density refers to angular coordinate $\theta$ on the *initial* membrane — exactly what the modeller intends.
 
 #### 1.10.5 Material vs. Eulerian conventions in operator templates
 
@@ -1186,7 +1192,7 @@ A labelled boundary of a moving subdomain moves *with* the subdomain. Specifical
 
 - The boundary's incidence — which subdomain class(es) it bounds — is invariant under motion. A `membrane` that bounds `cytoplasm` and `extracellular` continues to bound them at every $t$, no matter how it deforms.
 - The geometric position of the boundary at time $t$ is the image of its initial position under the subdomain's motion map.
-- BC expressions evaluated on the boundary use the boundary's current (deformed) position. Geometric helpers (`n(x)`, `H(x)`, etc.) on a moving boundary reflect the current configuration.
+- BC expressions evaluated on the boundary use the boundary's current (deformed) position. Geometric helpers (`geom.normal`, `geom.mean_curvature`, etc.) on a moving boundary reflect the current configuration.
 
 The implication for BCs is mostly transparent: a Dirichlet BC `u = f(x, t)` on a moving boundary evaluates `f` at the current position $x$ on the deformed boundary. A Neumann BC's flux is the flux through the current boundary surface; the outward normal $\mathbf{n}$ is the current outward normal, not the reference one.
 
@@ -1225,7 +1231,7 @@ math_description:
     # In v1, this uses the weak-form escape hatch (§1.5) because mechanics templates
     # (T5-T7) ship in v2. The form below is illustrative; full UFL is left to §1.5.
     #
-    #   eta * v_membrane = -sigma_T * H(x) * n(x) + f_active
+    #   eta * v_membrane = -sigma_T * geom.mean_curvature * geom.normal + f_active
     #
     # where eta is drag, sigma_T is surface tension, H is mean curvature,
     # n is outward normal, and f_active is a vector-valued expression
@@ -1239,7 +1245,7 @@ math_description:
       # block are part of the string, so the "= 0" note lives outside the form.
       form: |
         ( eta * inner(v_membrane, v_membrane_test)
-          + sigma_T * H(x) * inner(n(x), v_membrane_test)
+          + sigma_T * geom.mean_curvature * inner(geom.normal, v_membrane_test)
           - inner(f_active, v_membrane_test) ) * dx_Gamma
       initial_condition: "0"              # zero default (memory decision 11c)
 
@@ -1251,7 +1257,7 @@ math_description:
       terms:
         diffusion: 0.05
         source: "-k_off * rho"
-      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"
+      initial_condition: "1.0 + 0.3 * cos(2 * geom.azimuth)"
 
   parameters:
     - { name: eta,     value: 1.0  }     # viscous drag coefficient
@@ -1260,8 +1266,8 @@ math_description:
     - { name: f0,      value: 0.3  }     # active-traction amplitude
     - name: f_active                     # polarised active traction (vector)
       type: vector
-      subdomain: membrane                # uses theta(x) — scope required (§2.2.3)
-      expression: "[f0 * cos(theta(x)), 0]"
+      subdomain: membrane                # uses geom.azimuth — scope required (§2.2.3)
+      expression: "[f0 * cos(geom.azimuth), 0]"
 ```
 
 What this sketch demonstrates:
@@ -1270,7 +1276,7 @@ What this sketch demonstrates:
 - **The motion equation uses the §1.5 weak-form escape hatch** — because v1 has no surface-mechanics template, the user writes a UFL form directly. v2 will replace this with a T5/T6/T7-style mechanics template.
 - **The receptor density equation is unchanged from §1.4.5** in shape — only `motion.kind` changed from `prescribed` to `unknown`. The T2 template picks up the dilution automatically from `membrane.motion`, whether prescribed or solved. The user does not edit the receptor equation when switching motion modes.
 - **`initial_condition: 0` for `v_membrane`** uses the zero default (memory decision 11c). The mesh starts at rest at t = 0; the force balance immediately produces a non-zero velocity in response to the initial curvature and traction.
-- **Geometric helpers `H(x)`, `n(x)`** evaluate against the current deformed membrane configuration (§1.10.6). At t = 0 that is the geometry's initial configuration.
+- **Geometric helpers `geom.mean_curvature`, `geom.normal`** evaluate against the current deformed membrane configuration (§1.10.6). At t = 0 that is the geometry's initial configuration.
 
 This sketch is intentionally minimal — a single membrane, one mechanics balance, one surface species. Real cell-migration models add bulk hydrodynamics, multiple surface species, intracellular signalling, and adhesion-with-slippage to substrates. Each of those is expressible in the formalism (the deferred constitutive templates from §1.4.3 and the mechanism for unknown motion + governing equation) once the matching templates and adhesion vocabulary ship.
 
@@ -1299,7 +1305,7 @@ Most rules below are errors. The few warning cases are noted explicitly. Example
 - Parameter names referenced in expressions must be declared in the `parameters:` block.
 - Subdomain class names referenced anywhere must be declared in the `subdomains:` block (§1.2).
 - Labelled boundary names referenced in BCs must exist in the referenced geometry (§1.11.10).
-- Reserved names (`t`, `x`, geometric helpers, standard functions, operator names) must not be shadowed by variable or parameter names. Shadowing is an error at construction, not a precedence resolution (§1.8.6).
+- Reserved names — the namespace roots `geom` / `sim` and the integration measures — must not be taken by variable, parameter, or subdomain names. Operator and function names (`grad`, `sin`, …) are reserved only in call position and never collide with the bare value namespace (ADR 006). Shadowing a reserved name is an error at construction (§1.8.6, §2.4.1).
 - A bare name in an expression must resolve to a local variable (defined on the same subdomain as the expression's evaluation context), a parameter, or a reserved name. References to variables on a *different* subdomain require `trace(·)`; lower-dimensional variables cannot be referenced at all (§1.8.6, §1.8.7).
 - **Parameter expression cycles are an error.** Parameter expressions may reference other parameters (§2.2.3); the validator topologically sorts the parameter graph and rejects any cycle. The error message names the cycle's members.
 
@@ -1321,7 +1327,7 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 **Errors** (cross-references §1.4.4, §1.8.8, §1.7.4):
 
 - A slot expression's value type must match the slot's declared type. Scalar slots require scalar values; vector slots require vectors in $\mathbb{R}^d$; tensor slots require symmetric $d \times d$ tensors.
-- No implicit broadcast. A scalar where a vector is expected must be made explicit (e.g., `c * n(x)` to broadcast scalar $c$ along the normal).
+- No implicit broadcast. A scalar where a vector is expected must be made explicit (e.g., `c * geom.normal` to broadcast scalar $c$ along the normal).
 - Calculus operators' argument and result types must be honoured (`grad(u)` for scalar $u$ returns a vector; `div(v)` for vector $v$ returns a scalar; etc., per §1.8.5).
 - Variable initial conditions must match the variable's declared type (§1.7.4).
 - The Robin coefficient fields `alpha`, `beta`, `expression` ($\alpha$, $\beta$, $h$ in §1.6.2) must each be scalar.
@@ -1381,7 +1387,7 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 - Every labelled boundary name referenced in a BC must exist in the Geometry.
 - Every internal boundary referenced by an interface BC must in fact bound two subdomains in the Geometry, matching the BC's `variable.subdomain` and `partner_variable.subdomain`.
 - Region-keyed parameter maps (`kind: region_map`) must cover every region the Geometry assigns to the parameter's subdomain class — missing regions are errors, not silent zero defaults.
-- **Expression-valued parameter scoping (§2.2.3).** A parameter whose body expression references any geometric helper (`n(x)`, `H(x)`, `kappa1`, `tangent`, `theta(x)`, `r(x)`, …) must declare a `subdomain:` scope. Any *use* of a scoped parameter must be from an expression whose evaluation context is on (or a sub-entity of) the parameter's scope subdomain. A use from an incompatible context is an error pointing both to the parameter declaration and the offending use site.
+- **Expression-valued parameter scoping (§2.2.3).** A parameter whose body expression references any subdomain-relative geometry quantity (`geom.normal`, `geom.mean_curvature`, `geom.curvature1`, `geom.tangent`, `geom.azimuth`, `geom.radius`, …) must declare a `subdomain:` scope. Any *use* of a scoped parameter must be from an expression whose evaluation context is on (or a sub-entity of) the parameter's scope subdomain. A use from an incompatible context is an error pointing both to the parameter declaration and the offending use site.
 
 These checks require the Geometry to be available at MathDescription validation time. If the Geometry is loaded lazily (typical at solve time), some of these checks are deferred until both are present. The validator may still run all *intra*-MathDescription checks without the Geometry.
 
@@ -1503,14 +1509,14 @@ parameters:
     expression: "<expression>"
 ```
 
-The `expression` body is an expression in the §1.8 vocabulary: `t`, `x`, geometric helpers, standard functions, and references to other parameters. It is **not** a function declaration (no formal arguments) — it is the parameter's *value*, which happens to depend on the evaluation point. At each use, the parameter resolves to its expression evaluated in the surrounding context (current `x`, current `t`, current subdomain).
+The `expression` body is an expression in the §1.8 vocabulary: `sim.t`, the `geom.*` quantities, standard functions, and references to other parameters. It is **not** a function declaration (no formal arguments) — it is the parameter's *value*, which happens to depend on the evaluation point. At each use, the parameter resolves to its expression evaluated in the surrounding context (current `geom.x`, current `sim.t`, current subdomain).
 
-This covers time-varying boundary values (`L_reservoir = "1.0 + 0.5 * sin(omega * t)"`), prescribed forcing fields (`f_active = "[f0 * cos(theta(x)), 0]"`), and any data field that is a known function of space-time but not a state variable.
+This covers time-varying boundary values (`L_reservoir = "1.0 + 0.5 * sin(omega * sim.t)"`), prescribed forcing fields (`f_active = "[f0 * cos(geom.azimuth), 0]"`), and any data field that is a known function of space-time but not a state variable.
 
 **Scoping rules for expression parameters:**
 
-- The `subdomain:` field is optional. When provided, the parameter may only be referenced from expressions whose evaluation context is on (or a sub-entity of) that subdomain — geometric helpers like `H(x)` and tangent-frame quantities are only meaningful inside the scope they were written for.
-- **`subdomain:` is required** if the expression body uses any geometric helper (`n(x)`, `H(x)`, `kappa1`, `tangent`, `theta(x)`, `r(x)`, etc.). Without a scope, the validator cannot tell where the helper is meaningful.
+- The `subdomain:` field is optional. When provided, the parameter may only be referenced from expressions whose evaluation context is on (or a sub-entity of) that subdomain — geometric helpers like `geom.mean_curvature` and tangent-frame quantities are only meaningful inside the scope they were written for.
+- **`subdomain:` is required** if the expression body uses any subdomain-relative geometry quantity (`geom.normal`, `geom.mean_curvature`, `geom.curvature1`, `geom.tangent`, `geom.azimuth`, `geom.radius`, etc.). Without a scope, the validator cannot tell where the quantity is meaningful.
 - Parameters with no geometric-helper references are unscoped by default and may be used from any expression context.
 
 **Parameter-to-parameter references** are permitted (e.g. `omega = 2 * pi * freq`). The validator topologically sorts the parameter graph at construction time and rejects any cycle (§1.11.3).
@@ -1609,11 +1615,11 @@ Interface kinds require `partner_variable` per §1.6.2. The validator checks all
 Expression strings in YAML use math-like infix notation. The syntactic primitives:
 
 - **Numeric literals.** `0`, `1.0`, `0.5`, `1.0e-3`, scientific notation per usual.
-- **Bare names** resolve per §1.8.6: local variable → parameter → reserved name. Examples: `rho`, `k_on`, `t`, `x`.
-- **Indexed access** on the spatial coordinate: `x[0]`, `x[1]`, `x[2]`.
+- **Bare names** resolve per §1.8.6: local variable → parameter. Examples: `rho`, `k_on`. (Built-ins are qualified — `geom.x`, `sim.t` — not bare.)
+- **Indexed access** on the spatial coordinate: `geom.x[0]`, `geom.x[1]`, `geom.x[2]`.
 - **Binary arithmetic**: `+`, `-`, `*`, `/`, `**` (power). Standard precedence.
 - **Unary minus**: `-expr`.
-- **Function calls**: `f(arg1, arg2, ...)` for every function in the vocabulary — `sin`, `cos`, `exp`, `sqrt`, `trace`, `grad`, `n`, `H`, `theta`, `inner`, `if`, `partial_t`, etc.
+- **Function calls**: `f(arg1, arg2, ...)` for every function in the vocabulary — `sin`, `cos`, `exp`, `sqrt`, `trace`, `grad`, `inner`, `if`, `partial_t`, etc.
 - **Vector and tensor literals**: `[a, b]`, `[a, b, c]` for vectors; tensor literals are nested lists, e.g. `[[a, b], [c, d]]`.
 - **Parentheses** for grouping, as expected.
 
@@ -1623,10 +1629,10 @@ Examples seen in Part 1's worked models:
 
 ```
 "1.0"
-"1.0 + 0.5 * cos(2 * theta(x))"
+"1.0 + 0.5 * cos(2 * geom.azimuth)"
 "-k_off * rho_active"
 "k_on * trace(L) * rho_f - k_off * rho_b"
-"r_dot * x / r(x)"
+"r_dot * geom.x / geom.radius"
 "k_on * rho_inactive - k_off * rho_active"
 ```
 
@@ -1646,9 +1652,9 @@ After the validator's resolution pass, the AST has the following node kinds. The
 | `Name` | parser | name | Unresolved bare identifier. The resolution pass rewrites it into one of the four `*Ref` kinds; it does not survive into the canonical AST. |
 | `VariableRef` | resolution | name | A `Name` that resolved to a local variable's value field. |
 | `ParameterRef` | resolution | name | A `Name` that resolved to a parameter: constant value for `kind: scalar`; the parameter's body expression (already a parsed AST) evaluated against the current context for expression-valued parameters; per-region value for `kind: region_map` (§2.2.3). |
-| `ReservedRef` | resolution | which (`t`, `x`) | A `Name` that resolved to time or the spatial coordinate. |
+| `BuiltinRef` | resolution | which (`geom.x`, `sim.t`, …) | A qualified `Name` that resolved to a built-in quantity — time, the spatial coordinate, or a `geom.*` geometry quantity (ADR 006). |
 | `MeasureRef` | resolution | which (`dx`, `dx_Gamma`, `ds`, …) | A `Name` (or `FunctionCall` for the parametrised `ds(<boundary>)` forms) that resolved to a measure. Only valid in weak-form `form:` expressions. |
-| `IndexAccess` | parser | object, index | `x[0]` parses to `IndexAccess(Name("x"), Number(0))`; resolution rewrites the base to `ReservedRef("x")`. |
+| `IndexAccess` | parser | object, index | `geom.x[0]` parses to `IndexAccess(Name("geom.x"), Number(0))`; resolution rewrites the base to the built-in `geom.x`. |
 | `FunctionCall` | parser | callee, args | Both built-in functions (sin, cos, …) and special operators (`trace`, `grad`, geometric helpers, `partial_t`, `inner`). The callee is a raw name; resolution dispatches on it (and rewrites measure callees to `MeasureRef`). |
 | `BinaryOp` | parser | op (`+`, `-`, `*`, `/`, `**`), left, right | Standard arithmetic. |
 | `UnaryOp` | parser | op (`+`, `-`), operand | |
@@ -1661,7 +1667,7 @@ After resolution, each node carries a type (`scalar`, `vector`, `symmetric_tenso
 The vocabulary is the union of:
 
 - **Standard mathematical functions** from §1.8.5 (`sin`, `cos`, `tan`, inverse trig, `exp`, `log`, `sqrt`, `abs`, `min`, `max`, `pow`, `if`, `step`, `sign`).
-- **Geometric helpers** from §1.8.4 (`n(x)`, `H(x)`, `kappa1`, `kappa2`, `tangent`, `theta`, `phi`, `r`).
+- **Geometry quantities** from §1.8.4, namespaced under `geom.*` and used as *values*, not calls (`geom.normal`, `geom.mean_curvature`, `geom.curvature1`, `geom.curvature2`, `geom.tangent`, `geom.radius`, `geom.azimuth`).
 - **Calculus operators** from §1.8.5, subject to the narrow rule of §1.8.5 in template slots and unrestricted in weak-form (`grad`, `div`, `lapl`, `grad_surf`, `div_surf`, `lapl_beltrami`).
 - **Cross-dimensional reference** from §1.8.2 (`trace`).
 - **Tensor algebra** for weak-form expressions: `inner(a, b)` for the inner product (works on any matching-rank pair — scalar*scalar, vector·vector, tensor:tensor — returns a scalar), `outer(a, b)` for outer product, `cross(a, b)` in 3D. There is intentionally no separate `dot(·, ·)` — on vectors it would coincide with `inner` and the duplication invites confusion; tensor-contraction beyond the matching-rank inner case is deferred to the v2 vocabulary if a use case warrants it.
@@ -1685,9 +1691,9 @@ Weak-form expressions may span multiple lines via YAML's `|` (literal block) syn
 
 Names within a MathDescription:
 
-- **Identifiers** match `[A-Za-z_][A-Za-z0-9_]*` — letters, digits, underscores, leading non-digit. Case-sensitive.
+- **Identifiers** match `[A-Za-z_][A-Za-z0-9_]*` — letters, digits, underscores, leading non-digit. Case-sensitive. A *qualified* built-in name adds dotted members (`geom.x`, `sim.t`); the dot is not legal in a user identifier.
 - **Snake_case** is conventional but not enforced; `rho_active`, `k_on`, `cytoplasm_left_cell` are typical.
-- **Reserved names** (cannot be used as variable, parameter, or subdomain names): `t`, `x`, plus every function and helper name in §2.3.4 (`sin`, `trace`, `grad`, `n`, `H`, `theta`, etc.) and every measure name (`dx`, `ds`, ...). Common shadowing pitfall: the polar / spherical accessors `theta`, `phi`, `r` (§1.8.4) are reserved even though they are natural names for angle, phase, or radial *parameters* in biological models. A user trying to declare `parameter: theta` for an angle offset will hit a shadowing error at construction; the workaround is a non-reserved synonym (`angle_offset`, `phase_lag`, `radius0`, …).
+- **Reserved names** (cannot be used as variable, parameter, or subdomain names): only the two **namespace roots** `geom` / `sim`, and the integration measures (`dx`, `ds`, …). Per ADR 006 the bare value namespace belongs to the user, so the short physical names that used to collide — `t`, `x`, `r`, `theta`, `phi`, `n`, `H` — are now **free for the modeller**: `parameter: theta` for an angle offset, `variable: phi` for a phase field, and so on are all legal. Operator and function names (`sin`, `trace`, `grad`, …) are reserved only in *call* position; they never occupy a value name, so a variable may even be named `grad` (and `grad(...)` still calls the operator). Built-in quantities are reached through their namespace — `geom.azimuth`, `geom.radius`, `geom.normal`, `sim.t` — never as bare names.
 - **Boundary and region names** are also identifiers; their assignment is the Geometry's responsibility.
 
 #### 2.4.2 Scope rules
@@ -1795,8 +1801,8 @@ math_description:
     - { name: f0,      value: 0.3   }              # active-traction amplitude
     - name: f_active                                # polarised active traction (vector)
       type: vector
-      subdomain: membrane                           # uses theta(x) — scope required (§2.2.3)
-      expression: "[f0 * cos(theta(x)), 0]"
+      subdomain: membrane                           # uses geom.azimuth — scope required (§2.2.3)
+      expression: "[f0 * cos(geom.azimuth), 0]"
 
   equations:
     # Motion equation — weak-form viscous force balance, quasi-static.
@@ -1806,7 +1812,7 @@ math_description:
       temporality: steady_state
       form: |
         ( eta * inner(v_membrane, v_membrane_test)
-          + sigma_T * H(x) * inner(n(x), v_membrane_test)
+          + sigma_T * geom.mean_curvature * inner(geom.normal, v_membrane_test)
           - inner(f_active, v_membrane_test)
         ) * dx_Gamma
       initial_condition: "0"
@@ -1819,7 +1825,7 @@ math_description:
       terms:
         diffusion: "0.05"
         source: "-k_off * rho"
-      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"
+      initial_condition: "1.0 + 0.3 * cos(2 * geom.azimuth)"
 
   boundary_conditions: []
 ```
@@ -1854,7 +1860,7 @@ What the equivalent JSON looks like (same data, different syntax):
         "name": "f_active",
         "type": "vector",
         "subdomain": "membrane",
-        "expression": "[f0 * cos(theta(x)), 0]"
+        "expression": "[f0 * cos(geom.azimuth), 0]"
       }
     ],
     "equations": [
@@ -1863,7 +1869,7 @@ What the equivalent JSON looks like (same data, different syntax):
         "variable": "v_membrane",
         "subdomain": "membrane",
         "temporality": "steady_state",
-        "form": "( eta * inner(v_membrane, v_membrane_test) + sigma_T * H(x) * inner(n(x), v_membrane_test) - inner(f_active, v_membrane_test) ) * dx_Gamma",
+        "form": "( eta * inner(v_membrane, v_membrane_test) + sigma_T * geom.mean_curvature * inner(geom.normal, v_membrane_test) - inner(f_active, v_membrane_test) ) * dx_Gamma",
         "initial_condition": "0"
       },
       {
@@ -1872,7 +1878,7 @@ What the equivalent JSON looks like (same data, different syntax):
         "subdomain": "membrane",
         "temporality": "time_dependent",
         "terms": { "diffusion": "0.05", "source": "-k_off * rho" },
-        "initial_condition": "1.0 + 0.3 * cos(2 * theta(x))"
+        "initial_condition": "1.0 + 0.3 * cos(2 * geom.azimuth)"
       }
     ],
     "boundary_conditions": []
@@ -1907,7 +1913,7 @@ md = MathDescription(
             name="f_active",
             type="vector",
             subdomain="membrane",
-            expression="[f0 * cos(theta(x)), 0]",
+            expression="[f0 * cos(geom.azimuth), 0]",
         ),
     ],
     equations=[
@@ -1917,7 +1923,7 @@ md = MathDescription(
             temporality="steady_state",
             form=(
                 "( eta * inner(v_membrane, v_membrane_test)"
-                " + sigma_T * H(x) * inner(n(x), v_membrane_test)"
+                " + sigma_T * geom.mean_curvature * inner(geom.normal, v_membrane_test)"
                 " - inner(f_active, v_membrane_test)"
                 ") * dx_Gamma"
             ),
@@ -1929,7 +1935,7 @@ md = MathDescription(
             subdomain="membrane",
             temporality="time_dependent",
             terms={"diffusion": "0.05", "source": "-k_off * rho"},
-            initial_condition="1.0 + 0.3 * cos(2 * theta(x))",
+            initial_condition="1.0 + 0.3 * cos(2 * geom.azimuth)",
         ),
     ],
 )
@@ -2118,11 +2124,11 @@ The three v1 conformance models run **through the formalism** (`tests/test_backe
 
 - Convergence-rate verification (`tests/test_backend_convergence.py`): h-refinement against analytical diffusion eigenmodes confirms the P1 operator is **second-order in L2** on both the bulk path (cos(πx)cos(πy) on an exactly-meshed unit square) and the surface path (cos(kθ) on the circle membrane, where the O(h²) polygonal-geometry error matches the FE rate); dt-refinement confirms backward Euler is **first-order in time** by self-convergence on a fixed mesh, cross-checked against the closed-form decay. This is the order-of-accuracy axis the single-resolution reference tests cannot cover.
 
-**Weak-form escape hatch** (`backend/weakform.py`, `assemble_weak_form`): one `weak_form` equation governing a scalar or vector variable on a subdomain, with the residual `form` compiled to UFL — the variable, its implicit `<variable>_test`, the tensor-algebra (`inner`/`dot`/`outer`/`cross`) and first-order calculus (`grad`/`div`/`lapl` + `_surf`/`_beltrami`) operators, vector literals `[·,·]`, parameters, `x`, and the subdomain measure (`dx`/`dx_Gamma`). `partial_t(u)` lowers to the backward-Euler difference for a time-dependent form; steady-state forms solve directly; the residual is split with `ufl.lhs`/`rhs`. This is the **membrane-mechanics** route in v1 (T5–T7 are v2): verified by reproducing the T2 surface diffusion as a weak form, a scalar membrane force balance `α u − σ Δ_Γ u = f` (analytic), and a vector viscous balance `η v = f_active` (analytic). The `n(x)`/`H(x)` geometric helpers compile, but resolve only where the curvature projection is bound — the unknown-motion mechanics solve (below); a bare `weak_form` that references them raises `CompileError`. *Deferred:* labelled-boundary measures `ds(·)`/`dS(·)`, BCs on a weak-form variable, and coupled multi-equation weak forms.
+**Weak-form escape hatch** (`backend/weakform.py`, `assemble_weak_form`): one `weak_form` equation governing a scalar or vector variable on a subdomain, with the residual `form` compiled to UFL — the variable, its implicit `<variable>_test`, the tensor-algebra (`inner`/`dot`/`outer`/`cross`) and first-order calculus (`grad`/`div`/`lapl` + `_surf`/`_beltrami`) operators, vector literals `[·,·]`, parameters, `geom.x`, and the subdomain measure (`dx`/`dx_Gamma`). `partial_t(u)` lowers to the backward-Euler difference for a time-dependent form; steady-state forms solve directly; the residual is split with `ufl.lhs`/`rhs`. This is the **membrane-mechanics** route in v1 (T5–T7 are v2): verified by reproducing the T2 surface diffusion as a weak form, a scalar membrane force balance `α u − σ Δ_Γ u = f` (analytic), and a vector viscous balance `η v = f_active` (analytic). The `geom.normal`/`geom.mean_curvature` geometric helpers compile, but resolve only where the curvature projection is bound — the unknown-motion mechanics solve (below); a bare `weak_form` that references them raises `CompileError`. *Deferred:* labelled-boundary measures `ds(·)`/`dS(·)`, BCs on a weak-form variable, and coupled multi-equation weak forms.
 
 **Unknown (mechanics-driven) motion** (`backend/unknown_motion.py`, `assemble_unknown_motion`): the §1.10.8 model — a `motion: { kind: unknown, variable: v }` membrane whose substrate velocity is *solved* from a weak-form force balance (not prescribed), with a T2 receptor that dilutes with the solved motion. The discretisation is **staggered**: each step solves the force balance for `v` on the current membrane, moves it by `dt·v`, then advances the receptor (mass + diffusion + dilution `ρ ∇_Γ·v`) on the deformed membrane. It reuses the existing machinery — the velocity is solved into a `Function` handed to a `DiscreteProblem` as its `motion_velocity`, so the dilution term and the per-step `_MeshMotion` read the freshly-solved field. This is the path to genuine cell migration (the membrane moves under force, not by fiat). Verified against a known-answer force `η v = f₀ x/r`: the solved velocity is `|v| = f₀/η` (radial), the membrane expands at that speed, and the receptor's ∫_Γ ρ ds is conserved across the solved expansion.
 
-**Curvature forces** (`n(x)`/`H(x)`): a force balance with surface tension, `η v + σ H n = 0`, drives mean-curvature flow. Because a discrete membrane's curvature is vertex-concentrated (not pointwise), `n(x)` and `H(x)` are resolved from a **projected mean-curvature vector** κ = H·n — the weak surface Laplacian of position, `∫κ·φ ds = ∫∇_Γ X : ∇_Γ φ ds` — re-solved on the deformed membrane each step (`_CurvatureProjection`). Then `H(x)` = |κ|, `n(x)` = κ/|κ|, and `σ H(x) inner(n(x), test)` evaluates to the correct weak force `inner(κ, test)`. The receptor is now optional, so a pure-mechanics (motion-only) membrane is supported. Verified: a unit circle's solved velocity is `σ/(η r)` radially **inward**, and the membrane shrinks as `r² = r₀² − 2σt/η` (mean-curvature flow). A stability note: without tangential redistribution (BGN-style) the mesh degenerates at large `dt`, so the verification uses a small step. *Deferred:* vector *expression* parameters, multiple receptors, tangential mesh redistribution, and a moving membrane coupled to a bulk.
+**Curvature forces** (`geom.normal`/`geom.mean_curvature`): a force balance with surface tension, `η v + σ H n = 0`, drives mean-curvature flow. Because a discrete membrane's curvature is vertex-concentrated (not pointwise), `geom.normal` and `geom.mean_curvature` are resolved from a **projected mean-curvature vector** κ = H·n — the weak surface Laplacian of position, `∫κ·φ ds = ∫∇_Γ X : ∇_Γ φ ds` — re-solved on the deformed membrane each step (`_CurvatureProjection`). Then `geom.mean_curvature` = |κ|, `geom.normal` = κ/|κ|, and `σ geom.mean_curvature inner(geom.normal, test)` evaluates to the correct weak force `inner(κ, test)`. The receptor is now optional, so a pure-mechanics (motion-only) membrane is supported. Verified: a unit circle's solved velocity is `σ/(η r)` radially **inward**, and the membrane shrinks as `r² = r₀² − 2σt/η` (mean-curvature flow). A stability note: without tangential redistribution (BGN-style) the mesh degenerates at large `dt`, so the verification uses a small step. *Deferred:* vector *expression* parameters, multiple receptors, tangential mesh redistribution, and a moving membrane coupled to a bulk.
 
 **Punted in v1**:
 
@@ -2150,10 +2156,10 @@ Alphabetical. Each entry links to the section that defines or first uses the ter
 - **Boundary (labelled)** — A codim-1 entity in the geometry with a name. Carries BCs in the MathDescription; can also be a subdomain in its own right (membrane double-role, §1.2.4).
 - **Composable pattern** — The §1.6.5 bulk-surface coupling idiom: a regular Neumann BC on the bulk variable plus a matching `source:` term on a surface variable. Used for accumulation (binding, capture). Contrast with `interface_flux_balance` (conservation, no accumulation).
 - **Conformance** — A backend claim that, for some declared subset of the formalism, it reproduces the reference suite's models within tolerance (§3.5).
-- **Current configuration** — The deformed mesh position at the current time step for moving subdomains. Geometric helpers (`n(x)`, `H(x)`, …) evaluate against it. Contrast with reference configuration (§1.7.2, §1.10.6).
+- **Current configuration** — The deformed mesh position at the current time step for moving subdomains. Geometric helpers (`geom.normal`, `geom.mean_curvature`, …) evaluate against it. Contrast with reference configuration (§1.7.2, §1.10.6).
 - **DAE** — Differential-algebraic equation. The combined system when a MathDescription has both `time_dependent` and `steady_state` equations (§1.9.4).
 - **Equation envelope** — The fixed five-field envelope every equation has: `template`, `variable`, `subdomain`, `temporality`, `terms` (or `form` for weak-form), plus `initial_condition` when time-dependent (§1.4.1, §1.5.2).
-- **Expression-valued parameter** — A parameter whose value is an expression in `t`, `x`, helpers, and other parameters rather than a constant. Scalar, vector, or symmetric-tensor (§2.2.3 (b)).
+- **Expression-valued parameter** — A parameter whose value is an expression in `sim.t`, `geom.*`, and other parameters rather than a constant. Scalar, vector, or symmetric-tensor (§2.2.3 (b)).
 - **Form (weak)** — The UFL-style residual expression in a weak-form equation. Equation is interpreted as `form = 0` for all admissible test functions (§1.5.3).
 - **Geometry** — The external object that provides the mesh, region-to-class assignment, and labelled-boundary identifiers. Referenced by name from the MathDescription (§1.2.1).
 - **Interface BC** — A boundary condition on an internal boundary (two-sided). Two kinds in v1: value-equality and flux-balance. Both require `partner_variable` (§1.6.2). Flux-balance is bulk-bulk only; bulk-surface accumulation uses the composable pattern.

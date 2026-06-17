@@ -50,7 +50,7 @@ def test_static_mesh_advects_at_the_prescribed_velocity() -> None:
     model = _bulk_model(
         motion="kind: none",
         terms=f'diffusion: "0.002", relative_advection: "[{u}, 0.0]"',
-        ic="exp(-((x[0]+0.4)*(x[0]+0.4) + x[1]*x[1])/0.05)",
+        ic="exp(-((geom.x[0]+0.4)*(geom.x[0]+0.4) + geom.x[1]*geom.x[1])/0.05)",
     )
     dp = assemble(load_yaml(model), make_disk_geometry("g", volume_subdomain="cyto", radius=1.5, h=0.04), dt=0.01)
     coords_x = dp.V.tabulate_dof_coordinates()[:, 0]
@@ -70,13 +70,13 @@ def test_eulerian_field_stays_put_while_mesh_rotates_through_it() -> None:
     # when the mesh rotates through it. With relative_advection = −v_mesh it stays put;
     # co-moving (no advection) carries the field around with the mesh.
     omega = 0.6
-    rotation = f"{omega} * [-x[1], x[0]]"  # divergence-free ⇒ no dilution to confound the test
+    rotation = f"{omega} * [-geom.x[1], geom.x[0]]"  # divergence-free ⇒ no dilution to confound the test
 
     def _max_error_vs_lab_frame(relative_advection: str | None) -> float:
         terms = 'diffusion: "0.0"'
         if relative_advection is not None:
             terms += f', relative_advection: "{relative_advection}"'
-        model = _bulk_model(motion=f'kind: prescribed, velocity: "{rotation}"', terms=terms, ic="1.0 + 0.3*x[0]")
+        model = _bulk_model(motion=f'kind: prescribed, velocity: "{rotation}"', terms=terms, ic="1.0 + 0.3*geom.x[0]")
         dp = assemble(load_yaml(model), make_disk_geometry("g", volume_subdomain="cyto", radius=1.0, h=0.05), dt=0.01)
         for _ in range(40):
             dp.step()
@@ -84,7 +84,7 @@ def test_eulerian_field_stays_put_while_mesh_rotates_through_it() -> None:
         lab_field = 1.0 + 0.3 * coords[:, 0]  # the static lab field, at each node's CURRENT position
         return float(np.abs(dp.unknown.x.array - lab_field).max())
 
-    eulerian = _max_error_vs_lab_frame(f"{omega} * [x[1], -x[0]]")  # −v_mesh
+    eulerian = _max_error_vs_lab_frame(f"{omega} * [geom.x[1], -geom.x[0]]")  # −v_mesh
     comoving = _max_error_vs_lab_frame(None)
     assert eulerian < 0.01  # the lab-frame field is held static as the mesh rotates
     assert comoving > 0.05  # the co-moving field rotates with the mesh — order of magnitude worse

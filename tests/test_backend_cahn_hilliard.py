@@ -86,7 +86,7 @@ math_description:
       subdomain: cyto
       temporality: {temporality}
       terms: {{ interface_width: "0.08" }}
-      initial_condition: "0.5 + 0.1 * cos(6.0*x[0]) * cos(6.0*x[1])"
+      initial_condition: "0.5 + 0.1 * cos(6.0*geom.x[0]) * cos(6.0*geom.x[1])"
 """
 
 

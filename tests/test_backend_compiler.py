@@ -30,7 +30,7 @@ def _ctx(params: dict[str, float] | None = None) -> CompileContext:
         for name, value in (params or {}).items()
     }
     # The assembler binds `x` to the spatial coordinate; mirror that here.
-    symbols["x"] = ufl.SpatialCoordinate(mesh)
+    symbols["geom.x"] = ufl.SpatialCoordinate(mesh)
     return CompileContext(mesh=mesh, symbols=symbols)
 
 
@@ -76,18 +76,18 @@ def test_parameter_resolves_from_context() -> None:
 
 def test_coordinate_component_averages_to_zero_on_centred_disk() -> None:
     # ∫_disk x[0] dA = 0 for a disk centred at the origin.
-    assert _mean("x[0]") == pytest.approx(0.0, abs=1e-9)
+    assert _mean("geom.x[0]") == pytest.approx(0.0, abs=1e-9)
 
 
 def test_radius_helper_averages_to_two_thirds() -> None:
     # ∫_disk r dA / area = (2/3)R = 2/3 for R = 1; coarse mesh, loose tol.
-    assert _mean("r(x)") == pytest.approx(2.0 / 3.0, abs=2e-2)
+    assert _mean("geom.radius") == pytest.approx(2.0 / 3.0, abs=2e-2)
 
 
 def test_cos_of_theta_mode_averages_to_constant() -> None:
     # ∫_disk cos(2θ) dA = 0 analytically, so the mean of 1 + 0.5·cos(2θ) is 1.
     # θ is singular at the origin, so a coarse mesh leaves a small residue; loose tol.
-    assert _mean("1.0 + 0.5 * cos(2 * theta(x))") == pytest.approx(1.0, abs=2e-3)
+    assert _mean("1.0 + 0.5 * cos(2 * geom.azimuth)") == pytest.approx(1.0, abs=2e-3)
 
 
 def test_compiled_coefficient_matches_handwritten_ufl() -> None:
@@ -120,7 +120,7 @@ def test_unsupported_construct_raises() -> None:
 
 def test_unsupported_function_raises() -> None:
     with pytest.raises(CompileError, match="not supported"):
-        compile_expression(parse("sinh(x[0])"), _ctx())
+        compile_expression(parse("sinh(geom.x[0])"), _ctx())
 
 
 # ---------------------------------------------------------------------------

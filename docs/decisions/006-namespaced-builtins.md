@@ -1,7 +1,7 @@
 # ADR 006 — Namespaced built-ins: the bare identifier namespace belongs to the user
 
 **Date:** 2026-06-16
-**Status:** Proposed
+**Status:** Accepted (implemented)
 
 ## Context
 
@@ -56,17 +56,21 @@ namespace.**
 **The bare identifier namespace belongs entirely to the user.** No built-in *quantity* occupies a
 bare name. Concretely:
 
-1. **Built-in quantities are namespaced** under two roots:
+1. **Built-in quantities are namespaced** under two roots, with **explicit, spelled-out member
+   names** (not the terse single letters of the old flat set):
    - **`geom.*`** — geometry-derived quantities: `geom.x` (the position vector, indexable
-     `geom.x[0]`/`geom.x[1]`/`geom.x[2]`), `geom.n` (boundary/surface normal), `geom.H` (mean
-     curvature), `geom.kappa1`/`geom.kappa2` (principal curvatures), `geom.tangent`, and the
-     curvilinear coordinates `geom.r` / `geom.theta` / `geom.phi`.
+     `geom.x[0]`/`geom.x[1]`/`geom.x[2]`), `geom.normal` (boundary/surface normal),
+     `geom.mean_curvature`, `geom.curvature1`/`geom.curvature2` (principal curvatures),
+     `geom.tangent`, and the curvilinear coordinates `geom.radius` / `geom.azimuth`.
    - **`sim.*`** — simulation quantities: `sim.t` (time), `sim.dt` (the step), and room for
      future run-level quantities.
 
-   So `x` becomes `geom.x` and `t` becomes `sim.t` — even the coordinates and time leave the bare
-   namespace. A modeller may now use `x`, `t`, `phi`, `r`, `theta`, `n`, `H`, `c`, … as their own
-   variable or parameter names without conflict.
+   So `x` becomes `geom.x` and `t` becomes `sim.t`; the former terse helpers map to explicit
+   names — `n`→`geom.normal`, `H`→`geom.mean_curvature`, `r`→`geom.radius`, `theta`→`geom.azimuth`.
+   Even the coordinates and time leave the bare namespace, so a modeller may now use `x`, `t`,
+   `phi`, `r`, `theta`, `n`, `H`, `c`, … as their own variable or parameter names without conflict.
+   The explicit names also read unambiguously at the call site (`geom.normal`, not `n`) — the terse
+   forms were a frequent source of "is this the user's `n` or the normal?" confusion.
 
 2. **Operators and functions stay bare and call-position** — `grad(...)`, `div(...)`,
    `inner(...)`, `trace(...)`, `partial_t(...)`, `sin(...)`, etc. They are reserved as
@@ -99,9 +103,10 @@ The net reserved-as-bare-name set shrinks to essentially the two roots **`geom`*
 **Negative / costs:**
 
 - **Migration is real and touches existing models.** Every current use of a bare built-in must be
-  rewritten: `x[0]` → `geom.x[0]`, `cos(2*theta)` → `cos(2*geom.theta)`, `r_dot * x / r(x)` →
-  `r_dot * geom.x / geom.r`, `n(x)`/`H(x)` → `geom.n`/`geom.H`, etc. The conformance fixtures, the
-  surface-diffusion and moving-membrane tests, and the worked-example YAML all reference these.
+  rewritten: `x[0]` → `geom.x[0]`, `cos(2*theta(x))` → `cos(2*geom.azimuth)`, `r_dot * x / r(x)` →
+  `r_dot * geom.x / geom.radius`, `n(x)`/`H(x)` → `geom.normal`/`geom.mean_curvature`, etc. The
+  conformance fixtures, the surface-diffusion and moving-membrane tests, and the worked-example
+  YAML all reference these.
 - **The parser gains a qualified-name form.** `geom.x` is a member access (`root . member`), a new
   syntactic construct — a small extension to the tokenizer/grammar and a `MemberAccess` (or
   qualified-`Name`) AST node, resolved by the compiler exactly as the bare names are today.
@@ -126,17 +131,24 @@ The net reserved-as-bare-name set shrinks to essentially the two roots **`geom`*
   (concentration `c`, position `x`…), and "everything system-provided is under a root" is a
   cleaner, more teachable rule than "everything except `x` and `t`". Adopted the fuller form.
 
-## Migration (staged, not yet implemented)
+## Migration (implemented)
 
-This ADR records the policy; the change is a sequenced follow-up:
+The policy was rolled out in one change:
 
-1. Parser: add the qualified-name form (`root.member`, with indexing `geom.x[0]`).
-2. Vocabulary/validator: replace the flat reserved set with the `geom`/`sim` roots + their member
-   tables + the reserved-callable list; bare-name resolution falls through to user
-   variables/parameters.
-3. Compiler: resolve `geom.*` / `sim.*` to the UFL objects the bare helpers resolve to today.
-4. Migrate the worked-example fixtures, tests, and docs to the namespaced forms.
-5. Update `RESERVED_NAMES` and the formalism reference (`docs/modeling/declarative-formalism.md`).
+1. Parser: the name token accepts a dotted qualified form (`root.member`, with indexing
+   `geom.x[0]`) — `formalism/parser.py`, `_NAME_RE`.
+2. Vocabulary/validator: the flat reserved set was replaced with the `geom`/`sim` member tables
+   (`GEOMETRY_MEMBERS`, `SIMULATION_MEMBERS`, `QUALIFIED_BUILTINS`, `SCOPED_GEOMETRY_NAMES`) plus
+   the reserved-callable list (`RESERVED_CALLABLES`); `RESERVED_NAMES` shrank to the two roots and
+   the measures. Bare-name resolution falls through to user variables/parameters
+   (`formalism/vocabulary.py`, `formalism/validator.py`).
+3. Compiler: `geom.*` / `sim.*` resolve to the UFL objects the bare helpers resolved to before —
+   `geom.x`→`SpatialCoordinate`, `geom.radius`/`geom.azimuth` as functions of position,
+   `geom.normal`/`geom.mean_curvature` from the bound curvature projection, `sim.t`→the time
+   Constant (`backend/compiler.py`, `_resolve_qualified`; assemblers bind `geom.x`/`sim.t`).
+4. The worked-example fixtures, tests, and docs were migrated to the namespaced forms.
+5. `RESERVED_NAMES` and the formalism reference (`docs/modeling/declarative-formalism.md`) were
+   updated.
 
 ## Notes
 

@@ -24,7 +24,7 @@ math_description:
     - name: f_active
       type: vector
       subdomain: membrane
-      expression: "[f0 * cos(theta(x)), 0]"
+      expression: "[f0 * cos(geom.azimuth), 0]"
 
   equations:
     - template: weak_form
@@ -33,7 +33,7 @@ math_description:
       temporality: steady_state
       form: |
         ( eta * inner(v_membrane, v_membrane_test)
-          + sigma_T * H(x) * inner(n(x), v_membrane_test)
+          + sigma_T * geom.mean_curvature * inner(geom.normal, v_membrane_test)
           - inner(f_active, v_membrane_test)
         ) * dx_Gamma
       initial_condition: "0"
@@ -45,4 +45,4 @@ math_description:
       terms:
         diffusion: "0.05"
         source: "-k_off * rho"
-      initial_condition: "1.0 + 0.3 * cos(2 * theta(x))"
+      initial_condition: "1.0 + 0.3 * cos(2 * geom.azimuth)"

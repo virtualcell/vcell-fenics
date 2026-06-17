@@ -1,20 +1,49 @@
-"""The closed reserved-name vocabulary of the expression language.
+"""The reserved-name vocabulary of the expression language (ADR 006).
 
-These are the names a MathDescription's expressions may invoke but a user may
-*not* reuse as a variable, parameter, or subdomain name (§2.4.1 — shadowing is
-a construction-time error). The sets mirror docs/modeling/declarative-formalism.md
-§1.8.3–§1.8.5 and §2.3.4.
+Two disjoint kinds of name live here:
 
-This module currently exports the *name sets* the shadowing check needs. Arg
-counts, argument/return types, and domain constraints (e.g. `grad_surf` is
-surface-only, `H` is codim-1-only) are added when expression type-checking and
-the operator-usage rules land — they are not needed to detect shadowing.
+- **Built-in quantities** are namespaced under the roots ``geom`` and ``sim`` —
+  ``geom.x``, ``geom.normal``, ``sim.t`` — and addressed as qualified names, never
+  bare. The bare value namespace therefore belongs entirely to the user: a
+  modeller may name a variable or parameter ``x``, ``t``, ``phi``, ``r``, … without
+  colliding with a built-in.
+- **Operators, functions, and measures** (``grad``, ``sin``, ``inner``, ``dx``, …)
+  are reserved only in *call / measure position* (``name(...)`` or ``* dx``). They
+  do not consume value-namespace names — a value is read as ``name``, a call as
+  ``name(`` — so they never restrict user variable names.
+
+Consequently the only names a user may *not* take (`RESERVED_NAMES`) are the two
+namespace roots and the measures (which read as bare tokens inside weak forms).
+The sets mirror docs/modeling/declarative-formalism.md §1.8.3–§1.8.5 and §2.3.4.
 """
 
 from __future__ import annotations
 
-# Time and spatial-coordinate accessors (§1.8.3).
-COORDINATES_AND_TIME: frozenset[str] = frozenset({"t", "x"})
+# -- Built-in quantities, addressed as qualified names (ADR 006) ------------
+
+# `geom.x` is the position field, available everywhere (the old bare `x`). The rest are
+# *subdomain-relative* geometry — the boundary/surface normal and curvatures, the tangent, and
+# the curvilinear radius/azimuth (defined relative to the geometry) — so a parameter expression
+# that uses one must declare a `subdomain:` scope (§2.2.3).
+GEOMETRY_POSITION: str = "x"
+GEOMETRY_SCOPED_MEMBERS: frozenset[str] = frozenset(
+    {"normal", "mean_curvature", "curvature1", "curvature2", "tangent", "radius", "azimuth"}
+)
+GEOMETRY_MEMBERS: frozenset[str] = GEOMETRY_SCOPED_MEMBERS | {GEOMETRY_POSITION}
+
+# `sim.t` is the simulation time (the old bare `t`); `sim.dt` the step.
+SIMULATION_MEMBERS: frozenset[str] = frozenset({"t", "dt"})
+
+# The bare namespace roots. A qualified built-in is `root.member`.
+NAMESPACE_ROOTS: frozenset[str] = frozenset({"geom", "sim"})
+
+# Fully-qualified built-in names, e.g. `geom.x`, `geom.normal`, `sim.t`.
+GEOMETRY_NAMES: frozenset[str] = frozenset(f"geom.{m}" for m in GEOMETRY_MEMBERS)
+SCOPED_GEOMETRY_NAMES: frozenset[str] = frozenset(f"geom.{m}" for m in GEOMETRY_SCOPED_MEMBERS)
+SIMULATION_NAMES: frozenset[str] = frozenset(f"sim.{m}" for m in SIMULATION_MEMBERS)
+QUALIFIED_BUILTINS: frozenset[str] = GEOMETRY_NAMES | SIMULATION_NAMES
+
+# -- Operators / functions / measures (call or measure position only) -------
 
 # Elementary / transcendental / piecewise functions (§1.8.5).
 STANDARD_FUNCTIONS: frozenset[str] = frozenset(
@@ -24,9 +53,6 @@ STANDARD_FUNCTIONS: frozenset[str] = frozenset(
         "if", "step", "sign",
     }
 )  # fmt: skip
-
-# Geometric helpers (§1.8.4).
-GEOMETRIC_HELPERS: frozenset[str] = frozenset({"n", "H", "kappa1", "kappa2", "tangent", "theta", "phi", "r"})
 
 # Calculus operators on variables (§1.8.5).
 CALCULUS_OPERATORS: frozenset[str] = frozenset({"grad", "div", "lapl", "grad_surf", "div_surf", "lapl_beltrami"})
@@ -42,15 +68,11 @@ TIME_DERIVATIVE: frozenset[str] = frozenset({"partial_t"})
 # parametrised forms (`ds(<boundary>)`, …) share these base names.
 MEASURES: frozenset[str] = frozenset({"dx", "dx_Gamma", "dl", "dp", "ds", "dS", "dl_Gamma"})
 
-# Every reserved name. A variable, parameter, or subdomain whose name is in
-# this set is a shadowing error (§1.11.3, §2.4.1).
-RESERVED_NAMES: frozenset[str] = (
-    COORDINATES_AND_TIME
-    | STANDARD_FUNCTIONS
-    | GEOMETRIC_HELPERS
-    | CALCULUS_OPERATORS
-    | TRACE
-    | TENSOR_ALGEBRA
-    | TIME_DERIVATIVE
-    | MEASURES
-)
+# Names that may appear only as a call's callee, never as a bare value.
+RESERVED_CALLABLES: frozenset[str] = STANDARD_FUNCTIONS | CALCULUS_OPERATORS | TRACE | TENSOR_ALGEBRA | TIME_DERIVATIVE
+
+# Names a user may NOT take for a subdomain, variable, or parameter (§1.11.3, §2.4.1). Per ADR 006
+# the bare value namespace is the user's: only the two namespace roots and the measures (bare
+# tokens in weak forms) are off-limits. Operators/functions are *not* here — they never collide
+# with a value, so a user may name a variable `grad` if they insist (and call `grad(...)` too).
+RESERVED_NAMES: frozenset[str] = NAMESPACE_ROOTS | MEASURES

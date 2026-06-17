@@ -62,7 +62,7 @@ def test_scalar_source_accepts_scalar() -> None:
 
 def test_vector_in_scalar_source_is_rejected() -> None:
     # x is a vector; a scalar source slot cannot hold it.
-    assert any("expected scalar" in m for m in _errors(_surface_model(source="x")))
+    assert any("expected scalar" in m for m in _errors(_surface_model(source="geom.x")))
 
 
 def test_relative_advection_requires_vector() -> None:
@@ -71,7 +71,7 @@ def test_relative_advection_requires_vector() -> None:
 
 
 def test_relative_advection_accepts_vector() -> None:
-    assert validate(_surface_model(relative_advection="x")) == []
+    assert validate(_surface_model(relative_advection="geom.x")) == []
 
 
 def test_diffusion_accepts_scalar() -> None:
@@ -85,15 +85,15 @@ def test_diffusion_accepts_scalar() -> None:
 
 def test_scalar_times_vector_is_a_vector() -> None:
     # `0.5 * x` is the explicit broadcast and is allowed in a vector slot.
-    assert validate(_surface_model(relative_advection="0.5 * x")) == []
+    assert validate(_surface_model(relative_advection="0.5 * geom.x")) == []
 
 
 def test_adding_scalar_and_vector_is_rejected() -> None:
-    assert any("no implicit broadcast" in m for m in _errors(_surface_model(relative_advection="x + 1")))
+    assert any("no implicit broadcast" in m for m in _errors(_surface_model(relative_advection="geom.x + 1")))
 
 
 def test_dividing_by_a_vector_is_rejected() -> None:
-    assert any("divisor must be scalar" in m for m in _errors(_surface_model(source="1 / x")))
+    assert any("divisor must be scalar" in m for m in _errors(_surface_model(source="1 / geom.x")))
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ def test_grad_surf_of_scalar_yields_vector_in_vector_slot() -> None:
 
 
 def test_vector_ic_for_scalar_variable_is_rejected() -> None:
-    assert any("expected scalar" in m for m in _errors(_surface_model(ic="x")))
+    assert any("expected scalar" in m for m in _errors(_surface_model(ic="geom.x")))
 
 
 def test_expression_parameter_type_mismatch_is_rejected() -> None:
@@ -146,5 +146,5 @@ def test_expression_parameter_type_mismatch_is_rejected() -> None:
 
 
 def test_inner_of_mismatched_ranks_is_rejected() -> None:
-    md = _surface_model(source="inner(x, 1.0)")  # vector vs scalar
+    md = _surface_model(source="inner(geom.x, 1.0)")  # vector vs scalar
     assert any("matching ranks" in m for m in _errors(md))

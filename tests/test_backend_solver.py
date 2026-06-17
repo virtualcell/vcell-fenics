@@ -35,7 +35,7 @@ math_description:
       subdomain: cytoplasm
       temporality: time_dependent
       terms: { diffusion: "0.2" }
-      initial_condition: "1.0 + 0.3 * x[0]"
+      initial_condition: "1.0 + 0.3 * geom.x[0]"
 """
 
 _MOVING_MEMBRANE = """
@@ -44,7 +44,7 @@ math_description:
   subdomains:
     - name: membrane
       kind: surface
-      motion: { kind: prescribed, velocity: "r_dot * x / r(x)" }
+      motion: { kind: prescribed, velocity: "r_dot * geom.x / geom.radius" }
   variables:
     - { name: rho, subdomain: membrane }
   equations:
@@ -177,7 +177,7 @@ math_description:
       terms: { diffusion: "0.2" }
       initial_condition: "1.0"
   boundary_conditions:
-    - { kind: dirichlet, variable: c, boundary: wall, expression: "1.0 + 2.0 * t" }
+    - { kind: dirichlet, variable: c, boundary: wall, expression: "1.0 + 2.0 * sim.t" }
 """
 
 

@@ -56,9 +56,9 @@ math_description:
 
 # A non-uniform radial motion: speed varies with angle, so node spacing along the
 # membrane diverges and the mesh distorts (the curve stays a simple radial graph).
-_DISTORTING = "(1.0 + 0.8 * cos(2 * theta(x))) * x / r(x)"
+_DISTORTING = "(1.0 + 0.8 * cos(2 * geom.azimuth)) * geom.x / geom.radius"
 # Uniform radial expansion: scale-invariant, so the mesh never distorts.
-_UNIFORM = "x / r(x)"
+_UNIFORM = "geom.x / geom.radius"
 
 
 def _geom(h: float = 0.12):  # type: ignore[no-untyped-def]
@@ -156,7 +156,7 @@ def test_driver_reproduces_run_when_no_remesh_needed() -> None:
 def test_step_too_large_is_raised() -> None:
     # Inward motion with dt large enough to collapse the membrane onto the origin in
     # a single step — remeshing cannot rescue it.
-    md = load_yaml(_model("-1.0 * x / r(x)"))
+    md = load_yaml(_model("-1.0 * geom.x / geom.radius"))
     state = ALEState.initial(md, _geom(0.3), SolverConfiguration(dt=1.0, t_final=1.0))
 
     with pytest.raises(StepTooLarge):

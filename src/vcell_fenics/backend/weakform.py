@@ -102,7 +102,7 @@ def assemble_weak_form(md: MathDescription, geometry: Geometry, *, dt: float, fe
 
     dx = ufl.Measure("dx", domain=mesh)
     symbols: dict[str, UflExpr] = {
-        "x": ufl.SpatialCoordinate(mesh),
+        "geom.x": ufl.SpatialCoordinate(mesh),
         eq.variable: trial,
         f"{eq.variable}_test": test,
         "dx": dx,

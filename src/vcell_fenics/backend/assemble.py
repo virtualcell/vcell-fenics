@@ -197,7 +197,7 @@ def _build_problem(
         bcs=bcs,
         boundary_terms=tuple(boundary_terms),
         motion_velocity=velocity,
-        time=ctx.symbols["t"],
+        time=ctx.symbols["sim.t"],
         dirichlet_refreshers=tuple(dirichlet_refreshers),
     )
 
@@ -391,12 +391,13 @@ def _motion_velocity(md: MathDescription, subdomain: str, ctx: CompileContext) -
 
 
 def _compile_context(md: MathDescription, mesh: Mesh) -> CompileContext:
-    # `t` is bound to a mutable time Constant: expressions outside the IC (which the validator
-    # forbids `t` in) may reference it, and the driver advances it each step — e.g. a
-    # time-dependent Dirichlet value g(t). It stays 0 unless a step updates it.
+    # The namespaced built-ins (ADR 006): `geom.x` is the position field, `sim.t` a mutable time
+    # Constant. Expressions outside the IC (which the validator forbids `sim.t` in) may reference
+    # the time, and the driver advances it each step — e.g. a time-dependent Dirichlet value
+    # g(sim.t). It stays 0 unless a step updates it.
     symbols: dict[str, UflExpr] = {
-        "x": ufl.SpatialCoordinate(mesh),
-        "t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
+        "geom.x": ufl.SpatialCoordinate(mesh),
+        "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
     }
     for p in md.parameters:
         if not isinstance(p, ParameterConstant):
