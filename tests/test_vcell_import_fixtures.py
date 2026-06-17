@@ -33,19 +33,12 @@ from typing import Any
 import pytest
 import yaml
 
+from tests._pyvcell_models import load_models_math
 from vcell_fenics.formalism import dump_yaml, load_yaml, validate
 from vcell_fenics.pyvcell_bridge import VcellImportError, import_math_description, translate_expression
 
-try:
-    import pyvcell.vcml.models_math as vm
-
-    _HAVE_PYVCELL = True
-except ImportError:  # pragma: no cover - environment-dependent
-    _HAVE_PYVCELL = False
-
-needs_pyvcell = pytest.mark.skipif(
-    not _HAVE_PYVCELL, reason="pyvcell not installed (run `pixi run -e dev link-pyvcell`)"
-)
+vm = load_models_math()  # pyvcell.vcml.models_math, or None if pyvcell is not installed
+needs_pyvcell = pytest.mark.skipif(vm is None, reason="pyvcell not installed (run `pixi run -e dev link-pyvcell`)")
 
 _FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "vcell_import"
 _UPDATE_GOLDENS = os.environ.get("UPDATE_GOLDENS") == "1"

@@ -15,11 +15,19 @@ construction. The translator implements the §2.6.1 direct maps:
   ``relative_advection`` (the ``velocity``) slots and ``initial_condition``;
   ``steady`` picks the temporality.
 - ``OdeEquation`` → ``lumped_ode`` (``rate`` slot).
-- numeric ``Constant`` → ``ParameterConstant``; symbolic ``Constant`` and
-  ``MathFunction`` → ``ParameterExpression``.
+- numeric ``Constant`` → ``ParameterConstant``; symbolic ``Constant`` and **pure**
+  ``MathFunction`` (no variable reference) → ``ParameterExpression``.
+
+**Functions and observables.** A VCell ``MathFunction`` that references state variables
+(e.g. ``I = gL*(V - VL)``) cannot be a parameter (the formalism forbids variable refs in
+parameters). Such functions are **inlined** into the equation expressions that use them
+(so each equation is self-contained for the compiler) and **also** surfaced as
+:class:`Observable`\\ s — derived outputs kept on the side, never inside the math (§2.6.3).
+See :mod:`~vcell_fenics.pyvcell_bridge.inlining`.
 
 Expression strings are run through :func:`translate_expression` (coordinate/time
-namespacing, ``^``→``**``).
+namespacing, ``^``→``**``). :func:`import_model` returns the math + observables; the
+convenience :func:`import_math_description` returns just the math.
 
 The translator is **duck-typed** over the pydantic object's attributes, so it needs no
 import of ``pyvcell`` itself — the caller supplies the
@@ -37,6 +45,7 @@ zero-Neumann boundary.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from vcell_fenics.formalism.schema import (
@@ -52,6 +61,7 @@ from vcell_fenics.formalism.schema import (
     Variable,
 )
 from vcell_fenics.pyvcell_bridge.expression import translate_expression
+from vcell_fenics.pyvcell_bridge.inlining import FunctionResolution, resolve_functions
 
 
 class VcellImportError(Exception):
@@ -59,25 +69,43 @@ class VcellImportError(Exception):
     formalism (an out-of-scope §2.6.3 construct, or a malformed equation)."""
 
 
-def import_math_description(vcml: Any, *, geometry: str | None = None) -> MathDescription:
-    """Translate a pyvcell ``MathDescription`` into a formalism ``MathDescription``.
+@dataclass(frozen=True)
+class Observable:
+    """A derived output quantity (a VCell ``MathFunction`` that references state variables),
+    kept *outside* the math description (§2.6.3). ``expression`` is in formalism syntax and
+    may reference variables, parameters, ``geom.*`` and ``sim.t``; ``subdomain`` is the
+    function's home subdomain, if VCell recorded one."""
 
-    ``vcml`` is a ``pyvcell.vcml.models.MathDescription`` (duck-typed). ``geometry`` is
-    the name of the formalism Geometry this math will be paired with at solve time
-    (cross-checked then, not now); it defaults to the VCell math description's ``name``.
-    The result is a structurally complete ``MathDescription`` ready for
-    ``validate_or_raise`` / the backend.
-    """
+    name: str
+    expression: str
+    subdomain: str | None = None
+
+
+@dataclass(frozen=True)
+class ImportResult:
+    """The result of importing a VCell model: the solvable formalism ``MathDescription`` plus
+    the observables sidecar (derived quantities, not part of the math/solve)."""
+
+    math: MathDescription
+    observables: tuple[Observable, ...] = field(default=())
+
+
+def import_model(vcml: Any, *, geometry: str | None = None) -> ImportResult:
+    """Translate a pyvcell ``MathDescription`` into a formalism ``MathDescription`` plus its
+    observables. ``geometry`` defaults to the VCell math description's ``name`` (it is
+    cross-checked against a real Geometry at solve time, not here)."""
+
+    variable_names = _collect_variable_names(vcml)
+    resolution = resolve_functions(list(getattr(vcml, "functions", [])), variable_names)
 
     subdomains: list[Subdomain] = []
     variables: list[Variable] = []
     equations: list[Equation] = []
-    boundary_conditions: list[BoundaryCondition] = []
 
     for compartment in vcml.compartment_subdomains:
         _reject_stochastic(compartment)
         subdomains.append(Subdomain(name=compartment.name, kind="volume", motion=MotionNone()))
-        _translate_subdomain_equations(compartment, kind="volume", variables=variables, equations=equations)
+        _translate_subdomain_equations(compartment, "volume", variables, equations, resolution)
 
     for membrane in vcml.membrane_subdomains:
         _reject_stochastic(membrane)
@@ -87,35 +115,61 @@ def import_math_description(vcml: Any, *, geometry: str | None = None) -> MathDe
                 f"jump-condition import is a follow-up increment"
             )
         subdomains.append(Subdomain(name=membrane.name, kind="surface", motion=MotionNone()))
-        _translate_subdomain_equations(membrane, kind="surface", variables=variables, equations=equations)
+        _translate_subdomain_equations(membrane, "surface", variables, equations, resolution)
 
-    parameters = _translate_parameters(vcml)
+    parameters = _translate_parameters(vcml, resolution)
+    observables = _build_observables(vcml, resolution)
 
-    return MathDescription(
+    math = MathDescription(
         geometry=geometry if geometry is not None else vcml.name,
         subdomains=subdomains,
         variables=variables,
         equations=equations,
         parameters=parameters,
-        boundary_conditions=boundary_conditions,
+        boundary_conditions=list[BoundaryCondition](),
     )
+    return ImportResult(math=math, observables=tuple(observables))
+
+
+def import_math_description(vcml: Any, *, geometry: str | None = None) -> MathDescription:
+    """Convenience wrapper returning just the formalism ``MathDescription`` (the observables
+    sidecar is dropped). See :func:`import_model`."""
+
+    return import_model(vcml, geometry=geometry).math
+
+
+def _collect_variable_names(vcml: Any) -> set[str]:
+    """The state-variable names — the equation-governed names (plus any declared
+    ``MathVariable``s). Used to decide which functions reference variables."""
+
+    names: set[str] = {v.name for v in getattr(vcml, "variables", [])}
+    for sub in [*vcml.compartment_subdomains, *vcml.membrane_subdomains]:
+        names.update(p.name for p in sub.pde_equations)
+        names.update(o.name for o in sub.ode_equations)
+    return names
 
 
 def _translate_subdomain_equations(
-    subdomain: Any, *, kind: str, variables: list[Variable], equations: list[Equation]
+    subdomain: Any, kind: str, variables: list[Variable], equations: list[Equation], res: FunctionResolution
 ) -> None:
-    """Append the variables + template equations for one subdomain's PDEs and ODEs."""
+    """Append the variables + template equations for one subdomain's PDEs and ODEs,
+    inlining variable-referencing functions into each expression."""
 
     pde_template = "bulk_radv_diff" if kind == "volume" else "surface_pde_with_dilution"
+
+    def expr(raw: str | None) -> str | None:
+        if raw is None:
+            return None
+        return translate_expression(res.inline(raw) or "")
 
     for pde in subdomain.pde_equations:
         _reject_boundaries(pde, subdomain)
         terms: dict[str, str] = {}
         if pde.diffusion is not None:
-            terms["diffusion"] = translate_expression(pde.diffusion)
+            terms["diffusion"] = expr(pde.diffusion)  # type: ignore[assignment]
         if pde.rate is not None:
-            terms["source"] = translate_expression(pde.rate)
-        advection = _velocity_vector(pde.velocity)
+            terms["source"] = expr(pde.rate)  # type: ignore[assignment]
+        advection = _velocity_vector(pde.velocity, res)
         if advection is not None:
             terms["relative_advection"] = advection
         variables.append(Variable(name=pde.name, subdomain=subdomain.name, type="scalar"))
@@ -126,7 +180,7 @@ def _translate_subdomain_equations(
                 subdomain=subdomain.name,
                 temporality="steady_state" if pde.steady else "time_dependent",
                 terms=terms,
-                initial_condition=(translate_expression(pde.initial) if pde.initial is not None else None),
+                initial_condition=expr(pde.initial),
             )
         )
 
@@ -140,13 +194,13 @@ def _translate_subdomain_equations(
                 variable=ode.name,
                 subdomain=subdomain.name,
                 temporality="time_dependent",
-                terms={"rate": translate_expression(ode.rate)},
-                initial_condition=(translate_expression(ode.initial) if ode.initial is not None else None),
+                terms={"rate": expr(ode.rate)},  # type: ignore[dict-item]
+                initial_condition=expr(ode.initial),
             )
         )
 
 
-def _velocity_vector(velocity: Any) -> str | None:
+def _velocity_vector(velocity: Any, res: FunctionResolution) -> str | None:
     """Build a formalism vector-expression `"[vx, vy(, vz)]"` from a VCell ``Velocity``
     (the species' advection field → the template's ``relative_advection`` slot), or
     ``None`` if there is no velocity. A 2D model (no z component) yields two components."""
@@ -158,14 +212,14 @@ def _velocity_vector(velocity: Any) -> str | None:
         components.append(velocity.z)
     if all(c is None for c in components):
         return None
-    rendered = [translate_expression(c) if c is not None else "0" for c in components]
+    rendered = [translate_expression(res.inline(c) or "") if c is not None else "0" for c in components]
     return "[" + ", ".join(rendered) + "]"
 
 
-def _translate_parameters(vcml: Any) -> list[Parameter]:
-    """Translate VCell ``Constant``s and ``MathFunction``s into formalism parameters.
-    A numeric constant becomes a `ParameterConstant`; a symbolic constant or a named
-    function becomes a `ParameterExpression`."""
+def _translate_parameters(vcml: Any, res: FunctionResolution) -> list[Parameter]:
+    """VCell ``Constant``s → parameters; **pure** ``MathFunction``s (no variable reference)
+    → ``ParameterExpression``. Variable-referencing functions are not parameters — they are
+    inlined into equations and surfaced as observables instead."""
 
     parameters: list[Parameter] = []
     for constant in vcml.constants:
@@ -173,16 +227,37 @@ def _translate_parameters(vcml: Any) -> list[Parameter]:
         if numeric is not None:
             parameters.append(ParameterConstant(name=constant.name, value=numeric))
         else:
-            parameters.append(ParameterExpression(name=constant.name, expression=translate_expression(constant.exp)))
-    for function in vcml.functions:
-        parameters.append(
-            ParameterExpression(
-                name=function.name,
-                expression=translate_expression(function.exp),
-                subdomain=getattr(function, "domain", None),
+            parameters.append(
+                ParameterExpression(name=constant.name, expression=translate_expression(res.inline(constant.exp) or ""))
             )
-        )
+    for function in vcml.functions:
+        if function.name in res.pure_function_names:
+            parameters.append(
+                ParameterExpression(
+                    name=function.name,
+                    expression=translate_expression(function.exp or ""),
+                    subdomain=getattr(function, "domain", None),
+                )
+            )
     return parameters
+
+
+def _build_observables(vcml: Any, res: FunctionResolution) -> list[Observable]:
+    """Surface the variable-referencing functions as observables, with bodies fully inlined
+    (so they reference only variables, parameters, coordinates, and time)."""
+
+    observables: list[Observable] = []
+    for function in vcml.functions:
+        body = res.var_function_bodies.get(function.name)
+        if body is not None:
+            observables.append(
+                Observable(
+                    name=function.name,
+                    expression=translate_expression(body),
+                    subdomain=getattr(function, "domain", None),
+                )
+            )
+    return observables
 
 
 def _as_float(expression: str) -> float | None:

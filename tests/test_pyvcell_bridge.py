@@ -18,19 +18,17 @@ from __future__ import annotations
 
 import pytest
 
+from tests._pyvcell_models import load_models_math
 from vcell_fenics.formalism.schema import TemplateEquation
-from vcell_fenics.pyvcell_bridge import VcellImportError, import_math_description, translate_expression
-
-try:
-    import pyvcell.vcml.models_math as vm  # lazy import — pulls none of pyvcell's heavy stack
-
-    _HAVE_PYVCELL = True
-except ImportError:  # pragma: no cover - environment-dependent
-    _HAVE_PYVCELL = False
-
-needs_pyvcell = pytest.mark.skipif(
-    not _HAVE_PYVCELL, reason="pyvcell not installed (run `pixi run -e dev link-pyvcell`)"
+from vcell_fenics.pyvcell_bridge import (
+    VcellImportError,
+    import_math_description,
+    import_model,
+    translate_expression,
 )
+
+vm = load_models_math()  # pyvcell.vcml.models_math, or None if pyvcell is not installed
+needs_pyvcell = pytest.mark.skipif(vm is None, reason="pyvcell not installed (run `pixi run -e dev link-pyvcell`)")
 
 
 # --- 1. expression translation -------------------------------------------------
@@ -185,6 +183,85 @@ def test_imported_model_validates() -> None:
     )
     md = import_math_description(vcml, geometry="disk_2d")
     assert [d for d in validate(md) if d.severity == "error"] == []
+
+
+# --- function inlining + observables -------------------------------------------
+
+
+@needs_pyvcell
+def test_variable_referencing_function_is_inlined_and_observed() -> None:
+    from vcell_fenics.formalism import validate
+
+    vcml = vm.MathDescription(
+        name="m",
+        constants=[vm.Constant(name="k", exp="2.0")],
+        functions=[vm.MathFunction(name="J", exp="k * c")],  # references the variable c
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto",
+                pde_equations=[vm.PdeEquation(name="c", diffusion="1.0", rate="-J", initial="1.0", steady=False)],
+            )
+        ],
+    )
+    result = import_model(vcml, geometry="g")
+
+    (eq,) = result.math.equations
+    assert isinstance(eq, TemplateEquation)
+    assert "J" not in eq.terms["source"]  # the function was inlined away
+    assert "k * c" in eq.terms["source"]
+    assert all(p.name != "J" for p in result.math.parameters)  # not a parameter
+    assert [(o.name, o.expression) for o in result.observables] == [("J", "k * c")]  # surfaced as an observable
+    assert [d for d in validate(result.math) if d.severity == "error"] == []  # now validates clean
+
+
+@needs_pyvcell
+def test_pure_function_stays_a_parameter_not_an_observable() -> None:
+    vcml = vm.MathDescription(
+        name="m",
+        constants=[vm.Constant(name="a", exp="2.0"), vm.Constant(name="b", exp="3.0")],
+        functions=[vm.MathFunction(name="g", exp="a + b")],  # references no variable
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto", pde_equations=[vm.PdeEquation(name="c", diffusion="g", initial="1.0", steady=False)]
+            )
+        ],
+    )
+    result = import_model(vcml, geometry="g")
+    assert result.observables == ()
+    assert any(p.name == "g" for p in result.math.parameters)
+
+
+@needs_pyvcell
+def test_nested_variable_function_is_fully_inlined() -> None:
+    vcml = vm.MathDescription(
+        name="m",
+        functions=[vm.MathFunction(name="inner", exp="2 * c"), vm.MathFunction(name="outer", exp="inner + 1")],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto",
+                pde_equations=[vm.PdeEquation(name="c", diffusion="1.0", rate="-outer", initial="1.0", steady=False)],
+            )
+        ],
+    )
+    result = import_model(vcml, geometry="g")
+    observables = {o.name: o.expression for o in result.observables}
+    assert observables["outer"] == "(2 * c) + 1"  # `inner` inlined into `outer`
+    (eq,) = result.math.equations
+    assert isinstance(eq, TemplateEquation)
+    assert "outer" not in eq.terms["source"] and "inner" not in eq.terms["source"]
+
+
+@needs_pyvcell
+def test_import_math_description_is_the_math_of_import_model() -> None:
+    vcml = vm.MathDescription(
+        name="m",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto", pde_equations=[vm.PdeEquation(name="c", diffusion="1.0", initial="1.0", steady=False)]
+            )
+        ],
+    )
+    assert import_math_description(vcml, geometry="g") == import_model(vcml, geometry="g").math
 
 
 # --- loud rejection of out-of-scope / not-yet constructs ----------------------

@@ -15,10 +15,19 @@ would otherwise drag in that closure).
 """
 
 from vcell_fenics.pyvcell_bridge.expression import translate_expression
-from vcell_fenics.pyvcell_bridge.importer import VcellImportError, import_math_description
+from vcell_fenics.pyvcell_bridge.importer import (
+    ImportResult,
+    Observable,
+    VcellImportError,
+    import_math_description,
+    import_model,
+)
 
 __all__ = [
+    "ImportResult",
+    "Observable",
     "VcellImportError",
     "import_math_description",
+    "import_model",
     "translate_expression",
 ]

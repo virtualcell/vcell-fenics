@@ -57,11 +57,17 @@ _UFL_UNARY_FUNCTIONS: dict[str, Any] = {
     "asin": ufl.asin,
     "acos": ufl.acos,
     "atan": ufl.atan,
+    "sinh": ufl.sinh,
+    "cosh": ufl.cosh,
+    "tanh": ufl.tanh,
     "exp": ufl.exp,
     "log": ufl.ln,  # the formalism `log` is the natural log; UFL spells it `ln`
+    "log10": lambda a: ufl.ln(a) / ufl.ln(10.0),
     "sqrt": ufl.sqrt,
     "abs": abs,
 }
+# `floor` / `ceil` are accepted by the validator (they appear in real VCell models) but are
+# non-differentiable, so UFL/DOLFINx has no operator for them — compiling one raises below.
 
 # Two-argument tensor-algebra operators (§1.8, TENSOR_ALGEBRA).
 _UFL_BINARY: dict[str, Any] = {"inner": ufl.inner, "dot": ufl.dot, "outer": ufl.outer, "cross": ufl.cross}
