@@ -30,9 +30,19 @@ import sys
 from pathlib import Path
 
 import pyvcell.vcml as vc
-from pyvcell._internal.api.vcell_client.api.bio_model_resource_api import BioModelResourceApi
+import requests
 
 _DEFAULT_OUT = Path(__file__).resolve().parent.parent / "vcml_biomodels"
+
+# The VCML-download endpoint has moved before; the generated client's path 500'd, so we
+# call the REST API directly (reusing the OAuth token, like list_biomodels does) and probe
+# a few path/Accept variants, pinning the first that works. Ordered by likelihood.
+_VCML_PATH_TEMPLATES = (
+    "/api/v1/bioModel/{id}/vcml_download",
+    "/api/v1/bioModel/{id}/biomodel.vcml",
+    "/api/v1/bioModel/{id}/vcml",
+)
+_ACCEPT_HEADERS = ("application/xml", "text/xml", "*/*")
 
 
 def _slug(name: str) -> str:
@@ -41,12 +51,72 @@ def _slug(name: str) -> str:
     return cleaned[:120] or "model"
 
 
+def _looks_like_vcml(text: str) -> bool:
+    head = text.lstrip()[:400].lower()
+    return "<vcml" in head or "<biomodel" in head or ("<?xml" in head and "vcml" in head)
+
+
+def _fetch_vcml(
+    host: str, token: str | None, model_id: str, timeout: float, pinned: dict[str, str]
+) -> tuple[str | None, str]:
+    """Fetch one model's VCML, probing path/Accept variants until one returns XML. Returns
+    (vcml_or_None, diagnostic). Once a (path, accept) combo works it is pinned for reuse."""
+
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    combos = (
+        [(pinned["path"], pinned["accept"])]
+        if pinned
+        else [(p, a) for p in _VCML_PATH_TEMPLATES for a in _ACCEPT_HEADERS]
+    )
+    last = ""
+    for path_template, accept in combos:
+        url = host.rstrip("/") + path_template.format(id=model_id)
+        try:
+            resp = requests.get(url, headers={**headers, "Accept": accept}, timeout=timeout)
+        except requests.RequestException as exc:
+            last = f"{path_template} [{accept}] -> request error: {exc}"
+            continue
+        if resp.status_code == 200 and _looks_like_vcml(resp.text):
+            pinned["path"], pinned["accept"] = path_template, accept
+            return resp.text, ""
+        body = resp.text.replace("\n", " ")[:300]
+        last = f"{path_template} [{accept}] -> HTTP {resp.status_code}: {body}"
+    return None, last
+
+
+def _diagnose(host: str, token: str | None, model_ids: list[str], timeout: float) -> None:
+    """Probe every path/Accept variant for a few models and print status + content-type +
+    body snippet — distinguishes a wrong/changed endpoint (all variants error for every
+    model) from individually-broken models (some models 200, some 500)."""
+
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    for model_id in model_ids:
+        print(f"\n--- model {model_id} ---")
+        for path_template in _VCML_PATH_TEMPLATES:
+            for accept in _ACCEPT_HEADERS:
+                url = host.rstrip("/") + path_template.format(id=model_id)
+                try:
+                    resp = requests.get(url, headers={**headers, "Accept": accept}, timeout=timeout)
+                except requests.RequestException as exc:
+                    print(f"  {path_template} [{accept}] -> request error: {exc}")
+                    continue
+                ok = "OK " if (resp.status_code == 200 and _looks_like_vcml(resp.text)) else "   "
+                ct = resp.headers.get("content-type", "?")
+                body = resp.text.replace("\n", " ").strip()[:200]
+                print(f"  {ok}{path_template} [{accept}] -> {resp.status_code} ct={ct}  {body}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Download VCell BioModels as .vcml")
     parser.add_argument("--out", type=Path, default=_DEFAULT_OUT, help="output dir (default: <repo>/vcml_biomodels)")
     parser.add_argument("--limit", type=int, default=None, help="download at most N models (for testing)")
     parser.add_argument("--server", default="https://vcell.cam.uchc.edu", help="VCell server URL")
     parser.add_argument("--timeout", type=float, default=120.0, help="per-model request timeout (s)")
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="probe the VCML endpoint variants for the first few models and exit (no downloads)",
+    )
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -54,14 +124,23 @@ def main() -> int:
 
     print("Opening browser for VCell OAuth2 login ...")
     session = vc.connect(api_base_url=args.server, login=True)
-    api = BioModelResourceApi(session._api_client)
+    config = session._api_client.configuration
+    host = config.host
+    token = config.access_token
 
     print("Listing BioModels ...")
     summaries = session.list_biomodels()
     print(f"Server returned {len(summaries)} BioModel summaries.")
+
+    if args.diagnose:
+        ids = [s["id"] for s in summaries if s.get("id")][:3]
+        _diagnose(host, token, ids, args.timeout)
+        return 0
+
     if args.limit is not None:
         summaries = summaries[: args.limit]
 
+    pinned: dict[str, str] = {}
     downloaded = skipped = failed = 0
     failures: list[tuple[str, str]] = []
     total = len(summaries)
@@ -74,19 +153,19 @@ def main() -> int:
         if dest.exists():
             skipped += 1
             continue
-        try:
-            vcml = api.get_bio_model_vcml(model_id, _request_timeout=args.timeout)
+        vcml, diagnostic = _fetch_vcml(host, token, model_id, args.timeout, pinned)
+        if vcml is not None:
             dest.write_text(vcml)
             downloaded += 1
-            print(f"[{i}/{total}] {dest.name}")
-        except Exception as exc:  # keep going; report at the end
+            print(f"[{i}/{total}] {dest.name}  (via {pinned['path']} [{pinned['accept']}])")
+        else:
             failed += 1
-            failures.append((f"{name} ({model_id})", str(exc).splitlines()[0][:200]))
-            print(f"[{i}/{total}] FAILED {name} ({model_id}): {exc!r}", file=sys.stderr)
+            failures.append((f"{name} ({model_id})", diagnostic))
+            print(f"[{i}/{total}] FAILED {name} ({model_id}): {diagnostic}", file=sys.stderr)
 
     print(f"\nDone. downloaded={downloaded} skipped={skipped} failed={failed} -> {args.out}")
     if failures:
-        print("Failures:")
+        print("Failures (last variant tried per model):")
         for who, why in failures:
             print(f"  - {who}: {why}")
     return 0
