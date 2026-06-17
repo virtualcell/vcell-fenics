@@ -1,0 +1,64 @@
+{
+  "name": "cell",
+  "constants": [
+    {
+      "name": "Dc",
+      "exp": "0.2"
+    },
+    {
+      "name": "Dm",
+      "exp": "0.05"
+    }
+  ],
+  "functions": [],
+  "variables": [],
+  "compartment_subdomains": [
+    {
+      "name": "cytosol",
+      "boundary_types": [],
+      "ode_equations": [],
+      "pde_equations": [
+        {
+          "name": "c",
+          "rate": null,
+          "diffusion": "Dc",
+          "initial": "1.0",
+          "solution_type": null,
+          "solution": null,
+          "steady": false,
+          "boundaries": null,
+          "velocity": null
+        }
+      ],
+      "variable_initial_counts": [],
+      "jump_processes": [],
+      "particle_jump_processes": [],
+      "particle_properties": []
+    }
+  ],
+  "membrane_subdomains": [
+    {
+      "name": "membrane",
+      "inside_compartment": "cytosol",
+      "outside_compartment": null,
+      "boundary_types": [],
+      "ode_equations": [],
+      "pde_equations": [
+        {
+          "name": "rho",
+          "rate": null,
+          "diffusion": "Dm",
+          "initial": "0.5",
+          "solution_type": null,
+          "solution": null,
+          "steady": false,
+          "boundaries": null,
+          "velocity": null
+        }
+      ],
+      "jump_conditions": [],
+      "particle_jump_processes": [],
+      "particle_properties": []
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+math_description:
+  geometry: steady
+  subdomains:
+  - name: cytosol
+    kind: volume
+  variables:
+  - name: u
+    subdomain: cytosol
+  equations:
+  - template: bulk_radv_diff
+    variable: u
+    subdomain: cytosol
+    temporality: steady_state
+    terms:
+      diffusion: D
+      source: 1.0 - u
+  parameters:
+  - name: D
+    value: 1.0

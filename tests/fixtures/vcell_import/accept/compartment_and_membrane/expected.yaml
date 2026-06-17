@@ -1,0 +1,32 @@
+math_description:
+  geometry: cell
+  subdomains:
+  - name: cytosol
+    kind: volume
+  - name: membrane
+    kind: surface
+  variables:
+  - name: c
+    subdomain: cytosol
+  - name: rho
+    subdomain: membrane
+  equations:
+  - template: bulk_radv_diff
+    variable: c
+    subdomain: cytosol
+    temporality: time_dependent
+    terms:
+      diffusion: Dc
+    initial_condition: '1.0'
+  - template: surface_pde_with_dilution
+    variable: rho
+    subdomain: membrane
+    temporality: time_dependent
+    terms:
+      diffusion: Dm
+    initial_condition: '0.5'
+  parameters:
+  - name: Dc
+    value: 0.2
+  - name: Dm
+    value: 0.05

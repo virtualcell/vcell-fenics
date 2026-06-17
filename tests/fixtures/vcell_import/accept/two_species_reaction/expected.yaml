@@ -1,0 +1,34 @@
+math_description:
+  geometry: binding
+  subdomains:
+  - name: cytosol
+    kind: volume
+  variables:
+  - name: A
+    subdomain: cytosol
+  - name: B
+    subdomain: cytosol
+  equations:
+  - template: bulk_radv_diff
+    variable: A
+    subdomain: cytosol
+    temporality: time_dependent
+    terms:
+      diffusion: D
+      source: -k_on*A + k_off*B
+    initial_condition: 1.0 + 0.3*geom.x[0]
+  - template: bulk_radv_diff
+    variable: B
+    subdomain: cytosol
+    temporality: time_dependent
+    terms:
+      diffusion: D
+      source: k_on*A - k_off*B
+    initial_condition: '0.0'
+  parameters:
+  - name: D
+    value: 0.2
+  - name: k_on
+    value: 1.0
+  - name: k_off
+    value: 0.2

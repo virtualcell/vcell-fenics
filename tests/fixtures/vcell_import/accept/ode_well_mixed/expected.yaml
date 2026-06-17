@@ -1,0 +1,21 @@
+math_description:
+  geometry: ode
+  subdomains:
+  - name: cytosol
+    kind: volume
+  variables:
+  - name: w
+    subdomain: cytosol
+  equations:
+  - template: lumped_ode
+    variable: w
+    subdomain: cytosol
+    temporality: time_dependent
+    terms:
+      rate: k1 - k2*w
+    initial_condition: '0.0'
+  parameters:
+  - name: k1
+    value: 1.0
+  - name: k2
+    value: 0.3

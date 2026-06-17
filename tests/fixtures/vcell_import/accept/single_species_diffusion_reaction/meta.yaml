@@ -1,0 +1,7 @@
+geometry: disk_2d
+note: Bulk diffusion + first-order decay; runs end-to-end (uniform c0*exp(-kt)).
+run:
+  volume_subdomain: cytosol
+  dt: 0.05
+  t_final: 1.0
+  h: 0.2
