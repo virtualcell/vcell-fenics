@@ -97,4 +97,19 @@ REGISTRY: dict[str, TemplateSpec] = {
         temporalities=_BOTH_TEMPORALITIES,
         slots=(SlotSpec(name="rate", types=_SCALAR, required=True),),
     ),
+    "cahn_hilliard": TemplateSpec(  # diffuse-interface phase separation
+        # A 4th-order conserved order parameter ∂φ/∂t = ∇·(M∇μ), μ = f'(φ) − ε²∇²φ, with the
+        # standard double-well f = W φ²(1−φ)². The backend expands it into a mixed (φ, μ) system
+        # (backend/cahn_hilliard.py) — the auxiliary chemical potential μ stays internal, so the
+        # modeller declares only φ and the three physical scales. Always time-dependent.
+        name="cahn_hilliard",
+        governed_types=_SCALAR,
+        subdomain_kinds=frozenset({"volume"}),
+        temporalities=frozenset({"time_dependent"}),
+        slots=(
+            SlotSpec(name="mobility", types=_SCALAR, required=False),  # M
+            SlotSpec(name="interface_width", types=_SCALAR, required=False),  # ε
+            SlotSpec(name="well_height", types=_SCALAR, required=False),  # W
+        ),
+    ),
 }

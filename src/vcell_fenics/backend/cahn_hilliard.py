@@ -42,23 +42,30 @@ from dolfinx.mesh import Mesh
 from mpi4py import MPI
 
 from vcell_fenics.backend._typing import UflExpr
+from vcell_fenics.backend.assemble import _compile_context
+from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.geometry import Geometry, cross_validate
+from vcell_fenics.formalism.parser import parse
+from vcell_fenics.formalism.schema import MathDescription, TemplateEquation
+from vcell_fenics.formalism.validator import FormalismValidationError, validate_or_raise
 
-# Height of the double-well `W φ²(1−φ)²`; its wells (the two phases) are at φ = 0 and φ = 1, and
-# the spinodal (unstable) band where it phase-separates is φ ∈ ((3−√3)/6, (3+√3)/6) ≈ (0.21, 0.79).
-_WELL_HEIGHT = 100.0
+# Default height of the double-well `W φ²(1−φ)²`; its wells (the two phases) are at φ = 0 and
+# φ = 1, and the spinodal (unstable) band where it phase-separates is φ ∈ ((3−√3)/6, (3+√3)/6)
+# ≈ (0.21, 0.79). Independent of W.
+_DEFAULT_WELL_HEIGHT = 100.0
 
 
-def _double_well_derivative(phi: UflExpr) -> UflExpr:
+def _double_well_derivative(phi: UflExpr, well_height: float) -> UflExpr:
     """`f'(φ)` for `f(φ) = W φ²(1−φ)²` — i.e. `2W φ(1−φ)(1−2φ)`."""
-    return 2.0 * _WELL_HEIGHT * phi * (1.0 - phi) * (1.0 - 2.0 * phi)
+    return 2.0 * well_height * phi * (1.0 - phi) * (1.0 - 2.0 * phi)
 
 
-def cahn_hilliard_free_energy(phi: fem.Function, *, epsilon: float) -> float:
+def cahn_hilliard_free_energy(phi: fem.Function, *, epsilon: float, well_height: float = _DEFAULT_WELL_HEIGHT) -> float:
     """The Cahn–Hilliard free energy `F = ∫[W φ²(1−φ)² + ε²/2 |∇φ|²] dx` — the bulk double-well
     plus the gradient (interface) penalty. The Lyapunov functional the dynamics decrease."""
 
     mesh = phi.function_space.mesh
-    bulk = _WELL_HEIGHT * phi**2 * (1.0 - phi) ** 2
+    bulk = well_height * phi**2 * (1.0 - phi) ** 2
     gradient = 0.5 * epsilon**2 * ufl.dot(ufl.grad(phi), ufl.grad(phi))
     local = fem.assemble_scalar(fem.form((bulk + gradient) * ufl.dx(domain=mesh)))
     return float(mesh.comm.allreduce(local, op=MPI.SUM))
@@ -72,6 +79,7 @@ def solve_cahn_hilliard(
     n_steps: int,
     mobility: float = 1.0,
     epsilon: float = 0.1,
+    well_height: float = _DEFAULT_WELL_HEIGHT,
     theta: float = 1.0,
 ) -> tuple[fem.Function, list[float]]:
     """Integrate Cahn–Hilliard for `n_steps` steps of `dt`, returning the final order parameter
@@ -104,7 +112,7 @@ def solve_cahn_hilliard(
     # φ equation: ∂φ/∂t = ∇·(M∇μ)  ⇒  ∫(φ − φ⁰)q + dt·M ∫∇μ·∇q = 0
     residual = (phi - phi_old) * test_phi * dx + dt * mobility * ufl.dot(ufl.grad(mu_mid), ufl.grad(test_phi)) * dx
     # μ definition: μ = f'(φ) − ε²∇²φ  ⇒  ∫μ·v − ∫f'(φ)·v − ε² ∫∇φ·∇v = 0
-    residual += mu * test_mu * dx - _double_well_derivative(phi) * test_mu * dx
+    residual += mu * test_mu * dx - _double_well_derivative(phi, well_height) * test_mu * dx
     residual -= epsilon**2 * ufl.dot(ufl.grad(phi), ufl.grad(test_mu)) * dx
 
     problem = NonlinearProblem(
@@ -115,10 +123,66 @@ def solve_cahn_hilliard(
     )
 
     phi_final = solution.sub(0).collapse()
-    energies = [cahn_hilliard_free_energy(phi_final, epsilon=epsilon)]
+    energies = [cahn_hilliard_free_energy(phi_final, epsilon=epsilon, well_height=well_height)]
     for _ in range(n_steps):
         problem.solve()
         previous.x.array[:] = solution.x.array
         phi_final = solution.sub(0).collapse()
-        energies.append(cahn_hilliard_free_energy(phi_final, epsilon=epsilon))
+        energies.append(cahn_hilliard_free_energy(phi_final, epsilon=epsilon, well_height=well_height))
     return phi_final, energies
+
+
+def _constant_slot(terms: dict[str, str], name: str, default: float, ctx: CompileContext) -> float:
+    """A Cahn–Hilliard scalar slot (`mobility` / `interface_width` / `well_height`) as a float.
+    Absent ⇒ the default; present ⇒ compiled and required to be a constant (a spatially-varying
+    coefficient is a later increment)."""
+
+    if name not in terms:
+        return default
+    compiled = compile_expression(parse(terms[name]), ctx)
+    if not isinstance(compiled, fem.Constant):
+        raise NotImplementedError(f"Cahn–Hilliard slot {name!r} must be a constant in v1, got {terms[name]!r}")
+    return float(compiled.value)
+
+
+def run_cahn_hilliard(
+    md: MathDescription, geometry: Geometry, *, dt: float, t_final: float, theta: float = 1.0
+) -> fem.Function:
+    """Drive the Cahn–Hilliard *template* from a validated MathDescription — the solidified
+    formal template (`formalism/templates.py`) on top of the `solve_cahn_hilliard` expansion.
+
+    The model declares one `cahn_hilliard` equation governing a scalar `φ` on a volume subdomain,
+    with the physical scales as slots (`mobility`, `interface_width` = ε, `well_height` = W, each
+    a constant; defaults `1`, `0.1`, `100`) and `φ`'s `initial_condition`. The auxiliary chemical
+    potential `μ` is internal to the expansion, so it needs no variable and no reserved name.
+    Integrates from the IC to `t_final` in steps of `dt`, returning the final `φ`."""
+
+    validate_or_raise(md)
+    geometry_errors = cross_validate(md, geometry)
+    if geometry_errors:
+        raise FormalismValidationError(geometry_errors)
+
+    equation = next(
+        (e for e in md.equations if isinstance(e, TemplateEquation) and e.template == "cahn_hilliard"), None
+    )
+    if equation is None or equation.initial_condition is None:
+        raise ValueError("run_cahn_hilliard needs a model with a cahn_hilliard equation and an initial condition")
+
+    mesh = geometry.mesh_of(equation.subdomain)
+    ctx = _compile_context(md, mesh)
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    initial = fem.Function(space)
+    ic = compile_expression(parse(equation.initial_condition), ctx)
+    initial.interpolate(fem.Expression(ic, space.element.interpolation_points))
+
+    phi, _ = solve_cahn_hilliard(
+        mesh,
+        initial=initial,
+        dt=dt,
+        n_steps=round(t_final / dt),
+        mobility=_constant_slot(equation.terms, "mobility", 1.0, ctx),
+        epsilon=_constant_slot(equation.terms, "interface_width", 0.1, ctx),
+        well_height=_constant_slot(equation.terms, "well_height", _DEFAULT_WELL_HEIGHT, ctx),
+        theta=theta,
+    )
+    return phi
