@@ -25,7 +25,6 @@ Options: `--out DIR`, `--limit N` (download at most N, for a quick test), `--ser
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
@@ -45,12 +44,6 @@ _VCML_PATH_TEMPLATES = (
     "/api/v1/bioModel/{id}/vcml",
 )
 _ACCEPT_HEADERS = ("text/xml", "*/*", "application/xml")
-
-
-def _slug(name: str) -> str:
-    """A filesystem-safe slug; the BioModel id (appended separately) guarantees uniqueness."""
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name or "").strip("_")
-    return cleaned[:120] or "model"
 
 
 def _looks_like_vcml(text: str) -> bool:
@@ -154,7 +147,7 @@ def main() -> int:
         name = summary.get("name") or "model"
         if not model_id:
             continue
-        dest = args.out / f"{_slug(name)}__{model_id}.vcml"
+        dest = args.out / f"biomodel_{model_id}.vcml"
         if dest.exists():
             skipped += 1
             continue
