@@ -55,6 +55,16 @@ numpy = "*"
 scipy = "*"
 pyyaml = ">=6.0.3,<7"
 
+# VCell integration (pyvcell_bridge). The source representation is pyvcell's
+# pure-Pydantic `pyvcell.vcml.models_math.MathDescription` (the math half of pyvcell's
+# geom/math/bio split). pyvcell's `vcml` package is lazily imported (PEP 562), so
+# `from pyvcell.vcml.models_math import ...` pulls only pydantic (+ numpy) — none of
+# pyvcell's heavy solver/viz/binary closure (vtk, trame, libvcell, pyvcell-fvsolver, …),
+# which would clash with the conda DOLFINx stack. pyvcell itself is editable-installed
+# `--no-deps` via the `link-pyvcell` task (it is not on PyPI, and its *declared* deps
+# would still drag in that closure even though it never imports them here).
+pydantic = ">=2.10,<3"
+
 [tool.pixi.feature.dev.dependencies]
 pytest = "*"
 ipython = "*"
@@ -87,6 +97,12 @@ typecheck = "mypy src tests"
 check = { depends-on = ["lint", "format-check", "typecheck", "test"] }
 # Launch JupyterLab on the demo notebooks (needs the dev env: `pixi run -e dev notebooks`).
 notebooks = "jupyter lab docs/notebooks"
+# Editable-install the sibling ../pyvcell WITHOUT its heavy dependency closure, so the
+# bridge can `import pyvcell.vcml.models`. pyvcell is not on PyPI, and its full deps
+# (vtk/trame/libvcell/fvsolver/…) would clash with the conda DOLFINx stack — we only
+# need its pure-Pydantic data model. Run once after `pixi install` re-solves the env
+# (which wipes pip-installed packages). uv installs into the active pixi env (CONDA_PREFIX).
+link-pyvcell = "uv pip install --no-deps -e ../pyvcell"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -178,5 +194,9 @@ module = [
     "dolfinx_mpc.*",
     "meshio",
     "scipy.*",
+    # pyvcell ships no py.typed marker; its vcml data model resolves to Any. The bridge
+    # is duck-typed over it and verified by tests, so Any at that boundary is acceptable.
+    "pyvcell",
+    "pyvcell.*",
 ]
 ignore_missing_imports = true
