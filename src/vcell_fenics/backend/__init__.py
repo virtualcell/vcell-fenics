@@ -11,7 +11,11 @@ FEniCSx dependency; this package is where DOLFINx enters.
 
 from vcell_fenics.backend.ale import ALEState, StepTooLarge, run_with_remeshing, step_with_remeshing
 from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
-from vcell_fenics.backend.cahn_hilliard import cahn_hilliard_free_energy, solve_cahn_hilliard
+from vcell_fenics.backend.cahn_hilliard import (
+    cahn_hilliard_free_energy,
+    run_cahn_hilliard,
+    solve_cahn_hilliard,
+)
 from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
 from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
 from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
@@ -110,6 +114,7 @@ __all__ = [
     "rebuild_on_mesh",
     "register_geometry",
     "run",
+    "run_cahn_hilliard",
     "run_with_remeshing",
     "solve_cahn_hilliard",
     "solve_incompressible_stokes",

@@ -66,3 +66,50 @@ def test_free_energy_helper_is_zero_at_a_well() -> None:
     mesh = dolfinx.mesh.create_unit_square(MPI.COMM_WORLD, 8, 8)
     phi = fem.Function(fem.functionspace(mesh, ("Lagrange", 1)))  # φ = 0 everywhere
     assert abs(cahn_hilliard_free_energy(phi, epsilon=0.1)) < 1e-14
+
+
+# --- the solidified formal template: a MathDescription with a `cahn_hilliard` equation ---
+
+from vcell_fenics.backend import make_disk_geometry, run_cahn_hilliard  # noqa: E402
+from vcell_fenics.formalism import load_yaml, validate  # noqa: E402
+
+_CH_MODEL = """
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - {{ name: cyto, kind: volume, motion: {{ kind: none }} }}
+  variables:
+    - {{ name: c, subdomain: cyto, type: scalar }}
+  equations:
+    - template: cahn_hilliard
+      variable: c
+      subdomain: cyto
+      temporality: {temporality}
+      terms: {{ interface_width: "0.08" }}
+      initial_condition: "0.5 + 0.1 * cos(6.0*x[0]) * cos(6.0*x[1])"
+"""
+
+
+def test_cahn_hilliard_template_validates() -> None:
+    # The solidified template is recognised by the generic registry-driven validator — a correct
+    # model has no errors. (The order parameter is `c`: `phi` is a reserved name, the azimuthal
+    # angle, so the chemical-potential split needs no reserved name either — μ stays internal.)
+    errors = [d for d in validate(load_yaml(_CH_MODEL.format(temporality="time_dependent"))) if d.severity == "error"]
+    assert errors == []
+
+
+def test_cahn_hilliard_template_requires_time_dependent() -> None:
+    # Cahn–Hilliard is always transient; a steady-state declaration is rejected by the template.
+    errors = [d for d in validate(load_yaml(_CH_MODEL.format(temporality="steady_state"))) if d.severity == "error"]
+    assert any("temporality" in d.message and "cahn_hilliard" in d.message for d in errors)
+
+
+def test_run_cahn_hilliard_drives_the_model_conserving_and_separating() -> None:
+    # Driven from the validated model: the order parameter is conserved to round-off (the
+    # conservative form survives the formalism path) and the field separates into two phases.
+    md = load_yaml(_CH_MODEL.format(temporality="time_dependent"))
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.06)
+    total0 = _total(run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.0))  # 0 steps ⇒ the IC's ∫c
+    phi = run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.06)
+    assert abs(_total(phi) - total0) < 1e-10  # ∫c conserved through the template driver
+    assert float(phi.x.array.min()) < 0.3 and float(phi.x.array.max()) > 0.7  # separated into phases
