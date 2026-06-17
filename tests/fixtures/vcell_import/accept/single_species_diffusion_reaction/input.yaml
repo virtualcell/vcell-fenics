@@ -1,0 +1,13 @@
+name: decay
+constants:
+- name: D
+  exp: '0.1'
+- name: k
+  exp: '0.5'
+compartment_subdomains:
+- name: cytosol
+  pde_equations:
+  - name: c
+    rate: -k*c
+    diffusion: D
+    initial: '2.0'

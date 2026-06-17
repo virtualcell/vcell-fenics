@@ -1,0 +1,9 @@
+name: bt
+compartment_subdomains:
+- name: cytosol
+  boundary_types:
+  - boundary: Xm
+    type: Value
+  pde_equations:
+  - name: c
+    diffusion: '1.0'

@@ -1,0 +1,17 @@
+name: advect
+constants:
+- name: D
+  exp: '0.1'
+- name: vx
+  exp: '0.5'
+- name: vy
+  exp: '0.3'
+compartment_subdomains:
+- name: cytosol
+  pde_equations:
+  - name: c
+    diffusion: D
+    initial: '1.0'
+    velocity:
+      x: vx
+      y: -vy

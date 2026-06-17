@@ -5,15 +5,16 @@ the unit tests assert specific facts with precise messages; this corpus gives *b
 across math-description structure and expression variety, and guards against regression.
 Three tiers, under `tests/fixtures/vcell_import/`:
 
-- **accept/<case>/** — `input.json` (a pyvcell `MathDescription`, `model_dump_json`) +
-  `expected.yaml` (the golden formalism `MathDescription`) + optional `meta.yaml`
-  (`geometry:` for the import's geometry arg; `run:` to also solve it end-to-end; `note:`).
-  Each accepted golden must also *validate* (no formalism errors).
-- **reject/<case>/** — `input.json` + `error.txt` (`<ExceptionType>: <message substring>`):
+- **accept/<case>/** — `input.yaml` (a pyvcell `MathDescription`) + `expected.yaml`
+  (the golden formalism `MathDescription`) + optional `meta.yaml` (`geometry:` for the
+  import's geometry arg; `run:` to also solve it end-to-end; `note:`). Both YAML, for
+  readability. Each accepted golden must also *validate* (no formalism errors).
+- **reject/<case>/** — `input.yaml` + `error.txt` (`<ExceptionType>: <message substring>`):
   constructs that must be rejected loudly (§2.6.3 out-of-scope / §2.6.2 not-yet).
 - **expressions.yaml** — a dense `vcell` → `formalism` expression-translation table.
 
-**Adding a case.** Drop a VCell `input.json` (exported via pyvcell's `model_dump_json`)
+**Adding a case.** Write a VCell `input.yaml` (a pyvcell `MathDescription`; export from
+pyvcell with `yaml.safe_dump(md.model_dump(exclude_none=True, exclude_defaults=True))`)
 into `accept/<case>/`, then regenerate the golden with `UPDATE_GOLDENS=1 pytest -k vcell_import`
 and **review the produced `expected.yaml` in the PR diff** — that review is the real check;
 the golden then guards against regressions, with `validate` and the runnable subset as
@@ -66,7 +67,7 @@ def _or_skip(items: list[Any], reason: str) -> list[Any]:
 
 
 def _load_input(case_dir: pathlib.Path) -> Any:
-    return vm.MathDescription.model_validate_json((case_dir / "input.json").read_text())
+    return vm.MathDescription.model_validate(yaml.safe_load((case_dir / "input.yaml").read_text()))
 
 
 def _load_meta(case_dir: pathlib.Path) -> dict[str, Any]:
