@@ -134,3 +134,6 @@ dmypy.json
 
 # ADIOS2 / VTX output
 *.bp/
+
+# Downloaded VCell BioModel pool (data-collection scratch, not source)
+vcml_biomodels/
