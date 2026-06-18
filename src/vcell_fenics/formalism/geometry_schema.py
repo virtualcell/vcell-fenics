@@ -21,6 +21,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
+from pydantic import ConfigDict
+
+# Attached to each dataclass below so a `pydantic.TypeAdapter` (the geometry_io loader)
+# rejects unknown fields at the YAML/JSON boundary. The classes stay plain stdlib
+# dataclasses — this is only consulted when pydantic validates them; nothing else changes.
+_FORBID_EXTRA = ConfigDict(extra="forbid")
+
 # A subvolume's membership rule (VCell's `SubVolumeType`):
 #   compartmental — the whole non-spatial (dim-0) domain; no payload
 #   analytic      — the region where `expression` (an implicit function of geom.x) is inside
@@ -33,6 +40,7 @@ SubVolumeType: TypeAlias = Literal["compartmental", "analytic", "csg", "image"]
 class PixelClass:
     """A labelled voxel value in a segmented image."""
 
+    __pydantic_config__ = _FORBID_EXTRA
     name: str
     pixel_value: int
 
@@ -42,6 +50,7 @@ class GeometryImage:
     """Metadata for a segmented image backing `image`-typed subvolumes. The raw voxel data is
     deliberately not carried here (see the module docstring)."""
 
+    __pydantic_config__ = _FORBID_EXTRA
     name: str
     size: tuple[int, int, int]
     pixel_classes: tuple[PixelClass, ...] = ()
@@ -53,6 +62,7 @@ class SubVolume:
     is the implicit analytic function for `analytic`; `pixel_value` is the image class for
     `image`; `compartmental` and `csg` carry neither."""
 
+    __pydantic_config__ = _FORBID_EXTRA
     name: str
     type: SubVolumeType
     expression: str | None = None
@@ -65,6 +75,7 @@ class SurfaceClass:
     The order `(inside, outside)` fixes the outward normal and the inside/outside trace
     directions for cross-membrane coupling."""
 
+    __pydantic_config__ = _FORBID_EXTRA
     name: str
     inside: str
     outside: str
@@ -76,6 +87,7 @@ class GeometryDescription:
     `subvolumes` with `surfaces` between them. `dim = 0` is the non-spatial / well-mixed case
     (one `compartmental` subvolume, no surfaces)."""
 
+    __pydantic_config__ = _FORBID_EXTRA
     name: str
     dim: int
     extent: tuple[float, float, float] = (1.0, 1.0, 1.0)
