@@ -28,11 +28,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
-# Operator discriminators. Standard math arithmetic only; tensor algebra
-# (`inner`, `outer`, `cross`) and calculus (`grad`, `div`, …) are spelled as
-# `FunctionCall`s, not operators (§2.3.4).
-BinOp: TypeAlias = Literal["+", "-", "*", "/", "**"]
-UnOp: TypeAlias = Literal["+", "-"]
+# Operator discriminators. Arithmetic, plus relational / logical operators (used by
+# conditionals like `if(a > b, ...)` — common in imported VCell kinetics). Tensor algebra
+# (`inner`, `outer`, `cross`) and calculus (`grad`, `div`, …) are spelled as `FunctionCall`s,
+# not operators (§2.3.4).
+BinOp: TypeAlias = Literal["+", "-", "*", "/", "**", "<", ">", "<=", ">=", "==", "!=", "&&", "||"]
+UnOp: TypeAlias = Literal["+", "-", "!"]
 
 
 @dataclass(frozen=True, slots=True)

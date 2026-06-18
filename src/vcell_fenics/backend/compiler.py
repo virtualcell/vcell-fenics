@@ -114,7 +114,11 @@ def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
             raise CompileError(f"unresolved name {node.name!r} (not in the compile context)") from None
     if isinstance(node, UnaryOp):
         operand = compile_expression(node.operand, ctx)
-        return operand if node.op == "+" else -operand
+        if node.op == "+":
+            return operand
+        if node.op == "!":
+            return ufl.Not(operand)
+        return -operand
     if isinstance(node, BinaryOp):
         left = compile_expression(node.left, ctx)
         right = compile_expression(node.right, ctx)
@@ -129,6 +133,23 @@ def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
                 return left / right
             case "**":
                 return left**right
+            # Relational / logical operators produce a UFL `Condition`, for use inside `if(...)`.
+            case "<":
+                return ufl.lt(left, right)
+            case ">":
+                return ufl.gt(left, right)
+            case "<=":
+                return ufl.le(left, right)
+            case ">=":
+                return ufl.ge(left, right)
+            case "==":
+                return ufl.eq(left, right)
+            case "!=":
+                return ufl.ne(left, right)
+            case "&&":
+                return ufl.And(left, right)
+            case "||":
+                return ufl.Or(left, right)
     if isinstance(node, IndexAccess):
         base = compile_expression(node.base, ctx)
         if not isinstance(node.index, Number) or not node.index.value.is_integer():
@@ -194,6 +215,12 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
         return derivative
 
     args = [compile_expression(arg, ctx) for arg in node.args]
+    if node.callee == "if":
+        # `if(condition, then, else)` → a UFL conditional. The condition is a relational/
+        # logical expression (a UFL `Condition`); the branches are the values.
+        if len(args) != 3:
+            raise CompileError("if(condition, then, else) takes exactly three arguments")
+        return ufl.conditional(args[0], args[1], args[2])
     if node.callee == "trace":
         # The trace of a higher-dimensional variable onto a lower-dimensional
         # evaluation domain (§1.8.2). At the UFL level this is the variable itself;

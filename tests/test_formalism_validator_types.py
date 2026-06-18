@@ -74,6 +74,16 @@ def test_relative_advection_accepts_vector() -> None:
     assert validate(_surface_model(relative_advection="geom.x")) == []
 
 
+def test_conditional_with_relational_validates() -> None:
+    # if(condition, then, else) with a relational condition — the common imported form.
+    assert validate(_surface_model(source="if(rho > 0.5, -1.0, 1.0)")) == []
+
+
+def test_relational_operator_requires_scalar_operands() -> None:
+    # geom.x is a vector; comparing it is a type error.
+    assert any("requires scalar operands" in m for m in _errors(_surface_model(source="if(geom.x > 0.0, 1.0, 0.0)")))
+
+
 def test_diffusion_accepts_scalar() -> None:
     assert validate(_surface_model(diffusion="0.1")) == []
 

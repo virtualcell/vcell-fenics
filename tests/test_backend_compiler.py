@@ -131,6 +131,22 @@ def test_floor_validates_but_does_not_compile() -> None:
         compile_expression(parse("floor(geom.x[0])"), _ctx())
 
 
+def test_conditional_and_relational_operators_compile() -> None:
+    # Relational/logical operators + if(...) — common in imported VCell kinetics.
+    for src in (
+        "geom.x[0] >= 0.0",
+        "geom.x[0] > 0.0 && geom.x[1] < 1.0",
+        "if(geom.x[0] > 0.5, 1.0, 2.0)",
+        "if(geom.x[0] > 0.0 || geom.x[1] != 0.0, 1.0, 0.0)",
+    ):
+        compile_expression(parse(src), _ctx())  # must not raise
+
+
+def test_conditional_selects_branch_pointwise() -> None:
+    # if(x[0] > 0, +1, -1) over a disk centred at the origin integrates to ~0 (antisymmetric).
+    assert _mean("if(geom.x[0] > 0.0, 1.0, -1.0)") == pytest.approx(0.0, abs=2e-2)
+
+
 # ---------------------------------------------------------------------------
 # trace(·) — the cross-dimensional reference (§1.8.2).
 # ---------------------------------------------------------------------------

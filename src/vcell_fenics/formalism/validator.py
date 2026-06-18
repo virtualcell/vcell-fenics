@@ -1010,7 +1010,11 @@ class _Validator:
         if isinstance(node, Name):
             return self._name_type(node.name, ctx)
         if isinstance(node, UnaryOp):
-            return self._infer(node.operand, ctx)
+            operand = self._infer(node.operand, ctx)
+            if node.op == "!" and operand not in ("scalar", "error"):
+                self._error(ctx.path, f"! requires a scalar operand, got {operand} (§1.11.5)")
+                return "error"
+            return operand
         if isinstance(node, BinaryOp):
             return self._infer_binary(node, ctx)
         if isinstance(node, IndexAccess):
@@ -1069,6 +1073,13 @@ class _Validator:
                 self._error(ctx.path, f"divisor must be scalar, got {right} (§1.11.5)")
                 return "error"
             return left
+        if op in ("<", ">", "<=", ">=", "==", "!=", "&&", "||"):
+            # relational / logical operators — scalar operands, scalar (boolean-as-0/1) result.
+            # Mainly used inside conditionals, e.g. `if(c > 0, a, b)`.
+            if left != "scalar" or right != "scalar":
+                self._error(ctx.path, f"{op} requires scalar operands, got {left} {op} {right} (§1.11.5)")
+                return "error"
+            return "scalar"
         if left == "scalar" and right == "scalar":  # op == "**"
             return "scalar"
         self._error(ctx.path, f"** requires scalar operands, got {left} ** {right} (§1.11.5)")
