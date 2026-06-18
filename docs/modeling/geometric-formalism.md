@@ -41,7 +41,7 @@ A subvolume is a named volume region. Its membership is defined by one of four *
 | type | defined by | realization |
 |---|---|---|
 | `compartmental` | nothing — the whole (non-spatial) domain | a trivial well-mixed cell (§3.2) |
-| `analytic` | `expression` — an implicit function of `geom.x`; the region where it is *inside* (> 0 by convention) | gmsh OCC if it is a primitive/CSG shape, else a level-set (§3.2) |
+| `analytic` | `expression` — a **boolean predicate** over `geom.x` (the region where it is *true*), e.g. `geom.x[0]**2 + geom.x[1]**2 < 1` | gmsh OCC if it is a primitive/CSG shape, else a level-set via the Rvachev lowering (§3.2, §3.5) |
 | `csg` | a constructive-solid-geometry tree of primitives + booleans | gmsh OCC (§3.2) |
 | `image` | `pixel_value` — the voxels of `image` carrying that class value | segmentation → mesh (deferred, §3.2) |
 
@@ -143,13 +143,34 @@ for multi-compartment domains. For unfitted approaches it is a background mesh p
   kernel**. OCC gives CSG booleans for free; we tag each resulting region with its subvolume name,
   each shared interface with its surface name, and each outer face with its face name → a conforming
   `Geometry`. This is the common spatial case (simple 1–2-region topologies).
-- **arbitrary `analytic`** (an implicit `f(geom.x) > 0` that is not a tidy primitive) → sample `f`
-  onto a **background mesh** as a level-set / indicator field. This is the natural input to **cut /
-  trace FEM** (Approach D, CutFEMx — unfitted, no body-fitting), and serves as an indicator
-  elsewhere. Conforming-meshing of an arbitrary implicit surface is *not* attempted.
+- **arbitrary `analytic`** (a boolean predicate that is not a tidy primitive) → lower it to a
+  single real-valued **implicit function** `φ` via the Rvachev lowering below, then either sample
+  `φ` onto a **background mesh** as a level-set (the natural input to **cut / trace FEM**, Approach
+  D, CutFEMx — unfitted) *or* reinitialise it to a signed distance and **mesh it body-fitted**
+  (marching + remesh). The implicit function is an approach-independent **pre-mesh intermediate**,
+  not a commitment to unfitted methods.
 - **`image`** → segmentation → conforming mesh (marching-cubes / a meshing tool / libvcell).
   **Deferred** (16% of the corpus, the heaviest pipeline); the `image` subvolume type still imports
   losslessly so no data is dropped before it can be meshed.
+
+**Rvachev lowering (predicate → implicit function).** A VCell `analytic` subvolume is a boolean
+predicate; the realization first lowers it to an implicit function `φ` whose **sign** encodes
+membership — `φ < 0` inside, `= 0` on the boundary, `> 0` outside (the **inside-negative**
+convention). The lowering is a faithful port of VCell's (`RvachevFunctionUtils`,
+`FiniteVolumeFileWriter.convertAnalyticGeometryToRvachevFunction`), using plain `min`/`max`
+R-functions: `a < b → a − b`, `a > b → b − a`, `&&` (and all-boolean `*`) → `max`, `||` (and
+all-boolean `+`) → `min`, `!` → negation; `==`/`!=` and boolean/numeric-mixed products are rejected.
+It is the same field VCell's embedded-boundary **fvsolver** consumes (§3.5), so it doubles as the
+apples-to-apples comparison input. The result is sign-exact but not a true distance — reinitialise
+before marching or smoothing, and use a non-shrink smoother to match fvsolver. Implemented in
+`formalism/rvachev.py` (`lower_predicate`, `subvolume_implicit_functions`).
+
+**Subvolume priority.** The subvolumes of a `GeometryDescription` are **ordered**, and that order
+*is* their priority (index 0 highest). Each region is its own predicate **minus** every
+higher-priority region, and the **last** subvolume is the *background* — the complement of the union
+of all the others (its own expression, if any, is ignored). This painter's-algorithm partition
+matches VCell and is preserved by the importer; it is carried implicitly by list order, not an
+explicit `priority` field.
 
 ### 3.3 Approach-dependent realization
 
