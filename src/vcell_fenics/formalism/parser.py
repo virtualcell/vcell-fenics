@@ -97,7 +97,12 @@ def parse(source: str) -> Expr:
 # first for a leading digit, so a dot only joins identifiers, never digits.
 _NUMBER_RE = re.compile(r"(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
-_OPERATORS = ("**", "+", "-", "*", "/", "(", ")", "[", "]", ",")
+# Multi-character operators must precede their single-character prefixes (the tokenizer
+# takes the first match): `**` before `*`, `<=`/`>=`/`==`/`!=` before `<`/`>`/`!`.
+_OPERATORS = (
+    "**", "<=", ">=", "==", "!=", "&&", "||",
+    "+", "-", "*", "/", "<", ">", "!", "(", ")", "[", "]", ",",
+)  # fmt: skip
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +185,38 @@ class _Parser:
     # -- grammar -------------------------------------------------------------
 
     def parse_expression(self) -> Expr:
-        return self._parse_additive()
+        return self._parse_logical_or()
+
+    # Precedence (low → high): ||, &&, ==/!=, </>/<=/>=, +/-, */ , unary, **.
+    # All left-associative except ** (right). Relational/logical sit below arithmetic
+    # so `a + b > c` parses as `(a + b) > c` and `a > b && c > d` as `(a > b) && (c > d)`.
+    def _parse_logical_or(self) -> Expr:
+        node = self._parse_logical_and()
+        while self._at_op("||"):
+            op = cast(BinOp, self._advance().value)
+            node = BinaryOp(op=op, left=node, right=self._parse_logical_and())
+        return node
+
+    def _parse_logical_and(self) -> Expr:
+        node = self._parse_equality()
+        while self._at_op("&&"):
+            op = cast(BinOp, self._advance().value)
+            node = BinaryOp(op=op, left=node, right=self._parse_equality())
+        return node
+
+    def _parse_equality(self) -> Expr:
+        node = self._parse_relational()
+        while self._at_op("==", "!="):
+            op = cast(BinOp, self._advance().value)
+            node = BinaryOp(op=op, left=node, right=self._parse_relational())
+        return node
+
+    def _parse_relational(self) -> Expr:
+        node = self._parse_additive()
+        while self._at_op("<", ">", "<=", ">="):
+            op = cast(BinOp, self._advance().value)
+            node = BinaryOp(op=op, left=node, right=self._parse_additive())
+        return node
 
     def _parse_additive(self) -> Expr:
         node = self._parse_multiplicative()
@@ -197,7 +233,7 @@ class _Parser:
         return node
 
     def _parse_unary(self) -> Expr:
-        if self._at_op("+", "-"):
+        if self._at_op("+", "-", "!"):
             op = cast(UnOp, self._advance().value)
             return UnaryOp(op=op, operand=self._parse_unary())
         return self._parse_power()

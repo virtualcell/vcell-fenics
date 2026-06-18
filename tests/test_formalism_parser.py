@@ -176,6 +176,40 @@ def test_unary_minus_on_parenthesised_group() -> None:
     assert parse("-(a - b)") == UnaryOp(op="-", operand=BinaryOp(op="-", left=Name(name="a"), right=Name(name="b")))
 
 
+def test_relational_binds_looser_than_arithmetic() -> None:
+    # `a + b > c` parses as `(a + b) > c`.
+    assert parse("a + b > c") == BinaryOp(
+        op=">", left=BinaryOp(op="+", left=Name(name="a"), right=Name(name="b")), right=Name(name="c")
+    )
+
+
+def test_logical_operator_precedence() -> None:
+    # ||  <  &&  <  ==/!=  <  relational. So `a > b && c == d || e` groups as `((a>b) && (c==d)) || e`.
+    tree = parse("a > b && c == d || e")
+    assert tree == BinaryOp(
+        op="||",
+        left=BinaryOp(
+            op="&&",
+            left=BinaryOp(op=">", left=Name(name="a"), right=Name(name="b")),
+            right=BinaryOp(op="==", left=Name(name="c"), right=Name(name="d")),
+        ),
+        right=Name(name="e"),
+    )
+
+
+def test_relational_operators_tokenize_multi_char_first() -> None:
+    ops = []
+    for s in ("a<=b", "a>=b", "a!=b", "a<b", "a>b"):
+        node = parse(s)
+        assert isinstance(node, BinaryOp)
+        ops.append(node.op)
+    assert ops == ["<=", ">=", "!=", "<", ">"]
+
+
+def test_logical_not_parses() -> None:
+    assert parse("!a") == UnaryOp(op="!", operand=Name(name="a"))
+
+
 def test_leading_unary_minus_on_term() -> None:
     assert parse("-k_on * rho + k_off") == BinaryOp(
         op="+",

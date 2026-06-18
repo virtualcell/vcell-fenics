@@ -942,7 +942,9 @@ Namespaced geometry quantities (ADR 006), addressed as `geom.<member>`. Availabl
 
 #### 1.8.5 Standard functions and calculus operators
 
-**Standard mathematical functions.** The usual elementary, transcendental, and piecewise primitives: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `sqrt`, `abs`, `min`, `max`, `pow`, `if(cond, a, b)` for conditional evaluation, `step(x)` for Heaviside, `sign(x)`. These have no usage restrictions — they appear anywhere an expression appears.
+**Standard mathematical functions.** The usual elementary, transcendental, and piecewise primitives: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log10`, `sqrt`, `abs`, `min`, `max`, `pow`, `floor`, `ceil`, `if(cond, a, b)` for conditional evaluation, `step(x)` for Heaviside, `sign(x)`. These have no usage restrictions — they appear anywhere an expression appears. (`floor`/`ceil` are accepted but non-differentiable, so they do not compile to a finite-element coefficient; they exist for round-tripping models that use them.)
+
+**Relational and logical operators.** Comparisons `<`, `>`, `<=`, `>=`, `==`, `!=` and the logical connectives `&&`, `||`, `!` produce a boolean condition. A condition used in **arithmetic** coerces to its 0/1 numeric value (VCell semantics), so `10*(x < 5)` is identical to `if(x < 5, 10, 0)`, and the common pulse idiom `A*((t > t0) && (t < t1))` is `A` inside the window and `0` outside. A condition used as the first argument of `if(cond, then, else)` stays boolean. Operands are scalars; precedence (low→high) is `||` < `&&` < `==`/`!=` < relational < arithmetic, so `a + b > c && d` reads as `((a + b) > c) && d`.
 
 **Calculus operators on variables:**
 

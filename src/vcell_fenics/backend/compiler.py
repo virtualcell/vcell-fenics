@@ -78,6 +78,19 @@ _UFL_BINARY: dict[str, Any] = {"inner": ufl.inner, "dot": ufl.dot, "outer": ufl.
 _UFL_CALCULUS: dict[str, Any] = {"grad": ufl.grad, "div": ufl.div, "grad_surf": ufl.grad, "div_surf": ufl.div}
 
 
+def _as_value(compiled: Any) -> Any:
+    """Coerce a relational/logical result (a UFL `Condition`) to its 0/1 numeric value, so a
+    boolean used arithmetically follows VCell semantics — `10*(x<5)` == `if(x<5, 10, 0)`.
+    Non-conditions pass through unchanged."""
+    return ufl.conditional(compiled, 1.0, 0.0) if isinstance(compiled, ufl.classes.Condition) else compiled
+
+
+def _as_condition(compiled: Any) -> Any:
+    """Coerce a numeric value to a UFL `Condition` (`x != 0`) where a boolean is required
+    (logical operators, an `if(...)` condition). Conditions pass through unchanged."""
+    return compiled if isinstance(compiled, ufl.classes.Condition) else ufl.ne(compiled, 0.0)
+
+
 class CompileError(Exception):
     """A MathDescription expression could not be compiled to UFL. Indicates an
     unresolved name or a construct outside the current backend subset — both of
@@ -114,28 +127,53 @@ def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
             raise CompileError(f"unresolved name {node.name!r} (not in the compile context)") from None
     if isinstance(node, UnaryOp):
         operand = compile_expression(node.operand, ctx)
-        return operand if node.op == "+" else -operand
+        if node.op == "+":
+            return _as_value(operand)
+        if node.op == "!":
+            return ufl.Not(_as_condition(operand))
+        return -_as_value(operand)
     if isinstance(node, BinaryOp):
         left = compile_expression(node.left, ctx)
         right = compile_expression(node.right, ctx)
+        # Arithmetic and relational operators take *values*: a relational/logical operand
+        # (a UFL Condition) is coerced to its 0/1 number first, so `10*(x<5)` means
+        # `10 if x<5 else 0` (VCell boolean-as-number semantics). Logical operators take
+        # *conditions* (a numeric operand becomes `!= 0`).
+        lv, rv = _as_value(left), _as_value(right)
         match node.op:
             case "+":
-                return left + right
+                return lv + rv
             case "-":
-                return left - right
+                return lv - rv
             case "*":
-                return left * right
+                return lv * rv
             case "/":
-                return left / right
+                return lv / rv
             case "**":
-                return left**right
+                return lv**rv
+            case "<":
+                return ufl.lt(lv, rv)
+            case ">":
+                return ufl.gt(lv, rv)
+            case "<=":
+                return ufl.le(lv, rv)
+            case ">=":
+                return ufl.ge(lv, rv)
+            case "==":
+                return ufl.eq(lv, rv)
+            case "!=":
+                return ufl.ne(lv, rv)
+            case "&&":
+                return ufl.And(_as_condition(left), _as_condition(right))
+            case "||":
+                return ufl.Or(_as_condition(left), _as_condition(right))
     if isinstance(node, IndexAccess):
         base = compile_expression(node.base, ctx)
         if not isinstance(node.index, Number) or not node.index.value.is_integer():
             raise CompileError("index must be an integer literal, e.g. x[0]")
         return base[int(node.index.value)]
     if isinstance(node, VectorLiteral):
-        return ufl.as_vector([compile_expression(c, ctx) for c in node.components])
+        return ufl.as_vector([_as_value(compile_expression(c, ctx)) for c in node.components])
     if isinstance(node, FunctionCall):
         return _compile_call(node, ctx)
     raise CompileError(f"{type(node).__name__} is not supported by the backend yet")
@@ -194,6 +232,12 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
         return derivative
 
     args = [compile_expression(arg, ctx) for arg in node.args]
+    if node.callee == "if":
+        # `if(condition, then, else)` → a UFL conditional. The condition is coerced to a
+        # boolean (a bare numeric condition becomes `!= 0`); the branches to values.
+        if len(args) != 3:
+            raise CompileError("if(condition, then, else) takes exactly three arguments")
+        return ufl.conditional(_as_condition(args[0]), _as_value(args[1]), _as_value(args[2]))
     if node.callee == "trace":
         # The trace of a higher-dimensional variable onto a lower-dimensional
         # evaluation domain (§1.8.2). At the UFL level this is the variable itself;
@@ -215,5 +259,5 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
         return ufl.div(ufl.grad(args[0]))  # ∇·∇ — Beltrami on a submesh
     fn = _UFL_UNARY_FUNCTIONS.get(node.callee)
     if fn is not None:
-        return fn(*args)
+        return fn(*[_as_value(a) for a in args])
     raise CompileError(f"function {node.callee!r} is not supported by the backend yet")
