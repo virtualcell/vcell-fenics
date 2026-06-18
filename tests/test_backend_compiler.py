@@ -147,6 +147,19 @@ def test_conditional_selects_branch_pointwise() -> None:
     assert _mean("if(geom.x[0] > 0.0, 1.0, -1.0)") == pytest.approx(0.0, abs=2e-2)
 
 
+def test_relational_in_arithmetic_equals_explicit_if() -> None:
+    # VCell boolean-as-number semantics: a comparison used in arithmetic is 1 if true, 0 if
+    # false, so `10*(x<0)` must be identical to `if(x<0, 10, 0)` (the user's question).
+    assert _mean("10.0*(geom.x[0]<0.0)") == pytest.approx(_mean("if(geom.x[0]<0.0, 10.0, 0.0)"))
+
+
+def test_logical_and_band_equals_explicit_if() -> None:
+    # `(x>-0.5) && (x<0.5)` is the 0/1 indicator of a band — equal to its if(...) form. The
+    # VCell pulse idiom `A*((t>t0) && (t<t1))` relies on this.
+    band = "(geom.x[0] > -0.5) && (geom.x[0] < 0.5)"
+    assert _mean(band) == pytest.approx(_mean(f"if({band}, 1.0, 0.0)"))
+
+
 # ---------------------------------------------------------------------------
 # trace(·) — the cross-dimensional reference (§1.8.2).
 # ---------------------------------------------------------------------------
