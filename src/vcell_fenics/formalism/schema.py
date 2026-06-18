@@ -11,12 +11,28 @@ per-instance __dict__ overhead. Discriminated unions (Motion, Parameter,
 Equation, BoundaryCondition) are tagged unions: one dataclass per `kind`
 with a Literal discriminator, unioned by `|` and exported as a TypeAlias.
 mypy narrows through `isinstance` and pattern matching.
+
+The unions also carry pydantic discriminators (`Field(discriminator=...)` or a
+callable `Discriminator`) so a `pydantic.TypeAdapter` can validate this tree at
+the YAML/JSON boundary (`formalism.loader`). `BoundaryCondition` is a clean
+Literal-tagged union; `Equation`, `Motion`, and `Parameter` dispatch on an open
+tag or on field presence (the `{name, value}` parameter shorthand omits `kind`),
+so they use callable discriminators that also raise the domain errors. The
+shared `_CONFIG` rejects unknown fields and coerces numeric YAML scalars to the
+string fields (e.g. `initial_condition: 0`), matching the old hand loader.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from typing import Annotated, Literal, TypeAlias
+
+from pydantic import BeforeValidator, ConfigDict, Discriminator, Field, Tag
+
+# extra="forbid": reject unknown fields (the old loader's _reject_unknown).
+# coerce_numbers_to_str: a YAML int/float in a string field (initial_condition,
+# terms values, expressions) becomes its str form, as the old loader's str(...) did.
+_CONFIG = ConfigDict(extra="forbid", coerce_numbers_to_str=True)
 
 # ---------------------------------------------------------------------------
 # Closed enumerations used in multiple places.
@@ -69,7 +85,49 @@ class MotionUnknown:
     variable: str
 
 
-Motion: TypeAlias = MotionNone | MotionPrescribedVelocity | MotionPrescribedDisplacement | MotionUnknown
+def _validate_motion(value: object) -> object:
+    """Enforce the motion domain rules the old loader checked. Raised in a BeforeValidator
+    (not the discriminator, whose raises would escape un-wrapped) so the error carries the
+    `subdomains[i].motion` location."""
+
+    if isinstance(value, dict):
+        kind = value.get("kind")
+        if kind == "prescribed":
+            has_v, has_d = "velocity" in value, "displacement" in value
+            if has_v and has_d:
+                raise ValueError("prescribed motion must declare exactly one of 'velocity' or 'displacement', not both")
+            if not (has_v or has_d):
+                raise ValueError("prescribed motion requires either 'velocity' or 'displacement'")
+        elif kind not in ("none", "unknown"):
+            raise ValueError(f"unknown motion kind {kind!r}; expected 'none', 'prescribed' or 'unknown'")
+    return value
+
+
+def _motion_tag(value: object) -> str:
+    """Route a (validated) Motion to its concrete class. `velocity` / `displacement` both
+    carry kind='prescribed' and are split by which field is present."""
+
+    if isinstance(value, dict):
+        if value.get("kind") == "prescribed":
+            return "velocity" if "velocity" in value else "displacement"
+        return str(value.get("kind"))
+    if isinstance(value, MotionPrescribedVelocity):
+        return "velocity"
+    if isinstance(value, MotionPrescribedDisplacement):
+        return "displacement"
+    if isinstance(value, MotionNone | MotionUnknown):
+        return value.kind
+    raise ValueError(f"cannot determine motion kind for {type(value).__name__}")
+
+
+_MotionUnion: TypeAlias = Annotated[
+    Annotated[MotionNone, Tag("none")]
+    | Annotated[MotionPrescribedVelocity, Tag("velocity")]
+    | Annotated[MotionPrescribedDisplacement, Tag("displacement")]
+    | Annotated[MotionUnknown, Tag("unknown")],
+    Discriminator(_motion_tag),
+]
+Motion: TypeAlias = Annotated[_MotionUnion, BeforeValidator(_validate_motion)]
 
 
 # ---------------------------------------------------------------------------
@@ -156,10 +214,61 @@ class ParameterRegionMap:
     kind: Literal["region_map"] = "region_map"
     name: str
     subdomain: str
-    values: dict[str, float]
+    values: Annotated[dict[str, float], Field(min_length=1)]
 
 
-Parameter: TypeAlias = ParameterConstant | ParameterExpression | ParameterRegionMap
+def _validate_parameter(value: object) -> object:
+    """Enforce the parameter dispatch rules the old loader checked: `value`/`expression`
+    are mutually exclusive, an explicit `kind` must match the field shape, and one of the
+    three forms must be present. Raised in a BeforeValidator so the error carries the
+    `parameters[i]` location (a discriminator's raise would escape un-wrapped)."""
+
+    if isinstance(value, dict):
+        kind = value.get("kind")
+        if kind != "region_map":
+            has_e, has_val = "expression" in value, "value" in value
+            if has_e and has_val:
+                raise ValueError(
+                    "parameter cannot declare both 'expression' and 'value' (those are mutually exclusive forms)"
+                )
+            if has_e and kind not in (None, "expression"):
+                raise ValueError(
+                    f"expression-valued parameter cannot have kind={kind!r}; expected 'expression' or omitted"
+                )
+            if has_val and kind not in (None, "scalar"):
+                raise ValueError(f"constant parameter cannot have kind={kind!r}; expected 'scalar' or omitted")
+            if not (has_e or has_val):
+                raise ValueError(
+                    "parameter must have one of: 'value' (constant), 'expression' (expression-valued), "
+                    "or 'kind: region_map' with 'values' (region-keyed)"
+                )
+    return value
+
+
+def _parameter_tag(value: object) -> str:
+    """Route a (validated) Parameter to its concrete class. The `{name, value}` /
+    `{name, expression}` shorthands omit `kind`, so dispatch is by field presence."""
+
+    if isinstance(value, dict):
+        if value.get("kind") == "region_map":
+            return "region_map"
+        return "expression" if "expression" in value else "scalar"
+    if isinstance(value, ParameterExpression):
+        return "expression"
+    if isinstance(value, ParameterRegionMap):
+        return "region_map"
+    if isinstance(value, ParameterConstant):
+        return "scalar"
+    raise ValueError(f"cannot determine parameter kind for {type(value).__name__}")
+
+
+_ParameterUnion: TypeAlias = Annotated[
+    Annotated[ParameterConstant, Tag("scalar")]
+    | Annotated[ParameterExpression, Tag("expression")]
+    | Annotated[ParameterRegionMap, Tag("region_map")],
+    Discriminator(_parameter_tag),
+]
+Parameter: TypeAlias = Annotated[_ParameterUnion, BeforeValidator(_validate_parameter)]
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +321,19 @@ class WeakFormEquation:
     initial_condition: str | None = None
 
 
-Equation: TypeAlias = TemplateEquation | WeakFormEquation
+def _equation_tag(value: object) -> str:
+    """Route an Equation: `template: weak_form` is the WeakFormEquation; any other
+    template name is a TemplateEquation (whose `template` is an open registry name)."""
+
+    if isinstance(value, dict):
+        return "weak_form" if value.get("template") == "weak_form" else "template"
+    return "weak_form" if isinstance(value, WeakFormEquation) else "template"
+
+
+Equation: TypeAlias = Annotated[
+    Annotated[WeakFormEquation, Tag("weak_form")] | Annotated[TemplateEquation, Tag("template")],
+    Discriminator(_equation_tag),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +415,12 @@ class BCInterfaceFluxBalance:
     expression: str
 
 
-BoundaryCondition: TypeAlias = BCDirichlet | BCNeumann | BCRobin | BCInterfaceValueEquality | BCInterfaceFluxBalance
+# Clean Literal-tagged union — every member has a unique `kind`, so pydantic
+# discriminates on the field directly (no callable needed).
+BoundaryCondition: TypeAlias = Annotated[
+    BCDirichlet | BCNeumann | BCRobin | BCInterfaceValueEquality | BCInterfaceFluxBalance,
+    Field(discriminator="kind"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +439,38 @@ class MathDescription:
     """
 
     geometry: str
-    subdomains: list[Subdomain]
-    variables: list[Variable]
-    equations: list[Equation]
+    subdomains: Annotated[list[Subdomain], Field(min_length=1)]
+    variables: Annotated[list[Variable], Field(min_length=1)]
+    equations: Annotated[list[Equation], Field(min_length=1)]
     parameters: list[Parameter] = field(default_factory=list)
     boundary_conditions: list[BoundaryCondition] = field(default_factory=list)
+
+
+# Attach the shared pydantic config to every dataclass so a `pydantic.TypeAdapter`
+# (the loader) rejects unknown fields and coerces numeric scalars into string fields.
+# Config can't be passed to TypeAdapter for a dataclass — it must live on the class —
+# and it does not propagate to nested types, so each class carries it. The classes stay
+# plain stdlib dataclasses; this attribute is inert unless pydantic validates them.
+_CONFIGURED_CLASSES: tuple[type, ...] = (
+    MotionNone,
+    MotionPrescribedVelocity,
+    MotionPrescribedDisplacement,
+    MotionUnknown,
+    Subdomain,
+    Variable,
+    ParameterConstant,
+    ParameterExpression,
+    ParameterRegionMap,
+    TemplateEquation,
+    WeakFormEquation,
+    BCDirichlet,
+    BCNeumann,
+    BCRobin,
+    BCInterfaceValueEquality,
+    BCInterfaceFluxBalance,
+    MathDescription,
+)
+for _cls in _CONFIGURED_CLASSES:
+    # pydantic reads `__pydantic_config__` off the class to validate these stdlib dataclasses;
+    # it is not a known attribute of `type`, hence the targeted ignore.
+    _cls.__pydantic_config__ = _CONFIG  # type: ignore[attr-defined]
