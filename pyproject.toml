@@ -64,6 +64,9 @@ pyvista = "*"
 numpy = "*"
 scipy = "*"
 pyyaml = ">=6.0.3,<7"
+# Marching (contour extraction) for body-fitted realization of an implicit (Rvachev) field —
+# skimage.measure.find_contours in 2D, marching_cubes in 3D (backend/realize.py).
+scikit-image = "*"
 
 # pydantic backs pyvcell's VCML data model (the import source); pinned here as a conda
 # package so pyvcell's pydantic requirement resolves from conda-forge, not a PyPI wheel.
@@ -162,7 +165,9 @@ ignore = [
 
 [tool.mypy]
 strict = true
-python_version = "3.11"
+# Match requires-python (>= 3.12) and the runtime (3.14): the env's scientific deps (e.g.
+# tifffile via scikit-image) use 3.12+ `type` statements that mypy cannot parse under 3.11.
+python_version = "3.12"
 files = ["src", "tests"]
 # Strict already enables warn_unused_ignores; keep it explicit so anyone
 # reading the config sees that `# type: ignore` comments must be load-bearing.
@@ -172,7 +177,7 @@ warn_unused_ignores = true
 # call. Exclude those packages from *that one* check while keeping every other
 # real check against their types. See ADR 005; the whole stack was previously
 # follow_imports="skip" (all Any), which also hid genuine type errors in our code.
-untyped_calls_exclude = ["ufl", "basix", "dolfinx", "pyvista", "scifem", "dolfinx_mpc"]
+untyped_calls_exclude = ["ufl", "basix", "dolfinx", "pyvista", "scifem", "dolfinx_mpc", "skimage"]
 
 [[tool.mypy.overrides]]
 # These packages either ship no types (gmsh, meshio) or partly-wrong ones;
@@ -192,6 +197,8 @@ module = [
     "dolfinx_mpc.*",
     "meshio",
     "scipy.*",
+    "skimage",
+    "skimage.*",
 ]
 ignore_missing_imports = true
 
