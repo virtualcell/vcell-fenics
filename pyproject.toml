@@ -33,7 +33,7 @@ vcell-fenics = { path = ".", editable = true }
 # (lxml + numexpr on top of pydantic/numpy) — its heavy solver/viz/binary stack is behind
 # optional extras we don't request. So it's a normal, lock-reproducible dependency now; no
 # --no-deps editable workaround. The remote-client / full-stack scripts still use ../pyvcell/.venv.
-pyvcell = ">=0.3.0,<0.4"
+pyvcell = ">=0.3.1,<0.4"
 
 [tool.pixi.dependencies]
 # Pin Python >= 3.12 across platforms (it is otherwise unconstrained, so platforms
@@ -192,9 +192,14 @@ module = [
     "dolfinx_mpc.*",
     "meshio",
     "scipy.*",
-    # pyvcell ships no py.typed marker; its vcml data model resolves to Any. The bridge
-    # is duck-typed over it and verified by tests, so Any at that boundary is acceptable.
-    "pyvcell",
-    "pyvcell.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pyvcell >= 0.3.1 ships py.typed, so we use its real (pydantic) types — the bridge importers
+# are annotated with pyvcell's MathDescription / Geometry, not Any. `follow_imports = "silent"`
+# is pyvcell's recommended consumer config: use its annotations but don't report errors from
+# following into its internal modules that pull optional-extra deps we don't install (libvcell,
+# the solver/viz stack). Pure consumer-side; never ships in any wheel.
+module = ["pyvcell.*"]
+follow_imports = "silent"

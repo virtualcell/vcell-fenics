@@ -29,10 +29,9 @@ Expression strings are run through :func:`translate_expression` (coordinate/time
 namespacing, ``^``→``**``). :func:`import_model` returns the math + observables; the
 convenience :func:`import_math_description` returns just the math.
 
-The translator is **duck-typed** over the pydantic object's attributes, so it needs no
-import of ``pyvcell`` itself — the caller supplies the
-``pyvcell.vcml.models_math.MathDescription`` (a clean ``from pyvcell.vcml.models_math
-import ...``, which is lazy and pulls none of pyvcell's heavy stack).
+The translator reads pyvcell's typed pydantic model directly; the pyvcell types are
+imported under ``TYPE_CHECKING`` (annotations only), so the module type-checks against the
+real ``pyvcell.vcml.models_math`` classes without a runtime import of pyvcell.
 
 **Loud rejection.** Constructs that would change the math if dropped are never dropped
 silently: stochastic / particle dynamics (§2.6.3) raise :class:`VcellImportError`, and
@@ -46,7 +45,7 @@ zero-Neumann boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING
 
 from vcell_fenics.formalism.schema import (
     BoundaryCondition,
@@ -62,6 +61,20 @@ from vcell_fenics.formalism.schema import (
 )
 from vcell_fenics.pyvcell_bridge.expression import translate_expression
 from vcell_fenics.pyvcell_bridge.inlining import FunctionResolution, resolve_functions
+
+if TYPE_CHECKING:
+    from pyvcell.vcml.models_math import (
+        CompartmentSubDomain,
+        MembraneSubDomain,
+        PdeEquation,
+        Velocity,
+    )
+    from pyvcell.vcml.models_math import (
+        MathDescription as VcmlMathDescription,
+    )
+
+    # A volume or surface subdomain of the VCell math model.
+    VcmlSubDomain = CompartmentSubDomain | MembraneSubDomain
 
 
 class VcellImportError(Exception):
@@ -90,13 +103,13 @@ class ImportResult:
     observables: tuple[Observable, ...] = field(default=())
 
 
-def import_model(vcml: Any, *, geometry: str | None = None) -> ImportResult:
+def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None) -> ImportResult:
     """Translate a pyvcell ``MathDescription`` into a formalism ``MathDescription`` plus its
     observables. ``geometry`` defaults to the VCell math description's ``name`` (it is
     cross-checked against a real Geometry at solve time, not here)."""
 
     variable_names = _collect_variable_names(vcml)
-    resolution = resolve_functions(list(getattr(vcml, "functions", [])), variable_names)
+    resolution = resolve_functions(list(vcml.functions), variable_names)
 
     subdomains: list[Subdomain] = []
     variables: list[Variable] = []
@@ -109,7 +122,7 @@ def import_model(vcml: Any, *, geometry: str | None = None) -> ImportResult:
 
     for membrane in vcml.membrane_subdomains:
         _reject_stochastic(membrane)
-        if getattr(membrane, "jump_conditions", None):
+        if membrane.jump_conditions:
             raise NotImplementedError(
                 f"membrane {membrane.name!r} has jump conditions (interface flux balance, §2.6.2); "
                 f"jump-condition import is a follow-up increment"
@@ -131,26 +144,29 @@ def import_model(vcml: Any, *, geometry: str | None = None) -> ImportResult:
     return ImportResult(math=math, observables=tuple(observables))
 
 
-def import_math_description(vcml: Any, *, geometry: str | None = None) -> MathDescription:
+def import_math_description(vcml: VcmlMathDescription, *, geometry: str | None = None) -> MathDescription:
     """Convenience wrapper returning just the formalism ``MathDescription`` (the observables
     sidecar is dropped). See :func:`import_model`."""
 
     return import_model(vcml, geometry=geometry).math
 
 
-def _collect_variable_names(vcml: Any) -> set[str]:
+def _collect_variable_names(vcml: VcmlMathDescription) -> set[str]:
     """The state-variable names — the equation-governed names (plus any declared
     ``MathVariable``s). Used to decide which functions reference variables."""
 
-    names: set[str] = {v.name for v in getattr(vcml, "variables", [])}
-    for sub in [*vcml.compartment_subdomains, *vcml.membrane_subdomains]:
-        names.update(p.name for p in sub.pde_equations)
-        names.update(o.name for o in sub.ode_equations)
+    names: set[str] = {v.name for v in vcml.variables}
+    for compartment in vcml.compartment_subdomains:
+        names.update(p.name for p in compartment.pde_equations)
+        names.update(o.name for o in compartment.ode_equations)
+    for membrane in vcml.membrane_subdomains:
+        names.update(p.name for p in membrane.pde_equations)
+        names.update(o.name for o in membrane.ode_equations)
     return names
 
 
 def _translate_subdomain_equations(
-    subdomain: Any, kind: str, variables: list[Variable], equations: list[Equation], res: FunctionResolution
+    subdomain: VcmlSubDomain, kind: str, variables: list[Variable], equations: list[Equation], res: FunctionResolution
 ) -> None:
     """Append the variables + template equations for one subdomain's PDEs and ODEs,
     inlining variable-referencing functions into each expression."""
@@ -200,7 +216,7 @@ def _translate_subdomain_equations(
         )
 
 
-def _velocity_vector(velocity: Any, res: FunctionResolution) -> str | None:
+def _velocity_vector(velocity: Velocity | None, res: FunctionResolution) -> str | None:
     """Build a formalism vector-expression `"[vx, vy(, vz)]"` from a VCell ``Velocity``
     (the species' advection field → the template's ``relative_advection`` slot), or
     ``None`` if there is no velocity. A 2D model (no z component) yields two components."""
@@ -216,7 +232,7 @@ def _velocity_vector(velocity: Any, res: FunctionResolution) -> str | None:
     return "[" + ", ".join(rendered) + "]"
 
 
-def _translate_parameters(vcml: Any, res: FunctionResolution) -> list[Parameter]:
+def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) -> list[Parameter]:
     """VCell ``Constant``s → parameters; **pure** ``MathFunction``s (no variable reference)
     → ``ParameterExpression``. Variable-referencing functions are not parameters — they are
     inlined into equations and surfaced as observables instead."""
@@ -236,13 +252,13 @@ def _translate_parameters(vcml: Any, res: FunctionResolution) -> list[Parameter]
                 ParameterExpression(
                     name=function.name,
                     expression=translate_expression(function.exp or ""),
-                    subdomain=getattr(function, "domain", None),
+                    subdomain=function.domain,
                 )
             )
     return parameters
 
 
-def _build_observables(vcml: Any, res: FunctionResolution) -> list[Observable]:
+def _build_observables(vcml: VcmlMathDescription, res: FunctionResolution) -> list[Observable]:
     """Surface the variable-referencing functions as observables, with bodies fully inlined
     (so they reference only variables, parameters, coordinates, and time)."""
 
@@ -254,7 +270,7 @@ def _build_observables(vcml: Any, res: FunctionResolution) -> list[Observable]:
                 Observable(
                     name=function.name,
                     expression=translate_expression(body),
-                    subdomain=getattr(function, "domain", None),
+                    subdomain=function.domain,
                 )
             )
     return observables
@@ -267,38 +283,42 @@ def _as_float(expression: str) -> float | None:
         return None
 
 
-def _reject_stochastic(subdomain: Any) -> None:
+def _reject_stochastic(subdomain: VcmlSubDomain) -> None:
     """Loudly reject the stochastic / particle constructs (§2.6.3) — dropping them would
     silently change the model from what VCell specified."""
 
-    for attr, what in (
-        ("jump_processes", "stochastic jump processes"),
-        ("particle_jump_processes", "particle (Smoldyn) jump processes"),
-        ("particle_properties", "particle (Smoldyn) properties"),
-        ("variable_initial_counts", "stochastic initial counts"),
-    ):
-        if getattr(subdomain, attr, None):
+    # `particle_*` are on both subdomain kinds; `jump_processes` / `variable_initial_counts` are
+    # CompartmentSubDomain-only, so read those defensively (coerced to `object`, not `Any`).
+    constructs: list[tuple[object, str]] = [
+        (subdomain.particle_jump_processes, "particle (Smoldyn) jump processes"),
+        (subdomain.particle_properties, "particle (Smoldyn) properties"),
+        (getattr(subdomain, "jump_processes", None), "stochastic jump processes"),
+        (getattr(subdomain, "variable_initial_counts", None), "stochastic initial counts"),
+    ]
+    for value, what in constructs:
+        if value:
             raise VcellImportError(
                 f"subdomain {subdomain.name!r} uses {what}, which are out of scope for the formalism "
                 f"(§2.6.3) and cannot be imported"
             )
 
 
-def _reject_boundaries(pde: Any, subdomain: Any) -> None:
+def _reject_boundaries(pde: PdeEquation, subdomain: VcmlSubDomain) -> None:
     """Per-face boundary conditions (§2.6.2) are a follow-up increment. A PDE that
     relies on VCell's default no-flux faces (no boundary expressions, only ``Flux``
     boundary types) imports cleanly — that default is the formalism's natural
     zero-Neumann BC. Anything else raises rather than silently dropping a BC."""
 
-    boundaries = getattr(pde, "boundaries", None)
+    boundaries = pde.boundaries
     if boundaries is not None and any(
-        getattr(boundaries, face) is not None for face in ("xm", "xp", "ym", "yp", "zm", "zp")
+        face is not None
+        for face in (boundaries.xm, boundaries.xp, boundaries.ym, boundaries.yp, boundaries.zm, boundaries.zp)
     ):
         raise NotImplementedError(
             f"PDE for {pde.name!r} on {subdomain.name!r} has explicit boundary expressions (§2.6.2); "
             f"per-face boundary-condition import is a follow-up increment"
         )
-    for bt in getattr(subdomain, "boundary_types", []):
+    for bt in subdomain.boundary_types:
         if bt.type.lower() != "flux":
             raise NotImplementedError(
                 f"subdomain {subdomain.name!r} has a {bt.type!r} boundary on face {bt.boundary!r} (§2.6.2); "

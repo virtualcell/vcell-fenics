@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -45,7 +44,7 @@ from vcell_fenics.formalism.schema import (
 # ---------------------------------------------------------------------------
 
 
-def to_dict(md: MathDescription) -> dict[str, Any]:
+def to_dict(md: MathDescription) -> dict[str, object]:
     """Serialise a MathDescription to a JSON/YAML-ready nested dict.
 
     Defaults are omitted. The result satisfies ``load_dict(to_dict(md)) == md``.
@@ -88,8 +87,8 @@ def dump_json(md: MathDescription, path: str | Path | None = None, *, indent: in
 # ---------------------------------------------------------------------------
 
 
-def _math_description_to_dict(md: MathDescription) -> dict[str, Any]:
-    out: dict[str, Any] = {
+def _math_description_to_dict(md: MathDescription) -> dict[str, object]:
+    out: dict[str, object] = {
         "geometry": md.geometry,
         "subdomains": [_subdomain_to_dict(s) for s in md.subdomains],
         "variables": [_variable_to_dict(v) for v in md.variables],
@@ -103,14 +102,14 @@ def _math_description_to_dict(md: MathDescription) -> dict[str, Any]:
     return out
 
 
-def _subdomain_to_dict(s: Subdomain) -> dict[str, Any]:
-    out: dict[str, Any] = {"name": s.name, "kind": s.kind}
+def _subdomain_to_dict(s: Subdomain) -> dict[str, object]:
+    out: dict[str, object] = {"name": s.name, "kind": s.kind}
     if not isinstance(s.motion, MotionNone):
         out["motion"] = _motion_to_dict(s.motion)
     return out
 
 
-def _motion_to_dict(m: Motion) -> dict[str, Any]:
+def _motion_to_dict(m: Motion) -> dict[str, object]:
     if isinstance(m, MotionNone):
         return {"kind": "none"}
     if isinstance(m, MotionPrescribedVelocity):
@@ -122,8 +121,8 @@ def _motion_to_dict(m: Motion) -> dict[str, Any]:
     raise AssertionError(f"unhandled Motion variant: {type(m).__name__}")
 
 
-def _variable_to_dict(v: Variable) -> dict[str, Any]:
-    out: dict[str, Any] = {"name": v.name, "subdomain": v.subdomain}
+def _variable_to_dict(v: Variable) -> dict[str, object]:
+    out: dict[str, object] = {"name": v.name, "subdomain": v.subdomain}
     if v.type != "scalar":
         out["type"] = v.type
     if v.space != "lagrange_p1":
@@ -131,13 +130,13 @@ def _variable_to_dict(v: Variable) -> dict[str, Any]:
     return out
 
 
-def _parameter_to_dict(p: Parameter) -> dict[str, Any]:
+def _parameter_to_dict(p: Parameter) -> dict[str, object]:
     if isinstance(p, ParameterConstant):
         # Constant uses the {name, value} shorthand the loader recognises.
         # The explicit `kind: scalar` is redundant and omitted.
         return {"name": p.name, "value": p.value}
     if isinstance(p, ParameterExpression):
-        out: dict[str, Any] = {"name": p.name}
+        out: dict[str, object] = {"name": p.name}
         if p.type != "scalar":
             out["type"] = p.type
         if p.subdomain is not None:
@@ -154,9 +153,9 @@ def _parameter_to_dict(p: Parameter) -> dict[str, Any]:
     raise AssertionError(f"unhandled Parameter variant: {type(p).__name__}")
 
 
-def _equation_to_dict(e: Equation) -> dict[str, Any]:
+def _equation_to_dict(e: Equation) -> dict[str, object]:
     if isinstance(e, WeakFormEquation):
-        out: dict[str, Any] = {
+        out: dict[str, object] = {
             "template": "weak_form",
             "variable": e.variable,
             "subdomain": e.subdomain,
@@ -181,7 +180,7 @@ def _equation_to_dict(e: Equation) -> dict[str, Any]:
     raise AssertionError(f"unhandled Equation variant: {type(e).__name__}")
 
 
-def _bc_to_dict(b: BoundaryCondition) -> dict[str, Any]:
+def _bc_to_dict(b: BoundaryCondition) -> dict[str, object]:
     if isinstance(b, BCDirichlet):
         return {
             "kind": "dirichlet",
@@ -206,7 +205,7 @@ def _bc_to_dict(b: BoundaryCondition) -> dict[str, Any]:
             "expression": b.expression,
         }
     if isinstance(b, BCInterfaceValueEquality):
-        out: dict[str, Any] = {
+        out: dict[str, object] = {
             "kind": "interface_value_equality",
             "variable": b.variable,
             "partner_variable": b.partner_variable,

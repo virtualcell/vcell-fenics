@@ -252,10 +252,11 @@ analytic (level-set) → image (mesh).** This realizes the majority of importabl
 ## 6. Roadmap
 
 1. **Formalism + schema + carriers + VCell-geometry importer** (pure data, no realization) —
-   `GeometryDescription` dataclasses mirroring VCell, YAML/JSON loaders, a duck-typed
-   `models_geometry → GeometryDescription` importer, and a coverage survey over the corpus. This is
-   the geometry counterpart of the math import layer and is independently useful (a validated
-   geometry pool) before anything is meshed.
+   `GeometryDescription` dataclasses mirroring VCell, YAML/JSON loaders, a `models_geometry →
+   GeometryDescription` importer, and a coverage survey over the corpus. This is the geometry
+   counterpart of the math import layer and is independently useful (a validated geometry pool)
+   before anything is meshed. **Done** (`formalism/geometry_*.py`, `pyvcell_bridge/geometry.py`,
+   `scripts/survey_parsed_geom.py`): **98.6% of the 5615 corpus geometries import + validate clean.**
 2. **Realization v1** — `compartmental`/dim-0 (trivial) + `csg`/primitive-analytic via gmsh OCC →
    a `Geometry` with tagged regions, surfaces, and **named external faces**. Subsumes today's
    imperative `make_*` helpers as recipes over the formalism.
