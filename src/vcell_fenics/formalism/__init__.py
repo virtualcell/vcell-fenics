@@ -22,6 +22,23 @@ from vcell_fenics.formalism.expr import (
     UnaryOp,
     VectorLiteral,
 )
+from vcell_fenics.formalism.geometry_io import (
+    dump_geometry_json,
+    dump_geometry_yaml,
+    geometry_to_dict,
+    load_geometry_dict,
+    load_geometry_json,
+    load_geometry_yaml,
+)
+from vcell_fenics.formalism.geometry_schema import (
+    GeometryDescription,
+    GeometryImage,
+    PixelClass,
+    SubVolume,
+    SubVolumeType,
+    SurfaceClass,
+)
+from vcell_fenics.formalism.geometry_validator import validate_geometry, validate_geometry_or_raise
 from vcell_fenics.formalism.loader import FormalismLoadError, load_dict, load_json, load_yaml
 from vcell_fenics.formalism.parser import ExpressionSyntaxError, parse
 from vcell_fenics.formalism.schema import (
@@ -72,6 +89,8 @@ __all__ = [
     "FormalismLoadError",
     "FormalismValidationError",
     "FunctionCall",
+    "GeometryDescription",
+    "GeometryImage",
     "IndexAccess",
     "MathDescription",
     "Motion",
@@ -85,8 +104,12 @@ __all__ = [
     "ParameterConstant",
     "ParameterExpression",
     "ParameterRegionMap",
+    "PixelClass",
+    "SubVolume",
+    "SubVolumeType",
     "Subdomain",
     "SubdomainKind",
+    "SurfaceClass",
     "TemplateEquation",
     "Temporality",
     "TensorLiteral",
@@ -95,13 +118,21 @@ __all__ = [
     "VariableType",
     "VectorLiteral",
     "WeakFormEquation",
+    "dump_geometry_json",
+    "dump_geometry_yaml",
     "dump_json",
     "dump_yaml",
+    "geometry_to_dict",
     "load_dict",
+    "load_geometry_dict",
+    "load_geometry_json",
+    "load_geometry_yaml",
     "load_json",
     "load_yaml",
     "parse",
     "to_dict",
     "validate",
+    "validate_geometry",
+    "validate_geometry_or_raise",
     "validate_or_raise",
 ]
