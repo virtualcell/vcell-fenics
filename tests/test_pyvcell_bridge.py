@@ -10,15 +10,15 @@ Three layers:
 3. **End-to-end** — import a VCell reaction-diffusion model and actually run it through
    the FEniCSx backend, proving the import lands on a runnable, well-posed model.
 
-The pyvcell-dependent tests skip cleanly when pyvcell is not installed (it is a local
-sibling, not on PyPI — `pixi run -e dev link-pyvcell` installs it editable/--no-deps).
+pyvcell (>= 0.3.0) is a normal dependency — its pure-Pydantic `vcml.models_math` data model
+installs with a minimal default dependency set, so it is always present in the env.
 """
 
 from __future__ import annotations
 
 import pytest
+import pyvcell.vcml.models_math as vm
 
-from tests._pyvcell_models import load_models_math
 from vcell_fenics.formalism.schema import TemplateEquation
 from vcell_fenics.pyvcell_bridge import (
     VcellImportError,
@@ -26,10 +26,6 @@ from vcell_fenics.pyvcell_bridge import (
     import_model,
     translate_expression,
 )
-
-vm = load_models_math()  # pyvcell.vcml.models_math, or None if pyvcell is not installed
-needs_pyvcell = pytest.mark.skipif(vm is None, reason="pyvcell not installed (run `pixi run -e dev link-pyvcell`)")
-
 
 # --- 1. expression translation -------------------------------------------------
 
@@ -63,7 +59,6 @@ def test_inserted_builtin_is_not_re_translated() -> None:
 # --- 2. structural import ------------------------------------------------------
 
 
-@needs_pyvcell
 def test_compartment_pde_maps_to_bulk_radv_diff() -> None:
     vcml = vm.MathDescription(
         name="cell",
@@ -90,7 +85,6 @@ def test_compartment_pde_maps_to_bulk_radv_diff() -> None:
     assert eq.initial_condition == "1.0 + 0.3*geom.x[0]"  # coordinate translated
 
 
-@needs_pyvcell
 def test_membrane_pde_maps_to_surface_template_and_geometry_defaults_to_name() -> None:
     vcml = vm.MathDescription(
         name="membrane_model",
@@ -108,7 +102,6 @@ def test_membrane_pde_maps_to_surface_template_and_geometry_defaults_to_name() -
     assert eq.template == "surface_pde_with_dilution"
 
 
-@needs_pyvcell
 def test_steady_pde_is_steady_state_and_ode_maps_to_lumped_ode() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -129,7 +122,6 @@ def test_steady_pde_is_steady_state_and_ode_maps_to_lumped_ode() -> None:
     assert w.terms == {"rate": "k1 - k2*w"}
 
 
-@needs_pyvcell
 def test_velocity_becomes_a_relative_advection_vector() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -147,7 +139,6 @@ def test_velocity_becomes_a_relative_advection_vector() -> None:
     assert eq.terms["relative_advection"] == "[vx, 2*geom.x[1]]"
 
 
-@needs_pyvcell
 def test_numeric_and_symbolic_constants_and_functions() -> None:
     from vcell_fenics.formalism.schema import ParameterConstant, ParameterExpression
 
@@ -165,7 +156,6 @@ def test_numeric_and_symbolic_constants_and_functions() -> None:
     assert isinstance(params["f"], ParameterExpression) and params["f"].expression == "geom.x[0]*2"
 
 
-@needs_pyvcell
 def test_imported_model_validates() -> None:
     from vcell_fenics.formalism import validate
 
@@ -188,7 +178,6 @@ def test_imported_model_validates() -> None:
 # --- function inlining + observables -------------------------------------------
 
 
-@needs_pyvcell
 def test_variable_referencing_function_is_inlined_and_observed() -> None:
     from vcell_fenics.formalism import validate
 
@@ -214,7 +203,6 @@ def test_variable_referencing_function_is_inlined_and_observed() -> None:
     assert [d for d in validate(result.math) if d.severity == "error"] == []  # now validates clean
 
 
-@needs_pyvcell
 def test_pure_function_stays_a_parameter_not_an_observable() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -231,7 +219,6 @@ def test_pure_function_stays_a_parameter_not_an_observable() -> None:
     assert any(p.name == "g" for p in result.math.parameters)
 
 
-@needs_pyvcell
 def test_nested_variable_function_is_fully_inlined() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -251,7 +238,6 @@ def test_nested_variable_function_is_fully_inlined() -> None:
     assert "outer" not in eq.terms["source"] and "inner" not in eq.terms["source"]
 
 
-@needs_pyvcell
 def test_import_math_description_is_the_math_of_import_model() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -267,7 +253,6 @@ def test_import_math_description_is_the_math_of_import_model() -> None:
 # --- loud rejection of out-of-scope / not-yet constructs ----------------------
 
 
-@needs_pyvcell
 def test_stochastic_constructs_are_rejected() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -282,7 +267,6 @@ def test_stochastic_constructs_are_rejected() -> None:
         import_math_description(vcml)
 
 
-@needs_pyvcell
 def test_membrane_jump_conditions_are_not_yet_implemented() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -294,7 +278,6 @@ def test_membrane_jump_conditions_are_not_yet_implemented() -> None:
         import_math_description(vcml)
 
 
-@needs_pyvcell
 def test_explicit_boundary_expressions_are_not_yet_implemented() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -309,7 +292,6 @@ def test_explicit_boundary_expressions_are_not_yet_implemented() -> None:
         import_math_description(vcml)
 
 
-@needs_pyvcell
 def test_non_flux_boundary_type_is_not_yet_implemented() -> None:
     vcml = vm.MathDescription(
         name="m",
@@ -325,7 +307,6 @@ def test_non_flux_boundary_type_is_not_yet_implemented() -> None:
         import_math_description(vcml)
 
 
-@needs_pyvcell
 def test_default_flux_boundary_types_import_cleanly() -> None:
     # VCell's default no-flux faces (all `Flux`, no expressions) == the formalism's
     # natural zero-Neumann boundary, so they import without producing any BC.
@@ -346,7 +327,6 @@ def test_default_flux_boundary_types_import_cleanly() -> None:
 # --- 3. end-to-end: import a VCell model and run it through FEniCSx ------------
 
 
-@needs_pyvcell
 def test_imported_reaction_diffusion_model_runs_and_decays() -> None:
     from vcell_fenics.backend import SolverConfiguration, make_disk_geometry, run
 

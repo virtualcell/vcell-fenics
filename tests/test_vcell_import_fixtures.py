@@ -20,8 +20,8 @@ and **review the produced `expected.yaml` in the PR diff** — that review is th
 the golden then guards against regressions, with `validate` and the runnable subset as
 backstops against blessing a plausible-but-wrong translation.
 
-The accept/reject tiers need pyvcell (skipped when absent — `pixi run -e dev link-pyvcell`);
-the expression table runs everywhere.
+The accept/reject tiers reconstruct pyvcell `MathDescription`s (pyvcell is a normal
+dependency); the expression table is pure.
 """
 
 from __future__ import annotations
@@ -31,14 +31,11 @@ import pathlib
 from typing import Any
 
 import pytest
+import pyvcell.vcml.models_math as vm
 import yaml
 
-from tests._pyvcell_models import load_models_math
 from vcell_fenics.formalism import dump_yaml, load_yaml, validate
 from vcell_fenics.pyvcell_bridge import VcellImportError, import_math_description, translate_expression
-
-vm = load_models_math()  # pyvcell.vcml.models_math, or None if pyvcell is not installed
-needs_pyvcell = pytest.mark.skipif(vm is None, reason="pyvcell not installed (run `pixi run -e dev link-pyvcell`)")
 
 _FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "vcell_import"
 _UPDATE_GOLDENS = os.environ.get("UPDATE_GOLDENS") == "1"
@@ -71,7 +68,6 @@ def _load_meta(case_dir: pathlib.Path) -> dict[str, Any]:
 # --- accept: VCell math → golden formalism math --------------------------------
 
 
-@needs_pyvcell
 @pytest.mark.parametrize("case", _or_skip(_case_dirs("accept"), "no accept fixtures"))
 def test_accept_fixture_matches_golden(case: str) -> None:
     case_dir = _FIXTURES / "accept" / case
@@ -87,7 +83,6 @@ def test_accept_fixture_matches_golden(case: str) -> None:
     assert [d for d in validate(imported) if d.severity == "error"] == []
 
 
-@needs_pyvcell
 @pytest.mark.parametrize(
     "case",
     _or_skip(
@@ -116,7 +111,6 @@ def test_accept_fixture_runs_end_to_end(case: str) -> None:
 # --- reject: out-of-scope / not-yet constructs must raise ----------------------
 
 
-@needs_pyvcell
 @pytest.mark.parametrize("case", _or_skip(_case_dirs("reject"), "no reject fixtures"))
 def test_reject_fixture_raises(case: str) -> None:
     case_dir = _FIXTURES / "reject" / case

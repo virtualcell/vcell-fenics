@@ -16,7 +16,7 @@ The first concrete goal is a 2D single-cell prototype with one surface PDE (rece
 
 Two repos in the same workspace define the broader context.
 
-- **`../pyvcell`** — VCell's Python project, the **integration target**. The `vcell_fenics.pyvcell_bridge` package now translates pyvcell's lowered math model (`pyvcell.vcml.models_math.MathDescription`) into the formalism (doc §2.6) — the "problem-generation front door" of the template-surface architecture. The coupling is **minimal**: we depend only on pyvcell's pure-Pydantic `vcml` data model (lazily imported, so none of pyvcell's heavy solver/viz/binary closure enters the DOLFINx env). pyvcell is not on PyPI; install it editable/`--no-deps` with **`pixi run -e dev link-pyvcell`** (re-run after `pixi install` re-solves). Bridge tests skip cleanly when it is absent.
+- **`../pyvcell`** — VCell's Python project, the **integration target**. The `vcell_fenics.pyvcell_bridge` package translates pyvcell's lowered math model (`pyvcell.vcml.models_math.MathDescription`) into the formalism (doc §2.6) — the "problem-generation front door" of the template-surface architecture. The coupling is **minimal**: `pyvcell >= 0.3.0` (a normal PyPI/pixi dependency) ships its pure-Pydantic `vcml` data model with a minimal default dependency set (lxml + numexpr), so none of pyvcell's heavy solver/viz/binary closure (behind optional extras) enters the conda DOLFINx env. The full-stack scripts (BioModel download/parse in `scripts/`) instead run in pyvcell's own env, `../pyvcell/.venv`.
 - **`../vcell-solvers`** — contains VCell's existing **moving-boundary solver**, the eventual **comparison baseline** for any moving-membrane work done here. Keep dimensional and biological conventions documentable so the comparison is meaningful when it happens.
 - **`../vcell-solvers`** — contains VCell's existing **moving-boundary solver**, the eventual **comparison baseline** for any moving-membrane work done here. Keep dimensional and biological conventions documentable so the comparison is meaningful when it happens.
 
@@ -54,7 +54,6 @@ pixi run -e dev lint          # ruff lint
 pixi run -e dev format        # ruff format (writes)
 pixi run -e dev typecheck     # mypy --strict
 pixi run -e dev check         # lint + format-check + typecheck + test
-pixi run -e dev link-pyvcell  # editable/--no-deps install of ../pyvcell (for pyvcell_bridge tests)
 pixi add <pkg>                # add a conda dep (writes to pyproject.toml + pixi.lock)
 pixi add --pypi <pkg>         # add a PyPI dep
 pixi update                   # upgrade within version specs

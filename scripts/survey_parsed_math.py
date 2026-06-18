@@ -19,49 +19,24 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import re
 import sys
-import types
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import pyvcell.vcml.models_math as vm
 import yaml
+
+from vcell_fenics.formalism import validate
+from vcell_fenics.pyvcell_bridge import VcellImportError, import_math_description
 
 # VCell expressions can nest deeply (long parenthesised kinetic laws); the recursive-descent
 # parser needs headroom. Pathological cases are still caught per-model in _classify.
 sys.setrecursionlimit(20000)
 
-from vcell_fenics.formalism import validate
-from vcell_fenics.pyvcell_bridge import VcellImportError, import_math_description
-
 _ROOT = Path(__file__).resolve().parent.parent
 _PARSED = _ROOT / "vcml_biomodels" / "parsed"
-
-
-def _load_models_math() -> Any:
-    """Import `pyvcell.vcml.models_math` (pydantic-only) bypassing the heavy `pyvcell.vcml`
-    package __init__, which (depending on the pyvcell working-tree state) may eagerly import
-    numexpr/libvcell/etc. that the vcell-fenics dev env omits."""
-    if "pyvcell.vcml.models_math" in sys.modules:
-        return sys.modules["pyvcell.vcml.models_math"]
-    import pyvcell  # noqa: F401 — empty top-level package init
-
-    vcml_dir = Path(pyvcell.__file__).parent / "vcml"
-    if "pyvcell.vcml" not in sys.modules:
-        pkg = types.ModuleType("pyvcell.vcml")
-        pkg.__path__ = [str(vcml_dir)]  # type: ignore[attr-defined]
-        sys.modules["pyvcell.vcml"] = pkg
-    spec = importlib.util.spec_from_file_location("pyvcell.vcml.models_math", vcml_dir / "models_math.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pyvcell.vcml.models_math"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-vm = _load_models_math()
 
 _CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 _COORD_RE = re.compile(r"\b(?:x|y|z)\b")

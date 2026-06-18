@@ -8,7 +8,7 @@ version = "0.0.0"
 description = "FEniCSx-based cell mechanics and migration modeling, in the context of Virtual Cell."
 readme = "README.md"
 license = { file = "LICENSE.md" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [{ name = "Jim Schaff" }]
 
 [tool.hatch.build.targets.wheel]
@@ -28,8 +28,18 @@ platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.pypi-dependencies]
 vcell-fenics = { path = ".", editable = true }
+# VCell integration (pyvcell_bridge). pyvcell >= 0.3.0 publishes the pure-Pydantic VCML data
+# model (pyvcell.vcml.models_math / models_geometry) with a minimal default dependency set
+# (lxml + numexpr on top of pydantic/numpy) — its heavy solver/viz/binary stack is behind
+# optional extras we don't request. So it's a normal, lock-reproducible dependency now; no
+# --no-deps editable workaround. The remote-client / full-stack scripts still use ../pyvcell/.venv.
+pyvcell = ">=0.3.0,<0.4"
 
 [tool.pixi.dependencies]
+# Pin Python >= 3.12 across platforms (it is otherwise unconstrained, so platforms
+# diverge — osx-arm64 solved to 3.14 while linux-64 picked 3.11). pyvcell >= 0.3.0
+# requires >= 3.12, so both platforms must agree.
+python = ">=3.12"
 # Core FEniCSx stack (conda-forge). Pin DOLFINx to 0.10.x — native
 # mixed-dimensional assembly (used by Approach B) landed in this release.
 # mpich is the recommended MPI variant on macOS arm64.
@@ -55,14 +65,8 @@ numpy = "*"
 scipy = "*"
 pyyaml = ">=6.0.3,<7"
 
-# VCell integration (pyvcell_bridge). The source representation is pyvcell's
-# pure-Pydantic `pyvcell.vcml.models_math.MathDescription` (the math half of pyvcell's
-# geom/math/bio split). pyvcell's `vcml` package is lazily imported (PEP 562), so
-# `from pyvcell.vcml.models_math import ...` pulls only pydantic (+ numpy) — none of
-# pyvcell's heavy solver/viz/binary closure (vtk, trame, libvcell, pyvcell-fvsolver, …),
-# which would clash with the conda DOLFINx stack. pyvcell itself is editable-installed
-# `--no-deps` via the `link-pyvcell` task (it is not on PyPI, and its *declared* deps
-# would still drag in that closure even though it never imports them here).
+# pydantic backs pyvcell's VCML data model (the import source); pinned here as a conda
+# package so pyvcell's pydantic requirement resolves from conda-forge, not a PyPI wheel.
 pydantic = ">=2.10,<3"
 
 [tool.pixi.feature.dev.dependencies]
@@ -97,12 +101,6 @@ typecheck = "mypy src tests"
 check = { depends-on = ["lint", "format-check", "typecheck", "test"] }
 # Launch JupyterLab on the demo notebooks (needs the dev env: `pixi run -e dev notebooks`).
 notebooks = "jupyter lab docs/notebooks"
-# Editable-install the sibling ../pyvcell WITHOUT its heavy dependency closure, so the
-# bridge can `import pyvcell.vcml.models`. pyvcell is not on PyPI, and its full deps
-# (vtk/trame/libvcell/fvsolver/…) would clash with the conda DOLFINx stack — we only
-# need its pure-Pydantic data model. Run once after `pixi install` re-solves the env
-# (which wipes pip-installed packages). uv installs into the active pixi env (CONDA_PREFIX).
-link-pyvcell = "uv pip install --no-deps -e ../pyvcell"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
