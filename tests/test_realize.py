@@ -9,13 +9,20 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 import ufl
 from dolfinx import fem
+from dolfinx import geometry as dgeom
+from dolfinx.mesh import Mesh
+from numpy.typing import NDArray
 
 from vcell_fenics.backend.geometry import Geometry, cross_validate
 from vcell_fenics.backend.realize import RealizationError, realize
+from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, Number, UnaryOp
 from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume, SurfaceClass
+from vcell_fenics.formalism.parser import parse
+from vcell_fenics.formalism.rvachev import subvolume_implicit_functions
 from vcell_fenics.formalism.schema import MathDescription, Subdomain, TemplateEquation, Variable
 
 
@@ -23,6 +30,61 @@ def _measure(geometry: Geometry, subdomain: str) -> float:
     """The integral of 1 over a subdomain mesh — its area (volume) or, for the membrane, length."""
     mesh = geometry.mesh_of(subdomain)
     return float(fem.assemble_scalar(fem.form(1.0 * ufl.dx(domain=mesh))).real)
+
+
+def _eval(expr: Expr, x: float, y: float) -> float | bool:
+    """Scalar evaluator over the geom.x predicate / implicit-function subset — used as an
+    independent oracle (the boolean predicate and its R-function) against the realized mesh."""
+    if isinstance(expr, Number):
+        return expr.value
+    if isinstance(expr, IndexAccess):
+        assert isinstance(expr.index, Number)
+        return (x, y)[int(expr.index.value)]
+    if isinstance(expr, UnaryOp):
+        v = _eval(expr.operand, x, y)
+        return -float(v) if expr.op == "-" else (float(v) if expr.op == "+" else not v)
+    if isinstance(expr, BinaryOp):
+        a, b = float(_eval(expr.left, x, y)), float(_eval(expr.right, x, y))
+        op = expr.op
+        if op == "+":
+            return a + b
+        if op == "-":
+            return a - b
+        if op == "*":
+            return a * b
+        if op == "/":
+            return a / b
+        if op == "**":
+            return math.pow(a, b)
+        if op == "<":
+            return a < b
+        if op == "<=":
+            return a <= b
+        if op == ">":
+            return a > b
+        if op == ">=":
+            return a >= b
+        if op == "&&":
+            return bool(a) and bool(b)
+        if op == "||":
+            return bool(a) or bool(b)
+        raise AssertionError(f"unhandled operator {op!r}")
+    if isinstance(expr, FunctionCall):
+        args = [float(_eval(a, x, y)) for a in expr.args]
+        if expr.callee == "min":
+            return min(args)
+        if expr.callee == "max":
+            return max(args)
+        raise AssertionError(f"unhandled function {expr.callee!r}")
+    raise AssertionError(f"unhandled node {type(expr).__name__}")
+
+
+def _in_mesh(mesh: Mesh, points: NDArray[np.float64]) -> NDArray[np.bool_]:
+    """Whether each (N, 3) point lies in a cell of `mesh` (via DOLFINx collision queries)."""
+    tree = dgeom.bb_tree(mesh, mesh.topology.dim)
+    candidates = dgeom.compute_collisions_points(tree, points)
+    colliding = dgeom.compute_colliding_cells(mesh, candidates, points)
+    return np.array([colliding.links(np.int32(i)).size > 0 for i in range(len(points))])
 
 
 def _compartmental(name: str, *subvolumes: str, surfaces: tuple[SurfaceClass, ...] = ()) -> GeometryDescription:
@@ -125,6 +187,43 @@ def test_2d_disk_in_box_partition() -> None:
     assert cyto + ext == pytest.approx(4.0, abs=1e-9)
     assert cyto == pytest.approx(math.pi * radius**2, rel=0.05)
     assert _measure(geom, "pm") == pytest.approx(2 * math.pi * radius, rel=0.05)
+
+
+def test_2d_point_membership_agrees_across_predicate_rfunction_and_mesh() -> None:
+    """Random points are classified inside/outside the cell by three independent representations —
+    the original boolean predicate, the Rvachev implicit field's sign, and the realized gmsh mesh —
+    and all three agree. Points whose R-function value is near 0 (the membrane band, where the mesh
+    necessarily approximates the contour) are skipped; the seed is fixed and can be changed if a rare
+    near-boundary point slips past the skip."""
+
+    radius = 0.5
+    description = _disk_in_box(radius)
+    h = 0.06
+    geom = realize(description, h=h, resolution=161)
+
+    assert description.subvolumes[0].expression is not None
+    predicate = parse(description.subvolumes[0].expression)  # the cytosol boolean
+    field = subvolume_implicit_functions(description)["cytosol"]  # its R-function
+
+    rng = np.random.default_rng(0)
+    pts2d = rng.uniform(-0.95, 0.95, size=(400, 2))
+    points = np.column_stack([pts2d, np.zeros(len(pts2d))]).astype(np.float64)
+
+    in_cyto = _in_mesh(geom.mesh_of("cytosol"), points)
+    in_ext = _in_mesh(geom.mesh_of("extracellular"), points)
+
+    phi_skip = 2.5 * h  # |phi| ~ distance-to-membrane here; skip the band the mesh can't resolve
+    checked = 0
+    for i, (x, y, _z) in enumerate(points):
+        phi = float(_eval(field, float(x), float(y)))
+        if abs(phi) < phi_skip:
+            continue
+        predicate_inside = bool(_eval(predicate, float(x), float(y)))
+        assert (phi < 0) == predicate_inside, f"R-function vs predicate at {(x, y)}"
+        assert bool(in_cyto[i]) == predicate_inside, f"mesh vs predicate at {(x, y)}"
+        assert bool(in_ext[i]) == (not predicate_inside), f"complementary region at {(x, y)}"
+        checked += 1
+    assert checked > 100  # the skip band did not swallow the sample
 
 
 def test_2d_membrane_is_internal_and_faces_external() -> None:

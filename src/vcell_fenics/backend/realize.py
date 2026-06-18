@@ -124,8 +124,9 @@ def _realize_2d(description: GeometryDescription, *, h: float, resolution: int, 
     contour = _march_interior_contour(field, ox=ox, oy=oy, lx=lx, ly=ly, resolution=resolution, name=description.name)
 
     membrane_name = description.surfaces[0].name if description.surfaces else None
-    parent, cell_tags, facet_tags, region_tags = _mesh_box_with_contour(
-        contour, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, names=(interior.name, background.name)
+    parent = _mesh_box_with_contour(contour, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name)
+    cell_tags, facet_tags, region_tags = _classify_and_tag(
+        parent, field, names=(interior.name, background.name), ox=ox, oy=oy, lx=lx, ly=ly
     )
 
     tdim = parent.topology.dim
@@ -192,26 +193,17 @@ def _march_interior_contour(
 
 
 def _mesh_box_with_contour(
-    contour: NDArray[np.float64],
-    *,
-    ox: float,
-    oy: float,
-    lx: float,
-    ly: float,
-    h: float,
-    comm: MPI.Comm,
-    names: tuple[str, str],
-) -> tuple[dmesh.Mesh, dmesh.MeshTags, dmesh.MeshTags, dict[str, int]]:
-    """Build a gmsh model of the box with ``contour`` embedded, fragment it into interior +
-    background, tag the regions / membrane / four faces, and return the DOLFINx mesh and tags."""
-
-    interior_name, background_name = names
-    region_tags = {interior_name: 1, background_name: 2}
+    contour: NDArray[np.float64], *, ox: float, oy: float, lx: float, ly: float, h: float, comm: MPI.Comm, name: str
+) -> dmesh.Mesh:
+    """Build a gmsh model of the box with ``contour`` embedded and fragment it so the contour is a
+    conforming internal edge, returning the body-fitted DOLFINx mesh. Region / membrane / face
+    tagging is done afterwards in DOLFINx (:func:`_classify_and_tag`) — robustly, by field sign —
+    rather than from gmsh surface areas (which mis-assign when the interior is the larger region)."""
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
     try:
-        gmsh.model.add(interior_name)
+        gmsh.model.add(name)
         occ = gmsh.model.occ
         # Simplify the marched polyline (Douglas–Peucker) to a fraction of the mesh size: removes
         # the sub-grid near-duplicate vertices OCC rejects, while staying within h of the contour.
@@ -219,55 +211,73 @@ def _mesh_box_with_contour(
         if len(verts) > 1 and np.allclose(verts[0], verts[-1]):
             verts = verts[:-1]
         if len(verts) < 3:
-            raise RealizationError(f"membrane contour of {interior_name!r} degenerated to {len(verts)} vertices")
-        # Closed polyline → an interior plane surface.
+            raise RealizationError(f"membrane contour of {name!r} degenerated to {len(verts)} vertices")
         points = [occ.addPoint(float(x), float(y), 0.0, h) for x, y in verts]
         lines = [occ.addLine(points[i], points[(i + 1) % len(points)]) for i in range(len(points))]
         inner = occ.addPlaneSurface([occ.addCurveLoop(lines)])
         box = occ.addRectangle(ox, oy, 0.0, lx, ly)
         occ.fragment([(2, box)], [(2, inner)])
         occ.synchronize()
-
-        # The fragment yields the interior region and the box-minus-interior background. Classify by
-        # area: the interior cell is the smaller piece. (A centroid sign-test is unreliable here —
-        # the background's centroid lands in the hole; area is robust for the interior+background
-        # topology v1 targets, as in approaches/multicompartment.)
-        areas = {surf: occ.getMass(2, surf) for _, surf in gmsh.model.getEntities(2)}
-        interior_surf = min(areas, key=lambda s: areas[s])
-        gmsh.model.addPhysicalGroup(2, [interior_surf], tag=region_tags[interior_name], name=interior_name)
-        gmsh.model.addPhysicalGroup(
-            2, [s for s in areas if s != interior_surf], tag=region_tags[background_name], name=background_name
-        )
-
-        # Classify curves: on a box edge → that face; otherwise the membrane.
-        membrane_curves: list[int] = []
-        face_curves: dict[int, list[int]] = {}
-        for dim, curve in gmsh.model.getEntities(1):
-            com = occ.getCenterOfMass(dim, curve)
-            face = _classify_face(com[0], com[1], ox=ox, oy=oy, lx=lx, ly=ly)
-            if face is None:
-                membrane_curves.append(curve)
-            else:
-                face_curves.setdefault(face, []).append(curve)
-        gmsh.model.addPhysicalGroup(1, membrane_curves, tag=_MEMBRANE_TAG, name="membrane")
-        for i, _name in enumerate(_FACE_NAMES_2D):
-            if i in face_curves:
-                gmsh.model.addPhysicalGroup(1, face_curves[i], tag=_FACE_TAG_BASE + i, name=_name)
+        # One physical group over every fragment so model_to_mesh returns the whole mesh.
+        gmsh.model.addPhysicalGroup(2, [s for _, s in gmsh.model.getEntities(2)], tag=1, name="domain")
 
         gmsh.option.setNumber("Mesh.MeshSizeMin", h)
         gmsh.option.setNumber("Mesh.MeshSizeMax", h)
         gmsh.model.mesh.generate(2)
-        data = model_to_mesh(gmsh.model, comm, rank=0, gdim=2)
+        mesh = model_to_mesh(gmsh.model, comm, rank=0, gdim=2).mesh
     finally:
         gmsh.finalize()
+    return mesh
 
-    assert data.cell_tags is not None, "model_to_mesh returned no cell tags for the region groups"
-    assert data.facet_tags is not None, "model_to_mesh returned no facet tags for the membrane / face groups"
-    return data.mesh, data.cell_tags, data.facet_tags, region_tags
+
+def _classify_and_tag(
+    parent: dmesh.Mesh, field: Expr, *, names: tuple[str, str], ox: float, oy: float, lx: float, ly: float
+) -> tuple[dmesh.MeshTags, dmesh.MeshTags, dict[str, int]]:
+    """Tag the body-fitted mesh by the implicit field's sign — each cell is assigned to the region
+    whose `φ` is negative at the cell midpoint (the per-cell analogue of SBML Spatial's interior
+    points). Robust to which region is larger or non-convex, unlike an area or centroid heuristic.
+    The membrane is the set of interior facets between cells of different regions; the box faces are
+    the exterior facets, classified by position."""
+
+    interior_name, background_name = names
+    region_tags = {interior_name: 1, background_name: 2}
+    tdim = parent.topology.dim
+
+    cells = np.arange(parent.topology.index_map(tdim).size_local, dtype=np.int32)
+    cell_mid = dmesh.compute_midpoints(parent, tdim, cells)
+    phi = _eval_field(field, (cell_mid[:, 0], cell_mid[:, 1]))
+    cell_values = np.where(phi < 0, region_tags[interior_name], region_tags[background_name]).astype(np.int32)
+    cell_tags = dmesh.meshtags(parent, tdim, cells, cell_values)
+
+    parent.topology.create_connectivity(tdim - 1, tdim)
+    facet_to_cell = parent.topology.connectivity(tdim - 1, tdim)
+    num_facets = parent.topology.index_map(tdim - 1).size_local
+    facet_mid = dmesh.compute_midpoints(parent, tdim - 1, np.arange(num_facets, dtype=np.int32))
+    facet_index: list[int] = []
+    facet_value: list[int] = []
+    for facet in range(num_facets):
+        incident = facet_to_cell.links(facet)
+        if incident.size == 1:  # exterior — a box face
+            face = _classify_face(float(facet_mid[facet, 0]), float(facet_mid[facet, 1]), ox=ox, oy=oy, lx=lx, ly=ly)
+            if face is not None:
+                facet_index.append(facet)
+                facet_value.append(_FACE_TAG_BASE + face)
+        elif cell_values[incident[0]] != cell_values[incident[1]]:  # interior region boundary — membrane
+            facet_index.append(facet)
+            facet_value.append(_MEMBRANE_TAG)
+
+    order = np.argsort(facet_index)
+    facet_tags = dmesh.meshtags(
+        parent,
+        tdim - 1,
+        np.asarray(facet_index, dtype=np.int32)[order],
+        np.asarray(facet_value, dtype=np.int32)[order],
+    )
+    return cell_tags, facet_tags, region_tags
 
 
 def _classify_face(x: float, y: float, *, ox: float, oy: float, lx: float, ly: float) -> int | None:
-    """Index into ``_FACE_NAMES_2D`` for a curve centroid on a box edge, else ``None`` (membrane)."""
+    """Index into ``_FACE_NAMES_2D`` for a facet centroid on a box edge, else ``None`` (membrane)."""
 
     if np.isclose(x, ox):
         return 0  # x_minus
