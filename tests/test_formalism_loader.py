@@ -233,8 +233,9 @@ def test_error_missing_envelope() -> None:
 def test_error_missing_required_top_level_field() -> None:
     with pytest.raises(FormalismLoadError) as exc:
         load_dict({"math_description": {"geometry": "g"}})
-    assert exc.value.path == "math_description"
-    assert "missing required" in exc.value.message
+    # pydantic reports the first missing required field (subdomains, in declaration order).
+    assert exc.value.path == "math_description.subdomains"
+    assert "required" in exc.value.message
 
 
 def test_error_unknown_subdomain_kind() -> None:
@@ -258,7 +259,8 @@ def test_error_unknown_subdomain_kind() -> None:
     with pytest.raises(FormalismLoadError) as exc:
         load_dict(raw)
     assert exc.value.path == "math_description.subdomains[0].kind"
-    assert "bulk" in exc.value.message
+    # pydantic's Literal error lists the allowed values rather than echoing the bad input.
+    assert "volume" in exc.value.message
 
 
 def test_error_motion_prescribed_with_both_velocity_and_displacement() -> None:
@@ -340,8 +342,9 @@ def test_error_unknown_field_in_variable() -> None:
     }
     with pytest.raises(FormalismLoadError) as exc:
         load_dict(raw)
-    assert exc.value.path == "math_description.variables[0]"
-    assert "color" in exc.value.message
+    # The unknown field is named in the path; pydantic's message is the generic rejection.
+    assert exc.value.path == "math_description.variables[0].color"
+    assert "Unexpected keyword" in exc.value.message
 
 
 def test_error_neumann_bc_missing_expression() -> None:
@@ -365,8 +368,9 @@ def test_error_neumann_bc_missing_expression() -> None:
     }
     with pytest.raises(FormalismLoadError) as exc:
         load_dict(raw)
-    assert exc.value.path == "math_description.boundary_conditions[0]"
-    assert "expression" in exc.value.message
+    # The matched union member adds its tag (`neumann`) and the missing field to the path.
+    assert exc.value.path == "math_description.boundary_conditions[0].neumann.expression"
+    assert "required" in exc.value.message
 
 
 # ---------------------------------------------------------------------------
