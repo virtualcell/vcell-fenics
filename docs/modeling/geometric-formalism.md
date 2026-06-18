@@ -174,39 +174,46 @@ deformed boundary polyline with gmsh — it does *not* re-evaluate the analytic 
 path the level-set evolves on the fixed background mesh. The geometric formalism is not a live
 description of a moving domain; it is the initial-and-naming SOT.
 
-### 3.5 How VCell realizes geometry — the comparison baseline (not the recipe)
+### 3.5 The two VCell solvers — comparison baselines (not the recipe)
 
-For the eventual numerical comparison against VCell's moving-boundary FV solver
-(`../vcell-mbsolver`), it matters how VCell itself turns a geometry into something it solves on.
-**VCell does not solve on the staircase mesh, and not on a body-fitted mesh.** Its pipeline:
+VCell has **two** solvers, with different geometry treatments; each is a baseline for a different
+class of our approaches.
+
+**`../vcell-fvsolver` — fixed-grid, implicit-surface FV** (the general-purpose finite-volume PDE
+solver; wrapped by pyvcell via the `fvsolver` extra). It does *not* solve on the staircase mesh or a
+body-fitted mesh. Pipeline:
 
 1. choose a Cartesian solver mesh `(nx, ny, nz)`;
 2. sample whatever representation (analytic / csg / image) uniformly onto that grid → an indicator;
 3. build staircase quad boundary surfaces (voxel-face patches);
 4. (optionally smooth those for *visualization*);
-5. the **solver** uses an *implicit* surface obtained by a different, volume-preserving smoothing of
-   the surface grid — a Gaussian-like smoothing **without shrinkage**, on a tangent Voronoi grid.
+5. the **solver** uses an *implicit* surface from a different, volume-preserving smoothing of the
+   surface grid — Gaussian-like, **without shrinkage**, on a tangent Voronoi grid.
 
-So VCell is effectively an **embedded-boundary / cut-cell finite-volume** method on a structured
-grid with a *smoothed implicit interface* — every geometry type is first reduced to a sampled
-indicator, and the interface the solver sees is a smoothed level-set, not the voxel staircase.
+So fvsolver is effectively an **embedded-boundary FV** method on a structured grid with a *smoothed
+implicit interface* — every geometry type is first reduced to a sampled indicator, and the interface
+the solver sees is a smoothed level-set, not the voxel staircase. Its closest analogue here is
+**cut / trace FEM (Approach D)** on a fixed background mesh (and, loosely, phase-field).
 
-Two implications, with the right framing:
+**`../vcell-mbsolver` — FronTier front-tracking, explicit moving geometry** (the moving-boundary
+solver; a FronTier-based cut-cell method with an *explicit* tracked interface). Its closest analogue
+here is **ALE / explicit-membrane moving-boundary work (Approach A)** — an explicit, conforming-ish
+moving interface rather than a fixed-grid implicit one.
 
-- **We are not bound to this pipeline, and can do better.** The thing we *share* with VCell is the
-  declarative geometric *formalism* (§1–§2) — we import it faithfully. The *realization* is ours to
+Framing:
+
+- **We are not bound to either pipeline, and can do better.** What we *share* with VCell is the
+  declarative geometric *formalism* (§1–§2) — imported faithfully. The *realization* is ours to
   improve: from the same spec, FEniCSx can build an **exact conforming mesh** via gmsh OCC (no
   staircase, no sampling error for an analytic/CSG shape), or a **clean level-set** for cut/trace
-  FEM. Neither inherits VCell's sample-then-smooth approximation of the interface. The SOT is the
-  formalism, not VCell's realized grid.
-- **But know the baseline when comparing.** VCell's effective interface is a volume-preserving
-  smoothed implicit surface on a structured grid; quantitative discrepancies against vcell-mbsolver
-  may come from *that* (interface smoothing, grid sampling, the no-shrinkage smoothing), not only
-  from the method. The realization closest to VCell's — and the natural apples-to-apples comparison —
-  is the **structured-grid + implicit-surface (cut/embedded) path** (Approach D / a Cartesian
-  background mesh), which is also why that path is more than a fallback. When the comparison is run,
-  document the interface/conservation conventions on both sides so the difference being measured is
-  the method, not the geometry treatment.
+  FEM. The SOT is the formalism, not VCell's realized grid.
+- **But match the baseline to the comparison.** For a *fixed-grid, implicit-geometry* problem, the
+  apples-to-apples baseline is **fvsolver**, and our nearest realization is the **structured-grid +
+  implicit-surface (cut/embedded) path** — discrepancies there may come from fvsolver's
+  volume-preserving interface smoothing and grid sampling, not the method. For a *moving-boundary*
+  problem, the baseline is **mbsolver** (FronTier explicit front), against our ALE/explicit-membrane
+  realization. Either way, document the interface/conservation conventions on both sides so the
+  difference being measured is the method, not the geometry treatment.
 
 ## 4. Boundary conditions on a realized geometry
 
