@@ -1445,6 +1445,20 @@ math_description:
 
 There is no top-level `temporality` or `motion` declaration — both are derived from per-equation and per-subdomain fields. There is no top-level `solver` block either; solver configuration is a separate object (Part 3).
 
+#### 2.1.3 Loading and structural validation
+
+Loading a YAML or JSON document is a two-layer process. The first layer is **structural validation**: the parsed data is checked against the schema *shape* before any semantic rule runs. This is distinct from, and precedes, the §2.5 semantic pass — structural validation answers "is this a well-formed schema tree?", while §2.5 answers "is the model internally consistent?" (names resolve, types match, temporality is consistent).
+
+The reference implementation (`formalism/loader.py`) performs this layer with a pydantic `TypeAdapter` over the schema dataclasses (`formalism/schema.py`). The dataclasses remain plain stdlib dataclasses — pydantic validates them at the load boundary without their becoming pydantic models — so the in-memory carrier is unchanged. The structural layer enforces:
+
+- the `math_description:` envelope and the required-vs-optional field distinction of §2.1.2 (the three required lists must be present and non-empty);
+- **rejection of unknown fields** — a misspelled or stray key is an error, not silently ignored;
+- the **discriminated-union dispatch** for the tagged unions (Subdomain `motion`, Parameter, Equation, BoundaryCondition), including the field-presence shorthands the schema allows — e.g. a Parameter written `{name, value}` with no `kind` is dispatched to the constant form, and a `prescribed` motion is split by whether it carries `velocity` or `displacement` (declaring both, or neither, is an error here);
+- **closed-enum / `Literal` membership** — `kind`, variable `type`, `temporality`, and subdomain `kind` must be one of their allowed values;
+- **numeric→string coercion** for string-typed fields, so a bare number in an expression slot round-trips (e.g. `initial_condition: 0` is accepted as `"0"`).
+
+Structural errors are raised as `FormalismLoadError` carrying a JSON-pointer-style path to the offending field (e.g. `math_description.subdomains[0].kind`; a matched union member appends its tag, as in `boundary_conditions[0].neumann.expression`). The geometry carrier (`geometric-formalism.md`) loads through the same pydantic-`TypeAdapter` mechanism.
+
 ### 2.2 Schema by entity
 
 #### 2.2.1 Subdomain
@@ -1712,7 +1726,7 @@ Variable names on *different* subdomains are not conflicts — `(c, cytoplasm)` 
 
 ### 2.5 Validation
 
-The validation rules of §1.11 are implemented by a single validation pass over the MathDescription dataclass tree, run during construction (after YAML/JSON parsing, before the MathDescription is exposed to downstream code). The pass:
+The validation rules of §1.11 are implemented by a single **semantic** validation pass over the MathDescription dataclass tree, run during construction (after the structural load of §2.1.3, before the MathDescription is exposed to downstream code). Structural well-formedness — required/unknown fields, union tagging, enum membership — is already guaranteed by the load layer; this pass assumes a structurally valid tree and checks model consistency. The pass:
 
 1. Resolves every name (§1.11.3) — every reference must point to a declared entity.
 2. Topologically sorts parameter expressions (§1.11.3) — parameter-to-parameter references must be acyclic.
