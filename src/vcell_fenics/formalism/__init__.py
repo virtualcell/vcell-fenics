@@ -41,6 +41,12 @@ from vcell_fenics.formalism.geometry_schema import (
 from vcell_fenics.formalism.geometry_validator import validate_geometry, validate_geometry_or_raise
 from vcell_fenics.formalism.loader import FormalismLoadError, load_dict, load_json, load_yaml
 from vcell_fenics.formalism.parser import ExpressionSyntaxError, parse
+from vcell_fenics.formalism.rvachev import (
+    RvachevLoweringError,
+    is_boolean,
+    lower_predicate,
+    subvolume_implicit_functions,
+)
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
     BCInterfaceFluxBalance,
@@ -105,6 +111,7 @@ __all__ = [
     "ParameterExpression",
     "ParameterRegionMap",
     "PixelClass",
+    "RvachevLoweringError",
     "SubVolume",
     "SubVolumeType",
     "Subdomain",
@@ -123,13 +130,16 @@ __all__ = [
     "dump_json",
     "dump_yaml",
     "geometry_to_dict",
+    "is_boolean",
     "load_dict",
     "load_geometry_dict",
     "load_geometry_json",
     "load_geometry_yaml",
     "load_json",
     "load_yaml",
+    "lower_predicate",
     "parse",
+    "subvolume_implicit_functions",
     "to_dict",
     "validate",
     "validate_geometry",

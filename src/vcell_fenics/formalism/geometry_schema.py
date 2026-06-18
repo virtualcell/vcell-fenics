@@ -30,7 +30,8 @@ _FORBID_EXTRA = ConfigDict(extra="forbid")
 
 # A subvolume's membership rule (VCell's `SubVolumeType`):
 #   compartmental — the whole non-spatial (dim-0) domain; no payload
-#   analytic      — the region where `expression` (an implicit function of geom.x) is inside
+#   analytic      — the region where `expression`, a boolean predicate over geom.x, is true
+#                   (lowered to an inside-negative implicit function by `rvachev.py`)
 #   csg           — a constructive-solid-geometry shape (payload not modelled yet; see ADR 007)
 #   image         — the voxels of the geometry's image carrying `pixel_value`
 SubVolumeType: TypeAlias = Literal["compartmental", "analytic", "csg", "image"]
@@ -59,8 +60,9 @@ class GeometryImage:
 @dataclass(frozen=True, slots=True)
 class SubVolume:
     """A named volume region (a `volume` subdomain), defined by its `type` (§1.2). `expression`
-    is the implicit analytic function for `analytic`; `pixel_value` is the image class for
-    `image`; `compartmental` and `csg` carry neither."""
+    is the boolean predicate for `analytic` (the region where it is true; lowered to an implicit
+    function by `rvachev.py`); `pixel_value` is the image class for `image`; `compartmental` and
+    `csg` carry neither."""
 
     __pydantic_config__ = _FORBID_EXTRA
     name: str
