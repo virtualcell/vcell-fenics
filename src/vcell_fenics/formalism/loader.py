@@ -24,8 +24,9 @@ debugging large models is tractable.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 import yaml
 
@@ -109,7 +110,7 @@ def load_json(source: str | Path) -> MathDescription:
     return load_dict(raw)
 
 
-def load_dict(raw: dict[str, Any]) -> MathDescription:
+def load_dict(raw: Mapping[str, object]) -> MathDescription:
     """Parse an already-deserialised dict (e.g. from YAML/JSON) into a
     MathDescription. The dict must have the top-level
     `math_description:` envelope.
@@ -138,29 +139,31 @@ def load_dict(raw: dict[str, Any]) -> MathDescription:
 _MD_KEYS = {"geometry", "subdomains", "variables", "equations", "parameters", "boundary_conditions"}
 
 
-def _parse_math_description(d: dict[str, Any], path: str) -> MathDescription:
+def _parse_math_description(d: dict[str, object], path: str) -> MathDescription:
     _require_keys(d, ["geometry", "subdomains", "variables", "equations"], path)
     _reject_unknown(d, _MD_KEYS, path)
     geometry = _str(d, "geometry", path)
 
     subdomains = [
-        _parse_subdomain(sub, f"{path}.subdomains[{i}]") for i, sub in enumerate(_list(d, "subdomains", path))
+        _parse_subdomain(sub, f"{path}.subdomains[{i}]") for i, sub in enumerate(_dict_list(d, "subdomains", path))
     ]
     if not subdomains:
         raise FormalismLoadError(f"{path}.subdomains", "must be non-empty")
 
-    variables = [_parse_variable(v, f"{path}.variables[{i}]") for i, v in enumerate(_list(d, "variables", path))]
+    variables = [_parse_variable(v, f"{path}.variables[{i}]") for i, v in enumerate(_dict_list(d, "variables", path))]
     if not variables:
         raise FormalismLoadError(f"{path}.variables", "must be non-empty")
 
-    equations = [_parse_equation(e, f"{path}.equations[{i}]") for i, e in enumerate(_list(d, "equations", path))]
+    equations = [_parse_equation(e, f"{path}.equations[{i}]") for i, e in enumerate(_dict_list(d, "equations", path))]
     if not equations:
         raise FormalismLoadError(f"{path}.equations", "must be non-empty")
 
-    parameters = [_parse_parameter(p, f"{path}.parameters[{i}]") for i, p in enumerate(d.get("parameters") or [])]
+    parameters = [
+        _parse_parameter(p, f"{path}.parameters[{i}]") for i, p in enumerate(_opt_dict_list(d, "parameters", path))
+    ]
     boundary_conditions = [
         _parse_boundary_condition(b, f"{path}.boundary_conditions[{i}]")
-        for i, b in enumerate(d.get("boundary_conditions") or [])
+        for i, b in enumerate(_opt_dict_list(d, "boundary_conditions", path))
     ]
 
     return MathDescription(
@@ -177,7 +180,7 @@ _SUBDOMAIN_KEYS = {"name", "kind", "motion"}
 _SUBDOMAIN_KINDS = {"volume", "surface", "curve", "point"}
 
 
-def _parse_subdomain(d: dict[str, Any], path: str) -> Subdomain:
+def _parse_subdomain(d: dict[str, object], path: str) -> Subdomain:
     _require_keys(d, ["name", "kind"], path)
     _reject_unknown(d, _SUBDOMAIN_KEYS, path)
     kind = _enum(d, "kind", path, _SUBDOMAIN_KINDS)
@@ -191,7 +194,7 @@ def _parse_subdomain(d: dict[str, Any], path: str) -> Subdomain:
 _MOTION_KINDS = {"none", "prescribed", "unknown"}
 
 
-def _parse_motion(d: Any, path: str) -> Motion:
+def _parse_motion(d: object, path: str) -> Motion:
     if not isinstance(d, dict):
         raise FormalismLoadError(path, f"must be a mapping, got {type(d).__name__}")
     kind = _enum(d, "kind", path, _MOTION_KINDS)
@@ -224,7 +227,7 @@ _VARIABLE_KEYS = {"name", "subdomain", "type", "space"}
 _VARIABLE_TYPES = {"scalar", "vector", "symmetric_tensor"}
 
 
-def _parse_variable(d: dict[str, Any], path: str) -> Variable:
+def _parse_variable(d: dict[str, object], path: str) -> Variable:
     _require_keys(d, ["name", "subdomain"], path)
     _reject_unknown(d, _VARIABLE_KEYS, path)
     var_type_str = d.get("type", "scalar")
@@ -260,7 +263,7 @@ _PARAM_EXPRESSION_KEYS = {"kind", "name", "type", "subdomain", "expression"}
 _PARAM_REGION_MAP_KEYS = {"kind", "name", "subdomain", "values"}
 
 
-def _parse_parameter(d: dict[str, Any], path: str) -> Parameter:
+def _parse_parameter(d: dict[str, object], path: str) -> Parameter:
     if not isinstance(d, dict):
         raise FormalismLoadError(path, f"must be a mapping, got {type(d).__name__}")
     if "name" not in d:
@@ -311,7 +314,7 @@ def _parse_parameter(d: dict[str, Any], path: str) -> Parameter:
             name=_str(d, "name", path),
             type=_cast_variable_type(param_type_str),
             expression=_str(d, "expression", path),
-            subdomain=d.get("subdomain"),
+            subdomain=_opt_str(d.get("subdomain"), f"{path}.subdomain"),
         )
 
     if has_value:
@@ -337,7 +340,7 @@ _WEAK_FORM_EQUATION_KEYS = {"template", "variable", "subdomain", "temporality", 
 _TEMPORALITIES = {"time_dependent", "steady_state"}
 
 
-def _parse_equation(d: dict[str, Any], path: str) -> Equation:
+def _parse_equation(d: dict[str, object], path: str) -> Equation:
     if not isinstance(d, dict):
         raise FormalismLoadError(path, f"must be a mapping, got {type(d).__name__}")
     _require_keys(d, ["template", "variable", "subdomain", "temporality"], path)
@@ -388,7 +391,7 @@ _BC_IVE_KEYS = {"kind", "variable", "partner_variable", "boundary", "expression"
 _BC_IFB_KEYS = _BC_IVE_KEYS
 
 
-def _parse_boundary_condition(d: dict[str, Any], path: str) -> BoundaryCondition:
+def _parse_boundary_condition(d: dict[str, object], path: str) -> BoundaryCondition:
     if not isinstance(d, dict):
         raise FormalismLoadError(path, f"must be a mapping, got {type(d).__name__}")
     kind = _enum(d, "kind", path, _BC_KINDS)
@@ -461,13 +464,13 @@ def _read_text(source: str | Path) -> str:
     return source
 
 
-def _require_keys(d: dict[str, Any], keys: list[str], path: str) -> None:
+def _require_keys(d: dict[str, object], keys: list[str], path: str) -> None:
     missing = [k for k in keys if k not in d]
     if missing:
         raise FormalismLoadError(path, f"missing required field(s): {missing}")
 
 
-def _reject_unknown(d: dict[str, Any], allowed: set[str], path: str) -> None:
+def _reject_unknown(d: dict[str, object], allowed: set[str], path: str) -> None:
     unknown = sorted(set(d) - allowed)
     if unknown:
         raise FormalismLoadError(
@@ -476,21 +479,44 @@ def _reject_unknown(d: dict[str, Any], allowed: set[str], path: str) -> None:
         )
 
 
-def _str(d: dict[str, Any], key: str, path: str) -> str:
+def _str(d: dict[str, object], key: str, path: str) -> str:
     v = d[key]
     if not isinstance(v, str):
         raise FormalismLoadError(f"{path}.{key}", f"must be a string, got {type(v).__name__}")
     return v
 
 
-def _list(d: dict[str, Any], key: str, path: str) -> list[Any]:
+def _as_dict(v: object, path: str) -> dict[str, object]:
+    if not isinstance(v, dict):
+        raise FormalismLoadError(path, f"must be a mapping, got {type(v).__name__}")
+    return cast("dict[str, object]", v)
+
+
+def _dict_list(d: dict[str, object], key: str, path: str) -> list[dict[str, object]]:
     v = d[key]
     if not isinstance(v, list):
         raise FormalismLoadError(f"{path}.{key}", f"must be a list, got {type(v).__name__}")
+    return [_as_dict(item, f"{path}.{key}[{i}]") for i, item in enumerate(v)]
+
+
+def _opt_dict_list(d: dict[str, object], key: str, path: str) -> list[dict[str, object]]:
+    v = d.get(key)
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise FormalismLoadError(f"{path}.{key}", f"must be a list, got {type(v).__name__}")
+    return [_as_dict(item, f"{path}.{key}[{i}]") for i, item in enumerate(v)]
+
+
+def _opt_str(v: object, path: str) -> str | None:
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise FormalismLoadError(path, f"must be a string, got {type(v).__name__}")
     return v
 
 
-def _float(v: Any, path: str) -> float:
+def _float(v: object, path: str) -> float:
     if isinstance(v, bool):  # bool is a subclass of int; reject explicitly
         raise FormalismLoadError(path, f"must be a number, got {type(v).__name__}")
     if isinstance(v, int | float):
@@ -498,7 +524,7 @@ def _float(v: Any, path: str) -> float:
     raise FormalismLoadError(path, f"must be a number, got {type(v).__name__}")
 
 
-def _enum(d: dict[str, Any], key: str, path: str, allowed: set[str]) -> str:
+def _enum(d: dict[str, object], key: str, path: str, allowed: set[str]) -> str:
     if key not in d:
         raise FormalismLoadError(path, f"missing required field {key!r}")
     v = d[key]

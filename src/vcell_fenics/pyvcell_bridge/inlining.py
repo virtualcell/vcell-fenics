@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyvcell.vcml.models_math import MathFunction
 
 # A bare identifier used as a *value* — optionally dotted (VCell `structure.param` names),
 # and NOT immediately followed by `(` (that would be a function call, not a name reference).
@@ -59,7 +62,7 @@ class FunctionResolution:
         return _IDENT_RE.sub(repl, expr)
 
 
-def resolve_functions(functions: list[Any], variable_names: set[str]) -> FunctionResolution:
+def resolve_functions(functions: list[MathFunction], variable_names: set[str]) -> FunctionResolution:
     """Classify ``functions`` (pyvcell ``MathFunction``s) into variable-referencing vs pure,
     and compute the fully-inlined VCell-syntax body of each variable-referencing one."""
 

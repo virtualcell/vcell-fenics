@@ -43,6 +43,18 @@ from vcell_fenics.formalism import (
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+# `to_dict` returns `dict[str, object]` (Any-free); these narrow nested access for mypy
+# and double as structural assertions on the dumped shape.
+def _as_dict(o: object) -> dict[str, object]:
+    assert isinstance(o, dict)
+    return o
+
+
+def _as_list(o: object) -> list[object]:
+    assert isinstance(o, list)
+    return o
+
+
 # ---------------------------------------------------------------------------
 # Fidelity — each fixture loads to the structure the schema tests build.
 # ---------------------------------------------------------------------------
@@ -173,11 +185,11 @@ def test_dump_omits_default_motion_none() -> None:
         ],
     )
     out = to_dict(md)
-    body = out["math_description"]
+    body = _as_dict(out["math_description"])
     # Motion default omitted.
-    assert "motion" not in body["subdomains"][0]
+    assert "motion" not in _as_dict(_as_list(body["subdomains"])[0])
     # Variable type / space defaults omitted.
-    assert body["variables"][0] == {"name": "u", "subdomain": "s"}
+    assert _as_list(body["variables"])[0] == {"name": "u", "subdomain": "s"}
     # Empty parameters / BC lists omitted.
     assert "parameters" not in body
     assert "boundary_conditions" not in body
@@ -203,7 +215,8 @@ def test_dump_constant_parameter_uses_shorthand() -> None:
     )
     out = to_dict(md)
     # ParameterConstant emits {name, value}; no explicit kind field.
-    assert out["math_description"]["parameters"][0] == {"name": "k", "value": 0.5}
+    params = _as_list(_as_dict(out["math_description"])["parameters"])
+    assert params[0] == {"name": "k", "value": 0.5}
 
 
 # ---------------------------------------------------------------------------
@@ -409,8 +422,9 @@ def test_expression_parameter_no_subdomain_round_trips() -> None:
     assert reloaded == md
     # And the dumper omits the subdomain field when it's None.
     dumped = to_dict(md)
-    assert "subdomain" not in dumped["math_description"]["parameters"][0]
-    assert "subdomain" not in dumped["math_description"]["parameters"][1]
+    dumped_params = _as_list(_as_dict(dumped["math_description"])["parameters"])
+    assert "subdomain" not in _as_dict(dumped_params[0])
+    assert "subdomain" not in _as_dict(dumped_params[1])
 
 
 # ---------------------------------------------------------------------------
