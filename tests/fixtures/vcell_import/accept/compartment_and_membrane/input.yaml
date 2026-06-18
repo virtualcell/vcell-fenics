@@ -1,0 +1,19 @@
+name: cell
+constants:
+- name: Dc
+  exp: '0.2'
+- name: Dm
+  exp: '0.05'
+compartment_subdomains:
+- name: cytosol
+  pde_equations:
+  - name: c
+    diffusion: Dc
+    initial: '1.0'
+membrane_subdomains:
+- name: membrane
+  inside_compartment: cytosol
+  pde_equations:
+  - name: rho
+    diffusion: Dm
+    initial: '0.5'

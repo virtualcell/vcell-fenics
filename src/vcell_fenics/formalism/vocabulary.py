@@ -49,7 +49,9 @@ QUALIFIED_BUILTINS: frozenset[str] = GEOMETRY_NAMES | SIMULATION_NAMES
 STANDARD_FUNCTIONS: frozenset[str] = frozenset(
     {
         "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-        "exp", "log", "sqrt", "abs", "min", "max", "pow",
+        "sinh", "cosh", "tanh",
+        "exp", "log", "log10", "sqrt", "abs", "min", "max", "pow",
+        "floor", "ceil",
         "if", "step", "sign",
     }
 )  # fmt: skip

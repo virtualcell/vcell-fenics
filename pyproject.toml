@@ -8,7 +8,7 @@ version = "0.0.0"
 description = "FEniCSx-based cell mechanics and migration modeling, in the context of Virtual Cell."
 readme = "README.md"
 license = { file = "LICENSE.md" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [{ name = "Jim Schaff" }]
 
 [tool.hatch.build.targets.wheel]
@@ -28,8 +28,18 @@ platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.pypi-dependencies]
 vcell-fenics = { path = ".", editable = true }
+# VCell integration (pyvcell_bridge). pyvcell >= 0.3.0 publishes the pure-Pydantic VCML data
+# model (pyvcell.vcml.models_math / models_geometry) with a minimal default dependency set
+# (lxml + numexpr on top of pydantic/numpy) — its heavy solver/viz/binary stack is behind
+# optional extras we don't request. So it's a normal, lock-reproducible dependency now; no
+# --no-deps editable workaround. The remote-client / full-stack scripts still use ../pyvcell/.venv.
+pyvcell = ">=0.3.0,<0.4"
 
 [tool.pixi.dependencies]
+# Pin Python >= 3.12 across platforms (it is otherwise unconstrained, so platforms
+# diverge — osx-arm64 solved to 3.14 while linux-64 picked 3.11). pyvcell >= 0.3.0
+# requires >= 3.12, so both platforms must agree.
+python = ">=3.12"
 # Core FEniCSx stack (conda-forge). Pin DOLFINx to 0.10.x — native
 # mixed-dimensional assembly (used by Approach B) landed in this release.
 # mpich is the recommended MPI variant on macOS arm64.
@@ -54,6 +64,10 @@ pyvista = "*"
 numpy = "*"
 scipy = "*"
 pyyaml = ">=6.0.3,<7"
+
+# pydantic backs pyvcell's VCML data model (the import source); pinned here as a conda
+# package so pyvcell's pydantic requirement resolves from conda-forge, not a PyPI wheel.
+pydantic = ">=2.10,<3"
 
 [tool.pixi.feature.dev.dependencies]
 pytest = "*"
@@ -178,5 +192,9 @@ module = [
     "dolfinx_mpc.*",
     "meshio",
     "scipy.*",
+    # pyvcell ships no py.typed marker; its vcml data model resolves to Any. The bridge
+    # is duck-typed over it and verified by tests, so Any at that boundary is acceptable.
+    "pyvcell",
+    "pyvcell.*",
 ]
 ignore_missing_imports = true

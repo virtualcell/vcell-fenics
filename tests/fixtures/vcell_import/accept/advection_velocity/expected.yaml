@@ -1,0 +1,24 @@
+math_description:
+  geometry: advect
+  subdomains:
+  - name: cytosol
+    kind: volume
+  variables:
+  - name: c
+    subdomain: cytosol
+  equations:
+  - template: bulk_radv_diff
+    variable: c
+    subdomain: cytosol
+    temporality: time_dependent
+    terms:
+      diffusion: D
+      relative_advection: '[vx, -vy]'
+    initial_condition: '1.0'
+  parameters:
+  - name: D
+    value: 0.1
+  - name: vx
+    value: 0.5
+  - name: vy
+    value: 0.3

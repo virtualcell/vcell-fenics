@@ -134,3 +134,9 @@ dmypy.json
 
 # ADIOS2 / VTX output
 *.bp/
+
+# Downloaded VCell BioModel pool (data-collection scratch, not source)
+vcml_biomodels/
+
+# uv writes this when the link-pyvcell task runs; pixi.lock is the lockfile of record
+uv.lock

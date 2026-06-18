@@ -118,9 +118,17 @@ def test_unsupported_construct_raises() -> None:
         compile_expression(parse("[[1.0, 2.0], [3.0, 4.0]]"), _ctx())
 
 
-def test_unsupported_function_raises() -> None:
+def test_hyperbolic_and_log10_functions_compile() -> None:
+    # Added for the VCell import layer (real models use these); UFL supports them directly.
+    for src in ("sinh(geom.x[0])", "cosh(geom.x[0])", "tanh(geom.x[0])", "log10(geom.radius)"):
+        compile_expression(parse(src), _ctx())  # must not raise
+
+
+def test_floor_validates_but_does_not_compile() -> None:
+    # floor / ceil are accepted by the vocabulary (real VCell models use them) but are
+    # non-differentiable, so UFL/DOLFINx has no operator — compiling one raises.
     with pytest.raises(CompileError, match="not supported"):
-        compile_expression(parse("sinh(geom.x[0])"), _ctx())
+        compile_expression(parse("floor(geom.x[0])"), _ctx())
 
 
 # ---------------------------------------------------------------------------

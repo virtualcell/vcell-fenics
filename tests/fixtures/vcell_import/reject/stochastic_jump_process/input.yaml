@@ -1,0 +1,6 @@
+name: stoch
+compartment_subdomains:
+- name: cytosol
+  jump_processes:
+  - name: birth
+    probability_rate: k

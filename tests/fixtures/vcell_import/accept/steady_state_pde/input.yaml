@@ -1,0 +1,11 @@
+name: steady
+constants:
+- name: D
+  exp: '1.0'
+compartment_subdomains:
+- name: cytosol
+  pde_equations:
+  - name: u
+    rate: 1.0 - u
+    diffusion: D
+    steady: true

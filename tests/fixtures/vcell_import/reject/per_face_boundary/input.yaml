@@ -1,0 +1,9 @@
+name: bc
+compartment_subdomains:
+- name: cytosol
+  pde_equations:
+  - name: c
+    diffusion: '1.0'
+    boundaries:
+      xm: '0.0'
+      xp: '1.0'

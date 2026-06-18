@@ -1,0 +1,22 @@
+math_description:
+  geometry: disk_2d
+  subdomains:
+  - name: cytosol
+    kind: volume
+  variables:
+  - name: c
+    subdomain: cytosol
+  equations:
+  - template: bulk_radv_diff
+    variable: c
+    subdomain: cytosol
+    temporality: time_dependent
+    terms:
+      diffusion: D
+      source: -k*c
+    initial_condition: '2.0'
+  parameters:
+  - name: D
+    value: 0.1
+  - name: k
+    value: 0.5

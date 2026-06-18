@@ -1,0 +1,12 @@
+name: ode
+constants:
+- name: k1
+  exp: '1.0'
+- name: k2
+  exp: '0.3'
+compartment_subdomains:
+- name: cytosol
+  ode_equations:
+  - name: w
+    rate: k1 - k2*w
+    initial: '0.0'

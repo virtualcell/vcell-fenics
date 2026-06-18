@@ -1,0 +1,38 @@
+# Expression-translation coverage for the VCell import layer.
+# Each entry: a VCell expression string and its expected formalism translation
+# (coordinates x/y/z -> geom.x[0..2], time t -> sim.t, ^ -> **; whole-identifier
+# matching keeps max/exp/Ca_x safe). Add VCell-specific constructs here as they are
+# collected (integer division, function-name aliases) - new rows may reveal
+# translator gaps, which is the point.
+- vcell: x
+  formalism: geom.x[0]
+- vcell: y
+  formalism: geom.x[1]
+- vcell: z
+  formalism: geom.x[2]
+- vcell: t
+  formalism: sim.t
+- vcell: x^2 + y^2
+  formalism: geom.x[0]**2 + geom.x[1]**2
+- vcell: a^b
+  formalism: a**b
+- vcell: sqrt(x^2 + y^2 + z^2)
+  formalism: sqrt(geom.x[0]**2 + geom.x[1]**2 + geom.x[2]**2)
+- vcell: exp(-k*t)
+  formalism: exp(-k*sim.t)
+- vcell: sin(2*t)
+  formalism: sin(2*sim.t)
+- vcell: D*(x^2 + y^2)
+  formalism: D*(geom.x[0]**2 + geom.x[1]**2)
+- vcell: A*x + B*y - t
+  formalism: A*geom.x[0] + B*geom.x[1] - sim.t
+- vcell: k_on*A*B - k_off*C
+  formalism: k_on*A*B - k_off*C
+- vcell: Vmax*S/(Km + S)
+  formalism: Vmax*S/(Km + S)
+- vcell: max(exp(a), b)
+  formalism: max(exp(a), b)
+- vcell: Ca_x * k_yz
+  formalism: Ca_x * k_yz
+- vcell: kt * tx
+  formalism: kt * tx

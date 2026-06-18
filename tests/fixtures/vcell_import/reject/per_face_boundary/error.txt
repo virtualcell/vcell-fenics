@@ -1,0 +1,2 @@
+# Explicit per-face boundary expressions are a follow-up (2.6.2).
+NotImplementedError: per-face boundary-condition import
