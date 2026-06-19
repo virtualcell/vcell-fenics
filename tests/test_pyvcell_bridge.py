@@ -43,6 +43,18 @@ def test_power_operator_is_translated() -> None:
     assert translate_expression("x^2 + y^2") == "geom.x[0]**2 + geom.x[1]**2"
 
 
+def test_unary_minus_power_precedence_matches_vcell() -> None:
+    # VCell's grammar binds the sign inside the power base (`-x^2` means `(-x)^2 = x²`); the
+    # formalism binds `**` tighter (`-x**2` means `-(x²)`). The translator inserts parens so the
+    # VCell meaning is preserved — verified against VCell's own region masks over the corpus.
+    assert translate_expression("-x^2") == "(-geom.x[0])**2"
+    assert translate_expression("-x^2 + -y^2") == "(-geom.x[0])**2 + (-geom.x[1])**2"
+    # VCell power is left-associative; ours is right-associative.
+    assert translate_expression("2^3^2") == "(2**3)**2"
+    # A positive base needs no parens (unchanged from the naive translation).
+    assert translate_expression("x^2") == "geom.x[0]**2"
+
+
 def test_coordinate_names_are_matched_only_as_whole_identifiers() -> None:
     # The `x` in `max`/`exp` and a parameter named `Ca_x` must not be rewritten; VCell
     # reserves x/y/z/t as coordinates, so no user symbol legitimately collides.
