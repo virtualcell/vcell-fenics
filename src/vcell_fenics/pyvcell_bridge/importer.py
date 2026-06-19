@@ -33,17 +33,21 @@ The translator reads pyvcell's typed pydantic model directly; the pyvcell types 
 imported under ``TYPE_CHECKING`` (annotations only), so the module type-checks against the
 real ``pyvcell.vcml.models_math`` classes without a runtime import of pyvcell.
 
-**Loud rejection.** Constructs that would change the math if dropped are never dropped
-silently: stochastic / particle dynamics (§2.6.3) raise :class:`VcellImportError`, and
-the §2.6.2 constructs not yet implemented here — per-face boundary conditions and
-membrane jump conditions — raise :class:`NotImplementedError` pointing at the follow-up.
-A model whose PDEs rely on VCell's *default* no-flux faces (all ``Flux`` boundary types,
-no boundary expressions) imports cleanly: that default equals the formalism's natural
-zero-Neumann boundary.
+**Boundary conditions.** Per-face box BCs (§2.6.2) map ``Flux``→Neumann / ``Value``→Dirichlet
+(with VCell's default-Dirichlet-from-IC rule), needing the geometry ``dim`` to tell which of the
+six faces are real. Membrane ``JumpCondition``s map to Neumann BCs on the bulk species at the
+membrane (the composable bulk-surface pattern §1.6.5), with cross-membrane volume-species
+references wrapped in ``trace(·)``.
+
+**Loud rejection.** Constructs that would change the math if dropped are never dropped silently:
+stochastic / particle dynamics (§2.6.3) raise :class:`VcellImportError`; a boundary-bearing PDE
+without ``dim``, a non-Flux/Value face type (periodic), and a jump-condition species living in both
+compartments raise :class:`NotImplementedError` pointing at the follow-up.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -119,6 +123,14 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim:
 
     variable_names = _collect_variable_names(vcml)
     resolution = resolve_functions(list(vcml.functions), variable_names)
+    # Bulk (volume) species → the compartment(s) each lives in: the species set drives trace-wrapping
+    # of cross-membrane flux references (§1.6.5); the compartment map detects a species on both sides
+    # of a membrane (which our per-variable BC cannot yet disambiguate).
+    species_compartments: dict[str, set[str]] = {}
+    for compartment in vcml.compartment_subdomains:
+        for pde in compartment.pde_equations:
+            species_compartments.setdefault(pde.name, set()).add(compartment.name)
+    bulk_species = set(species_compartments)
 
     subdomains: list[Subdomain] = []
     variables: list[Variable] = []
@@ -134,13 +146,9 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim:
 
     for membrane in vcml.membrane_subdomains:
         _reject_stochastic(membrane)
-        if membrane.jump_conditions:
-            raise NotImplementedError(
-                f"membrane {membrane.name!r} has jump conditions (interface flux balance, §2.6.2); "
-                f"jump-condition import is a follow-up increment"
-            )
         subdomains.append(Subdomain(name=membrane.name, kind="surface", motion=MotionNone()))
         _translate_subdomain_equations(membrane, "surface", variables, equations, boundary_conditions, resolution, dim)
+        boundary_conditions.extend(_translate_jump_conditions(membrane, bulk_species, species_compartments, resolution))
 
     parameters = _translate_parameters(vcml, resolution)
     observables = _build_observables(vcml, resolution)
@@ -387,3 +395,65 @@ def _translate_boundaries(
         elif value is not None:  # Flux with an explicit value → Neumann; bare Flux is the natural default
             bcs.append(BCNeumann(variable=pde.name, boundary=name, expression=expr(value) or "0"))
     return bcs
+
+
+def _translate_jump_conditions(
+    membrane: MembraneSubDomain,
+    bulk_species: set[str],
+    species_compartments: dict[str, set[str]],
+    res: FunctionResolution,
+) -> list[BoundaryCondition]:
+    """Map a membrane's VCell ``JumpCondition``s to formalism Neumann BCs at the membrane (the
+    composable bulk-surface pattern, §1.6.5). A jump condition is two *independent* Neumann
+    conditions for one bulk species: ``in_flux`` on the inside compartment, ``out_flux`` on the
+    outside. Each flux may reference ``geom.x`` / ``sim.t``, membrane species (directly), and volume
+    species on either side (wrapped in ``trace(·)`` — a bulk variable is only defined on the membrane
+    through its trace). This is **not** ``interface_flux_balance`` (§1.6.2): the two sides are
+    specified independently, not as one implicit equal-and-opposite expression.
+
+    A species present in *both* compartments would need two BCs distinguished by side, which the
+    per-variable ``BCNeumann(variable, boundary)`` cannot express yet — that case is rejected."""
+
+    inside, outside = membrane.inside_compartment, membrane.outside_compartment
+
+    def flux_expr(raw: str | None) -> str | None:
+        if raw is None or raw.strip() in ("0.0", "0"):
+            return None  # the natural no-flux default
+        return _trace_wrap(translate_expression(res.inline(raw) or ""), bulk_species)
+
+    bcs: list[BoundaryCondition] = []
+    for jc in membrane.jump_conditions:
+        inside_flux, outside_flux = flux_expr(jc.in_flux), flux_expr(jc.out_flux)
+        if inside_flux is None and outside_flux is None:
+            continue
+        compartments = species_compartments.get(jc.name, set())
+        if len(compartments) > 1:
+            raise NotImplementedError(
+                f"jump condition for {jc.name!r} on membrane {membrane.name!r}: the species lives in "
+                f"both compartments, so its inside / outside membrane fluxes need per-side BCs — a "
+                f"follow-up increment (our BC identifies a variable by name + boundary only)"
+            )
+        # The Neumann condition applies on the side where the species lives.
+        if inside in compartments:
+            flux = inside_flux
+        elif outside in compartments:
+            flux = outside_flux
+        else:
+            flux = inside_flux if inside_flux is not None else outside_flux
+        if flux is not None:
+            bcs.append(BCNeumann(variable=jc.name, boundary=membrane.name, expression=flux))
+    return bcs
+
+
+_IDENTIFIER = re.compile(r"(?<![\w.])([A-Za-z_]\w*)(?![\w(])")
+
+
+def _trace_wrap(expression: str, bulk_species: set[str]) -> str:
+    """Wrap each bare *bulk*-species reference in ``trace(·)``. In a membrane-level expression a
+    volume variable is only well-defined through its trace on the membrane (§1.6.5); membrane species
+    and parameters are referenced directly and left untouched. A single ``re.sub`` pass does not
+    re-scan its own substitutions, so an inserted ``trace(name)`` is never re-wrapped."""
+
+    if not bulk_species:
+        return expression
+    return _IDENTIFIER.sub(lambda m: f"trace({m.group(1)})" if m.group(1) in bulk_species else m.group(1), expression)
