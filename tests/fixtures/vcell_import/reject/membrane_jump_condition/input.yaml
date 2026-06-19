@@ -1,6 +1,0 @@
-name: jc
-membrane_subdomains:
-- name: membrane
-  jump_conditions:
-  - name: J
-    in_flux: P*(cin - cout)

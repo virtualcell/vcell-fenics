@@ -279,14 +279,49 @@ def test_stochastic_constructs_are_rejected() -> None:
         import_math_description(vcml)
 
 
-def test_membrane_jump_conditions_are_not_yet_implemented() -> None:
+def test_jump_condition_imports_as_neumann_with_traced_bulk_species() -> None:
+    # A membrane JumpCondition is a per-side Neumann flux on the bulk species at the membrane
+    # (§1.6.5). The flux's bulk-species references are wrapped in trace(·); parameters are direct.
     vcml = vm.MathDescription(
         name="m",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="c", diffusion="1.0", initial="0")])
+        ],
         membrane_subdomains=[
-            vm.MembraneSubDomain(name="mem", jump_conditions=[vm.JumpCondition(name="J", in_flux="f")])
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                jump_conditions=[vm.JumpCondition(name="c", in_flux="k * c", out_flux="0.0")],
+            )
         ],
     )
-    with pytest.raises(NotImplementedError, match="jump-condition import is a follow-up"):
+    bcs = import_math_description(vcml).boundary_conditions
+    assert len(bcs) == 1
+    bc = bcs[0]
+    assert type(bc).__name__ == "BCNeumann" and bc.variable == "c" and bc.boundary == "pm"
+    assert bc.expression == "k * trace(c)"  # bulk species c traced; parameter k direct
+
+
+def test_jump_condition_species_on_both_sides_rejected() -> None:
+    # A species present in both compartments would need two side-distinguished BCs, which the
+    # per-variable BCNeumann(variable, boundary) cannot yet express → reject rather than guess.
+    vcml = vm.MathDescription(
+        name="m",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="c", diffusion="1.0")]),
+            vm.CompartmentSubDomain(name="ec", pde_equations=[vm.PdeEquation(name="c", diffusion="1.0")]),
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                jump_conditions=[vm.JumpCondition(name="c", in_flux="k1", out_flux="k2")],
+            )
+        ],
+    )
+    with pytest.raises(NotImplementedError, match=r"lives in\s+both compartments"):
         import_math_description(vcml)
 
 

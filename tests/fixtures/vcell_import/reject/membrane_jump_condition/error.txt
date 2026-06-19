@@ -1,2 +1,0 @@
-# Membrane jump conditions (interface flux balance) are a follow-up (2.6.2).
-NotImplementedError: jump-condition import is a follow-up
