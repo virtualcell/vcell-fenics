@@ -290,33 +290,57 @@ def test_membrane_jump_conditions_are_not_yet_implemented() -> None:
         import_math_description(vcml)
 
 
-def test_explicit_boundary_expressions_are_not_yet_implemented() -> None:
+def test_boundary_conditions_need_the_geometry_dimension() -> None:
+    # Without `dim`, the importer can't tell which of VCell's six box faces are real, so a PDE
+    # carrying any non-default boundary is rejected rather than mis-imported.
     vcml = vm.MathDescription(
         name="m",
         compartment_subdomains=[
             vm.CompartmentSubDomain(
                 name="cyto",
-                pde_equations=[vm.PdeEquation(name="c", diffusion="1.0", boundaries=vm.Boundaries(xm="0.0"))],
+                pde_equations=[vm.PdeEquation(name="c", diffusion="1.0", boundaries=vm.Boundaries(xm="0.5"))],
             )
         ],
     )
-    with pytest.raises(NotImplementedError, match="per-face boundary-condition import"):
+    with pytest.raises(NotImplementedError, match="pass dim="):
         import_math_description(vcml)
 
 
-def test_non_flux_boundary_type_is_not_yet_implemented() -> None:
+def test_value_face_imports_as_per_variable_dirichlet() -> None:
+    # A `Value` (Dirichlet) face with no explicit value uses the species' initial condition
+    # (VCell's default-Dirichlet rule); a `Flux` face with a value is a Neumann BC. The result is
+    # per-variable, and z-faces are filtered out at dim 2.
     vcml = vm.MathDescription(
         name="m",
         compartment_subdomains=[
             vm.CompartmentSubDomain(
                 name="cyto",
-                boundary_types=[vm.MathBoundaryType(boundary="Xm", type="Value")],
-                pde_equations=[vm.PdeEquation(name="c", diffusion="1.0")],
+                boundary_types=[
+                    vm.MathBoundaryType(boundary="Xm", type="Value"),
+                    vm.MathBoundaryType(boundary="Yp", type="Flux"),
+                    vm.MathBoundaryType(boundary="Zm", type="Value"),  # spurious in 2D — must be dropped
+                ],
+                pde_equations=[
+                    vm.PdeEquation(name="c", diffusion="1.0", initial="5.0", boundaries=vm.Boundaries(yp="2.0"))
+                ],
             )
         ],
     )
-    with pytest.raises(NotImplementedError, match="only the default no-flux"):
-        import_math_description(vcml)
+    bcs = import_math_description(vcml, dim=2).boundary_conditions
+    by_face = {bc.boundary: bc for bc in bcs}
+    assert set(by_face) == {"x_minus", "y_plus"}  # no z_minus
+    assert type(by_face["x_minus"]).__name__ == "BCDirichlet" and by_face["x_minus"].expression == "5.0"
+    assert type(by_face["y_plus"]).__name__ == "BCNeumann" and by_face["y_plus"].expression == "2.0"
+    assert all(bc.variable == "c" for bc in bcs)
+
+
+def test_box_face_names_match_the_realization() -> None:
+    # The importer's 2D box-face names must be exactly those the realization tags, so an imported
+    # per-face BC (`boundary=x_minus`) binds to a realized box face at solve time.
+    from vcell_fenics.backend.realize import _FACE_NAMES_2D
+    from vcell_fenics.pyvcell_bridge.importer import _FACE_NAME_MAP
+
+    assert (_FACE_NAME_MAP["Xm"], _FACE_NAME_MAP["Xp"], _FACE_NAME_MAP["Ym"], _FACE_NAME_MAP["Yp"]) == _FACE_NAMES_2D
 
 
 def test_default_flux_boundary_types_import_cleanly() -> None:

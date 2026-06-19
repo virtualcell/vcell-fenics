@@ -1,2 +1,3 @@
-# A non-default (Value/Dirichlet) face is not imported yet (2.6.2).
-NotImplementedError: only the default no-flux
+# A non-default (Value/Dirichlet) face needs the geometry dimension to import (which faces are
+# real); without dim= the importer rejects rather than mis-import. With dim it imports as a BC.
+NotImplementedError: pass dim=
