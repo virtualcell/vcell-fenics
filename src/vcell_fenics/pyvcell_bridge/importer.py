@@ -44,10 +44,13 @@ zero-Neumann boundary.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from vcell_fenics.formalism.schema import (
+    BCDirichlet,
+    BCNeumann,
     BoundaryCondition,
     Equation,
     MathDescription,
@@ -103,10 +106,16 @@ class ImportResult:
     observables: tuple[Observable, ...] = field(default=())
 
 
-def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None) -> ImportResult:
+def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim: int | None = None) -> ImportResult:
     """Translate a pyvcell ``MathDescription`` into a formalism ``MathDescription`` plus its
     observables. ``geometry`` defaults to the VCell math description's ``name`` (it is
-    cross-checked against a real Geometry at solve time, not here)."""
+    cross-checked against a real Geometry at solve time, not here).
+
+    ``dim`` is the spatial dimension of the geometry (0–3). It is required to import per-face
+    boundary conditions (§2.6.2): VCell's `boundary_types` are model-wide and list all six box
+    faces (`Xm…Zp`) even for a 2D model, so the dimension says which faces are real (`x_minus` /
+    `x_plus` for 2D, plus `z_*` for 3D). Without ``dim`` a PDE that carries any non-default
+    boundary is rejected rather than mis-imported."""
 
     variable_names = _collect_variable_names(vcml)
     resolution = resolve_functions(list(vcml.functions), variable_names)
@@ -114,11 +123,14 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None) -> I
     subdomains: list[Subdomain] = []
     variables: list[Variable] = []
     equations: list[Equation] = []
+    boundary_conditions: list[BoundaryCondition] = []
 
     for compartment in vcml.compartment_subdomains:
         _reject_stochastic(compartment)
         subdomains.append(Subdomain(name=compartment.name, kind="volume", motion=MotionNone()))
-        _translate_subdomain_equations(compartment, "volume", variables, equations, resolution)
+        _translate_subdomain_equations(
+            compartment, "volume", variables, equations, boundary_conditions, resolution, dim
+        )
 
     for membrane in vcml.membrane_subdomains:
         _reject_stochastic(membrane)
@@ -128,7 +140,7 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None) -> I
                 f"jump-condition import is a follow-up increment"
             )
         subdomains.append(Subdomain(name=membrane.name, kind="surface", motion=MotionNone()))
-        _translate_subdomain_equations(membrane, "surface", variables, equations, resolution)
+        _translate_subdomain_equations(membrane, "surface", variables, equations, boundary_conditions, resolution, dim)
 
     parameters = _translate_parameters(vcml, resolution)
     observables = _build_observables(vcml, resolution)
@@ -139,16 +151,18 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None) -> I
         variables=variables,
         equations=equations,
         parameters=parameters,
-        boundary_conditions=list[BoundaryCondition](),
+        boundary_conditions=boundary_conditions,
     )
     return ImportResult(math=math, observables=tuple(observables))
 
 
-def import_math_description(vcml: VcmlMathDescription, *, geometry: str | None = None) -> MathDescription:
+def import_math_description(
+    vcml: VcmlMathDescription, *, geometry: str | None = None, dim: int | None = None
+) -> MathDescription:
     """Convenience wrapper returning just the formalism ``MathDescription`` (the observables
     sidecar is dropped). See :func:`import_model`."""
 
-    return import_model(vcml, geometry=geometry).math
+    return import_model(vcml, geometry=geometry, dim=dim).math
 
 
 def _collect_variable_names(vcml: VcmlMathDescription) -> set[str]:
@@ -166,10 +180,16 @@ def _collect_variable_names(vcml: VcmlMathDescription) -> set[str]:
 
 
 def _translate_subdomain_equations(
-    subdomain: VcmlSubDomain, kind: str, variables: list[Variable], equations: list[Equation], res: FunctionResolution
+    subdomain: VcmlSubDomain,
+    kind: str,
+    variables: list[Variable],
+    equations: list[Equation],
+    boundary_conditions: list[BoundaryCondition],
+    res: FunctionResolution,
+    dim: int | None,
 ) -> None:
-    """Append the variables + template equations for one subdomain's PDEs and ODEs,
-    inlining variable-referencing functions into each expression."""
+    """Append the variables + template equations for one subdomain's PDEs and ODEs (inlining
+    variable-referencing functions into each expression), plus the per-face boundary conditions."""
 
     pde_template = "bulk_radv_diff" if kind == "volume" else "surface_pde_with_dilution"
 
@@ -179,7 +199,7 @@ def _translate_subdomain_equations(
         return translate_expression(res.inline(raw) or "")
 
     for pde in subdomain.pde_equations:
-        _reject_boundaries(pde, subdomain)
+        boundary_conditions.extend(_translate_boundaries(pde, subdomain, kind, expr, dim))
         terms: dict[str, str] = {}
         if pde.diffusion is not None:
             terms["diffusion"] = expr(pde.diffusion)  # type: ignore[assignment]
@@ -303,24 +323,67 @@ def _reject_stochastic(subdomain: VcmlSubDomain) -> None:
             )
 
 
-def _reject_boundaries(pde: PdeEquation, subdomain: VcmlSubDomain) -> None:
-    """Per-face boundary conditions (§2.6.2) are a follow-up increment. A PDE that
-    relies on VCell's default no-flux faces (no boundary expressions, only ``Flux``
-    boundary types) imports cleanly — that default is the formalism's natural
-    zero-Neumann BC. Anything else raises rather than silently dropping a BC."""
+# VCell box-face names → the formalism's named faces (the realization produces these, §3).
+_FACE_NAME_MAP = {"Xm": "x_minus", "Xp": "x_plus", "Ym": "y_minus", "Yp": "y_plus", "Zm": "z_minus", "Zp": "z_plus"}
+# Which box faces are real at each geometry dimension (VCell stores all six even for 2D).
+_BOX_FACES_BY_DIM: dict[int, tuple[str, ...]] = {
+    0: (),
+    1: ("Xm", "Xp"),
+    2: ("Xm", "Xp", "Ym", "Yp"),
+    3: ("Xm", "Xp", "Ym", "Yp", "Zm", "Zp"),
+}
+
+
+def _translate_boundaries(
+    pde: PdeEquation, subdomain: VcmlSubDomain, kind: str, expr: Callable[[str | None], str | None], dim: int | None
+) -> list[BoundaryCondition]:
+    """Per-face boundary conditions (§2.6.2). VCell's `boundary_types` are model-wide (per face, not
+    per species), so the type comes from the subdomain and the value from this PDE; the formalism's
+    BCs are per-variable, which is strictly more general. Mapping per real face:
+
+    - ``Flux`` + value → Neumann; ``Flux`` + none → natural (no-flux) default, omitted.
+    - ``Value`` + value → Dirichlet(value); ``Value`` + none → **Dirichlet(initial condition)** (VCell's
+      default-Dirichlet rule).
+
+    Faces outside the geometry dimension (`dim`) are skipped (VCell lists all six). Without `dim` we
+    cannot tell which faces are real, so any non-default boundary is rejected. Surface (membrane)
+    box-face BCs are not realized yet — a membrane PDE with explicit boundary values raises."""
 
     boundaries = pde.boundaries
-    if boundaries is not None and any(
-        face is not None
-        for face in (boundaries.xm, boundaries.xp, boundaries.ym, boundaries.yp, boundaries.zm, boundaries.zp)
-    ):
-        raise NotImplementedError(
-            f"PDE for {pde.name!r} on {subdomain.name!r} has explicit boundary expressions (§2.6.2); "
-            f"per-face boundary-condition import is a follow-up increment"
-        )
-    for bt in subdomain.boundary_types:
-        if bt.type.lower() != "flux":
+    has_explicit = boundaries is not None and any(
+        getattr(boundaries, face) is not None for face in ("xm", "xp", "ym", "yp", "zm", "zp")
+    )
+    face_type = {bt.boundary: bt.type for bt in subdomain.boundary_types}
+
+    if dim is None:
+        if has_explicit or any(t != "Flux" for t in face_type.values()):
             raise NotImplementedError(
-                f"subdomain {subdomain.name!r} has a {bt.type!r} boundary on face {bt.boundary!r} (§2.6.2); "
-                f"only the default no-flux (natural) boundary is imported in this increment"
+                f"PDE {pde.name!r} on {subdomain.name!r} carries non-default boundary conditions (§2.6.2); "
+                f"pass dim= (the geometry dimension) to import per-face boundary conditions"
             )
+        return []
+    if kind != "volume":
+        if has_explicit:
+            raise NotImplementedError(
+                f"membrane PDE {pde.name!r} on {subdomain.name!r} has explicit box-face boundary values; "
+                f"surface boundary-condition import is a follow-up increment"
+            )
+        return []
+
+    bcs: list[BoundaryCondition] = []
+    for face in _BOX_FACES_BY_DIM.get(dim, ()):
+        boundary_type = face_type.get(face, "Flux")  # an unlisted face is VCell's default no-flux
+        if boundary_type not in ("Flux", "Value"):
+            raise NotImplementedError(
+                f"subdomain {subdomain.name!r} has a {boundary_type!r} boundary on face {face!r} (§2.6.2); "
+                f"only Flux (Neumann) and Value (Dirichlet) are imported — periodic is a follow-up increment"
+            )
+        value = getattr(boundaries, face.lower()) if boundaries is not None else None
+        name = _FACE_NAME_MAP[face]
+        if boundary_type == "Value":
+            value_expr = expr(value) if value is not None else expr(pde.initial)
+            if value_expr is not None:  # no boundary value and no initial condition — nothing to impose
+                bcs.append(BCDirichlet(variable=pde.name, boundary=name, expression=value_expr))
+        elif value is not None:  # Flux with an explicit value → Neumann; bare Flux is the natural default
+            bcs.append(BCNeumann(variable=pde.name, boundary=name, expression=expr(value) or "0"))
+    return bcs

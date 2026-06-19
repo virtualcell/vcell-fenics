@@ -1,2 +1,3 @@
-# Explicit per-face boundary expressions are a follow-up (2.6.2).
-NotImplementedError: per-face boundary-condition import
+# Explicit per-face boundary expressions need the geometry dimension to import; without dim= the
+# importer rejects rather than emit BCs on faces it can't tell are real.
+NotImplementedError: pass dim=
