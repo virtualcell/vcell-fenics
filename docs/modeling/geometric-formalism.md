@@ -172,6 +172,26 @@ of all the others (its own expression, if any, is ignored). This painter's-algor
 matches VCell and is preserved by the importer; it is carried implicitly by list order, not an
 explicit `priority` field.
 
+**Tooling — VTK / pyvista for the implicit-field pipeline.** The 2D realizer marches with
+scikit-image (`find_contours`) and meshes the box body-fitted with gmsh OCC. **VTK** is an alternative
+with a deeper geometry-processing toolbox — contouring / marching cubes, distance fields, implicit
+modelling, surface extraction and reconstruction — and is **already in the environment via pyvista**
+(a dependency), so it needs no new package. Worth evaluating as the pipeline grows to 3D, non-shrink
+smoothing, and surface reconstruction, where VTK's filters may beat the hand-rolled steps.
+
+**Related formalism — SBML Spatial, and interior points.** The SBML Level 3 **Spatial** package is
+another variation on this geometry handling alongside VCell (analytic / CSG / sampled-field domains
+over a bounded space). One idea it adds is worth borrowing: it disambiguates domain membership with an
+explicit **list of interior points** — coordinates known to lie inside each domain — rather than
+inferring inside/outside from an inequality's sign or a winding rule. That makes region identification
+*computationally* unambiguous: after fragmenting the box, each region is simply the one containing its
+seed point. It is the principled fix for the classification problem the realizer hits — v1 assigns
+regions by **area** (smallest fragment = the interior cell), robust only for the interior + background
+topology, whereas per-domain interior points generalize cleanly to multi-region partitions (and sidestep
+the centroid-in-a-hole failure of a naive centroid sign-test). A future increment can carry optional
+interior-point seeds on `SubVolume` — importable from both VCell and SBML Spatial — and classify
+fragments by seed containment.
+
 ### 3.3 Approach-dependent realization
 
 The same description realizes differently per FE approach, but exposes the same names:

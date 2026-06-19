@@ -36,3 +36,12 @@
   formalism: Ca_x * k_yz
 - vcell: kt * tx
   formalism: kt * tx
+# Unary-minus vs. power precedence: VCell binds the sign inside the power base
+# (`-x^2` = `(-x)^2`), so the translator parenthesises to preserve it (the formalism
+# binds `**` tighter). Validated against VCell's own region masks over the corpus.
+- vcell: -x^2
+  formalism: (-geom.x[0])**2
+- vcell: -x^2 + -y^2
+  formalism: (-geom.x[0])**2 + (-geom.x[1])**2
+- vcell: 2^3^2
+  formalism: (2**3)**2
