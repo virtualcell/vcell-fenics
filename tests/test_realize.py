@@ -302,6 +302,33 @@ def test_2d_nested_membranes_named_internal_and_paired() -> None:
         assert boundary is not None and boundary.subdomains == ("ecm",)
 
 
+def test_2d_nested_point_membership_mesh_matches_rfunction() -> None:
+    """Stronger than the area checks: every sampled point lands in the same region per the realized
+    multi-region **mesh** (which submesh contains it) and per the **R-function** partition (which
+    subvolume's φ is negative). Points the mesh leaves ambiguous (in zero or several submeshes — the
+    near-membrane band) are skipped; the seed is fixed and reseedable."""
+
+    description = _nested_three_region()
+    geom = realize(description, h=0.05, resolution=201)
+    fields = subvolume_implicit_functions(description)
+    names = list(fields)  # nucleus, cytosol, ecm (priority order)
+
+    rng = np.random.default_rng(0)
+    pts2d = rng.uniform(-0.95, 0.95, size=(500, 2))
+    points = np.column_stack([pts2d, np.zeros(len(pts2d))]).astype(np.float64)
+    in_mesh = {name: _in_mesh(geom.mesh_of(name), points) for name in names}
+
+    checked = 0
+    for i, (x, y, _z) in enumerate(points):
+        mesh_regions = [name for name in names if in_mesh[name][i]]
+        rfunc_regions = [name for name in names if _eval(fields[name], float(x), float(y)) < 0]
+        if len(mesh_regions) != 1 or len(rfunc_regions) != 1:
+            continue  # near a membrane: the mesh approximates the contour, sign is undefined
+        assert mesh_regions[0] == rfunc_regions[0], f"at {(x, y)}: mesh={mesh_regions} rfunc={rfunc_regions}"
+        checked += 1
+    assert checked > 200  # the skip band did not swallow the sample
+
+
 def test_2d_interior_must_be_analytic() -> None:
     bad = GeometryDescription(
         name="g",
