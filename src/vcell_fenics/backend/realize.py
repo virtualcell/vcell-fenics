@@ -10,20 +10,24 @@ the formalism.
 - **Trivial / non-spatial (``dim = 0``).** A well-mixed geometry: each ``compartmental`` subvolume
   (and any membrane between them) is backed by a minimal single-cell mesh the lumped-ODE templates
   carry a constant over — a representational stand-in, not a spatial domain.
-- **2D body-fitted (``dim = 2``), box-partitioned.** The geometry is the bounding box (``extent`` /
-  ``origin``) partitioned by analytic subvolumes; the outer boundary is the **box faces**
-  (``x_minus`` / ``x_plus`` / ``y_minus`` / ``y_plus``) and the membrane is the internal interface.
-  Each analytic subvolume's boolean predicate is lowered to a Rvachev implicit field
-  (`formalism/rvachev.py`), sampled on a grid, and its ``φ = 0`` contour is **marched** (scikit-image)
-  and embedded in a gmsh model that fragments the box into the regions. v1 supports the common
-  *one interior subvolume + background* topology (one closed contour, strictly inside the box).
+- **2D body-fitted (``dim = 2``), box-partitioned, multi-region.** The geometry is the bounding box
+  (``extent`` / ``origin``) partitioned by ``N`` analytic subvolumes (the last is the background /
+  complement); the outer boundary is the **box faces** (``x_minus`` / ``x_plus`` / ``y_minus`` /
+  ``y_plus``) and each ``SurfaceClass`` is an internal membrane. Each non-background subvolume's
+  boolean predicate is lowered to a Rvachev implicit field (`formalism/rvachev.py`), sampled on a
+  grid, and its ``φ = 0`` boundary is **marched** (scikit-image) and embedded in a gmsh model that
+  fragments the box into the regions (nested shapes nest; disjoint shapes sit side by side). Each
+  cell is then assigned to the subvolume whose priority-resolved field is negative at its midpoint;
+  membrane facets between two regions are named by the ``SurfaceClass`` for that pair.
 
-**Not yet here:** 3D, multi-region (>2 subvolumes) partitions, ``image`` meshing, and the unfitted
+**Not yet here:** 3D, ``image`` meshing, subvolumes touching the box boundary, and the unfitted
 (level-set / cut-FEM) consumption of the same field. Unsupported descriptions raise
 :class:`NotImplementedError`.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import gmsh
 import numpy as np
@@ -36,12 +40,27 @@ from skimage.measure import approximate_polygon, find_contours
 from vcell_fenics.backend.geometry import BoundaryGeometry, Geometry, SubdomainGeometry
 from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, Number, UnaryOp
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
-from vcell_fenics.formalism.rvachev import subvolume_implicit_functions
+from vcell_fenics.formalism.parser import parse
+from vcell_fenics.formalism.rvachev import lower_predicate, subvolume_implicit_functions
 
 _FACE_NAMES_2D = ("x_minus", "x_plus", "y_minus", "y_plus")
-# Physical-group tag layout for the 2D realization.
-_MEMBRANE_TAG = 100
+# Mesh-tag layout for the 2D realization: one tag per declared surface class (membrane), one per box
+# face. Region (cell) tags are 1..N over the subvolumes.
+_SURFACE_TAG_BASE = 100  # membrane tags, in SurfaceClass order
 _FACE_TAG_BASE = 200  # x_minus=200, x_plus=201, …
+
+
+@dataclass(frozen=True)
+class _Tagging:
+    """The result of classifying/tagging a realized mesh: the cell and facet `MeshTags`, the
+    subvolume-name → region-tag and surface-name → membrane-tag maps, and which subvolume(s) each
+    box face is incident to."""
+
+    cell_tags: dmesh.MeshTags
+    facet_tags: dmesh.MeshTags
+    region_tags: dict[str, int]
+    surface_tags: dict[str, int]
+    face_regions: dict[int, tuple[str, ...]]
 
 
 class RealizationError(ValueError):
@@ -106,117 +125,137 @@ def _lumped_mesh(comm: MPI.Comm) -> dmesh.Mesh:
 
 def _realize_2d(description: GeometryDescription, *, h: float, resolution: int, comm: MPI.Comm) -> Geometry:
     subvolumes = description.subvolumes
-    if len(subvolumes) != 2:
+    if len(subvolumes) < 2:
         raise NotImplementedError(
-            f"2D realization v1 supports exactly one interior subvolume + background; "
-            f"geometry {description.name!r} has {len(subvolumes)} subvolumes"
+            f"2D realization needs an interior partition + background (>= 2 subvolumes); "
+            f"geometry {description.name!r} has {len(subvolumes)}"
         )
-    interior, background = subvolumes[0], subvolumes[1]
-    if interior.type != "analytic":
-        raise RealizationError(
-            f"2D geometry {description.name!r} interior subvolume {interior.name!r} must be 'analytic', "
-            f"got {interior.type!r}"
-        )
+    # Every subvolume but the last (the background / complement) defines an analytic shape we
+    # body-fit to; the background owns whatever is left.
+    for subvolume in subvolumes[:-1]:
+        if subvolume.type != "analytic" or subvolume.expression is None:
+            raise RealizationError(
+                f"2D geometry {description.name!r} subvolume {subvolume.name!r} must be 'analytic' with an "
+                f"expression to be realized (got type {subvolume.type!r})"
+            )
 
     ox, oy = description.origin[0], description.origin[1]
     lx, ly = description.extent[0], description.extent[1]
-    field = subvolume_implicit_functions(description)[interior.name]
-    contour = _march_interior_contour(field, ox=ox, oy=oy, lx=lx, ly=ly, resolution=resolution, name=description.name)
 
-    membrane_name = description.surfaces[0].name if description.surfaces else None
-    parent = _mesh_box_with_contour(contour, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name)
-    cell_tags, facet_tags, region_tags = _classify_and_tag(
-        parent, field, names=(interior.name, background.name), ox=ox, oy=oy, lx=lx, ly=ly
-    )
+    # March each shape's own (raw, not priority-resolved) boundary so the mesh conforms to every
+    # analytic surface; priority then decides each cell's owner. For nested shapes (nucleus in
+    # cytosol in ecm) the contours nest; for disjoint shapes they sit side by side.
+    contours: list[NDArray[np.float64]] = []
+    for subvolume in subvolumes[:-1]:
+        assert subvolume.expression is not None  # checked above
+        raw_field = lower_predicate(parse(subvolume.expression))
+        contours.extend(
+            _march_contours(raw_field, ox=ox, oy=oy, lx=lx, ly=ly, resolution=resolution, name=subvolume.name)
+        )
+    if not contours:
+        raise RealizationError(f"2D geometry {description.name!r} has no interior contours to mesh")
 
+    parent = _mesh_box_with_contours(contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name)
+    fields = subvolume_implicit_functions(description)  # priority-resolved; classifies each cell
+    tagging = _classify_and_tag(parent, description, fields, ox=ox, oy=oy, lx=lx, ly=ly)
     tdim = parent.topology.dim
+
     subdomains: dict[str, SubdomainGeometry] = {}
-    for name, tag in region_tags.items():
-        sub_mesh, *_ = dmesh.create_submesh(parent, tdim, cell_tags.find(tag))
+    for name, tag in tagging.region_tags.items():
+        sub_mesh, *_ = dmesh.create_submesh(parent, tdim, tagging.cell_tags.find(tag))
         subdomains[name] = SubdomainGeometry(mesh=sub_mesh, kind="volume")
 
     boundaries: dict[str, BoundaryGeometry] = {}
-    if membrane_name is not None:
-        membrane_mesh, *_ = dmesh.create_submesh(parent, tdim - 1, facet_tags.find(_MEMBRANE_TAG))
-        subdomains[membrane_name] = SubdomainGeometry(mesh=membrane_mesh, kind="surface")
-        boundaries[membrane_name] = BoundaryGeometry(
-            subdomains=(interior.name, background.name), facets=facet_tags.find(_MEMBRANE_TAG)
-        )
-    # The box faces bound the region that touches them — the background.
+    for surface in description.surfaces:
+        facets = tagging.facet_tags.find(tagging.surface_tags[surface.name])
+        if not facets.size:
+            continue  # the declared membrane has no realized interface (e.g. regions don't meet)
+        membrane_mesh, *_ = dmesh.create_submesh(parent, tdim - 1, facets)
+        subdomains[surface.name] = SubdomainGeometry(mesh=membrane_mesh, kind="surface")
+        boundaries[surface.name] = BoundaryGeometry(subdomains=(surface.inside, surface.outside), facets=facets)
+
     for i, face in enumerate(_FACE_NAMES_2D):
-        facets = facet_tags.find(_FACE_TAG_BASE + i)
+        facets = tagging.facet_tags.find(_FACE_TAG_BASE + i)
         if facets.size:
-            boundaries[face] = BoundaryGeometry(subdomains=(background.name,), facets=facets)
+            boundaries[face] = BoundaryGeometry(
+                subdomains=tagging.face_regions.get(_FACE_TAG_BASE + i, ()), facets=facets
+            )
 
     return Geometry(
         name=description.name,
         subdomains=subdomains,
         boundaries=boundaries,
         parent_mesh=parent,
-        cell_tags=cell_tags,
-        facet_tags=facet_tags,
+        cell_tags=tagging.cell_tags,
+        facet_tags=tagging.facet_tags,
     )
 
 
-def _march_interior_contour(
+def _march_contours(
     field: Expr, *, ox: float, oy: float, lx: float, ly: float, resolution: int, name: str
-) -> NDArray[np.float64]:
-    """Sample ``field`` over the box and march its ``φ = 0`` contour, returned as physical (x, y)
-    vertices. v1 requires a single closed contour strictly inside the box (the membrane)."""
+) -> list[NDArray[np.float64]]:
+    """Sample ``field`` over the box and march every ``φ = 0`` contour, each returned as physical
+    (x, y) vertices. v1 requires each contour to be strictly inside the box (a subvolume touching
+    the box boundary is a later slice)."""
 
     xs = np.linspace(ox, ox + lx, resolution)
     ys = np.linspace(oy, oy + ly, resolution)
     grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
     phi = _eval_field(field, (grid_x, grid_y))
 
-    contours = find_contours(phi, 0.0)
-    if len(contours) != 1:
-        raise NotImplementedError(
-            f"2D realization v1 expects one interior membrane contour for {name!r}, found {len(contours)} "
-            "(nested / multi-region geometries are a later slice)"
-        )
-    rows_cols = contours[0]
     dx, dy = lx / (resolution - 1), ly / (resolution - 1)
-    xy = np.column_stack([ox + rows_cols[:, 1] * dx, oy + rows_cols[:, 0] * dy])
-    on_edge = (
-        np.isclose(xy[:, 0], ox)
-        | np.isclose(xy[:, 0], ox + lx)
-        | np.isclose(xy[:, 1], oy)
-        | np.isclose(xy[:, 1], oy + ly)
-    )
-    if on_edge.any():
-        raise NotImplementedError(
-            f"2D realization v1 requires the membrane of {name!r} to be strictly inside the box "
-            "(a subvolume touching the box boundary is a later slice)"
+    out: list[NDArray[np.float64]] = []
+    for rows_cols in find_contours(phi, 0.0):
+        xy = np.column_stack([ox + rows_cols[:, 1] * dx, oy + rows_cols[:, 0] * dy])
+        on_edge = (
+            np.isclose(xy[:, 0], ox)
+            | np.isclose(xy[:, 0], ox + lx)
+            | np.isclose(xy[:, 1], oy)
+            | np.isclose(xy[:, 1], oy + ly)
         )
-    return xy
+        if on_edge.any():
+            raise NotImplementedError(
+                f"2D realization requires the boundary of {name!r} to be strictly inside the box "
+                "(a subvolume touching the box boundary is a later slice)"
+            )
+        out.append(xy)
+    return out
 
 
-def _mesh_box_with_contour(
-    contour: NDArray[np.float64], *, ox: float, oy: float, lx: float, ly: float, h: float, comm: MPI.Comm, name: str
+def _mesh_box_with_contours(
+    contours: list[NDArray[np.float64]],
+    *,
+    ox: float,
+    oy: float,
+    lx: float,
+    ly: float,
+    h: float,
+    comm: MPI.Comm,
+    name: str,
 ) -> dmesh.Mesh:
-    """Build a gmsh model of the box with ``contour`` embedded and fragment it so the contour is a
-    conforming internal edge, returning the body-fitted DOLFINx mesh. Region / membrane / face
-    tagging is done afterwards in DOLFINx (:func:`_classify_and_tag`) — robustly, by field sign —
-    rather than from gmsh surface areas (which mis-assign when the interior is the larger region)."""
+    """Build a gmsh model of the box with every ``contours`` polyline embedded and fragment it so
+    each is a conforming internal edge, returning the body-fitted DOLFINx mesh. Region / membrane /
+    face tagging is done afterwards in DOLFINx (:func:`_classify_and_tag`), by field sign."""
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
     try:
         gmsh.model.add(name)
         occ = gmsh.model.occ
-        # Simplify the marched polyline (Douglas–Peucker) to a fraction of the mesh size: removes
-        # the sub-grid near-duplicate vertices OCC rejects, while staying within h of the contour.
-        verts = approximate_polygon(contour, tolerance=0.25 * h)
-        if len(verts) > 1 and np.allclose(verts[0], verts[-1]):
-            verts = verts[:-1]
-        if len(verts) < 3:
-            raise RealizationError(f"membrane contour of {name!r} degenerated to {len(verts)} vertices")
-        points = [occ.addPoint(float(x), float(y), 0.0, h) for x, y in verts]
-        lines = [occ.addLine(points[i], points[(i + 1) % len(points)]) for i in range(len(points))]
-        inner = occ.addPlaneSurface([occ.addCurveLoop(lines)])
+        tools: list[tuple[int, int]] = []
+        for contour in contours:
+            # Simplify the marched polyline (Douglas–Peucker) to a fraction of the mesh size: removes
+            # the sub-grid near-duplicate vertices OCC rejects, while staying within h of the contour.
+            verts = approximate_polygon(contour, tolerance=0.25 * h)
+            if len(verts) > 1 and np.allclose(verts[0], verts[-1]):
+                verts = verts[:-1]
+            if len(verts) < 3:
+                raise RealizationError(f"a contour of {name!r} degenerated to {len(verts)} vertices")
+            points = [occ.addPoint(float(x), float(y), 0.0, h) for x, y in verts]
+            lines = [occ.addLine(points[i], points[(i + 1) % len(points)]) for i in range(len(points))]
+            tools.append((2, occ.addPlaneSurface([occ.addCurveLoop(lines)])))
         box = occ.addRectangle(ox, oy, 0.0, lx, ly)
-        occ.fragment([(2, box)], [(2, inner)])
+        occ.fragment([(2, box)], tools)
         occ.synchronize()
         # One physical group over every fragment so model_to_mesh returns the whole mesh.
         gmsh.model.addPhysicalGroup(2, [s for _, s in gmsh.model.getEntities(2)], tag=1, name="domain")
@@ -231,23 +270,39 @@ def _mesh_box_with_contour(
 
 
 def _classify_and_tag(
-    parent: dmesh.Mesh, field: Expr, *, names: tuple[str, str], ox: float, oy: float, lx: float, ly: float
-) -> tuple[dmesh.MeshTags, dmesh.MeshTags, dict[str, int]]:
-    """Tag the body-fitted mesh by the implicit field's sign — each cell is assigned to the region
-    whose `φ` is negative at the cell midpoint (the per-cell analogue of SBML Spatial's interior
-    points). Robust to which region is larger or non-convex, unlike an area or centroid heuristic.
-    The membrane is the set of interior facets between cells of different regions; the box faces are
-    the exterior facets, classified by position."""
+    parent: dmesh.Mesh,
+    description: GeometryDescription,
+    fields: dict[str, Expr],
+    *,
+    ox: float,
+    oy: float,
+    lx: float,
+    ly: float,
+) -> _Tagging:
+    """Tag the body-fitted mesh by the priority-resolved implicit fields — each cell is assigned to
+    the subvolume whose `φ` is negative at the cell midpoint (the per-cell analogue of SBML Spatial's
+    interior points; the fields partition the plane, so exactly one is negative). A membrane facet
+    (interior, between two regions) is named by the `SurfaceClass` for that subvolume pair; box faces
+    are exterior facets, classified by position and the region they touch."""
 
-    interior_name, background_name = names
-    region_tags = {interior_name: 1, background_name: 2}
+    subvolumes = description.subvolumes
+    region_tags = {sv.name: i + 1 for i, sv in enumerate(subvolumes)}
+    tag_to_name = {tag: name for name, tag in region_tags.items()}
     tdim = parent.topology.dim
 
     cells = np.arange(parent.topology.index_map(tdim).size_local, dtype=np.int32)
     cell_mid = dmesh.compute_midpoints(parent, tdim, cells)
-    phi = _eval_field(field, (cell_mid[:, 0], cell_mid[:, 1]))
-    cell_values = np.where(phi < 0, region_tags[interior_name], region_tags[background_name]).astype(np.int32)
+    cell_values = np.zeros(cells.size, dtype=np.int32)
+    for name, tag in region_tags.items():
+        inside = _eval_field(fields[name], (cell_mid[:, 0], cell_mid[:, 1])) < 0
+        cell_values[inside] = tag
+    cell_values[cell_values == 0] = region_tags[subvolumes[-1].name]  # any unclaimed cell → background
     cell_tags = dmesh.meshtags(parent, tdim, cells, cell_values)
+
+    surface_tags = {sc.name: _SURFACE_TAG_BASE + i for i, sc in enumerate(description.surfaces)}
+    pair_to_tag = {
+        frozenset({sc.inside, sc.outside}): _SURFACE_TAG_BASE + i for i, sc in enumerate(description.surfaces)
+    }
 
     parent.topology.create_connectivity(tdim - 1, tdim)
     facet_to_cell = parent.topology.connectivity(tdim - 1, tdim)
@@ -255,16 +310,24 @@ def _classify_and_tag(
     facet_mid = dmesh.compute_midpoints(parent, tdim - 1, np.arange(num_facets, dtype=np.int32))
     facet_index: list[int] = []
     facet_value: list[int] = []
+    face_regions: dict[int, set[str]] = {}
     for facet in range(num_facets):
         incident = facet_to_cell.links(facet)
         if incident.size == 1:  # exterior — a box face
             face = _classify_face(float(facet_mid[facet, 0]), float(facet_mid[facet, 1]), ox=ox, oy=oy, lx=lx, ly=ly)
             if face is not None:
+                tag = _FACE_TAG_BASE + face
                 facet_index.append(facet)
-                facet_value.append(_FACE_TAG_BASE + face)
-        elif cell_values[incident[0]] != cell_values[incident[1]]:  # interior region boundary — membrane
+                facet_value.append(tag)
+                face_regions.setdefault(tag, set()).add(tag_to_name[int(cell_values[incident[0]])])
+            continue
+        left, right = int(cell_values[incident[0]]), int(cell_values[incident[1]])
+        if left == right:
+            continue  # interior to one region
+        membrane_tag = pair_to_tag.get(frozenset({tag_to_name[left], tag_to_name[right]}))
+        if membrane_tag is not None:  # a declared SurfaceClass names this interface
             facet_index.append(facet)
-            facet_value.append(_MEMBRANE_TAG)
+            facet_value.append(membrane_tag)
 
     order = np.argsort(facet_index)
     facet_tags = dmesh.meshtags(
@@ -273,7 +336,13 @@ def _classify_and_tag(
         np.asarray(facet_index, dtype=np.int32)[order],
         np.asarray(facet_value, dtype=np.int32)[order],
     )
-    return cell_tags, facet_tags, region_tags
+    return _Tagging(
+        cell_tags=cell_tags,
+        facet_tags=facet_tags,
+        region_tags=region_tags,
+        surface_tags=surface_tags,
+        face_regions={tag: tuple(sorted(names)) for tag, names in face_regions.items()},
+    )
 
 
 def _classify_face(x: float, y: float, *, ox: float, oy: float, lx: float, ly: float) -> int | None:

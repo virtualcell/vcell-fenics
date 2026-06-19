@@ -132,11 +132,11 @@ def test_realized_geometry_passes_cross_check() -> None:
 
 
 def test_2d_single_subvolume_not_implemented() -> None:
-    # A box with no interior partition (one subvolume) isn't the supported interior+background case.
+    # A box with no interior partition (one subvolume) has no background to mesh against.
     spatial = GeometryDescription(
         name="cell", dim=2, subvolumes=(SubVolume(name="cyto", type="analytic", expression="geom.x[0] < 1"),)
     )
-    with pytest.raises(NotImplementedError, match="interior subvolume \\+ background"):
+    with pytest.raises(NotImplementedError, match=">= 2 subvolumes"):
         realize(spatial)
 
 
@@ -254,18 +254,52 @@ def test_2d_realized_geometry_passes_cross_check() -> None:
     assert cross_validate(md, geom) == []
 
 
-def test_2d_three_subvolumes_not_implemented() -> None:
-    three = GeometryDescription(
-        name="g",
+def _nested_three_region() -> GeometryDescription:
+    """A nucleus (r=0.3) inside a cytosol (r=0.7) inside an ecm background, in a 2x2 box."""
+    return GeometryDescription(
+        name="cell",
         dim=2,
+        extent=(2.0, 2.0, 1.0),
+        origin=(-1.0, -1.0, 0.0),
         subvolumes=(
-            SubVolume(name="a", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 < 0.04"),
-            SubVolume(name="b", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 < 0.25"),
-            SubVolume(name="bg", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 > 0.25"),
+            SubVolume(name="nucleus", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 < 0.09"),
+            SubVolume(name="cytosol", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 < 0.49"),
+            SubVolume(name="ecm", type="analytic", expression="1.0"),
+        ),
+        surfaces=(
+            SurfaceClass(name="ne", inside="nucleus", outside="cytosol"),
+            SurfaceClass(name="pm", inside="cytosol", outside="ecm"),
         ),
     )
-    with pytest.raises(NotImplementedError, match="interior subvolume \\+ background"):
-        realize(three)
+
+
+def test_2d_nested_three_region_partition() -> None:
+    geom = realize(_nested_three_region(), h=0.05, resolution=201)
+
+    assert {n: sg.kind for n, sg in geom.subdomains.items()} == {
+        "nucleus": "volume",
+        "cytosol": "volume",
+        "ecm": "volume",
+        "ne": "surface",
+        "pm": "surface",
+    }
+    nucleus, cytosol, ecm = (_measure(geom, n) for n in ("nucleus", "cytosol", "ecm"))
+    assert nucleus + cytosol + ecm == pytest.approx(4.0, abs=1e-9)  # partition the box exactly
+    assert nucleus == pytest.approx(math.pi * 0.3**2, rel=0.05)
+    assert cytosol == pytest.approx(math.pi * (0.7**2 - 0.3**2), rel=0.05)
+
+
+def test_2d_nested_membranes_named_internal_and_paired() -> None:
+    geom = realize(_nested_three_region(), h=0.06, resolution=161)
+    ne = geom.boundary_of("ne")
+    assert ne is not None and ne.is_internal and set(ne.subdomains) == {"nucleus", "cytosol"}
+    assert _measure(geom, "ne") == pytest.approx(2 * math.pi * 0.3, rel=0.06)
+    pm = geom.boundary_of("pm")
+    assert pm is not None and pm.is_internal and set(pm.subdomains) == {"cytosol", "ecm"}
+    # Only the background (ecm) touches the box faces in a nested geometry.
+    for face in ("x_minus", "x_plus", "y_minus", "y_plus"):
+        boundary = geom.boundary_of(face)
+        assert boundary is not None and boundary.subdomains == ("ecm",)
 
 
 def test_2d_interior_must_be_analytic() -> None:
