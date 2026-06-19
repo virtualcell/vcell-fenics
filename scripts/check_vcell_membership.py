@@ -18,6 +18,7 @@ Usage: `.pixi/envs/dev/bin/python scripts/check_vcell_membership.py [--masks DIR
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Any
 
@@ -40,17 +41,31 @@ def _reconstruct(data: dict[str, Any]) -> Any:
     return g.Geometry.model_validate(data)
 
 
-def _eval(expr: Expr, x: float, y: float) -> float:
+_UNARY_FUNCS = {
+    "sqrt": math.sqrt,
+    "abs": abs,
+    "exp": math.exp,
+    "log": math.log,
+    "log10": math.log10,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "floor": math.floor,
+    "ceil": math.ceil,
+}
+
+
+def _eval(expr: Expr, coord: tuple[float, float, float]) -> float:
     if isinstance(expr, Number):
         return expr.value
     if isinstance(expr, IndexAccess):
         assert isinstance(expr.index, Number)
-        return (x, y)[int(expr.index.value)]
+        return coord[int(expr.index.value)]
     if isinstance(expr, UnaryOp):
-        v = _eval(expr.operand, x, y)
+        v = _eval(expr.operand, coord)
         return -v if expr.op == "-" else v
     if isinstance(expr, BinaryOp):
-        a, b = _eval(expr.left, x, y), _eval(expr.right, x, y)
+        a, b = _eval(expr.left, coord), _eval(expr.right, coord)
         ops = {"+": a + b, "-": a - b, "*": a * b, "/": (a / b if b else float("nan"))}
         if expr.op in ops:
             return ops[expr.op]
@@ -58,11 +73,15 @@ def _eval(expr: Expr, x: float, y: float) -> float:
             return float(a**b) if not isinstance(a**b, complex) else float("nan")
         raise ValueError(f"operator {expr.op!r} not in an implicit function")
     if isinstance(expr, FunctionCall):
-        args = [_eval(a, x, y) for a in expr.args]
+        args = [_eval(a, coord) for a in expr.args]
         if expr.callee == "min":
             return min(args)
         if expr.callee == "max":
             return max(args)
+        if expr.callee == "pow":
+            return float(args[0] ** args[1])
+        if expr.callee in _UNARY_FUNCS:
+            return float(_UNARY_FUNCS[expr.callee](args[0]))
         raise ValueError(f"function {expr.callee!r} unsupported")
     raise ValueError(f"unbound/unhandled {type(expr).__name__}")
 
@@ -80,8 +99,9 @@ def _check_mask(npz_path: Path) -> tuple[int, int, int] | None:
         raise ValueError(f"no overlap between VCell domains {sorted(set(domains))} and ours {sorted(fields)}")
 
     agree = disagree = skipped = 0
-    for (x, y, _z), vcell_domain in zip(coords, domains):
-        inside = [name for name, field in fields.items() if _eval(field, float(x), float(y)) < 0]
+    for (x, y, z), vcell_domain in zip(coords, domains):
+        point = (float(x), float(y), float(z))
+        inside = [name for name, field in fields.items() if _eval(field, point) < 0]
         if len(inside) != 1:  # ambiguous: near a membrane
             skipped += 1
         elif inside[0] == vcell_domain:
