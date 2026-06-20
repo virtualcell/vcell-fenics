@@ -33,9 +33,10 @@ class SolverConfiguration:
 
     `time_integration` selects the integrator: `"backward_euler"` (the default — fixed-step,
     first-order implicit, `dt` is the step) or `"method_of_lines"` (PETSc `TS` adaptive BDF,
-    `backend/reaction_diffusion.py`; `dt` seeds the adaptive controller and `t_final` is the
-    target). Method-of-lines integrates *nonlinear* reactions directly (the inner Newton) and
-    adapts the step to stiffness, at the cost of being fixed-domain only.
+    `backend/reaction_diffusion.py`; `t_final` is the target and `dt` is **ignored** — the
+    integrator picks its own small startup step and adapts, since a backward-Euler-sized seed
+    would trigger a BDF cold-start over-diffusion). Method-of-lines integrates *nonlinear*
+    reactions directly (the inner Newton) and adapts the step to stiffness, fixed-domain only.
     """
 
     dt: float
@@ -51,7 +52,11 @@ def run(md: MathDescription, geometry: Geometry, config: SolverConfiguration) ->
 
     problem = assemble(md, geometry, dt=config.dt, fe_degree=config.fe_degree)
     if config.time_integration == "method_of_lines":
-        integrate_discrete_problem(problem, t_final=config.t_final, dt_initial=config.dt)
+        # `config.dt` is a backward-Euler *step*; for the adaptive MOL integrator it is not a step but
+        # a startup seed, and a large seed triggers a BDF cold-start over-diffusion (the controller
+        # cannot reject the first step). So we don't forward it — `integrate_discrete_problem` picks a
+        # small, safe startup step and adapts from there.
+        integrate_discrete_problem(problem, t_final=config.t_final)
     elif config.time_integration == "backward_euler":
         for n in range(round(config.t_final / config.dt)):
             time = (n + 1) * config.dt

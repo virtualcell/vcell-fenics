@@ -196,7 +196,12 @@ def _run_time_stepper(
     ts.setType(options.ts_type)
     ts.setIFunction(evaluate_residual, fem.Function(space).x.petsc_vec)
     ts.setIJacobian(evaluate_jacobian, jacobian_matrix)
-    ts.setTimeStep(options.dt_initial if options.dt_initial is not None else options.t_final / 100.0)
+    # BDF starts at order 1 (= backward Euler), and that first step's truncation error is *not*
+    # caught by the adaptive controller (it has no history to estimate it from), so it persists as a
+    # constant over-diffusion ≈ the initial step — independent of `rtol`. The remedy is a small
+    # startup step the controller then grows: `t_final / 1e4` drives the cold-start error below the
+    # spatial floor here while adding only a handful of steps (the controller ramps geometrically).
+    ts.setTimeStep(options.dt_initial if options.dt_initial is not None else options.t_final / 1.0e4)
     ts.setMaxTime(options.t_final)
     ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
     ts.setTolerances(options.atol, options.rtol)

@@ -59,6 +59,31 @@ def test_diffusion_eigenmode_decays_at_the_analytical_rate() -> None:
     assert result.steps < explicit_stability_steps / 3  # the implicit / adaptive-BDF win
 
 
+def test_bdf_cold_start_does_not_over_diffuse() -> None:
+    # Regression: BDF starts at order 1, and that first step's truncation error is not caught by the
+    # adaptive controller, so a too-large startup step injects a constant over-diffusion ≈ the initial
+    # step (independent of rtol). The default startup must be small enough that the solution matches a
+    # near-zero-startup reference; before the fix (default t_final/100) this difference is ~1%.
+    n, diffusivity, t_final = 48, 0.1, 0.2
+    mesh, space = _unit_square(n, 1)
+
+    def gaussian(x):  # type: ignore[no-untyped-def]
+        return np.array([np.exp(-((x[0] - 0.5) ** 2 + (x[1] - 0.5) ** 2) / 0.02)])
+
+    default = fem.Function(space)
+    default.interpolate(gaussian)
+    integrate_reaction_diffusion(mesh, default, diffusivities=[diffusivity], t_final=t_final)  # default startup
+    reference = fem.Function(space)
+    reference.interpolate(gaussian)
+    integrate_reaction_diffusion(
+        mesh, reference, diffusivities=[diffusivity], t_final=t_final, dt_initial=t_final / 1.0e6
+    )
+
+    # Same mesh, so the spatial error cancels — this isolates the time-startup difference.
+    rel = (_integral((default[0] - reference[0]) ** 2, mesh) ** 0.5) / (_integral(reference[0] ** 2, mesh) ** 0.5)
+    assert rel < 2e-3
+
+
 def test_conservative_reaction_conserves_total_and_reaches_equilibrium() -> None:
     # A ⇌ B (k_on·A − k_off·B): conservative, so ∫(A+B) is invariant; the steady state is the
     # detailed-balance ratio A/B = k_off/k_on.

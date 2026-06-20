@@ -13,10 +13,12 @@ on the broad-Gaussian pure-diffusion model (the v1b IC, well resolved on the coa
    better than either agrees with the *free-space* analytic — that ~2% vs analytic is **wall
    reflection** (bounded domain), physics both capture, not discretization error. A bug would show as
    a large non-decreasing FV↔FEniCSx floor.
-3. **MOL startup caveat** (a real finding): our method-of-lines integrator (PETSc `TSBDF`) over-diffuses
+3. **MOL startup (found here, now fixed):** the method-of-lines integrator (PETSc `TSBDF`) over-diffused
    by a constant effective-time offset ≈ the *initial* step — a BDF order-1 cold-start error the
-   adaptive controller does not catch (tightening `rtol` does nothing). It is accurate only when
-   seeded with a small `dt_initial`; the sweep below shows the offset tracking `dt_initial`.
+   adaptive controller does not catch (tightening `rtol` does nothing). Fixed by a small default
+   startup step (and `run()` no longer forwards `config.dt` as the seed); the sweep below shows the
+   **default** now lands on `t_final`, while a deliberately large explicit `dt_initial` still
+   over-diffuses (why a backward-Euler-sized seed must not be forwarded).
 
 Needs `convergence_fv_<N>.npz` from `convergence_fv.py`; imports the committed v1b lowered math.
 
@@ -86,15 +88,15 @@ def main() -> None:
         rel_fv_an = float(np.linalg.norm(fv - _analytic(x, y, t_final)) / np.linalg.norm(_analytic(x, y, t_final)))
         print(f"{n:5d} {2 / n:8.4f} {rel_fv:13.4%} {rel_an:15.4%} {rel_fv_an:14.4%}")
 
-    print(f"\n=== 3. MOL startup caveat (FV 128², our h={2 / 128:.4f}, t={t_final}) ===")
-    print("   over-diffusion shows as an effective diffusion-time > t_final, tracking dt_initial:")
-    for dt_initial in (0.05, 0.005, 0.0005):
+    print(f"\n=== 3. MOL startup: fixed via a small default step (FV 128², our h={2 / 128:.4f}, t={t_final}) ===")
+    print("   effective diffusion-time should equal t_final; a large *explicit* startup over-diffuses:")
+    for label, dt_initial in (("default", None), ("explicit 0.005", 0.005), ("explicit 0.05 (BE-sized)", 0.05)):
         geometry = realize(gd, h=2 / 128)
         problem = assemble(md, geometry, dt=0.05)
         result = integrate_discrete_problem(problem, t_final=t_final, dt_initial=dt_initial)
         peak = float(np.nanmax(_eval_on_grid(result.solution, geometry.mesh_of(name), x128, y128)))
         eff_t = (_A * 0.05 / peak - 0.05) / (4.0 * _D)  # invert the analytic peak A·a/(a+4Dt)
-        print(f"  MOL dt_initial={dt_initial:<7} t_final={result.time:.4f}  effective_t={eff_t:.4f} (want {t_final})")
+        print(f"  MOL dt_initial={label:24} effective_t={eff_t:.4f} (want {t_final})")
 
 
 if __name__ == "__main__":

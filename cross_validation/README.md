@@ -84,13 +84,14 @@ error); our comparison scripts use **backward Euler**, a first-order time error.
   *each* differ from the **free-space analytic** by ~5 % (at t=0.5) — by nearly identical amounts. That
   gap is **wall reflection** (bounded domain vs infinite-domain analytic), physics both solvers
   capture. The two solvers agree with each other 30–50× better than with the analytic ⇒ no hidden bug.
-- **MOL caveat (a real bug found):** our method-of-lines integrator (PETSc `TSBDF`) over-diffuses by a
-  constant effective-time offset ≈ the *initial* step (`dt_initial=0.05 → eff t 0.555`; `0.0005 →
-  0.501`; target 0.5) — a **BDF order-1 cold-start** error the adaptive controller does not catch
-  (tightening `rtol` does nothing; Crank–Nicolson is correct). `final_time` is exact, so it is not an
-  overshoot. MOL is only accurate when seeded with a *small* `dt_initial`; the default `t_final/100`
-  leaves ~1 %, and `run()` forwarding a backward-Euler-sized `config.dt` as the seed leaves several %.
-  Fix is a follow-up (small/error-controlled startup step).
+- **MOL bug found here, fixed:** our method-of-lines integrator (PETSc `TSBDF`) over-diffused by a
+  constant effective-time offset ≈ the *initial* step (`dt_initial=0.05 → eff t 0.555`; target 0.5) — a
+  **BDF order-1 cold-start** error the adaptive controller does not catch (tightening `rtol` does
+  nothing; Crank–Nicolson is correct; `final_time` is exact, so not an overshoot). **Fixed** by a small
+  default startup step (`t_final/1e4`) and by `run()` no longer forwarding the backward-Euler-sized
+  `config.dt` as the seed: MOL now lands on `t_final` (eff t `0.5008`) and is the *most* accurate
+  integrator (0.10 % vs FV-128, beating backward Euler's time error). Regression:
+  `test_backend_reaction_diffusion.py::test_bdf_cold_start_does_not_over_diffuse`.
 
 ## Time-dependent membrane flux (field comparison)
 
