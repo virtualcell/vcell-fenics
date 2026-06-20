@@ -1,0 +1,144 @@
+name: dummy_math_description
+constants:
+- name: _F_
+  exp: '96485.3321'
+- name: _F_nmol_
+  exp: '9.64853321E-5'
+- name: _K_GHK_
+  exp: '1.0E-9'
+- name: _N_pmol_
+  exp: 6.02214179E11
+- name: _PI_
+  exp: '3.141592653589793'
+- name: _R_
+  exp: '8314.46261815'
+- name: _T_
+  exp: '300.0'
+- name: AreaPerUnitArea_mem
+  exp: '1.0'
+- name: K_millivolts_per_volt
+  exp: '1000.0'
+- name: Kf
+  exp: '0.5'
+- name: KMOLE
+  exp: '0.001660538783162726'
+- name: Kr
+  exp: '0.0'
+- name: netValence
+  exp: '1.0'
+- name: u_boundaryXm
+  exp: '0.0'
+- name: u_boundaryXp
+  exp: '0.0'
+- name: u_boundaryYm
+  exp: '0.0'
+- name: u_boundaryYp
+  exp: '0.0'
+- name: u_boundaryZm
+  exp: '0.0'
+- name: u_boundaryZp
+  exp: '0.0'
+- name: u_diffusionRate
+  exp: '0.1'
+- name: u_init_uM
+  exp: '1.0'
+- name: UnitFactor_uM_um3_molecules_neg_1
+  exp: (1.0 * pow(KMOLE,1.0))
+- name: V_mem
+  exp: '0.0'
+- name: VolumePerUnitVolume_cyto
+  exp: '1.0'
+- name: VolumePerUnitVolume_ext
+  exp: '1.0'
+functions:
+- name: J_efflux
+  exp: (Kf * u)
+  domain: membrane_dom
+- name: KFlux_mem_cyto
+  exp: (AreaPerUnitArea_mem / VolumePerUnitVolume_cyto)
+  domain: membrane_dom
+- name: Size_cyto
+  exp: (VolumePerUnitVolume_cyto * vcRegionVolume('cytosol_dom'))
+  domain: cytosol_dom
+- name: Size_ext
+  exp: (VolumePerUnitVolume_ext * vcRegionVolume('extra_dom'))
+  domain: extra_dom
+- name: Size_mem
+  exp: (AreaPerUnitArea_mem * vcRegionArea('membrane_dom'))
+  domain: membrane_dom
+- name: sobj_cytosol_dom1_extra_dom0_size
+  exp: vcRegionArea('membrane_dom')
+  domain: membrane_dom
+- name: vobj_cytosol_dom1_size
+  exp: vcRegionVolume('cytosol_dom')
+  domain: cytosol_dom
+- name: vobj_extra_dom0_size
+  exp: vcRegionVolume('extra_dom')
+  domain: extra_dom
+variables:
+- name: u
+  var_type: VolumeVariable
+  domain: cytosol_dom
+compartment_subdomains:
+- name: cytosol_dom
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  pde_equations:
+  - name: u
+    rate: '0.0'
+    diffusion: u_diffusionRate
+    initial: u_init_uM
+    solution_type: Unknown
+    boundaries:
+      xm: u_boundaryXm
+      xp: u_boundaryXp
+      ym: u_boundaryYm
+      yp: u_boundaryYp
+      zm: u_boundaryZm
+      zp: u_boundaryZp
+- name: extra_dom
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+membrane_subdomains:
+- name: membrane_dom
+  inside_compartment: cytosol_dom
+  outside_compartment: extra_dom
+  boundary_types:
+  - boundary: Xm
+    type: Value
+  - boundary: Xp
+    type: Value
+  - boundary: Ym
+    type: Value
+  - boundary: Yp
+    type: Value
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  jump_conditions:
+  - name: u
+    in_flux: ( - 1.0 * KFlux_mem_cyto * UnitFactor_uM_um3_molecules_neg_1 * J_efflux)
+    out_flux: '0.0'
