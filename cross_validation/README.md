@@ -70,3 +70,21 @@ product a rate of 0, so a reactant-less `∅ → u` is silently inert.
 A full multi-compartment numerical FV-vs-ours *field* comparison would additionally need the backend
 to apply a one-sided flux on an internal interface (solve one compartment's submesh with the membrane
 as its boundary) — a later increment; this check confirms the sign at the import boundary.
+
+## Time-dependent membrane flux (field comparison)
+
+`membrane_timeflux_fv.py` (stage 1, pyvcell env) + `compare_membrane_timeflux.py` (stage 2, dev env)
+cross-validate a **time-dependent** membrane flux — the case that exercises the backend's `sim.t` path
+end-to-end (a `g(t)` Neumann re-evaluated each step). Same cell, with a general-kinetics membrane
+influx whose net rate is an explicit function of time, `J(t) = 100·exp(−2t)`. The flux depends only on
+`t`, so the cytosol PDE decouples from the extracellular and the membrane is the whole cytosol-disk
+boundary: stage 2 imports the real lowered math, reduces it to the cytosol (the membrane survives as
+the disk's external boundary carrying the imported `BCNeumann(u, membrane_dom, g(t))`), and solves on
+a single-compartment disk.
+
+Result: **0.9–2.1 % relL2** against the FV cytosol field at every output time, with mass tracking to
+~1 %; the mass-rise rate slows over time exactly as `J` decays — the time signature. The VCell unit
+factors (`KFlux`, `UnitFactor = KMOLE`, reconciling membrane molecules·µm⁻² ↔ volume µM) are carried
+as parameters, so our applied Neumann matches FV in **magnitude** as well as sign. This needed the
+backend to bind a `ParameterExpression` (those unit factors are `Area/Volume`, `pow(KMOLE,1)`, not
+bare constants) — `test_backend_assemble.py::test_expression_parameter_binds_against_constants`.

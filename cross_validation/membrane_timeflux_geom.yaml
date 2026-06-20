@@ -1,0 +1,23 @@
+name: cell
+dim: 2
+extent:
+- 2.0
+- 2.0
+- 1.0
+origin:
+- -1.0
+- -1.0
+- 0.0
+subvolumes:
+- name: cytosol_dom
+  handle: 0
+  subvolume_type: analytic
+  analytic_expr: (pow(x-0.0,2.0) + pow(y-0.0,2.0) + pow(z-0.0,2.0)) < pow(0.5,2.0)
+- name: extra_dom
+  handle: 1
+  subvolume_type: analytic
+  analytic_expr: '1.0'
+surface_classes:
+- name: membrane_dom
+  subvolume_ref_1: cytosol_dom
+  subvolume_ref_2: extra_dom
