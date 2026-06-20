@@ -45,7 +45,7 @@ _RADIUS = 0.5
 _RATE = "100.0 * exp( - 2.0 * t)"  # net membrane influx J(t): explicit, monotone-decaying time signature
 
 
-def author_membrane_timeflux(*, diffusion: float = 0.1) -> Biomodel:
+def author_membrane_timeflux(*, diffusion: float = 0.1, mesh: tuple[int, int, int] = (128, 128, 1)) -> Biomodel:
     geo = vc.Geometry(name="cell", dim=2, extent=(2.0, 2.0, 1.0), origin=(-1.0, -1.0, 0.0))
     geo.add_sphere("cytosol_dom", radius=_RADIUS, center=(0.0, 0.0, 0.0))
     geo.add_background("extra_dom")
@@ -72,7 +72,7 @@ def author_membrane_timeflux(*, diffusion: float = 0.1) -> Biomodel:
     app.map_compartment("mem", "membrane_dom")
     app.map_species("u", init_conc="0.0", diff_coef=diffusion)
     app.map_reaction("influx", True)
-    app.add_sim("sim", duration=1.0, output_time_step=0.1, mesh_size=(128, 128, 1))
+    app.add_sim("sim", duration=1.0, output_time_step=0.1, mesh_size=mesh)
     return biomodel
 
 
