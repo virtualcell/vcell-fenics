@@ -48,3 +48,25 @@ field smooths). Both reflect mass at the walls, so each diverges from the *free-
 once the front reaches the boundary (relL2 → ~14 % by `t = 1`) — an expected physical difference, not
 solver error. `v2`'s total mass decays `0.628 → 0.384 ≈ 0.628·e^(−0.5)` on both solvers, confirming
 the decay reaction rides correctly on top of diffusion.
+
+## Membrane jump-condition sign convention
+
+`membrane_flux_sign.py` (pyvcell `[native,solver]` env) confirms the **sign** of the membrane
+jump-condition → Neumann mapping against the FV solver, on a two-compartment cell (inner-disk
+`cytosol` + `background` extracellular, `membrane` between them), in both directions:
+
+| case   | reaction                          | VCell `in_flux(u)`   | FV cytosol mass |
+|--------|-----------------------------------|----------------------|-----------------|
+| efflux | mass-action `u → ∅` (`Kf·u`)      | negative (`∝ Kf·u`)  | decreases       |
+| influx | general-kinetics `∅ → u` (`J=0.5`)| positive (constant)  | increases       |
+
+The bridge maps `in_flux` **directly** (no sign flip) to `BCNeumann(u, membrane, in_flux)`, and the
+backend's Neumann sign is independently verified (`d(mass)/dt = ∫_Γ h ds`). Both FV directions match
+the sign of `in_flux`, so the convention is correct (locked in the dev env by
+`tests/test_pyvcell_bridge.py::test_jump_condition_preserves_vcell_flux_sign`). A constant membrane
+source needs **general kinetics** (the net rate set directly) — mass-action gives an empty reactant
+product a rate of 0, so a reactant-less `∅ → u` is silently inert.
+
+A full multi-compartment numerical FV-vs-ours *field* comparison would additionally need the backend
+to apply a one-sided flux on an internal interface (solve one compartment's submesh with the membrane
+as its boundary) — a later increment; this check confirms the sign at the import boundary.

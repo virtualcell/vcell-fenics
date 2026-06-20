@@ -335,6 +335,41 @@ def test_jump_condition_imports_as_neumann_with_traced_bulk_species() -> None:
     assert bc.expression == "k * trace(c)"  # bulk species c traced; parameter k direct
 
 
+def _membrane_flux_model(in_flux: str) -> vm.MathDescription:
+    return vm.MathDescription(
+        name="flux",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="u", diffusion="0.1", initial="1")])
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                jump_conditions=[vm.JumpCondition(name="u", in_flux=in_flux, out_flux="0.0")],
+            )
+        ],
+    )
+
+
+def test_jump_condition_preserves_vcell_flux_sign() -> None:
+    # The membrane jump-condition SIGN CONVENTION, confirmed against VCell's FV solver two-sided
+    # (cross_validation/membrane_flux_sign.py). Our bridge maps in_flux *directly* (no sign flip) to
+    # the BCNeumann expression, and the backend's Neumann sign is verified independently
+    # (d(mass)/dt = ∫ h ds, test_neumann_influx_adds_mass_at_predicted_rate). So preserving the sign
+    # is what makes our import reproduce the FV mass direction:
+    #   efflux: VCell in_flux NEGATIVE (∝ Kf·u) -> FV cytosol mass DECREASES;
+    #   influx: VCell in_flux POSITIVE (constant general-kinetics rate) -> FV cytosol mass INCREASES.
+    (efflux,) = import_math_description(_membrane_flux_model("-1.0 * Kflux * (Kf * u)")).boundary_conditions
+    assert type(efflux).__name__ == "BCNeumann" and efflux.variable == "u" and efflux.boundary == "pm"
+    assert efflux.expression == "-1.0 * Kflux * (Kf * trace(u))"  # negative; bulk u traced onto membrane
+    assert efflux.expression.lstrip().startswith("-")
+
+    (influx,) = import_math_description(_membrane_flux_model("Kflux * J_influx")).boundary_conditions
+    assert influx.expression == "Kflux * J_influx"  # positive constant flux preserved, no trace wrapping
+    assert not influx.expression.lstrip().startswith("-")
+
+
 def test_jump_condition_species_on_both_sides_rejected() -> None:
     # A species present in both compartments would need two side-distinguished BCs, which the
     # per-variable BCNeumann(variable, boundary) cannot yet express → reject rather than guess.
