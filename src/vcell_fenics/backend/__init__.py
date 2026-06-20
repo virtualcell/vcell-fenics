@@ -40,6 +40,7 @@ from vcell_fenics.backend.geometry import (
     BoundaryGeometry,
     CoupledGeometry,
     Geometry,
+    InterfaceCoupledGeometry,
     SubdomainGeometry,
     clear_geometries,
     cross_validate,
@@ -48,6 +49,8 @@ from vcell_fenics.backend.geometry import (
     make_disk_geometry,
     make_disk_membrane_geometry,
     make_extracellular_annulus_geometry,
+    make_two_bulk_membrane_geometry,
+    membrane_trace,
     register_geometry,
 )
 from vcell_fenics.backend.multiphase import (
@@ -84,6 +87,7 @@ __all__ = [
     "DiscreteProblem",
     "Geometry",
     "IntegrationResult",
+    "InterfaceCoupledGeometry",
     "MeshQualityError",
     "NonlinearTermError",
     "SolveError",
@@ -110,6 +114,8 @@ __all__ = [
     "make_disk_geometry",
     "make_disk_membrane_geometry",
     "make_extracellular_annulus_geometry",
+    "make_two_bulk_membrane_geometry",
+    "membrane_trace",
     "nitsche_normal_slip",
     "rebuild_on_mesh",
     "register_geometry",
