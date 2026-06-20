@@ -182,7 +182,7 @@ def _build_problem(
             terms.append(Term(TermKind.SOURCE, source * w))
 
     bcs, boundary_terms, dirichlet_refreshers = (
-        _build_boundary_conditions(md, equations, geometry, mesh, V, components, ctx)
+        _build_boundary_conditions(md, equations, geometry, mesh, V, components, ctx, var_trials)
         if geometry is not None
         else ([], [], [])
     )
@@ -215,6 +215,7 @@ def _build_boundary_conditions(
     V: fem.FunctionSpace,
     components: list[tuple[UflExpr, UflExpr]],
     ctx: CompileContext,
+    var_trials: dict[str, UflExpr],
 ) -> tuple[list[fem.DirichletBC], list[BoundaryTerm], list[tuple[fem.Function, fem.Expression]]]:
     """Translate the MathDescription's boundary conditions into strong Dirichlet BCs
     and weak Neumann / Robin boundary terms, plus the Dirichlet `(value, expression)`
@@ -224,9 +225,13 @@ def _build_boundary_conditions(
     external *or* an internal interface — a **one-sided** flux where the variable lives only in
     this incident compartment is a Neumann/Robin on the compartment's submesh boundary (the
     facets are re-located onto the submesh). The two `BCInterface*` kinds (genuine cross-compartment
-    coupling) and a Dirichlet on an internal interface still raise `NotImplementedError`. Expressions
-    are compiled against `ctx` (`x`, `t`, and constant parameters); a BC referencing another variable
-    is out of the v1 subset and surfaces as a `CompileError`.
+    coupling) and a Dirichlet on an internal interface still raise `NotImplementedError`.
+
+    A **weak** (Neumann / Robin) flux is compiled with the governed variables bound to their trial
+    functions (`var_trials`), so a flux that depends on the species — a jump-condition efflux
+    `D∇u·n = −k·trace(u)` (§1.6.5) — lands its variable-linear part in the implicit bilinear, exactly
+    as a Robin's `αu` term does. A **Dirichlet** value is a prescribed `g` (interpolated), so it is
+    compiled against the base `ctx` only; a Dirichlet referencing a variable surfaces as a `CompileError`.
     """
 
     subdomain = equations[0].subdomain
@@ -234,6 +239,9 @@ def _build_boundary_conditions(
     n = len(equations)
     fdim = mesh.topology.dim - 1
     mesh.topology.create_connectivity(fdim, mesh.topology.dim)
+    # Neumann/Robin flux data may reference the species (a u-dependent flux); bind the variables to
+    # their trials so the linear-in-u part goes implicit. Dirichlet keeps the base ctx (a prescribed g).
+    flux_ctx = CompileContext(mesh=mesh, symbols={**ctx.symbols, **var_trials})
 
     bcs: list[fem.DirichletBC] = []
     # Weak (Neumann / Robin) boundary terms are built after the loop so every exterior-facet `ds`
@@ -283,14 +291,15 @@ def _build_boundary_conditions(
             bcs.append(dirichlet)
             dirichlet_refreshers.append(refresher)
         elif isinstance(bc, BCNeumann):
-            # D∇u·n = h ⇒ the weak boundary term ∫_Γ h·v ds enters the residual as −h·v.
-            h = compile_expression(parse(bc.expression), ctx)
+            # D∇u·n = h ⇒ the weak boundary term ∫_Γ h·v ds enters the residual as −h·v. `h` may be
+            # u-dependent (a jump-condition flux ∝ trace(u)); var-bound, its u-linear part goes implicit.
+            h = compile_expression(parse(bc.expression), flux_ctx)
             weak.append((TermKind.NEUMANN, -h * w, facets))
         elif isinstance(bc, BCRobin):
             # αu + βD∇u·n = h ⇒ D∇u·n = (h − αu)/β ⇒ residual gains (α/β)u·v − (h/β)·v.
-            alpha = compile_expression(parse(bc.alpha), ctx)
-            beta = compile_expression(parse(bc.beta), ctx)
-            h = compile_expression(parse(bc.expression), ctx)
+            alpha = compile_expression(parse(bc.alpha), flux_ctx)
+            beta = compile_expression(parse(bc.beta), flux_ctx)
+            h = compile_expression(parse(bc.expression), flux_ctx)
             integrand = (alpha / beta) * u * w - (h / beta) * w
             weak.append((TermKind.ROBIN, integrand, facets))
 

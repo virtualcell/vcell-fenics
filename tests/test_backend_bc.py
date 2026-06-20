@@ -256,6 +256,24 @@ def test_robin_relaxes_to_h_over_alpha() -> None:
     assert dp.unknown.x.array.max() == pytest.approx(2.0, abs=1e-3)
 
 
+def test_neumann_flux_may_reference_the_governed_variable() -> None:
+    # A jump-condition efflux imports as a Neumann whose flux references the species: D∇u·n = h(c)
+    # (e.g. −k·trace(u), §1.6.5). Binding the variable in the BC expression lands the c-linear part in
+    # the implicit bilinear, so a u-dependent Neumann is exactly the equivalent Robin: D∇u·n = 2 − 2c
+    # is αu + βD∇u·n = h with α=2, β=1, h=2, relaxing to the uniform steady state h/α = 1.
+    bc = """
+  boundary_conditions:
+    - { kind: neumann, variable: c, boundary: wall, expression: "2.0 - 2.0 * c" }
+"""
+    dp = assemble(load_yaml(_model(bcs=bc, ic="0.0")), _geom(), dt=0.05)
+    assert dp.boundary_kinds() == {TermKind.NEUMANN}
+
+    for _ in range(300):
+        dp.step()
+    assert dp.unknown.x.array.min() == pytest.approx(1.0, abs=1e-3)
+    assert dp.unknown.x.array.max() == pytest.approx(1.0, abs=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # 4. rejection paths
 # ---------------------------------------------------------------------------
