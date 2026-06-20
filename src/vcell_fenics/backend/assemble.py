@@ -13,7 +13,9 @@ silently mis-assembling (§3.6.2):
   linear in the governed variable lands in the implicit bilinear form;
 - a static (`motion: none`) or prescribed-*velocity* subdomain (prescribed
   displacement and unknown motion are later increments);
-- constant parameters only.
+- constant parameters, and expression parameters that compile against the
+  symbol table (constants, coordinates, time, earlier parameters) — so a VCell
+  unit factor like `KFlux = Area/Volume` binds.
 
 On a codim-1 submesh `ufl.grad` is the tangential gradient ∇_Γ, so the diffusion
 integrand is the same for T1 and T2 — they differ only in the mesh. When the
@@ -52,6 +54,7 @@ from vcell_fenics.formalism.schema import (
     MotionNone,
     MotionPrescribedVelocity,
     ParameterConstant,
+    ParameterExpression,
     TemplateEquation,
 )
 from vcell_fenics.formalism.validator import FormalismValidationError, validate_or_raise
@@ -415,8 +418,18 @@ def _compile_context(md: MathDescription, mesh: Mesh) -> CompileContext:
         "geom.x": ufl.SpatialCoordinate(mesh),
         "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
     }
+    ctx = CompileContext(mesh=mesh, symbols=symbols)
+    # A ParameterExpression compiles against the symbols defined so far (constants, coordinates, time,
+    # and earlier parameters) — so a VCell unit factor like KFlux = Area/Volume or
+    # UnitFactor = pow(KMOLE, 1) binds as a UFL expression, as do (legitimately) spatial geom.x or
+    # time-dependent sim.t parameters. Parameters are processed in declaration order, which the import
+    # keeps dependency-ordered (constants before the functions that use them); a forward reference
+    # surfaces as a loud CompileError rather than a silent zero.
     for p in md.parameters:
-        if not isinstance(p, ParameterConstant):
-            raise NotImplementedError("backend v1 supports constant parameters only")
-        symbols[p.name] = fem.Constant(mesh, PETSc.ScalarType(p.value))  # type: ignore[operator]
-    return CompileContext(mesh=mesh, symbols=symbols)
+        if isinstance(p, ParameterConstant):
+            symbols[p.name] = fem.Constant(mesh, PETSc.ScalarType(p.value))  # type: ignore[operator]
+        elif isinstance(p, ParameterExpression):
+            symbols[p.name] = compile_expression(parse(p.expression), ctx)
+        else:
+            raise NotImplementedError(f"backend v1 cannot bind parameter {p.name!r} of type {type(p).__name__}")
+    return ctx

@@ -89,6 +89,36 @@ def test_bulk_diffusion_conserves_mass_with_spatial_ic() -> None:
     assert abs(dp.total_mass() - mass0) / abs(mass0) < 1e-10
 
 
+def test_expression_parameter_binds_against_constants() -> None:
+    # The backend binds a ParameterExpression by compiling it against the symbol table (constants,
+    # coordinates, time, earlier parameters), not just ParameterConstant — VCell models carry unit
+    # factors like KFlux = Area/Volume or UnitFactor = pow(KMOLE, 1) as expression parameters. Here a
+    # decay rate k = 2*k0 = 0.5 is an expression parameter; uniform first-order decay must reproduce
+    # c0*exp(-k t) (no-flux keeps it spatially uniform), proving k bound to 0.5 (not rejected, not 0).
+    from vcell_fenics.formalism.schema import ParameterConstant, ParameterExpression, TemplateEquation
+
+    md = MathDescription(
+        geometry="disk_2d",
+        subdomains=[Subdomain(name="cyto", kind="volume")],
+        variables=[Variable(name="c", subdomain="cyto")],
+        parameters=[ParameterConstant(name="k0", value=0.25), ParameterExpression(name="k", expression="2 * k0")],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="c",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "0.1", "source": "-k * c"},
+                initial_condition="2.0",
+            )
+        ],
+    )
+    dp = assemble(md, make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.15), dt=0.02)
+    for _ in range(50):  # to t = 1.0
+        dp.step()
+    assert dp.unknown.x.array.max() == pytest.approx(2.0 * np.exp(-0.5), rel=1e-2)
+
+
 # ---------------------------------------------------------------------------
 # Loader registry.
 # ---------------------------------------------------------------------------
