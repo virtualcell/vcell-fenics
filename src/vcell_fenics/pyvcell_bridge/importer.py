@@ -153,6 +153,13 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim:
     parameters = _translate_parameters(vcml, resolution)
     observables = _build_observables(vcml, resolution)
 
+    # Drop zero-flux Neumann BCs: a zero D∇u·n is the natural (no-flux) default, so imposing it is
+    # redundant. It also avoids a spurious constraint where it doesn't belong — VCell emits all-faces
+    # no-flux defaults for *every* compartment, so an interior compartment (not touching the box) gets
+    # box-face BCs it has no boundary for; those would otherwise be rejected at solve.
+    numeric = {c.name: value for c in vcml.constants if (value := _as_float(c.exp)) is not None}
+    boundary_conditions = [bc for bc in boundary_conditions if not _is_zero_neumann(bc, numeric)]
+
     math = MathDescription(
         geometry=geometry if geometry is not None else vcml.name,
         subdomains=subdomains,
@@ -162,6 +169,17 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim:
         boundary_conditions=boundary_conditions,
     )
     return ImportResult(math=math, observables=tuple(observables))
+
+
+def _is_zero_neumann(bc: BoundaryCondition, numeric: dict[str, float]) -> bool:
+    """Whether ``bc`` is a Neumann flux that resolves to zero — a literal ``0`` or a single numeric
+    constant equal to 0 (VCell's per-face no-flux default, e.g. ``u_boundaryXm = 0``)."""
+
+    if not isinstance(bc, BCNeumann):
+        return False
+    expression = bc.expression.strip()
+    literal = _as_float(expression)
+    return (literal == 0.0) if literal is not None else (numeric.get(expression) == 0.0)
 
 
 def import_math_description(

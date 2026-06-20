@@ -462,6 +462,34 @@ def test_default_flux_boundary_types_import_cleanly() -> None:
     assert md.boundary_conditions == []
 
 
+def test_zero_flux_box_faces_are_dropped_nonzero_kept() -> None:
+    # A zero D∇u·n is the natural no-flux default, so a Flux face whose value resolves to 0 (VCell's
+    # per-face default, e.g. u_boundaryXm = 0) is dropped — both redundant and, for an interior
+    # compartment that doesn't touch the box, a constraint it has no boundary for. A non-zero flux
+    # stays a Neumann.
+    vcml = vm.MathDescription(
+        name="m",
+        constants=[vm.Constant(name="zero_bc", exp="0.0"), vm.Constant(name="flux_bc", exp="0.5")],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto",
+                boundary_types=[
+                    vm.MathBoundaryType(boundary="Xm", type="Flux"),
+                    vm.MathBoundaryType(boundary="Xp", type="Flux"),
+                ],
+                pde_equations=[
+                    vm.PdeEquation(
+                        name="c", diffusion="1.0", initial="1.0", boundaries=vm.Boundaries(xm="zero_bc", xp="flux_bc")
+                    )
+                ],
+            )
+        ],
+    )
+    bcs = import_math_description(vcml, dim=2).boundary_conditions
+    neumann = [(bc.boundary, bc.expression) for bc in bcs if type(bc).__name__ == "BCNeumann"]
+    assert neumann == [("x_plus", "flux_bc")]  # zero Xm dropped, non-zero Xp kept
+
+
 # --- 3. end-to-end: import a VCell model and run it through FEniCSx ------------
 
 
