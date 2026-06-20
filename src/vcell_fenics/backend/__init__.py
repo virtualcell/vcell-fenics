@@ -53,6 +53,7 @@ from vcell_fenics.backend.geometry import (
     membrane_trace,
     register_geometry,
 )
+from vcell_fenics.backend.interface_coupled import InterfaceCoupledProblem, assemble_interface_coupled
 from vcell_fenics.backend.multiphase import (
     solve_two_phase_overdamped,
     solve_two_phase_stokes,
@@ -88,6 +89,7 @@ __all__ = [
     "Geometry",
     "IntegrationResult",
     "InterfaceCoupledGeometry",
+    "InterfaceCoupledProblem",
     "MeshQualityError",
     "NonlinearTermError",
     "SolveError",
@@ -100,6 +102,7 @@ __all__ = [
     "WeakFormProblem",
     "assemble",
     "assemble_coupled",
+    "assemble_interface_coupled",
     "assemble_unknown_motion",
     "assemble_weak_form",
     "cahn_hilliard_free_energy",
