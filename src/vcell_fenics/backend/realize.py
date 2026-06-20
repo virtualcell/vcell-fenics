@@ -10,6 +10,9 @@ the formalism.
 - **Trivial / non-spatial (``dim = 0``).** A well-mixed geometry: each ``compartmental`` subvolume
   (and any membrane between them) is backed by a minimal single-cell mesh the lumped-ODE templates
   carry a constant over — a representational stand-in, not a spatial domain.
+- **2D single-subvolume whole box (``dim = 2``).** A geometry with one subvolume (VCell's analytic
+  background ``'1.0'``) is the bounding box itself: a plain structured mesh, one ``volume`` region,
+  the four box faces named — no contours or membranes (the single-compartment pattern).
 - **2D body-fitted (``dim = 2``), box-partitioned, multi-region.** The geometry is the bounding box
   (``extent`` / ``origin``) partitioned by ``N`` analytic subvolumes (the last is the background /
   complement); the outer boundary is the **box faces** (``x_minus`` / ``x_plus`` / ``y_minus`` /
@@ -125,11 +128,15 @@ def _lumped_mesh(comm: MPI.Comm) -> dmesh.Mesh:
 
 def _realize_2d(description: GeometryDescription, *, h: float, resolution: int, comm: MPI.Comm) -> Geometry:
     subvolumes = description.subvolumes
-    if len(subvolumes) < 2:
-        raise NotImplementedError(
-            f"2D realization needs an interior partition + background (>= 2 subvolumes); "
-            f"geometry {description.name!r} has {len(subvolumes)}"
-        )
+    if not subvolumes:
+        raise RealizationError(f"2D geometry {description.name!r} has no subvolumes to realize")
+    if len(subvolumes) == 1:
+        # A single subvolume is the whole bounding box (VCell's analytic background '1.0'): there is
+        # no other region for a complement to occupy, so the expression is moot. A plain structured
+        # box mesh, one region, the four box faces named — no internal contours or membranes. This is
+        # the single-compartment pattern make_disk_geometry uses: the box mesh *is* the subdomain
+        # mesh, so boundary facets index it directly (parent_mesh / tags stay None).
+        return _realize_2d_whole_box(description, h=h, comm=comm)
     # Every subvolume but the last (the background / complement) defines an analytic shape we
     # body-fit to; the background owns whatever is left.
     for subvolume in subvolumes[:-1]:
@@ -189,6 +196,38 @@ def _realize_2d(description: GeometryDescription, *, h: float, resolution: int, 
         cell_tags=tagging.cell_tags,
         facet_tags=tagging.facet_tags,
     )
+
+
+def _realize_2d_whole_box(description: GeometryDescription, *, h: float, comm: MPI.Comm) -> Geometry:
+    """Realize a single-subvolume 2D geometry as a plain structured box: one `volume` region over the
+    whole `extent` / `origin` rectangle, with the four box faces (`x_minus` … `y_plus`) named for
+    boundary conditions. Mirrors :func:`make_disk_geometry` — the box mesh is the subdomain mesh."""
+
+    subvolume = description.subvolumes[0]
+    ox, oy = description.origin[0], description.origin[1]
+    lx, ly = description.extent[0], description.extent[1]
+    nx, ny = max(1, round(lx / h)), max(1, round(ly / h))
+    box = dmesh.create_rectangle(
+        comm,
+        [np.array([ox, oy]), np.array([ox + lx, oy + ly])],
+        [nx, ny],
+        dmesh.CellType.triangle,
+    )
+    fdim = box.topology.dim - 1
+    markers = (
+        ("x_minus", lambda p: np.isclose(p[0], ox)),
+        ("x_plus", lambda p: np.isclose(p[0], ox + lx)),
+        ("y_minus", lambda p: np.isclose(p[1], oy)),
+        ("y_plus", lambda p: np.isclose(p[1], oy + ly)),
+    )
+    boundaries: dict[str, BoundaryGeometry] = {}
+    for face, marker in markers:
+        facets = dmesh.locate_entities_boundary(box, fdim, marker)
+        if facets.size:
+            boundaries[face] = BoundaryGeometry(subdomains=(subvolume.name,), facets=facets)
+
+    subdomains = {subvolume.name: SubdomainGeometry(mesh=box, kind="volume")}
+    return Geometry(name=description.name, subdomains=subdomains, boundaries=boundaries)
 
 
 def _march_contours(
