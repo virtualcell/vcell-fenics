@@ -276,10 +276,19 @@ class InterfaceCoupledGeometry:
     parent_mesh: Mesh
     cell_tags: MeshTags
     facet_tags: MeshTags
+    inner_region_tag: int  # the inner compartment's cell tag on the parent (for dx(parent)(region))
+    outer_region_tag: int  # the outer compartment's cell tag on the parent
     interface: str
     interface_tag: int
     outer: str
     outer_tag: int
+
+    def region_tag_of(self, subdomain: str) -> int:
+        if subdomain == self.inner_subdomain:
+            return self.inner_region_tag
+        if subdomain == self.outer_subdomain:
+            return self.outer_region_tag
+        raise KeyError(f"{subdomain!r} is not a volume compartment of {self.name!r}")
 
     def kind_of(self, subdomain: str) -> SubdomainKind | None:
         if subdomain in (self.inner_subdomain, self.outer_subdomain):
@@ -350,6 +359,8 @@ def make_two_bulk_membrane_geometry(
         parent_mesh=cell.parent_mesh,
         cell_tags=cell.cell_tags,
         facet_tags=cell.facet_tags,
+        inner_region_tag=cell.inner_region_tag,
+        outer_region_tag=cell.outer_region_tag,
         interface=interface,
         interface_tag=MEMBRANE_TAG,
         outer=outer,

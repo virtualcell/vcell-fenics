@@ -126,6 +126,11 @@ class CellExtracellular:
     membrane_entity_map: dmesh.EntityMap
     inner_radius: float
     outer_radius: float
+    # The two compartments' cell tags on `parent_mesh`, named by *topology* (inner disk / outer
+    # annulus) rather than biology — so a math-layer consumer (`backend`) can use them without
+    # importing the cytosol/extracellular naming. Here: CYTOSOL_TAG / EXTRACELLULAR_TAG.
+    inner_region_tag: int = CYTOSOL_TAG
+    outer_region_tag: int = EXTRACELLULAR_TAG
 
 
 def create_cell_extracellular(
