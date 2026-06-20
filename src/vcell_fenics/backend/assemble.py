@@ -32,6 +32,7 @@ import ufl
 from dolfinx import fem
 from dolfinx import mesh as dmesh
 from dolfinx.mesh import Mesh
+from numpy.typing import NDArray
 from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
@@ -202,9 +203,6 @@ def _build_problem(
     )
 
 
-_BC_TAG = 1
-
-
 def _build_boundary_conditions(
     md: MathDescription,
     equations: list[TemplateEquation],
@@ -232,7 +230,12 @@ def _build_boundary_conditions(
     mesh.topology.create_connectivity(fdim, mesh.topology.dim)
 
     bcs: list[fem.DirichletBC] = []
-    boundary_terms: list[BoundaryTerm] = []
+    # Weak (Neumann / Robin) boundary terms are built after the loop so every exterior-facet `ds`
+    # measure shares ONE subdomain_data `MeshTags` with a distinct tag per boundary — DOLFINx
+    # requires all exterior_facet integrals in a form to carry the same subdomain_data object, so a
+    # per-boundary `MeshTags` (the natural one-boundary case) breaks the moment a second appears
+    # (e.g. all four box faces of a no-flux geometry).
+    weak: list[tuple[TermKind, UflExpr, NDArray[np.int32]]] = []
     dirichlet_refreshers: list[tuple[fem.Function, fem.Expression]] = []
     for bc in md.boundary_conditions:
         if isinstance(bc, BCInterfaceValueEquality | BCInterfaceFluxBalance):
@@ -265,15 +268,37 @@ def _build_boundary_conditions(
         elif isinstance(bc, BCNeumann):
             # D∇u·n = h ⇒ the weak boundary term ∫_Γ h·v ds enters the residual as −h·v.
             h = compile_expression(parse(bc.expression), ctx)
-            boundary_terms.append(BoundaryTerm(TermKind.NEUMANN, -h * w, _restricted_ds(mesh, bgeo.facets)))
+            weak.append((TermKind.NEUMANN, -h * w, np.asarray(bgeo.facets, dtype=np.int32)))
         elif isinstance(bc, BCRobin):
             # αu + βD∇u·n = h ⇒ D∇u·n = (h − αu)/β ⇒ residual gains (α/β)u·v − (h/β)·v.
             alpha = compile_expression(parse(bc.alpha), ctx)
             beta = compile_expression(parse(bc.beta), ctx)
             h = compile_expression(parse(bc.expression), ctx)
             integrand = (alpha / beta) * u * w - (h / beta) * w
-            boundary_terms.append(BoundaryTerm(TermKind.ROBIN, integrand, _restricted_ds(mesh, bgeo.facets)))
+            weak.append((TermKind.ROBIN, integrand, np.asarray(bgeo.facets, dtype=np.int32)))
+
+    boundary_terms = _weak_boundary_terms(mesh, fdim, weak)
     return bcs, boundary_terms, dirichlet_refreshers
+
+
+def _weak_boundary_terms(
+    mesh: Mesh, fdim: int, weak: list[tuple[TermKind, UflExpr, NDArray[np.int32]]]
+) -> list[BoundaryTerm]:
+    """Build the Neumann / Robin boundary terms over one shared exterior-facet `MeshTags`: each
+    boundary gets a distinct tag, and every term's `ds` measure carries that single subdomain_data
+    object (the DOLFINx form-assembly invariant). Returns the terms in input order."""
+
+    if not weak:
+        return []
+    facets = np.concatenate([f for *_, f in weak]).astype(np.int32)
+    values = np.concatenate([np.full(f.size, tag, dtype=np.int32) for tag, (*_, f) in enumerate(weak, start=1)])
+    order = np.argsort(facets)
+    tags = dmesh.meshtags(mesh, fdim, facets[order], values[order])
+    ds = ufl.Measure("ds", domain=mesh, subdomain_data=tags)
+    return [
+        BoundaryTerm(kind, integrand, cast(ufl.Measure, ds(tag)))
+        for tag, (kind, integrand, _) in enumerate(weak, start=1)
+    ]
 
 
 def _dirichlet_bc(
@@ -299,15 +324,6 @@ def _dirichlet_bc(
     value.interpolate(expression)
     dofs = fem.locate_dofs_topological((sub, sub_space), fdim, facets)
     return fem.dirichletbc(value, dofs, sub), (value, expression)
-
-
-def _restricted_ds(mesh: Mesh, facets: np.ndarray) -> ufl.Measure:
-    """An exterior-facet measure restricted to `facets` (a labelled boundary)."""
-
-    facets = np.asarray(facets, dtype=np.int32)
-    order = np.argsort(facets)
-    tags = dmesh.meshtags(mesh, mesh.topology.dim - 1, facets[order], np.full(facets.shape, _BC_TAG, dtype=np.int32))
-    return cast(ufl.Measure, ufl.Measure("ds", domain=mesh, subdomain_data=tags)(_BC_TAG))
 
 
 def _transfer_state(src: fem.Function, dst: fem.Function, *, conserve: bool) -> None:

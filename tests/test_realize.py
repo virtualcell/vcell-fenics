@@ -131,13 +131,26 @@ def test_realized_geometry_passes_cross_check() -> None:
     assert cross_validate(md, geom) == []
 
 
-def test_2d_single_subvolume_not_implemented() -> None:
-    # A box with no interior partition (one subvolume) has no background to mesh against.
+def test_2d_single_subvolume_is_the_whole_box() -> None:
+    # A geometry with one subvolume is the whole bounding box (VCell's analytic background '1.0'):
+    # a plain box mesh, one volume region, the four box faces named — no contours or membranes.
     spatial = GeometryDescription(
-        name="cell", dim=2, subvolumes=(SubVolume(name="cyto", type="analytic", expression="geom.x[0] < 1"),)
+        name="square",
+        dim=2,
+        extent=(2.0, 2.0, 1.0),
+        origin=(-1.0, -1.0, 0.0),
+        subvolumes=(SubVolume(name="domain", type="analytic", expression="1.0"),),
     )
-    with pytest.raises(NotImplementedError, match=">= 2 subvolumes"):
-        realize(spatial)
+    geom = realize(spatial, h=0.1)
+    assert set(geom.subdomains) == {"domain"}
+    assert geom.kind_of("domain") == "volume"
+    assert set(geom.boundaries) == {"x_minus", "x_plus", "y_minus", "y_plus"}
+    for face in ("x_minus", "x_plus", "y_minus", "y_plus"):
+        boundary = geom.boundary_of(face)
+        assert boundary is not None and not boundary.is_internal and boundary.subdomains == ("domain",)
+        assert boundary.facets.size > 0
+    # The four box faces are the subdomain mesh's own facets (single-compartment pattern).
+    assert geom.parent_mesh is None
 
 
 def test_non_compartmental_subvolume_in_dim0_rejected() -> None:

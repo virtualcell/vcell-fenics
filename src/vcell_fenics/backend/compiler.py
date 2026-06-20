@@ -72,6 +72,16 @@ _UFL_UNARY_FUNCTIONS: dict[str, Any] = {
 # Two-argument tensor-algebra operators (§1.8, TENSOR_ALGEBRA).
 _UFL_BINARY: dict[str, Any] = {"inner": ufl.inner, "dot": ufl.dot, "outer": ufl.outer, "cross": ufl.cross}
 
+# Two-argument scalar math functions (§1.8.5). VCell emits `pow(a, b)` for exponentiation (the
+# expression importer keeps it as a call) and `min` / `max` for clamping; these are the value-level
+# counterparts of the `**` operator and the tensor `min`/`max` are not these.
+_UFL_BINARY_MATH: dict[str, Any] = {
+    "pow": lambda a, b: a**b,
+    "atan2": ufl.atan2,
+    "min": ufl.min_value,
+    "max": ufl.max_value,
+}
+
 # First-order calculus operators (§1.8). On a codim-1 submesh `ufl.grad` / `ufl.div`
 # are already the tangential (surface) operators, so the `_surf` variants are the
 # same UFL calls — the distinction is the mesh, not the operator.
@@ -257,6 +267,11 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
         return calculus(args[0])
     if node.callee in ("lapl", "lapl_beltrami"):
         return ufl.div(ufl.grad(args[0]))  # ∇·∇ — Beltrami on a submesh
+    binary_math = _UFL_BINARY_MATH.get(node.callee)
+    if binary_math is not None:
+        if len(args) != 2:
+            raise CompileError(f"{node.callee}(...) takes two arguments")
+        return binary_math(*[_as_value(a) for a in args])
     fn = _UFL_UNARY_FUNCTIONS.get(node.callee)
     if fn is not None:
         return fn(*[_as_value(a) for a in args])

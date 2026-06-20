@@ -140,3 +140,8 @@ vcml_biomodels/
 
 # uv writes this when the link-pyvcell task runs; pixi.lock is the lockfile of record
 uv.lock
+
+# Cross-validation FV reference fields — large (~2.4 MB each), regenerable in the pyvcell
+# `[native,solver]` env via cross_validation/author_and_run.py; the small .vcml + lowered
+# math/geom YAML next to them are committed.
+cross_validation/*.npz

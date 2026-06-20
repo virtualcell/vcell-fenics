@@ -140,6 +140,55 @@ def test_neumann_influx_adds_mass_at_predicted_rate() -> None:
     assert _mass(dp) - m0 == pytest.approx(flux_per_step * dt * n_steps, rel=1e-6)
 
 
+def test_multiple_neumann_boundaries_assemble_over_one_shared_subdomain_data() -> None:
+    # DOLFINx requires every exterior-facet integral in a form to share one subdomain_data MeshTags,
+    # so a per-boundary measure breaks the moment a second labelled boundary carries a weak BC. A
+    # realized whole-box geometry has four faces; a Neumann influx on all four must assemble and the
+    # discrete mass balance must equal the influx over the *whole* perimeter.
+    from vcell_fenics.backend.realize import realize
+    from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume
+
+    geom = realize(
+        GeometryDescription(
+            name="box_2d",
+            dim=2,
+            extent=(2.0, 2.0, 1.0),
+            origin=(-1.0, -1.0, 0.0),
+            subvolumes=(SubVolume(name="domain", type="analytic", expression="1.0"),),
+        ),
+        h=0.1,
+    )
+    model = """
+math_description:
+  geometry: box_2d
+  subdomains:
+    - { name: domain, kind: volume, motion: { kind: none } }
+  variables:
+    - { name: c, subdomain: domain }
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: domain
+      temporality: time_dependent
+      terms: { diffusion: "0.1" }
+      initial_condition: "1.0"
+  boundary_conditions:
+    - { kind: neumann, variable: c, boundary: x_minus, expression: "0.5" }
+    - { kind: neumann, variable: c, boundary: x_plus, expression: "0.5" }
+    - { kind: neumann, variable: c, boundary: y_minus, expression: "0.5" }
+    - { kind: neumann, variable: c, boundary: y_plus, expression: "0.5" }
+"""
+    dp = assemble(load_yaml(model), geom, dt=0.01)
+    assert dp.boundary_kinds() == {TermKind.NEUMANN}
+
+    h, n_steps, dt = 0.5, 20, 0.01
+    m0 = _mass(dp)
+    flux_per_step = h * _perimeter(dp)  # the four faces are the whole boundary
+    for _ in range(n_steps):
+        dp.step()
+    assert _mass(dp) - m0 == pytest.approx(flux_per_step * dt * n_steps, rel=1e-6)
+
+
 # ---------------------------------------------------------------------------
 # 3. Robin
 # ---------------------------------------------------------------------------
