@@ -124,6 +124,26 @@ def test_hyperbolic_and_log10_functions_compile() -> None:
         compile_expression(parse(src), _ctx())  # must not raise
 
 
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("pow(2.0, 3.0)", 8.0),  # VCell emits pow(a, b); the importer keeps it as a call
+        ("pow(9.0, 0.5)", 3.0),
+        ("min(2.0, 5.0)", 2.0),
+        ("max(2.0, 5.0)", 5.0),
+        ("atan2(0.0, 1.0)", 0.0),
+    ],
+)
+def test_two_argument_math_functions_compile(expr: str, expected: float) -> None:
+    # Added for the VCell import layer: pow / min / max / atan2 are two-argument scalar functions.
+    assert _mean(expr) == pytest.approx(expected)
+
+
+def test_pow_takes_two_arguments() -> None:
+    with pytest.raises(CompileError, match="takes two arguments"):
+        compile_expression(parse("pow(2.0)"), _ctx())
+
+
 def test_floor_validates_but_does_not_compile() -> None:
     # floor / ceil are accepted by the vocabulary (real VCell models use them) but are
     # non-differentiable, so UFL/DOLFINx has no operator — compiling one raises.
