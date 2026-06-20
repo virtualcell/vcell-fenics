@@ -489,3 +489,86 @@ def test_imported_reaction_diffusion_model_runs_and_decays() -> None:
     assert float(c.min()) > 0.0  # stays positive
     # uniform decay from 2.0: mean ≈ 2·exp(-0.5·1.0) ≈ 1.21, well below the IC.
     assert 1.0 < float(c.mean()) < 1.4
+
+
+# --- 4. geometry-frame normalization (the VCell z-in-2D quirk) ------------------
+
+
+def test_normalize_to_geometry_frame_binds_out_of_plane_coordinates() -> None:
+    # VCell tolerates a 3D coordinate in a 2D model (e.g. add_sphere -> geom.x[2]); it is a unit slice
+    # at z = origin.z. normalize_to_geometry_frame binds every out-of-dimension geom.x[axis] (axis >=
+    # dim) to origin[axis] in BOTH the geometry and the math, so z never reaches realize / assemble.
+    from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume
+    from vcell_fenics.formalism.schema import BCNeumann, MathDescription, ParameterExpression, Subdomain, Variable
+    from vcell_fenics.pyvcell_bridge import normalize_to_geometry_frame
+
+    gd = GeometryDescription(
+        name="cell",
+        dim=2,
+        extent=(2.0, 2.0, 1.0),
+        origin=(0.0, 0.0, 5.0),  # the slab sits at z = 5
+        subvolumes=(SubVolume(name="cyto", type="analytic", expression="geom.x[0] + geom.x[1] + geom.x[2]"),),
+    )
+    md = MathDescription(
+        geometry="cell",
+        subdomains=[Subdomain(name="cyto", kind="volume")],
+        variables=[Variable(name="u", subdomain="cyto")],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "0.1", "source": "geom.x[2] * u"},
+                initial_condition="geom.x[0] + geom.x[2]",
+            )
+        ],
+        parameters=[ParameterExpression(name="p", expression="geom.x[2] + 1")],
+        boundary_conditions=[BCNeumann(variable="u", boundary="x_minus", expression="geom.x[2]")],
+    )
+    gd2, md2 = normalize_to_geometry_frame(gd, md)
+
+    # z (geom.x[2], axis >= dim) -> origin.z = 5.0, everywhere; the in-plane x / y are untouched.
+    assert gd2.subvolumes[0].expression == "geom.x[0] + geom.x[1] + (5.0)"
+    (eq,) = md2.equations
+    assert isinstance(eq, TemplateEquation)
+    assert eq.terms["source"] == "(5.0) * u"
+    assert eq.terms["diffusion"] == "0.1"
+    assert eq.initial_condition == "geom.x[0] + (5.0)"
+    assert md2.parameters[0].expression == "(5.0) + 1"  # type: ignore[union-attr]
+    assert md2.boundary_conditions[0].expression == "(5.0)"
+
+
+def test_normalize_to_geometry_frame_leaves_a_3d_model_unchanged() -> None:
+    # In a 3D geometry every coordinate is in-plane, so nothing is bound.
+    from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume
+    from vcell_fenics.formalism.schema import MathDescription, Subdomain, Variable
+    from vcell_fenics.pyvcell_bridge import normalize_to_geometry_frame
+
+    gd = GeometryDescription(
+        name="cell",
+        dim=3,
+        extent=(1.0, 1.0, 1.0),
+        origin=(0.0, 0.0, 0.0),
+        subvolumes=(SubVolume(name="cyto", type="analytic", expression="geom.x[2]"),),
+    )
+    md = MathDescription(
+        geometry="cell",
+        subdomains=[Subdomain(name="cyto", kind="volume")],
+        variables=[Variable(name="u", subdomain="cyto")],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "0.1"},
+                initial_condition="geom.x[2]",
+            )
+        ],
+    )
+    gd2, md2 = normalize_to_geometry_frame(gd, md)
+    assert gd2.subvolumes[0].expression == "geom.x[2]"
+    (eq,) = md2.equations
+    assert isinstance(eq, TemplateEquation)
+    assert eq.initial_condition == "geom.x[2]"
