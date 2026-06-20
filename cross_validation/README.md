@@ -43,11 +43,15 @@ out of the DOLFINx env), so the comparison is two stages:
 
 ## Result
 
-The two independent solvers agree to **< 2.5 %** relative L2 at every output time (tightening as the
-field smooths). Both reflect mass at the walls, so each diverges from the *free-space* analytic only
-once the front reaches the boundary (relL2 → ~14 % by `t = 1`) — an expected physical difference, not
-solver error. `v2`'s total mass decays `0.628 → 0.384 ≈ 0.628·e^(−0.5)` on both solvers, confirming
-the decay reaction rides correctly on top of diffusion.
+We solve with the **method-of-lines** integrator (PETSc TS adaptive BDF), the same strategy as the FV
+solver's Sundials/CVODE, so the time error is ≈0 and the comparison isolates the spatial
+discretisation. The two independent solvers then agree to **~0.1–0.3 % relative L2** at every output
+time (v1/v1b/v2; tightening as the field smooths) — the spatial floor. Both reflect mass at the walls,
+so each diverges from the *free-space* analytic only once the front reaches the boundary (relL2 → ~14 %
+by `t = 1`) — an expected physical difference, not solver error. `v2`'s total mass decays
+`0.628 → 0.384 ≈ 0.628·e^(−0.5)` on both solvers, confirming the decay reaction rides correctly on top
+of diffusion. (With backward Euler the difference was up to ~2 %, dominated by *our* time step — see
+the convergence study below.)
 
 ## Membrane jump-condition sign convention
 
@@ -104,9 +108,10 @@ boundary: stage 2 imports the real lowered math, reduces it to the cytosol (the 
 the disk's external boundary carrying the imported `BCNeumann(u, membrane_dom, g(t))`), and solves on
 a single-compartment disk.
 
-Result: **0.9–2.1 % relL2** against the FV cytosol field at every output time, with mass tracking to
-~1 %; the mass-rise rate slows over time exactly as `J` decays — the time signature. The VCell unit
-factors (`KFlux`, `UnitFactor = KMOLE`, reconciling membrane molecules·µm⁻² ↔ volume µM) are carried
-as parameters, so our applied Neumann matches FV in **magnitude** as well as sign. This needed the
-backend to bind a `ParameterExpression` (those unit factors are `Area/Volume`, `pow(KMOLE,1)`, not
-bare constants) — `test_backend_assemble.py::test_expression_parameter_binds_against_constants`.
+Result (method-of-lines): **0.16–0.70 % relL2** against the FV cytosol field at every output time
+(tightening to ~0.16 % as the transient settles), with mass tracking to ~0.1 %; the mass-rise rate
+slows over time exactly as `J` decays — the time signature. The VCell unit factors (`KFlux`,
+`UnitFactor = KMOLE`, reconciling membrane molecules·µm⁻² ↔ volume µM) are carried as parameters, so
+our applied Neumann matches FV in **magnitude** as well as sign. This needed the backend to bind a
+`ParameterExpression` (those unit factors are `Area/Volume`, `pow(KMOLE,1)`, not bare constants) —
+`test_backend_assemble.py::test_expression_parameter_binds_against_constants`.
