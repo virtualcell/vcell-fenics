@@ -4,8 +4,9 @@
 `membrane_timeflux_fv.py` (stage 1, pyvcell env) authored a two-compartment cell with a
 **time-dependent** general-kinetics membrane influx `J(t) = A·exp(−k·t)`, ran VCell's FV solver, and
 saved the cytosol `u(t, y, x)` field. This stage imports the same lowered math, solves the cytosol
-through our backend, and compares — the case that exercises the backend's `sim.t` path end-to-end (a
-`g(t)` Neumann that the driver re-evaluates each step).
+through our backend with the **method-of-lines** integrator (PETSc TS adaptive BDF, ≈0 time error like
+the FV solver), and compares — the case that exercises the backend's `sim.t` path end-to-end (MOL
+re-evaluates the `g(t)` membrane Neumann at each stage time).
 
 The membrane flux depends only on `t`, so the cytosol PDE is decoupled from the extracellular and the
 membrane is the whole cytosol-disk boundary. We import the real lowered math, then **reduce** it to
@@ -31,12 +32,11 @@ import pyvcell.vcml.models_math as mmod
 import yaml
 from compare_fenics_vs_fv import _eval_on_grid
 
-from vcell_fenics.backend import assemble, make_disk_geometry
+from vcell_fenics.backend import SolverConfiguration, assemble, make_disk_geometry, run
 from vcell_fenics.formalism.schema import MathDescription
 from vcell_fenics.pyvcell_bridge import import_math_description
 
 _CV = Path(__file__).resolve().parent
-_SOLVER_DT = 0.01
 
 
 def _reduce_to_cytosol(
@@ -77,22 +77,19 @@ def main() -> None:
     )
     mesh = geometry.mesh_of("cytosol_dom")
 
-    problem = assemble(reduced, geometry, dt=_SOLVER_DT)
     # Sample only strictly inside the disk — the FV cytosol field is defined on the cytosol region, and
     # our disk mesh covers r < radius (a thin rim is dropped to avoid boundary-interpolation noise).
     grid_x, grid_y = np.meshgrid(x, y, indexing="xy")
     inside = (grid_x**2 + grid_y**2) < (0.95 * radius) ** 2
 
+    # Solve with the method-of-lines integrator (PETSc TS adaptive BDF, ≈0 time error like the FV
+    # solver). MOL updates sim.t at each stage, so the membrane Neumann g(t) is evaluated correctly; it
+    # integrates to a single t_final, so each output time is its own integration from the IC.
     ours = np.empty_like(fv)
-    ours[0] = _eval_on_grid(problem.unknown, mesh, x, y)
-    out_i = 0
-    for n in range(round(float(t[-1]) / _SOLVER_DT)):
-        now = (n + 1) * _SOLVER_DT
-        problem.set_time(now)  # advances sim.t -> the membrane Neumann g(t) is re-evaluated this step
-        problem.step()
-        if out_i + 1 < len(t) and np.isclose(now, t[out_i + 1], atol=_SOLVER_DT / 2):
-            out_i += 1
-            ours[out_i] = _eval_on_grid(problem.unknown, mesh, x, y)
+    ours[0] = _eval_on_grid(assemble(reduced, geometry, dt=0.1).unknown, mesh, x, y)  # IC (u = 0) at t=0
+    for k in range(1, len(t)):
+        config = SolverConfiguration(dt=0.1, t_final=float(t[k]), time_integration="method_of_lines")  # dt ignored
+        ours[k] = _eval_on_grid(run(reduced, geometry, config).unknown, mesh, x, y)
 
     print(
         f"\n=== membrane time-flux: FV vs FEniCSx (cytosol disk r={radius}, {int(inside.sum())} interior grid pts) ==="

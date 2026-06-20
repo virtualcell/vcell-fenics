@@ -4,7 +4,9 @@
 `author_and_run.py` (stage 1, pyvcell `[native,solver]` env) authored a common VCML, ran VCell's
 finite-volume solver, and saved the 4D field + the lowered math/geometry YAML next to each model.
 This stage imports the *same* lowered math + geometry through the pyvcell bridge, realizes the
-geometry, solves it through our FEniCSx backend, samples our solution at the FV solver's own grid
+geometry, solves it through our FEniCSx backend with the **method-of-lines** integrator (PETSc TS
+adaptive BDF — the same strategy as the FV solver's Sundials/CVODE, so the time error is ≈0 and the
+comparison isolates the spatial discretisation), samples our solution at the FV solver's own grid
 points, and reports the agreement (relative L2 per output time, plus total-mass conservation).
 
     .pixi/envs/dev/bin/python cross_validation/compare_fenics_vs_fv.py [stem ...]
@@ -27,13 +29,12 @@ from dolfinx.fem import Function
 from dolfinx.mesh import Mesh
 from numpy.typing import NDArray
 
-from vcell_fenics.backend import SolverConfiguration
+from vcell_fenics.backend import SolverConfiguration, run
 from vcell_fenics.backend.assemble import assemble
 from vcell_fenics.backend.realize import realize
 from vcell_fenics.pyvcell_bridge import import_geometry, import_math_description
 
 _CV = Path(__file__).resolve().parent
-_SOLVER_DT = 0.01  # finer than the FV output interval; we snapshot at each output time
 
 
 def _eval_on_grid(u: Function, mesh: Mesh, xs: NDArray[np.float64], ys: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -72,23 +73,29 @@ def _compare(stem: str) -> None:
     geometry = realize(gd, h=0.02)
     mesh = geometry.mesh_of(gd.subvolumes[0].name)
 
-    problem = assemble(md, geometry, dt=_SOLVER_DT)
-    output_times = t[1:]  # t[0] is the IC, already in the function
-    next_out = 0
+    # Solve with the method-of-lines integrator (PETSc TS adaptive BDF) — the same strategy as VCell's
+    # FV solver (Sundials/CVODE), so the time error is ≈0 and the comparison isolates the *spatial*
+    # discretisation. MOL integrates to a single t_final, so each output time is its own integration
+    # from the IC (cheap; the adaptive controller reaches each in ~100 steps).
     ours = np.empty_like(fv)
-    ours[0] = _eval_on_grid(problem.unknown, mesh, x, y)  # the interpolated IC at t=0
-
-    nsteps = round(float(t[-1]) / _SOLVER_DT)
-    for n in range(nsteps):
-        now = (n + 1) * _SOLVER_DT
-        problem.set_time(now)
-        problem.step()
-        if next_out < len(output_times) and np.isclose(now, output_times[next_out], atol=_SOLVER_DT / 2):
-            ours[next_out + 1] = _eval_on_grid(problem.unknown, mesh, x, y)
-            next_out += 1
+    ours[0] = _eval_on_grid(assemble(md, geometry, dt=0.1).unknown, mesh, x, y)  # the interpolated IC at t=0
+    for k in range(1, len(t)):
+        config = SolverConfiguration(
+            dt=0.1, t_final=float(t[k]), time_integration="method_of_lines"
+        )  # dt ignored by MOL
+        ours[k] = _eval_on_grid(run(md, geometry, config).unknown, mesh, x, y)
 
     print(f"\n=== {stem} ===  mesh cells={mesh.topology.index_map(2).size_local}  grid={fv.shape[1]}x{fv.shape[2]}")
-    print(f"{'t':>6} {'relL2(FEM,FV)':>14} {'relL2(FEM,an)':>14} {'mass_FEM':>10} {'mass_FV':>10} {'peak_FEM':>9} {'peak_FV':>9}")
+    cols = (
+        ("t", 6),
+        ("relL2(FEM,FV)", 14),
+        ("relL2(FEM,an)", 14),
+        ("mass_FEM", 10),
+        ("mass_FV", 10),
+        ("peak_FEM", 9),
+        ("peak_FV", 9),
+    )
+    print(" ".join(f"{label:>{w}}" for label, w in cols))
     for ti in range(len(t)):
         denom = np.linalg.norm(fv[ti]) or 1.0
         rel_fv = np.linalg.norm(ours[ti] - fv[ti]) / denom
@@ -102,7 +109,10 @@ def _compare(stem: str) -> None:
 
 
 def main() -> int:
-    stems = sys.argv[1:] or [p.name[: -len("_reference.npz")] for p in sorted(_CV.glob("*_reference.npz"))]
+    # The single-compartment diffusion family only — the membrane cases have their own compare scripts.
+    stems = sys.argv[1:] or [
+        p.name[: -len("_reference.npz")] for p in sorted(_CV.glob("minimal_diffusion_2d_*_reference.npz"))
+    ]
     for stem in stems:
         _compare(stem)
     return 0
