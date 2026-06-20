@@ -24,12 +24,15 @@ import ufl
 from dolfinx import fem
 
 from vcell_fenics.backend import (
+    SolverConfiguration,
     TermKind,
     assemble,
     make_cell_extracellular_geometry,
     make_disk_geometry,
     rebuild_on_mesh,
+    run,
 )
+from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.formalism import load_yaml
 from vcell_fenics.formalism.validator import FormalismValidationError
 
@@ -254,6 +257,45 @@ def test_robin_relaxes_to_h_over_alpha() -> None:
     # Steady state of αu + βD∇u·n = h with no source is the uniform u = h/α.
     assert dp.unknown.x.array.min() == pytest.approx(2.0, abs=1e-3)
     assert dp.unknown.x.array.max() == pytest.approx(2.0, abs=1e-3)
+
+
+def test_neumann_flux_may_reference_the_governed_variable() -> None:
+    # A jump-condition efflux imports as a Neumann whose flux references the species: D∇u·n = h(c)
+    # (e.g. −k·trace(u), §1.6.5). Binding the variable in the BC expression lands the c-linear part in
+    # the implicit bilinear, so a u-dependent Neumann is exactly the equivalent Robin: D∇u·n = 2 − 2c
+    # is αu + βD∇u·n = h with α=2, β=1, h=2, relaxing to the uniform steady state h/α = 1.
+    bc = """
+  boundary_conditions:
+    - { kind: neumann, variable: c, boundary: wall, expression: "2.0 - 2.0 * c" }
+"""
+    dp = assemble(load_yaml(_model(bcs=bc, ic="0.0")), _geom(), dt=0.05)
+    assert dp.boundary_kinds() == {TermKind.NEUMANN}
+
+    for _ in range(300):
+        dp.step()
+    assert dp.unknown.x.array.min() == pytest.approx(1.0, abs=1e-3)
+    assert dp.unknown.x.array.max() == pytest.approx(1.0, abs=1e-3)
+
+
+def test_nonlinear_flux_is_handled_by_method_of_lines() -> None:
+    # A flux need not be linear in the unknown. D∇u·n = 1 − c² is nonlinear; it is *not* promoted to a
+    # bilinear form — it stays in the residual, and the method-of-lines inner Newton solves it,
+    # relaxing to the analytic uniform steady state c = 1 (where 1 − c² = 0). Backward Euler can only
+    # split an affine residual (ufl.lhs/rhs), so it raises a clear NonlinearTermError pointing to MOL.
+    bc = """
+  boundary_conditions:
+    - { kind: neumann, variable: c, boundary: wall, expression: "1.0 - c * c" }
+"""
+    problem = run(
+        load_yaml(_model(bcs=bc, ic="0.0")),
+        _geom(),
+        SolverConfiguration(dt=0.1, t_final=20.0, time_integration="method_of_lines"),
+    )
+    assert problem.unknown.x.array.min() == pytest.approx(1.0, abs=1e-3)
+    assert problem.unknown.x.array.max() == pytest.approx(1.0, abs=1e-3)
+
+    with pytest.raises(NonlinearTermError):
+        assemble(load_yaml(_model(bcs=bc, ic="0.0")), _geom(), dt=0.1).step()
 
 
 # ---------------------------------------------------------------------------
