@@ -53,7 +53,12 @@ from vcell_fenics.backend.geometry import (
     membrane_trace,
     register_geometry,
 )
-from vcell_fenics.backend.interface_coupled import InterfaceCoupledProblem, assemble_interface_coupled
+from vcell_fenics.backend.interface_coupled import (
+    InterfaceCoupledProblem,
+    InterfaceCoupledResult,
+    assemble_interface_coupled,
+    integrate_interface_coupled,
+)
 from vcell_fenics.backend.multiphase import (
     solve_two_phase_overdamped,
     solve_two_phase_stokes,
@@ -90,6 +95,7 @@ __all__ = [
     "IntegrationResult",
     "InterfaceCoupledGeometry",
     "InterfaceCoupledProblem",
+    "InterfaceCoupledResult",
     "MeshQualityError",
     "NonlinearTermError",
     "SolveError",
@@ -111,6 +117,7 @@ __all__ = [
     "cross_validate",
     "enclosed_volume",
     "integrate_discrete_problem",
+    "integrate_interface_coupled",
     "integrate_reaction_diffusion",
     "load_geometry",
     "make_cell_extracellular_geometry",
