@@ -1,0 +1,78 @@
+name: dummy_math_description
+constants:
+- name: _F_
+  exp: '96485.3321'
+- name: _F_nmol_
+  exp: '9.64853321E-5'
+- name: _K_GHK_
+  exp: '1.0E-9'
+- name: _N_pmol_
+  exp: 6.02214179E11
+- name: _PI_
+  exp: '3.141592653589793'
+- name: _R_
+  exp: '8314.46261815'
+- name: _T_
+  exp: '300.0'
+- name: K_millivolts_per_volt
+  exp: '1000.0'
+- name: KMOLE
+  exp: '0.001660538783162726'
+- name: u_boundaryXm
+  exp: '0.0'
+- name: u_boundaryXp
+  exp: '0.0'
+- name: u_boundaryYm
+  exp: '0.0'
+- name: u_boundaryYp
+  exp: '0.0'
+- name: u_boundaryZm
+  exp: '0.0'
+- name: u_boundaryZp
+  exp: '0.0'
+- name: u_diffusionRate
+  exp: '0.1'
+- name: VolumePerUnitVolume_cell
+  exp: '1.0'
+functions:
+- name: Size_cell
+  exp: (VolumePerUnitVolume_cell * vcRegionVolume('domain'))
+  domain: domain
+- name: u_init_uM
+  exp: (10.0 * exp(( - (pow((x - 0.3),2.0) + pow(y,2.0)) / 0.05)))
+  domain: domain
+- name: vobj_domain0_size
+  exp: vcRegionVolume('domain')
+  domain: domain
+variables:
+- name: u
+  var_type: VolumeVariable
+  domain: domain
+compartment_subdomains:
+- name: domain
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  pde_equations:
+  - name: u
+    rate: '0.0'
+    diffusion: u_diffusionRate
+    initial: u_init_uM
+    solution_type: Unknown
+    boundaries:
+      xm: u_boundaryXm
+      xp: u_boundaryXp
+      ym: u_boundaryYm
+      yp: u_boundaryYp
+      zm: u_boundaryZm
+      zp: u_boundaryZp
