@@ -67,7 +67,7 @@ from vcell_fenics.formalism.schema import (
     Variable,
 )
 from vcell_fenics.pyvcell_bridge.expression import translate_expression
-from vcell_fenics.pyvcell_bridge.inlining import FunctionResolution, resolve_functions
+from vcell_fenics.pyvcell_bridge.inlining import _IDENT_RE, FunctionResolution, resolve_functions
 
 if TYPE_CHECKING:
     from pyvcell.vcml.models_math import (
@@ -263,8 +263,15 @@ def _velocity_vector(velocity: Velocity | None, res: FunctionResolution) -> str 
 def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) -> list[Parameter]:
     """VCell ``Constant``s → parameters; **pure** ``MathFunction``s (no variable reference)
     → ``ParameterExpression``. Variable-referencing functions are not parameters — they are
-    inlined into equations and surfaced as observables instead."""
+    inlined into equations and surfaced as observables instead.
 
+    Pure functions that nothing in the model references are *not* imported: VCell emits region-size
+    bookkeeping (``Size_<compartment>``, ``vobj_<region>_size``) calling geometric built-ins like
+    ``vcRegionVolume('domain')`` that our expression formalism does not model. They are provably dead
+    (no equation, boundary, or other parameter reaches them), so dropping them removes no model
+    semantics — and a *referenced* such function is still emitted and rejected loudly at validation."""
+
+    reachable = _reachable_names(vcml)
     parameters: list[Parameter] = []
     for constant in vcml.constants:
         numeric = _as_float(constant.exp)
@@ -275,7 +282,7 @@ def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) ->
                 ParameterExpression(name=constant.name, expression=translate_expression(res.inline(constant.exp) or ""))
             )
     for function in vcml.functions:
-        if function.name in res.pure_function_names:
+        if function.name in res.constant_function_names and function.name in reachable:
             parameters.append(
                 ParameterExpression(
                     name=function.name,
@@ -286,13 +293,50 @@ def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) ->
     return parameters
 
 
+def _reachable_names(vcml: VcmlMathDescription) -> frozenset[str]:
+    """The names transitively referenced by the model's equations, boundary values, and constant /
+    function expressions — the live set. Used to drop dead pure functions (see
+    :func:`_translate_parameters`). Roots are every PDE/ODE rate, diffusion, and initial expression,
+    each per-face boundary value, each membrane jump flux, and each constant expression; the closure
+    then follows function bodies. Identifier matching reuses the inliner's dotted-name-aware,
+    call-excluding regex, so a built-in call like ``vcRegionVolume(...)`` is not itself a name."""
+
+    bodies = {f.name: (f.exp or "") for f in vcml.functions}
+    roots: list[str | None] = []
+    subdomains: list[VcmlSubDomain] = [*vcml.compartment_subdomains, *vcml.membrane_subdomains]
+    for subdomain in subdomains:
+        for pde in subdomain.pde_equations:
+            roots += [pde.rate, pde.diffusion, pde.initial]
+            if pde.boundaries is not None:
+                roots += [getattr(pde.boundaries, face) for face in ("xm", "xp", "ym", "yp", "zm", "zp")]
+        for ode in subdomain.ode_equations:
+            roots += [ode.rate, ode.initial]
+    for membrane in vcml.membrane_subdomains:
+        for jc in membrane.jump_conditions:
+            roots += [jc.in_flux, jc.out_flux]
+    roots += [constant.exp for constant in vcml.constants]
+
+    seen: set[str] = set()
+    stack = [name for raw in roots if raw for name in _IDENT_RE.findall(raw)]
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body = bodies.get(name)
+        if body:
+            stack.extend(_IDENT_RE.findall(body))
+    return frozenset(seen)
+
+
 def _build_observables(vcml: VcmlMathDescription, res: FunctionResolution) -> list[Observable]:
-    """Surface the variable-referencing functions as observables, with bodies fully inlined
-    (so they reference only variables, parameters, coordinates, and time)."""
+    """Surface the non-constant (variable- / coordinate- / time-referencing) functions as
+    observables, with bodies fully inlined (so they reference only variables, parameters,
+    coordinates, and time)."""
 
     observables: list[Observable] = []
     for function in vcml.functions:
-        body = res.var_function_bodies.get(function.name)
+        body = res.inlined_function_bodies.get(function.name)
         if body is not None:
             observables.append(
                 Observable(

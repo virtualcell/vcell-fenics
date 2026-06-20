@@ -157,15 +157,47 @@ def test_numeric_and_symbolic_constants_and_functions() -> None:
     vcml = vm.MathDescription(
         name="m",
         constants=[vm.Constant(name="D", exp="0.2"), vm.Constant(name="K", exp="a*b")],
-        functions=[vm.MathFunction(name="f", exp="x*2")],
+        functions=[
+            vm.MathFunction(name="g", exp="D*3"),  # constant-reducible + referenced → stays a parameter
+            vm.MathFunction(name="f", exp="x*2"),  # coordinate-referencing → inlined into the equation
+        ],
         compartment_subdomains=[
-            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="c", diffusion="D")])
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="c", diffusion="g", rate="f")])
         ],
     )
-    params = {p.name: p for p in import_math_description(vcml).parameters}
+    md = import_math_description(vcml)
+    params = {p.name: p for p in md.parameters}
     assert isinstance(params["D"], ParameterConstant) and params["D"].value == pytest.approx(0.2)
     assert isinstance(params["K"], ParameterExpression) and params["K"].expression == "a*b"
-    assert isinstance(params["f"], ParameterExpression) and params["f"].expression == "geom.x[0]*2"
+    assert isinstance(params["g"], ParameterExpression) and params["g"].expression == "D*3"
+    # A coordinate-dependent function is not a constant parameter — it is inlined where it is used.
+    assert "f" not in params
+    (eq,) = md.equations
+    assert isinstance(eq, TemplateEquation)
+    assert eq.terms["source"] == "(geom.x[0]*2)"
+
+
+def test_unreferenced_pure_function_is_dropped() -> None:
+    # VCell emits region-size bookkeeping (`Size_<compartment>`, `vobj_<region>_size`) that calls
+    # geometric built-ins like vcRegionVolume('domain') — not part of the PDE problem and not a
+    # formalism expression. Nothing references them, so they are dropped (not imported as a
+    # parameter that would fail to parse). A *referenced* such function would still be emitted and
+    # rejected loudly at validation, so this drops only provably-dead definitions.
+    vcml = vm.MathDescription(
+        name="m",
+        functions=[
+            vm.MathFunction(name="Size_cell", exp="vcRegionVolume('domain')"),
+            vm.MathFunction(name="vobj_domain0_size", exp="vcRegionVolume('domain')"),
+        ],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="domain", pde_equations=[vm.PdeEquation(name="u", diffusion="1.0", initial="1.0")]
+            )
+        ],
+    )
+    params = {p.name for p in import_math_description(vcml).parameters}
+    assert "Size_cell" not in params
+    assert "vobj_domain0_size" not in params
 
 
 def test_imported_model_validates() -> None:
