@@ -19,7 +19,13 @@ What is pinned here, and why these problems:
       that geometric error is itself O(h²), so the combined rate is still 2. This
       also exercises the codim-1 submesh path where ufl.grad is the tangential ∇_Γ.
   The diffusion integrand is identical for T1 and T2 (only the mesh differs), so
-  passing both is strong evidence the operator is assembled correctly on each.
+  passing both is strong evidence the operator is assembled correctly on each. The
+  bulk rate is pinned for **both** integrators — backward Euler (with a tiny dt
+  floor so the temporal error stays below the spatial one) and the adaptive
+  **method-of-lines** the cross-validation uses (no floor needed, its time error is
+  ≈0). A clean O(h²) via MOL also certifies the MOL time error sits under the
+  spatial error — the BDF cold-start over-diffusion (found + fixed in the
+  convergence-study work) would offset the field and flatten the rate.
 
 - **Temporal, O(dt¹).** Backward Euler is first-order. We pin it by
   self-convergence on a *fixed* mesh: solving with dt, dt/2, dt/4, the spatial
@@ -42,7 +48,7 @@ from dolfinx import fem
 from dolfinx.mesh import create_unit_square
 from mpi4py import MPI
 
-from vcell_fenics.backend import assemble, make_disk_membrane_geometry
+from vcell_fenics.backend import SolverConfiguration, assemble, make_disk_membrane_geometry, run
 from vcell_fenics.backend.discrete import DiscreteProblem
 from vcell_fenics.backend.geometry import Geometry, SubdomainGeometry
 from vcell_fenics.formalism import MathDescription, load_yaml
@@ -180,6 +186,33 @@ def test_surface_spatial_convergence_is_second_order() -> None:
     assert errors[0] > errors[1] > errors[2], f"L2 error not monotone under refinement: {errors}"
     order = _fit_order(hs, errors)
     assert 1.5 <= order <= 2.5, f"expected ~2nd-order surface convergence, got slope {order:.2f} (errors {errors})"
+
+
+def test_method_of_lines_spatial_convergence_is_second_order() -> None:
+    # The same bulk eigenmode, but integrated with the **method-of-lines** integrator (PETSc TS
+    # adaptive BDF) the cross-validation now uses. MOL's time error is ≈0 (adaptive, tight tolerances),
+    # so — unlike the backward-Euler test above, which needs a tiny dt to push the temporal floor below
+    # the spatial error — no dt floor is needed here (`config.dt` is ignored by MOL). A clean O(h²) rate
+    # also confirms the MOL time error stays under the spatial error: the BDF cold-start over-diffusion
+    # (found + fixed in the convergence-study work) would offset the field and flatten the rate.
+    D, t_final = 0.1, 0.05
+    decay = math.exp(-2.0 * PI**2 * D * t_final)
+    md = _square_model(diffusion=D)
+    config = SolverConfiguration(dt=t_final, t_final=t_final, time_integration="method_of_lines")
+
+    resolutions = [8, 16, 32]
+    hs, errors = [], []
+    for n in resolutions:
+        geometry = _square_geometry("unit_square", subdomain="cytoplasm", n=n)
+        problem = run(md, geometry, config)
+        x = ufl.SpatialCoordinate(problem.V.mesh)
+        exact = decay * ufl.cos(PI * x[0]) * ufl.cos(PI * x[1])
+        hs.append(1.0 / n)
+        errors.append(_l2_error(problem, exact))
+
+    assert errors[0] > errors[1] > errors[2], f"L2 error not monotone under refinement: {errors}"
+    order = _fit_order(hs, errors)
+    assert 1.7 <= order <= 2.3, f"expected ~2nd-order MOL spatial convergence, got slope {order:.2f} (errors {errors})"
 
 
 # ---------------------------------------------------------------------------
