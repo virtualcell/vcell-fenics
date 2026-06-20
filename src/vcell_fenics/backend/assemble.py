@@ -36,6 +36,7 @@ from dolfinx import mesh as dmesh
 from dolfinx.mesh import Mesh
 from numpy.typing import NDArray
 from petsc4py import PETSc
+from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
@@ -219,11 +220,13 @@ def _build_boundary_conditions(
     and weak Neumann / Robin boundary terms, plus the Dirichlet `(value, expression)`
     refreshers a driver re-interpolates to track a time-dependent `g(t)`.
 
-    Scope (v1): external Dirichlet / Neumann / Robin on a labelled boundary of *this*
-    solve's subdomain. The two interface kinds need an internal boundary between two
-    subdomains (multi-compartment geometry) and raise `NotImplementedError`.
-    Expressions are compiled against `ctx` (`x`, `t`, and constant parameters); a BC
-    referencing another variable is out of the v1 subset and surfaces as a `CompileError`.
+    Scope: Dirichlet / Neumann / Robin on a labelled boundary of *this* solve's subdomain,
+    external *or* an internal interface — a **one-sided** flux where the variable lives only in
+    this incident compartment is a Neumann/Robin on the compartment's submesh boundary (the
+    facets are re-located onto the submesh). The two `BCInterface*` kinds (genuine cross-compartment
+    coupling) and a Dirichlet on an internal interface still raise `NotImplementedError`. Expressions
+    are compiled against `ctx` (`x`, `t`, and constant parameters); a BC referencing another variable
+    is out of the v1 subset and surfaces as a `CompileError`.
     """
 
     subdomain = equations[0].subdomain
@@ -253,35 +256,65 @@ def _build_boundary_conditions(
         bgeo = geometry.boundary_of(bc.boundary)
         if bgeo is None:  # cross_validate already guards this; belt-and-braces for direct callers
             raise NotImplementedError(f"BC boundary {bc.boundary!r} is not a labelled boundary of the geometry")
-        if bgeo.is_internal:
-            raise NotImplementedError(
-                f"BC boundary {bc.boundary!r} is an internal interface between {bgeo.subdomains}; interface BCs and "
-                f"cross-compartment assembly are a later increment (external Dirichlet/Neumann/Robin only in v1)"
-            )
         if subdomain not in bgeo.subdomains:
             raise NotImplementedError(
                 f"BC boundary {bc.boundary!r} bounds {bgeo.subdomains}, not this solve's subdomain {subdomain!r}"
             )
+        if bgeo.is_internal and isinstance(bc, BCDirichlet):
+            raise NotImplementedError(
+                f"a Dirichlet BC on the internal interface {bc.boundary!r} is a later increment "
+                "(a one-sided Neumann/Robin on an interface is supported; cross-compartment coupling is not)"
+            )
+        # Facets on THIS solve's mesh. For a multi-compartment geometry a labelled boundary's facets
+        # index the shared parent mesh, so re-locate them on this subdomain's submesh — for an internal
+        # membrane that's the compartment's exterior boundary there, so a one-sided flux (the species
+        # lives only in this incident compartment) is a Neumann/Robin on the submesh boundary (the
+        # composable bulk-surface pattern §1.6.5). A single-compartment geometry's facets already lie
+        # on its mesh.
+        facets = (
+            _facets_on_submesh(mesh, geometry.parent_mesh, bgeo.facets)
+            if geometry.parent_mesh is not None
+            else np.asarray(bgeo.facets, dtype=np.int32)
+        )
         k = var_index[bc.variable]
         u, w = components[k]
         if isinstance(bc, BCDirichlet):
-            dirichlet, refresher = _dirichlet_bc(bc, V, n, k, fdim, bgeo.facets, ctx)
+            dirichlet, refresher = _dirichlet_bc(bc, V, n, k, fdim, facets, ctx)
             bcs.append(dirichlet)
             dirichlet_refreshers.append(refresher)
         elif isinstance(bc, BCNeumann):
             # D∇u·n = h ⇒ the weak boundary term ∫_Γ h·v ds enters the residual as −h·v.
             h = compile_expression(parse(bc.expression), ctx)
-            weak.append((TermKind.NEUMANN, -h * w, np.asarray(bgeo.facets, dtype=np.int32)))
+            weak.append((TermKind.NEUMANN, -h * w, facets))
         elif isinstance(bc, BCRobin):
             # αu + βD∇u·n = h ⇒ D∇u·n = (h − αu)/β ⇒ residual gains (α/β)u·v − (h/β)·v.
             alpha = compile_expression(parse(bc.alpha), ctx)
             beta = compile_expression(parse(bc.beta), ctx)
             h = compile_expression(parse(bc.expression), ctx)
             integrand = (alpha / beta) * u * w - (h / beta) * w
-            weak.append((TermKind.ROBIN, integrand, np.asarray(bgeo.facets, dtype=np.int32)))
+            weak.append((TermKind.ROBIN, integrand, facets))
 
     boundary_terms = _weak_boundary_terms(mesh, fdim, weak)
     return bcs, boundary_terms, dirichlet_refreshers
+
+
+def _facets_on_submesh(submesh: Mesh, parent: Mesh, parent_facets: NDArray[np.int32]) -> NDArray[np.int32]:
+    """Re-locate `parent_facets` (facet indices on the shared `parent` mesh) onto `submesh` by matching
+    facet midpoints. `create_submesh` copies the parent geometry, so every boundary facet has an
+    identical-midpoint twin among the submesh's exterior facets — including a parent *interior* facet
+    on a compartment interface, which becomes *exterior* on that compartment's submesh. Used to apply a
+    boundary condition on a compartment's submesh when the geometry labels facets on the parent."""
+
+    pdim = parent.topology.dim - 1
+    parent_mid = dmesh.compute_midpoints(parent, pdim, np.asarray(parent_facets, dtype=np.int32))
+    sdim = submesh.topology.dim - 1
+    submesh.topology.create_connectivity(sdim, submesh.topology.dim)
+    exterior = dmesh.exterior_facet_indices(submesh.topology)
+    submesh_mid = dmesh.compute_midpoints(submesh, sdim, exterior)
+    distances, nearest = cKDTree(submesh_mid).query(parent_mid)
+    # Midpoints coincide to round-off (same physical facets); keep only the matched ones.
+    matched = exterior[nearest[distances < 1.0e-9]]
+    return np.unique(matched).astype(np.int32)
 
 
 def _weak_boundary_terms(

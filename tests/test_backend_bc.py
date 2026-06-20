@@ -26,6 +26,7 @@ from dolfinx import fem
 from vcell_fenics.backend import (
     TermKind,
     assemble,
+    make_cell_extracellular_geometry,
     make_disk_geometry,
     rebuild_on_mesh,
 )
@@ -187,6 +188,52 @@ math_description:
     for _ in range(n_steps):
         dp.step()
     assert _mass(dp) - m0 == pytest.approx(flux_per_step * dt * n_steps, rel=1e-6)
+
+
+def test_one_sided_neumann_on_internal_membrane_interface() -> None:
+    # A flux on a membrane — an *internal* interface between two compartments — for a species that
+    # lives in only one incident compartment is a one-sided Neumann on that compartment's submesh
+    # boundary: the labelled facets index the shared parent mesh and are re-located onto the submesh.
+    # The cytosol is the interior disk, so its whole boundary IS the membrane; mass then enters at
+    # exactly d(mass)/dt = ∫_membrane h ds.
+    geometry = make_cell_extracellular_geometry(
+        "cell",
+        cytosol="cyto",
+        extracellular="ext",
+        membrane="mem",
+        interface="membrane",
+        outer="wall",
+        inner_radius=0.5,
+        outer_radius=1.0,
+        h=0.08,
+    )
+    model = """
+math_description:
+  geometry: cell
+  subdomains:
+    - { name: cyto, kind: volume, motion: { kind: none } }
+    - { name: ext, kind: volume, motion: { kind: none } }
+    - { name: mem, kind: surface, motion: { kind: none } }
+  variables:
+    - { name: c, subdomain: cyto }
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: { diffusion: "0.1" }
+      initial_condition: "0.0"
+  boundary_conditions:
+    - { kind: neumann, variable: c, boundary: membrane, expression: "0.5" }
+"""
+    dp = assemble(load_yaml(model), geometry, dt=0.01)
+    assert dp.boundary_kinds() == {TermKind.NEUMANN}
+
+    h, n_steps, dt = 0.5, 20, 0.01
+    membrane_length = _perimeter(dp)  # the cytosol submesh's exterior facets ARE the membrane
+    for _ in range(n_steps):
+        dp.step()
+    assert _mass(dp) == pytest.approx(h * membrane_length * dt * n_steps, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

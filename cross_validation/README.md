@@ -115,3 +115,28 @@ slows over time exactly as `J` decays — the time signature. The VCell unit fac
 our applied Neumann matches FV in **magnitude** as well as sign. This needed the backend to bind a
 `ParameterExpression` (those unit factors are `Area/Volume`, `pow(KMOLE,1)`, not bare constants) —
 `test_backend_assemble.py::test_expression_parameter_binds_against_constants`.
+
+### Through the real multi-compartment pipeline + convergence
+
+The disk reduction above sidesteps the membrane geometry. The same model now also solves through the
+**real** pipeline — import → `normalize_to_geometry_frame` → realize (multi-compartment: cytosol +
+extracellular + membrane) → run — with the membrane flux applied as a *one-sided* Neumann on the
+cytosol submesh boundary (the membrane is an internal interface; its facets are re-located onto the
+submesh). `membrane_convergence_fv.py` runs the FV solver at **64²…1024²** and `membrane_convergence.py`
+refines the FEniCSx mesh alongside (realize resamples the faceted membrane at the mesh scale). Comparing
+to a *single* FV grid can't show convergence — its 1st-order membrane error is the floor — so we refine
+both:
+
+| N | relL2(FEM, FV-N) | ratio |
+|------|------|------|
+| 64   | 1.73 % | — |
+| 128  | 0.94 % | 1.84× |
+| 256  | 0.47 % | 2.01× |
+| 512  | 0.36 % | 1.31× |
+| 1024 | 0.10 % | 3.44× |
+
+~2.0×/level on average (first-order, as both the FV stairstep and our body-fitted polygon membrane are
+O(h)), ending at **0.10 %** — the membrane solve converges to the FV solution, no hidden bug. The 512
+dip → 1024 recovery is grid/membrane-alignment noise: a 3-level sweep would misread it as a plateau,
+which is why the study runs **five** levels. The flux magnitude is independently exact — the total
+cytosol mass converges to the analytic `(perimeter)·∫g`.

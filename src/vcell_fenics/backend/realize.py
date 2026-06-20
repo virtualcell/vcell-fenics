@@ -76,14 +76,18 @@ def realize(
     description: GeometryDescription,
     *,
     h: float = 0.05,
-    resolution: int = 201,
+    resolution: int | None = None,
     comm: MPI.Comm = MPI.COMM_WORLD,
 ) -> Geometry:
     """Realize ``description`` into a backend :class:`Geometry`.
 
-    ``h`` is the target mesh size and ``resolution`` the per-axis sampling grid for the implicit
-    field (2D only). The result is *not* registered — the caller passes it to
-    :func:`~vcell_fenics.backend.geometry.register_geometry` if name resolution is wanted.
+    ``h`` is the target mesh size. ``resolution`` is the per-axis sampling grid for the implicit field
+    (2D only); leave it ``None`` to **resample at the mesh scale** — the marching grid spacing is set
+    to ≈ ``h`` (``resolution ≈ extent / h``), so refining the mesh refines the faceted geometry with it
+    and the realization converges to the exact analytic shape (a fixed resolution would leave a
+    geometry-error floor, or over-resolve a coarse mesh into a degraded membrane). The result is *not*
+    registered — the caller passes it to :func:`~vcell_fenics.backend.geometry.register_geometry` if
+    name resolution is wanted.
     """
 
     if description.dim == 0:
@@ -126,7 +130,7 @@ def _lumped_mesh(comm: MPI.Comm) -> dmesh.Mesh:
 # -- dim 2: body-fitted, box-partitioned ----------------------------------------
 
 
-def _realize_2d(description: GeometryDescription, *, h: float, resolution: int, comm: MPI.Comm) -> Geometry:
+def _realize_2d(description: GeometryDescription, *, h: float, resolution: int | None, comm: MPI.Comm) -> Geometry:
     subvolumes = description.subvolumes
     if not subvolumes:
         raise RealizationError(f"2D geometry {description.name!r} has no subvolumes to realize")
@@ -148,6 +152,10 @@ def _realize_2d(description: GeometryDescription, *, h: float, resolution: int, 
 
     ox, oy = description.origin[0], description.origin[1]
     lx, ly = description.extent[0], description.extent[1]
+    if resolution is None:
+        # Resample at the mesh scale: marching grid spacing ≈ h, so the faceted boundary refines with
+        # the mesh (clamped to keep a coarse mesh from under-sampling and a fine one from blowing up).
+        resolution = min(2001, max(51, round(max(lx, ly) / h) + 1))
 
     # March each shape's own (raw, not priority-resolved) boundary so the mesh conforms to every
     # analytic surface; priority then decides each cell's owner. For nested shapes (nucleus in
