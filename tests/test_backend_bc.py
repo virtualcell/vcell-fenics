@@ -24,12 +24,15 @@ import ufl
 from dolfinx import fem
 
 from vcell_fenics.backend import (
+    SolverConfiguration,
     TermKind,
     assemble,
     make_cell_extracellular_geometry,
     make_disk_geometry,
     rebuild_on_mesh,
+    run,
 )
+from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.formalism import load_yaml
 from vcell_fenics.formalism.validator import FormalismValidationError
 
@@ -272,6 +275,27 @@ def test_neumann_flux_may_reference_the_governed_variable() -> None:
         dp.step()
     assert dp.unknown.x.array.min() == pytest.approx(1.0, abs=1e-3)
     assert dp.unknown.x.array.max() == pytest.approx(1.0, abs=1e-3)
+
+
+def test_nonlinear_flux_is_handled_by_method_of_lines() -> None:
+    # A flux need not be linear in the unknown. D∇u·n = 1 − c² is nonlinear; it is *not* promoted to a
+    # bilinear form — it stays in the residual, and the method-of-lines inner Newton solves it,
+    # relaxing to the analytic uniform steady state c = 1 (where 1 − c² = 0). Backward Euler can only
+    # split an affine residual (ufl.lhs/rhs), so it raises a clear NonlinearTermError pointing to MOL.
+    bc = """
+  boundary_conditions:
+    - { kind: neumann, variable: c, boundary: wall, expression: "1.0 - c * c" }
+"""
+    problem = run(
+        load_yaml(_model(bcs=bc, ic="0.0")),
+        _geom(),
+        SolverConfiguration(dt=0.1, t_final=20.0, time_integration="method_of_lines"),
+    )
+    assert problem.unknown.x.array.min() == pytest.approx(1.0, abs=1e-3)
+    assert problem.unknown.x.array.max() == pytest.approx(1.0, abs=1e-3)
+
+    with pytest.raises(NonlinearTermError):
+        assemble(load_yaml(_model(bcs=bc, ic="0.0")), _geom(), dt=0.1).step()
 
 
 # ---------------------------------------------------------------------------
