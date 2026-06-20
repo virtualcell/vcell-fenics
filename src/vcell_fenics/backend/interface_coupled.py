@@ -75,12 +75,32 @@ class InterfaceCoupledProblem:
 
     def total_mass(self) -> float:
         """∫u over both compartments (conserved by a flux-balance coupling with no external flux)."""
-        mass = 0.0
-        for field in (self.inner, self.outer):
-            mesh = field.function_space.mesh
-            local = fem.assemble_scalar(fem.form(field * ufl.dx(domain=mesh)))
-            mass += mesh.comm.allreduce(local.real, op=MPI.SUM)
-        return mass
+        return _total_mass(self.inner, self.outer)
+
+
+@dataclass
+class InterfaceCoupledResult:
+    """The result of a **method-of-lines** integration of an interface-coupled system to `t_final`
+    (PETSc TS adaptive BDF): the integrated per-compartment solution `Function`s, the step count, and
+    the final time. Unlike `InterfaceCoupledProblem` (backward-Euler, stepped) the solve is one call."""
+
+    inner: fem.Function
+    outer: fem.Function
+    steps: int
+    time: float
+
+    def total_mass(self) -> float:
+        return _total_mass(self.inner, self.outer)
+
+
+def _total_mass(inner: fem.Function, outer: fem.Function) -> float:
+    """∫u over both compartments (conserved by a flux-balance coupling with no external flux)."""
+    mass = 0.0
+    for field in (inner, outer):
+        mesh = field.function_space.mesh
+        local = fem.assemble_scalar(fem.form(field * ufl.dx(domain=mesh)))
+        mass += mesh.comm.allreduce(local.real, op=MPI.SUM)
+    return mass
 
 
 def _const_params(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
@@ -188,6 +208,154 @@ def assemble_interface_coupled(
         rhs.destroy()
 
     return InterfaceCoupledProblem(inner_var, outer_var, u_in_fn, u_out_fn, advance)
+
+
+def integrate_interface_coupled(
+    md: MathDescription,
+    geometry: InterfaceCoupledGeometry,
+    *,
+    t_final: float,
+    dt_initial: float | None = None,
+    rtol: float = 1.0e-6,
+    atol: float = 1.0e-8,
+) -> InterfaceCoupledResult:
+    """Integrate an interface-coupled two-bulk system to `t_final` with the **method-of-lines**
+    integrator (PETSc TS adaptive BDF) — the same strategy as the FV solver and the single-mesh
+    `integrate_discrete_problem`, here over the blocked two-mesh system. The coupling flux may be
+    nonlinear in the unknowns (the inner Newton handles it); the time error is ≈0 (adaptive).
+
+    The residual `F(state, rate) = M·rate + K·state − coupling` is a 2-block form over the two
+    compartment spaces (all integrals on the parent: region `dx`, interface `dS`); the exact Jacobian
+    `σ ∂F/∂rate + ∂F/∂state` comes from `ufl.derivative`. Both are assembled monolithically
+    (`kind="mpi"`) so the TS state is one blocked vector. **Key:** the TS Jacobian holder is built by
+    `assemble_matrix` (the full coupling sparsity, including the off-diagonal blocks), not
+    `create_matrix` — a mismatched preallocation breaks the in-callback copy.
+    """
+
+    validate_or_raise(md)
+    equations = {eq.subdomain: eq for eq in md.equations if isinstance(eq, TemplateEquation)}
+    inner_eq = _require_equation(equations, geometry.inner_subdomain)
+    outer_eq = _require_equation(equations, geometry.outer_subdomain)
+    inner_var, outer_var = inner_eq.variable, outer_eq.variable
+
+    parent = geometry.parent_mesh
+    tdim = parent.topology.dim
+    parent.topology.create_connectivity(tdim - 1, tdim)
+    V_in = fem.functionspace(geometry.inner_mesh, ("Lagrange", 1))
+    V_out = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1))
+    u_in_fn = fem.Function(V_in, name=inner_var)
+    u_out_fn = fem.Function(V_out, name=outer_var)
+    rate_in, rate_out = fem.Function(V_in), fem.Function(V_out)
+    n_in = V_in.dofmap.index_map.size_local
+    n_out = V_out.dofmap.index_map.size_local
+
+    w_in, w_out = ufl.TestFunction(V_in), ufl.TestFunction(V_out)
+    dx_in = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.inner_region_tag)
+    dx_out = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.outer_region_tag)
+    ds_int = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)(geometry.interface_tag)
+    emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
+
+    params = _const_params(md, parent)
+    ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
+    d_in = compile_expression(parse(inner_eq.terms["diffusion"]), ctx)
+    d_out = compile_expression(parse(outer_eq.terms["diffusion"]), ctx)
+
+    # The MOL residual uses the state Functions directly (so the coupling can be nonlinear), with the
+    # time derivative ċ = rate (a Function TS supplies). One block per compartment, all on the parent.
+    residual = [
+        rate_in * w_in * dx_in + d_in * ufl.dot(ufl.grad(u_in_fn), ufl.grad(w_in)) * dx_in,
+        rate_out * w_out * dx_out + d_out * ufl.dot(ufl.grad(u_out_fn), ufl.grad(w_out)) * dx_out,
+    ]
+    state_of = {inner_var: u_in_fn, outer_var: u_out_fn}
+    test_of = {inner_var: w_in, outer_var: w_out}
+    index_of = {inner_var: 0, outer_var: 1}
+    for bc in md.boundary_conditions:
+        if isinstance(bc, BCInterfaceValueEquality):
+            raise NotImplementedError(
+                "the interface value-equality constraint (u = k·partner) is a follow-up increment; "
+                "this integrator handles flux-balance interface BCs"
+            )
+        if not isinstance(bc, BCInterfaceFluxBalance) or bc.boundary != geometry.interface:
+            continue
+        coupling_ctx = CompileContext(
+            parent,
+            {
+                bc.variable: membrane_trace(state_of[bc.variable]),
+                bc.partner_variable: membrane_trace(state_of[bc.partner_variable]),
+                "geom.x": ufl.SpatialCoordinate(parent),
+                **params,
+            },
+        )
+        flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
+        residual[index_of[bc.variable]] += -flux * membrane_trace(test_of[bc.variable]) * ds_int
+        residual[index_of[bc.partner_variable]] += flux * membrane_trace(test_of[bc.partner_variable]) * ds_int
+
+    states, rates = [u_in_fn, u_out_fn], [rate_in, rate_out]
+    shift = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # the TS σ
+    jacobian = [
+        [shift * ufl.derivative(residual[i], rates[j]) + ufl.derivative(residual[i], states[j]) for j in range(2)]
+        for i in range(2)
+    ]
+    residual_form = fem.form(residual, entity_maps=emaps)
+    jacobian_form = fem.form(jacobian, entity_maps=emaps)
+
+    _interpolate_ic(u_in_fn, inner_eq, ctx)
+    _interpolate_ic(u_out_fn, outer_eq, ctx)
+
+    def unpack(x: PETSc.Vec) -> None:
+        u_in_fn.x.array[:n_in] = x.array_r[:n_in]
+        u_out_fn.x.array[:n_out] = x.array_r[n_in : n_in + n_out]
+        u_in_fn.x.scatter_forward()
+        u_out_fn.x.scatter_forward()
+
+    def evaluate_residual(_ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+        unpack(x)
+        rate_in.x.array[:n_in] = x_dot.array_r[:n_in]
+        rate_out.x.array[:n_out] = x_dot.array_r[n_in : n_in + n_out]
+        b = petsc.assemble_vector(residual_form, kind="mpi")
+        b.copy(result)
+        b.destroy()
+
+    def evaluate_jacobian(
+        _ts: PETSc.TS, _t: float, x: PETSc.Vec, _x_dot: PETSc.Vec, sigma: float, mat: PETSc.Mat, _pre: PETSc.Mat
+    ) -> None:
+        unpack(x)
+        shift.value = sigma
+        fresh = petsc.assemble_matrix(jacobian_form, kind="mpi")
+        fresh.assemble()
+        fresh.copy(mat, structure=PETSc.Mat.Structure.SAME_NONZERO_PATTERN)
+        mat.assemble()
+        fresh.destroy()
+
+    ts = PETSc.TS().create(parent.comm)
+    ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
+    ts.setType("bdf")
+    state_vec = petsc.create_vector([V_in, V_out], kind="mpi")
+    state_vec.array[:n_in] = u_in_fn.x.array[:n_in]
+    state_vec.array[n_in : n_in + n_out] = u_out_fn.x.array[:n_out]
+    # Jacobian holder via assemble_matrix → the full coupling sparsity (off-diagonal blocks present).
+    jacobian_matrix = petsc.assemble_matrix(jacobian_form, kind="mpi")
+    jacobian_matrix.assemble()
+    ts.setIFunction(evaluate_residual, state_vec.duplicate())
+    ts.setIJacobian(evaluate_jacobian, jacobian_matrix, jacobian_matrix)
+    # A small startup step (BDF cold-start, see the single-mesh integrator) then adapt.
+    ts.setTimeStep(dt_initial if dt_initial is not None else t_final / 1.0e4)
+    ts.setMaxTime(t_final)
+    ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
+    ts.setTolerances(atol, rtol)
+    ts.setMaxSNESFailures(-1)
+    snes = ts.getSNES()
+    snes.setUseEW(False)
+    snes.getKSP().setType("preonly")
+    snes.getKSP().getPC().setType("lu")
+    ts.setFromOptions()
+
+    ts.solve(state_vec)
+    unpack(state_vec)
+    steps, final_time = ts.getStepNumber(), float(ts.getTime())
+    for obj in (ts, state_vec, jacobian_matrix):
+        obj.destroy()
+    return InterfaceCoupledResult(u_in_fn, u_out_fn, steps, final_time)
 
 
 def _require_equation(equations: dict[str, TemplateEquation], subdomain: str) -> TemplateEquation:

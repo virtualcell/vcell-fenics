@@ -26,7 +26,9 @@ from dolfinx import fem
 
 from vcell_fenics.backend import (
     InterfaceCoupledGeometry,
+    InterfaceCoupledResult,
     assemble_interface_coupled,
+    integrate_interface_coupled,
     make_two_bulk_membrane_geometry,
     membrane_trace,
 )
@@ -126,7 +128,9 @@ def test_membrane_trace_picks_the_own_side_value_not_an_average() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _flux_balance_model(*, permeability: str = "P", inner_ic: str = "1.0", outer_ic: str = "0.0") -> MathDescription:
+def _flux_balance_model(
+    *, permeability: str = "P", diffusion: str = "0.1", inner_ic: str = "1.0", outer_ic: str = "0.0"
+) -> MathDescription:
     """Two bulk diffusion species coupled by a permeability flux P·(u_out − u_in) at the membrane."""
     return MathDescription(
         geometry="cell",
@@ -139,7 +143,7 @@ def _flux_balance_model(*, permeability: str = "P", inner_ic: str = "1.0", outer
                 variable="u_in",
                 subdomain="cyto",
                 temporality="time_dependent",
-                terms={"diffusion": "0.1"},
+                terms={"diffusion": diffusion},
                 initial_condition=inner_ic,
             ),
             TemplateEquation(
@@ -147,7 +151,7 @@ def _flux_balance_model(*, permeability: str = "P", inner_ic: str = "1.0", outer
                 variable="u_out",
                 subdomain="ext",
                 temporality="time_dependent",
-                terms={"diffusion": "0.1"},
+                terms={"diffusion": diffusion},
                 initial_condition=outer_ic,
             ),
         ],
@@ -210,3 +214,53 @@ def test_value_equality_constraint_is_rejected() -> None:
     )
     with pytest.raises(NotImplementedError, match="value-equality"):
         assemble_interface_coupled(model, _geometry(h=0.2), dt=0.05)
+
+
+# ---------------------------------------------------------------------------
+# Method-of-lines coupled integrator (PETSc TS, blocked two-mesh).
+# ---------------------------------------------------------------------------
+
+
+def _inner_mean(result: InterfaceCoupledResult) -> float:
+    inner = result.inner
+    mesh = inner.function_space.mesh
+    area = fem.assemble_scalar(fem.form(fem.Constant(mesh, 1.0) * ufl.dx(domain=mesh)))
+    value = fem.assemble_scalar(fem.form(inner * ufl.dx(domain=mesh)))
+    return float((value / area).real)
+
+
+def test_mol_equilibrates_and_conserves_mass() -> None:
+    # The method-of-lines coupled integrator (PETSc TS adaptive BDF over the blocked two-mesh system)
+    # reaches the same analytic mass-weighted equilibrium as backward Euler, with mass conserved — the
+    # blocked TS residual + Jacobian (and the assemble_matrix-holder / SAME_NONZERO_PATTERN fix) is
+    # consistent. MOL is the accurate path (≈0 time error) and handles a nonlinear coupling flux.
+    inner_radius, outer_radius = 0.5, 1.0
+    geometry = _geometry(inner_radius=inner_radius, outer_radius=outer_radius, h=0.09)
+    area_in = math.pi * inner_radius**2
+    area_out = math.pi * (outer_radius**2 - inner_radius**2)
+    u_eq = area_in / (area_in + area_out)
+
+    # Fast intra-compartment diffusion (D=1, diffusion time r²/D ≈ 0.25) so the system equilibrates by
+    # t = 4 (~16 diffusion times) — keeps the test cheap while reaching the steady state.
+    result = integrate_interface_coupled(_flux_balance_model(diffusion="1.0"), geometry, t_final=4.0)
+    assert result.time == pytest.approx(4.0)
+    assert _inner_mean(result) == pytest.approx(u_eq, rel=2e-2)
+    assert result.total_mass() == pytest.approx(area_in, rel=2e-2)  # init mass = 1·A_in, conserved
+
+
+def test_mol_transient_is_second_order_in_space() -> None:
+    # A convergence study at the FEniCSx layer: the MID-TRANSIENT functional (mean u_in at t=0.3, before
+    # equilibrium — sensitive to the coupling rate AND the spatial profile, not just the steady state)
+    # self-converges at the P1 rate O(h²) under mesh refinement. Successive differences shrink ~4× per
+    # halving. (The definitive cross-solver check is a joint-refinement study vs VCell's FV solver — a
+    # follow-up; this pins the spatial order without an external reference.)
+    model = replace(_flux_balance_model(), parameters=[ParameterConstant(name="P", value=1.0)])
+
+    def functional(h: float) -> float:
+        return _inner_mean(integrate_interface_coupled(model, _geometry(h=h), t_final=0.3))
+
+    values = [functional(h) for h in (0.16, 0.08, 0.04)]
+    diff_coarse = abs(values[0] - values[1])
+    diff_fine = abs(values[1] - values[2])
+    order = math.log2(diff_coarse / diff_fine)
+    assert 1.6 <= order <= 2.4, f"expected ~2nd-order spatial self-convergence, got {order:.2f} ({values})"
