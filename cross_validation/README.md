@@ -71,6 +71,28 @@ A full multi-compartment numerical FV-vs-ours *field* comparison would additiona
 to apply a one-sided flux on an internal interface (solve one compartment's submesh with the membrane
 as its boundary) — a later increment; this check confirms the sign at the import boundary.
 
+## Convergence study — is the ~2 % a bug or discretization?
+
+`convergence_fv.py` (FV at 64²/128²/256²) + `convergence_study.py` (dev env) check that the FV↔FEniCSx
+difference is discretization, not a hidden bug — and surfaced one. The FV solver uses MOL (≈0 time
+error); our comparison scripts use **backward Euler**, a first-order time error.
+
+- **Time-error isolation** (FV 128², fixed mesh, t=0.5): relL2(FEM,FV) falls `1.46 % → 0.69 % → 0.30 %
+  → 0.11 %` as `dt` halves `0.02 → 0.0025` — first-order, heading to 0. Most of the original ~2 % was
+  *our backward-Euler time step*, not a spatial mismatch.
+- **Joint refinement** (small-`dt` BE, `h = 2/N`): relL2(FEM,FV) stays ~0.1–0.2 %, while FEM and FV
+  *each* differ from the **free-space analytic** by ~5 % (at t=0.5) — by nearly identical amounts. That
+  gap is **wall reflection** (bounded domain vs infinite-domain analytic), physics both solvers
+  capture. The two solvers agree with each other 30–50× better than with the analytic ⇒ no hidden bug.
+- **MOL bug found here, fixed:** our method-of-lines integrator (PETSc `TSBDF`) over-diffused by a
+  constant effective-time offset ≈ the *initial* step (`dt_initial=0.05 → eff t 0.555`; target 0.5) — a
+  **BDF order-1 cold-start** error the adaptive controller does not catch (tightening `rtol` does
+  nothing; Crank–Nicolson is correct; `final_time` is exact, so not an overshoot). **Fixed** by a small
+  default startup step (`t_final/1e4`) and by `run()` no longer forwarding the backward-Euler-sized
+  `config.dt` as the seed: MOL now lands on `t_final` (eff t `0.5008`) and is the *most* accurate
+  integrator (0.10 % vs FV-128, beating backward Euler's time error). Regression:
+  `test_backend_reaction_diffusion.py::test_bdf_cold_start_does_not_over_diffuse`.
+
 ## Time-dependent membrane flux (field comparison)
 
 `membrane_timeflux_fv.py` (stage 1, pyvcell env) + `compare_membrane_timeflux.py` (stage 2, dev env)
