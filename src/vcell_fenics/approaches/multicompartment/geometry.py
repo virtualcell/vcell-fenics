@@ -108,7 +108,12 @@ class CellExtracellular:
     """A concentric two-compartment cell. `parent_mesh` is the union mesh; `cell_tags`
     marks each cell's compartment (CYTOSOL_TAG / EXTRACELLULAR_TAG) and `facet_tags`
     marks the membrane and outer curves (MEMBRANE_TAG / OUTER_TAG). The three
-    submeshes are the per-compartment bulk meshes and the codim-1 membrane."""
+    submeshes are the per-compartment bulk meshes and the codim-1 membrane.
+
+    The three `*_entity_map`s relate each submesh's entities back to `parent_mesh`, so a
+    cross-mesh form integrated on the parent's interface facets can pull in functions from
+    all three submeshes (the two-sided-trace substrate — a membrane equation referencing
+    `trace(u_cytosol)` and `trace(u_extracellular)` at once)."""
 
     parent_mesh: dmesh.Mesh
     cell_tags: dmesh.MeshTags
@@ -116,6 +121,9 @@ class CellExtracellular:
     cytosol_mesh: dmesh.Mesh
     extracellular_mesh: dmesh.Mesh
     membrane_mesh: dmesh.Mesh
+    cytosol_entity_map: dmesh.EntityMap
+    extracellular_entity_map: dmesh.EntityMap
+    membrane_entity_map: dmesh.EntityMap
     inner_radius: float
     outer_radius: float
 
@@ -172,9 +180,9 @@ def create_cell_extracellular(
     assert facet_tags is not None, "model_to_mesh returned no facet tags for the membrane / outer groups"
 
     tdim = parent.topology.dim
-    cytosol_mesh, *_ = dmesh.create_submesh(parent, tdim, cell_tags.find(CYTOSOL_TAG))
-    extracellular_mesh, *_ = dmesh.create_submesh(parent, tdim, cell_tags.find(EXTRACELLULAR_TAG))
-    membrane_mesh, *_ = dmesh.create_submesh(parent, tdim - 1, facet_tags.find(MEMBRANE_TAG))
+    cytosol_mesh, cytosol_emap, *_ = dmesh.create_submesh(parent, tdim, cell_tags.find(CYTOSOL_TAG))
+    extracellular_mesh, extracellular_emap, *_ = dmesh.create_submesh(parent, tdim, cell_tags.find(EXTRACELLULAR_TAG))
+    membrane_mesh, membrane_emap, *_ = dmesh.create_submesh(parent, tdim - 1, facet_tags.find(MEMBRANE_TAG))
 
     return CellExtracellular(
         parent_mesh=parent,
@@ -183,6 +191,9 @@ def create_cell_extracellular(
         cytosol_mesh=cytosol_mesh,
         extracellular_mesh=extracellular_mesh,
         membrane_mesh=membrane_mesh,
+        cytosol_entity_map=cytosol_emap,
+        extracellular_entity_map=extracellular_emap,
+        membrane_entity_map=membrane_emap,
         inner_radius=inner_radius,
         outer_radius=outer_radius,
     )

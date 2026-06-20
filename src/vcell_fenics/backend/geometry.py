@@ -28,6 +28,7 @@ from vcell_fenics.approaches.multicompartment.geometry import (
 )
 from vcell_fenics.approaches.static.geometry import BOUNDARY_TAG, create_disk
 from vcell_fenics.approaches.submesh.geometry import create_disk_with_membrane
+from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.formalism.schema import MathDescription, SubdomainKind
 from vcell_fenics.formalism.validator import Diagnostic
 
@@ -234,6 +235,121 @@ def make_extracellular_annulus_geometry(
         surface_mesh=annulus.membrane_mesh,
         entity_map=annulus.membrane_entity_map,
         facet_tags=annulus.facet_tags,
+        interface=interface,
+        interface_tag=MEMBRANE_TAG,
+        outer=outer,
+        outer_tag=OUTER_TAG,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Two-bulk + membrane coupled geometry (§1.6.2 / §1.6.6, two-sided traces).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InterfaceCoupledGeometry:
+    """A coupled geometry for **two volume compartments meeting at a membrane** — the substrate
+    for cross-compartment coupling where a term needs the traces of *both* bulk variables at the
+    interface (a membrane equation in `trace(u_inner)` and `trace(u_outer)`, or one side's interface
+    flux referencing the partner trace; §1.6.2 / §1.6.6).
+
+    Unlike `CoupledGeometry` (one bulk + one surface-on-its-boundary, a single entity map), this
+    carries **both** bulk submeshes, the membrane submesh, and the three `EntityMap`s relating them to
+    `parent_mesh`. The membrane is an *interior* facet of the parent (a cell on each side), so a
+    cross-mesh coupling form is integrated on the parent's interface facets via `dS` (not the bulk's
+    `ds`), with all three submesh functions pulled in through their maps. The orientation-robust trace
+    of a bulk variable on the membrane is `membrane_trace(f)` = `f('+') + f('-')` — each bulk function
+    is non-zero only on its own side of the interface, so the sum picks its value regardless of which
+    side the arbitrary `dS` restriction labels `+`."""
+
+    name: str
+    inner_subdomain: str
+    outer_subdomain: str
+    membrane_subdomain: str
+    inner_mesh: Mesh
+    outer_mesh: Mesh
+    membrane_mesh: Mesh
+    inner_entity_map: EntityMap
+    outer_entity_map: EntityMap
+    membrane_entity_map: EntityMap
+    parent_mesh: Mesh
+    cell_tags: MeshTags
+    facet_tags: MeshTags
+    interface: str
+    interface_tag: int
+    outer: str
+    outer_tag: int
+
+    def kind_of(self, subdomain: str) -> SubdomainKind | None:
+        if subdomain in (self.inner_subdomain, self.outer_subdomain):
+            return "volume"
+        if subdomain == self.membrane_subdomain:
+            return "surface"
+        return None
+
+    def mesh_of(self, subdomain: str) -> Mesh:
+        meshes = {
+            self.inner_subdomain: self.inner_mesh,
+            self.outer_subdomain: self.outer_mesh,
+            self.membrane_subdomain: self.membrane_mesh,
+        }
+        try:
+            return meshes[subdomain]
+        except KeyError:
+            raise KeyError(f"{subdomain!r} is not a subdomain of coupled geometry {self.name!r}") from None
+
+    def entity_map_of(self, subdomain: str) -> EntityMap:
+        maps = {
+            self.inner_subdomain: self.inner_entity_map,
+            self.outer_subdomain: self.outer_entity_map,
+            self.membrane_subdomain: self.membrane_entity_map,
+        }
+        return maps[subdomain]
+
+
+def membrane_trace(bulk_function: UflExpr) -> UflExpr:
+    """The trace of a bulk variable on the interior membrane, written orientation-robustly for the
+    parent `dS` measure: `bulk_function('+') + bulk_function('-')`. A bulk function is non-zero only on
+    its own side of the interface (its entity map covers only that side's parent cells), so exactly one
+    restriction is its real value and the other is zero — the sum is the trace regardless of which side
+    `dS` happens to label `+`."""
+
+    return bulk_function("+") + bulk_function("-")
+
+
+def make_two_bulk_membrane_geometry(
+    name: str,
+    *,
+    inner: str,
+    outer_subdomain: str,
+    membrane: str,
+    interface: str,
+    outer: str,
+    inner_radius: float = 0.5,
+    outer_radius: float = 1.0,
+    h: float = 0.1,
+) -> InterfaceCoupledGeometry:
+    """A concentric two-compartment cell as an `InterfaceCoupledGeometry`: an inner-disk `inner`
+    compartment and outer-annulus `outer_subdomain`, meeting at the `membrane`. `interface` labels the
+    shared membrane curve, `outer` the external (reservoir) circle. Carries the three entity maps so a
+    coupling form can reference both bulk traces at the membrane."""
+
+    cell = create_cell_extracellular(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
+    return InterfaceCoupledGeometry(
+        name=name,
+        inner_subdomain=inner,
+        outer_subdomain=outer_subdomain,
+        membrane_subdomain=membrane,
+        inner_mesh=cell.cytosol_mesh,
+        outer_mesh=cell.extracellular_mesh,
+        membrane_mesh=cell.membrane_mesh,
+        inner_entity_map=cell.cytosol_entity_map,
+        outer_entity_map=cell.extracellular_entity_map,
+        membrane_entity_map=cell.membrane_entity_map,
+        parent_mesh=cell.parent_mesh,
+        cell_tags=cell.cell_tags,
+        facet_tags=cell.facet_tags,
         interface=interface,
         interface_tag=MEMBRANE_TAG,
         outer=outer,
