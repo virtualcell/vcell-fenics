@@ -15,6 +15,7 @@ would otherwise drag in that closure).
 """
 
 from vcell_fenics.pyvcell_bridge.expression import translate_expression
+from vcell_fenics.pyvcell_bridge.frame import normalize_to_geometry_frame
 from vcell_fenics.pyvcell_bridge.geometry import import_geometry
 from vcell_fenics.pyvcell_bridge.importer import (
     ImportResult,
@@ -31,5 +32,6 @@ __all__ = [
     "import_geometry",
     "import_math_description",
     "import_model",
+    "normalize_to_geometry_frame",
     "translate_expression",
 ]
