@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--This biomodel was generated in VCML Version unknown-->
+<vcml xmlns="http://sourceforge.net/projects/vcell/vcml" Version="unknown">
+  <BioModel Name="MembraneTimeFlux">
+    <Model Name="timeflux">
+      <Compound Name="u">
+        <Annotation>u</Annotation>
+      </Compound>
+      <Feature Name="cyto" />
+      <Feature Name="ext" />
+      <Membrane MembraneVoltage="V_mem" Name="mem" />
+      <LocalizedCompound Name="u" CompoundRef="u" Structure="cyto" OverrideName="true" />
+      <SimpleReaction Structure="mem" Name="influx" Reversible="true" FluxOption="MolecularOnly">
+        <Product LocalizedCompoundRef="u" Stoichiometry="1" />
+        <Kinetics KineticsType="GeneralKinetics">
+          <Parameter Name="J" Role="reaction rate" Unit="molecules.um-2.s-1">(100.0 * exp(( - 2.0 * t)))</Parameter>
+          <Parameter Name="I" Role="inward current density" Unit="pA.um-2">0.0</Parameter>
+          <Parameter Name="netValence" Role="net charge valence" Unit="1">1.0</Parameter>
+        </Kinetics>
+      </SimpleReaction>
+      <Diagram Name="cyto" Structure="cyto" />
+      <Diagram Name="ext" Structure="ext" />
+      <Diagram Name="mem" Structure="mem" />
+      <ModelUnitSystem VolumeSubstanceUnit="uM.um3" MembraneSubstanceUnit="molecules" LumpedReactionSubstanceUnit="molecules" VolumeUnit="um3" AreaUnit="um2" LengthUnit="um" TimeUnit="s" />
+    </Model>
+    <SimulationSpec Name="cellApp" Stochastic="false" UseConcentration="true" SpringSaLaD="false" RuleBased="false" MassConservationModelReduction="true" InsufficientIterations="false" InsufficientMaxMolecules="false" CharacteristicSize="0.0040545730590820315">
+      <NetworkConstraints RbmMaxIteration="1" RbmMaxMoleculesPerSpecies="10" RbmSpeciesLimit="800" RbmReactionsLimit="2500" />
+      <Annotation />
+      <Geometry Name="cell" Dimension="2">
+        <Extent X="2.0" Y="2.0" Z="1.0" />
+        <Origin X="-1.0" Y="-1.0" Z="0.0" />
+        <SubVolume Name="cytosol_dom" Handle="0" Type="Analytical">
+          <AnalyticExpression>((pow((x - 0.0),2.0) + pow((y - 0.0),2.0) + pow((z - 0.0),2.0)) &lt; pow(0.5,2.0))</AnalyticExpression>
+        </SubVolume>
+        <SubVolume Name="extra_dom" Handle="1" Type="Analytical">
+          <AnalyticExpression>1.0</AnalyticExpression>
+        </SubVolume>
+        <SurfaceClass Name="membrane_dom" SubVolume1Ref="cytosol_dom" SubVolume2Ref="extra_dom" />
+        <SurfaceDescription NumSamplesX="101" NumSamplesY="101" NumSamplesZ="1" CutoffFrequency="0.3">
+          <VolumeRegion Name="extra_dom0" RegionID="0" SubVolume="extra_dom" Size="3.2204" Unit="um2" />
+          <VolumeRegion Name="cytosol_dom1" RegionID="1" SubVolume="cytosol_dom" Size="0.7796000000000001" Unit="um2" />
+          <MembraneRegion Name="membrane_extra_dom0_cytosol_dom1" VolumeRegion1="cytosol_dom1" VolumeRegion2="extra_dom0" Size="3.136575861138519" Unit="um" />
+        </SurfaceDescription>
+      </Geometry>
+      <GeometryContext>
+        <FeatureMapping Feature="cyto" GeometryClass="cytosol_dom" SubVolume="cytosol_dom" Size="1.0" VolumePerUnitVolume="1.0">
+          <BoundariesTypes Xm="Flux" Xp="Flux" Ym="Flux" Yp="Flux" Zm="Flux" Zp="Flux" />
+        </FeatureMapping>
+        <FeatureMapping Feature="ext" GeometryClass="extra_dom" SubVolume="extra_dom" Size="1.0" VolumePerUnitVolume="1.0">
+          <BoundariesTypes Xm="Flux" Xp="Flux" Ym="Flux" Yp="Flux" Zm="Flux" Zp="Flux" />
+        </FeatureMapping>
+        <MembraneMapping Membrane="mem" Size="1.0" AreaPerUnitArea="1.0" CalculateVoltage="false" SpecificCapacitance="0.1" InitialVoltage="0.0" GeometryClass="membrane_dom">
+          <BoundariesTypes Xm="Flux" Xp="Flux" Ym="Flux" Yp="Flux" Zm="Flux" Zp="Flux" />
+        </MembraneMapping>
+      </GeometryContext>
+      <ReactionContext>
+        <LocalizedCompoundSpec LocalizedCompoundRef="u" ForceConstant="false" WellMixed="false" ForceContinuous="false">
+          <InitialConcentration>0.0</InitialConcentration>
+          <Diffusion>0.1</Diffusion>
+          <Boundaries Xm="0.0" Xp="0.0" Ym="0.0" Yp="0.0" Zm="0.0" Zp="0.0" />
+        </LocalizedCompoundSpec>
+        <ReactionSpec ReactionStepRef="influx" ReactionMapping="included" />
+      </ReactionContext>
+      <MathDescription Name="dummy_math_description">
+        <Constant Name="_F_">96485.3321</Constant>
+        <Constant Name="_F_nmol_">9.64853321E-5</Constant>
+        <Constant Name="_K_GHK_">1.0E-9</Constant>
+        <Constant Name="_N_pmol_">6.02214179E11</Constant>
+        <Constant Name="_PI_">3.141592653589793</Constant>
+        <Constant Name="_R_">8314.46261815</Constant>
+        <Constant Name="_T_">300.0</Constant>
+        <Constant Name="AreaPerUnitArea_mem">1.0</Constant>
+        <Constant Name="K_millivolts_per_volt">1000.0</Constant>
+        <Constant Name="KMOLE">0.001660538783162726</Constant>
+        <Constant Name="netValence">1.0</Constant>
+        <Constant Name="u_boundaryXm">0.0</Constant>
+        <Constant Name="u_boundaryXp">0.0</Constant>
+        <Constant Name="u_boundaryYm">0.0</Constant>
+        <Constant Name="u_boundaryYp">0.0</Constant>
+        <Constant Name="u_boundaryZm">0.0</Constant>
+        <Constant Name="u_boundaryZp">0.0</Constant>
+        <Constant Name="u_diffusionRate">0.1</Constant>
+        <Constant Name="u_init_uM">0.0</Constant>
+        <Constant Name="UnitFactor_uM_um3_molecules_neg_1">(1.0 * pow(KMOLE,1.0))</Constant>
+        <Constant Name="V_mem">0.0</Constant>
+        <Constant Name="VolumePerUnitVolume_cyto">1.0</Constant>
+        <Constant Name="VolumePerUnitVolume_ext">1.0</Constant>
+        <VolumeVariable Name="u" Domain="cytosol_dom" />
+        <Function Name="J_influx" Domain="membrane_dom">(100.0 * exp(( - 2.0 * t)))</Function>
+        <Function Name="KFlux_mem_cyto" Domain="membrane_dom">(AreaPerUnitArea_mem / VolumePerUnitVolume_cyto)</Function>
+        <Function Name="Size_cyto" Domain="cytosol_dom">(VolumePerUnitVolume_cyto * vcRegionVolume('cytosol_dom'))</Function>
+        <Function Name="Size_ext" Domain="extra_dom">(VolumePerUnitVolume_ext * vcRegionVolume('extra_dom'))</Function>
+        <Function Name="Size_mem" Domain="membrane_dom">(AreaPerUnitArea_mem * vcRegionArea('membrane_dom'))</Function>
+        <Function Name="sobj_cytosol_dom1_extra_dom0_size" Domain="membrane_dom">vcRegionArea('membrane_dom')</Function>
+        <Function Name="vobj_cytosol_dom1_size" Domain="cytosol_dom">vcRegionVolume('cytosol_dom')</Function>
+        <Function Name="vobj_extra_dom0_size" Domain="extra_dom">vcRegionVolume('extra_dom')</Function>
+        <CompartmentSubDomain Name="cytosol_dom">
+          <BoundaryType Boundary="Xm" Type="Flux" />
+          <BoundaryType Boundary="Xp" Type="Flux" />
+          <BoundaryType Boundary="Ym" Type="Flux" />
+          <BoundaryType Boundary="Yp" Type="Flux" />
+          <BoundaryType Boundary="Zm" Type="Value" />
+          <BoundaryType Boundary="Zp" Type="Value" />
+          <PdeEquation Name="u" SolutionType="Unknown">
+            <Boundaries Xm="u_boundaryXm" Xp="u_boundaryXp" Ym="u_boundaryYm" Yp="u_boundaryYp" Zm="u_boundaryZm" Zp="u_boundaryZp" />
+            <Rate>0.0</Rate>
+            <Diffusion>u_diffusionRate</Diffusion>
+            <Initial>u_init_uM</Initial>
+          </PdeEquation>
+        </CompartmentSubDomain>
+        <CompartmentSubDomain Name="extra_dom">
+          <BoundaryType Boundary="Xm" Type="Flux" />
+          <BoundaryType Boundary="Xp" Type="Flux" />
+          <BoundaryType Boundary="Ym" Type="Flux" />
+          <BoundaryType Boundary="Yp" Type="Flux" />
+          <BoundaryType Boundary="Zm" Type="Value" />
+          <BoundaryType Boundary="Zp" Type="Value" />
+        </CompartmentSubDomain>
+        <MembraneSubDomain Name="membrane_dom" InsideCompartment="cytosol_dom" OutsideCompartment="extra_dom">
+          <BoundaryType Boundary="Xm" Type="Value" />
+          <BoundaryType Boundary="Xp" Type="Value" />
+          <BoundaryType Boundary="Ym" Type="Value" />
+          <BoundaryType Boundary="Yp" Type="Value" />
+          <BoundaryType Boundary="Zm" Type="Value" />
+          <BoundaryType Boundary="Zp" Type="Value" />
+          <JumpCondition Name="u">
+            <InFlux>(KFlux_mem_cyto * UnitFactor_uM_um3_molecules_neg_1 * J_influx)</InFlux>
+            <OutFlux>0.0</OutFlux>
+          </JumpCondition>
+        </MembraneSubDomain>
+      </MathDescription>
+      <Simulation Name="sim">
+        <SolverTaskDescription TaskType="Unsteady" UseSymbolicJacobian="false" Solver="Sundials Stiff PDE Solver (Variable Time Step)">
+          <TimeBound StartTime="0.0" EndTime="1.0" />
+          <TimeStep DefaultTime="0.05" MinTime="0.0" MaxTime="0.1" />
+          <ErrorTolerance Absolut="1.0E-9" Relative="1.0E-7" />
+          <OutputOptions OutputTimeStep="0.1" />
+          <SundialsSolverOptions>
+            <maxOrderAdvection>2</maxOrderAdvection>
+          </SundialsSolverOptions>
+          <NumberProcessors>1</NumberProcessors>
+        </SolverTaskDescription>
+        <MathOverrides />
+        <MeshSpecification>
+          <Size X="128" Y="128" Z="1" />
+        </MeshSpecification>
+      </Simulation>
+      <SpatialObjects>
+        <SpatialObject Name="vobj_extra_dom0" Type="Volume" subVolume="extra_dom" regionId="0">
+          <QuantityCategoryList>
+            <QuantityCategory Name="VolumeCentroid" Enabled="false" />
+            <QuantityCategory Name="InteriorVelocity" Enabled="false" />
+            <QuantityCategory Name="VolumeRegionSize" Enabled="true" />
+          </QuantityCategoryList>
+        </SpatialObject>
+        <SpatialObject Name="vobj_cytosol_dom1" Type="Volume" subVolume="cytosol_dom" regionId="1">
+          <QuantityCategoryList>
+            <QuantityCategory Name="VolumeCentroid" Enabled="false" />
+            <QuantityCategory Name="InteriorVelocity" Enabled="false" />
+            <QuantityCategory Name="VolumeRegionSize" Enabled="true" />
+          </QuantityCategoryList>
+        </SpatialObject>
+        <SpatialObject Name="sobj_cytosol_dom1_extra_dom0" Type="Surface" subVolumeInside="cytosol_dom" regionIdInside="1" subVolumeOutside="extra_dom" regionIdOutside="0">
+          <QuantityCategoryList>
+            <QuantityCategory Name="SurfaceNormal" Enabled="false" />
+            <QuantityCategory Name="SurfaceVelocity" Enabled="false" />
+            <QuantityCategory Name="DistanceToSurface" Enabled="false" />
+            <QuantityCategory Name="DirectionToSurface" Enabled="false" />
+            <QuantityCategory Name="SurfaceSize" Enabled="true" />
+          </QuantityCategoryList>
+        </SpatialObject>
+      </SpatialObjects>
+      <MicroscopeMeasurement Name="fluor">
+        <ConvolutionKernel Type="ProjectionZKernel" />
+      </MicroscopeMeasurement>
+    </SimulationSpec>
+    <pathwayModel>
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:bp="http://www.biopax.org/release/biopax-level3.owl#" version="3.0" />
+    </pathwayModel>
+    <relationshipModel>
+      <RMNS version="3.0" />
+    </relationshipModel>
+    <vcmetadata>
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" />
+      <nonrdfAnnotationList>
+        <nonrdfAnnotation vcid="Species(u)">
+          <freetext>u</freetext>
+        </nonrdfAnnotation>
+      </nonrdfAnnotationList>
+      <uriBindingList />
+    </vcmetadata>
+  </BioModel>
+</vcml>
