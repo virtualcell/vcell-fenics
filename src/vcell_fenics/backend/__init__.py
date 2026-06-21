@@ -56,7 +56,9 @@ from vcell_fenics.backend.geometry import (
 from vcell_fenics.backend.interface_coupled import (
     InterfaceCoupledProblem,
     InterfaceCoupledResult,
+    MembraneCoupledProblem,
     assemble_interface_coupled,
+    assemble_membrane_coupled,
     integrate_interface_coupled,
 )
 from vcell_fenics.backend.multiphase import (
@@ -96,6 +98,7 @@ __all__ = [
     "InterfaceCoupledGeometry",
     "InterfaceCoupledProblem",
     "InterfaceCoupledResult",
+    "MembraneCoupledProblem",
     "MeshQualityError",
     "NonlinearTermError",
     "SolveError",
@@ -109,6 +112,7 @@ __all__ = [
     "assemble",
     "assemble_coupled",
     "assemble_interface_coupled",
+    "assemble_membrane_coupled",
     "assemble_unknown_motion",
     "assemble_weak_form",
     "cahn_hilliard_free_energy",
