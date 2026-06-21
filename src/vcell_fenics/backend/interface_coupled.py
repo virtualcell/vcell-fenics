@@ -22,17 +22,17 @@ Cross-mesh mechanics (the `InterfaceCoupledGeometry` substrate):
   into the block bilinear form via `ufl.extract_blocks`/`ufl.lhs`, with no lagging. The two-block
   system over `MixedFunctionSpace(V_inner, V_outer)` is solved each step.
 
-This module also carries `assemble_membrane_coupled` — the three-field extension where a **surface
-species on the membrane couples to both bulks** (the receptor–ligand cell): two bulk species plus one
-membrane species, coupled by interface fluxes referencing the surface density and a surface reaction
-referencing the bulk traces (backward Euler, semi-implicit binding).
+This module also carries `assemble_membrane_coupled` — the three-region extension where **surface
+species on the membrane couple to both bulks** (the receptor–ligand cell): any number of bulk species
+per compartment and any number of surface species, coupled by interface fluxes referencing the surface
+density and surface reactions referencing the bulk traces (backward Euler, fully-lagged/IMEX binding).
 
 Scope: two-bulk interface fluxes have both backward-Euler (`assemble_interface_coupled`) and
-method-of-lines (`integrate_interface_coupled`) solvers; the three-field membrane coupling is backward
+method-of-lines (`integrate_interface_coupled`) solvers; the three-region membrane coupling is backward
 Euler only so far. Follow-ups: a method-of-lines membrane-coupled integrator (nonlinear binding via
-Newton), a moving membrane (which makes the `ρ ∇_Γ·v_Γ` dilution term mandatory), multiple surface
-species, `BCInterfaceValueEquality` (the `u_inner = k·u_outer` constraint), and a reservoir Dirichlet
-on the outer boundary.
+Newton, for stiff kinetics), a moving membrane (which makes the `ρ ∇_Γ·v_Γ` dilution term mandatory),
+in-bulk reactions, `BCInterfaceValueEquality` (the `u_inner = k·u_outer` constraint), and a reservoir
+Dirichlet on the outer boundary.
 """
 
 from __future__ import annotations
@@ -117,14 +117,15 @@ def _mass_of(field: fem.Function) -> float:
 
 @dataclass
 class MembraneCoupledProblem:
-    """A three-field bulk–surface–bulk coupled solve, advanced by backward-Euler `step()`s: two bulk
-    species (one per compartment) and one membrane species, coupled at the shared membrane. `inner` /
-    `outer` are the per-compartment bulk `Function`s; `membrane` is the surface `Function`. `_advance`
-    is the per-step closure the assembler builds over the three-block system."""
+    """A three-region bulk–surface–bulk coupled solve, advanced by backward-Euler `step()`s: any number
+    of bulk species in each of two compartments and any number of surface species on their shared
+    membrane, all coupled at the membrane. `inner` / `outer` / `membrane` are the per-region **vector**
+    `Function`s whose components are the species named in `inner_species` / `outer_species` /
+    `membrane_species` order. `_advance` is the per-step closure over the three-block system."""
 
-    inner_var: str
-    outer_var: str
-    membrane_var: str
+    inner_species: list[str]
+    outer_species: list[str]
+    membrane_species: list[str]
     inner: fem.Function
     outer: fem.Function
     membrane: fem.Function
@@ -133,16 +134,41 @@ class MembraneCoupledProblem:
     def step(self) -> None:
         self._advance()
 
-    def field(self, name: str) -> fem.Function:
-        for var, fn in ((self.inner_var, self.inner), (self.outer_var, self.outer), (self.membrane_var, self.membrane)):
-            if name == var:
-                return fn
+    def _locate(self, name: str) -> tuple[fem.Function, int]:
+        """The (vector `Function`, component index) holding species `name`."""
+        for fn, names in (
+            (self.inner, self.inner_species),
+            (self.outer, self.outer_species),
+            (self.membrane, self.membrane_species),
+        ):
+            if name in names:
+                return fn, names.index(name)
         raise KeyError(f"{name!r} is not a variable of this membrane-coupled problem")
 
+    def field(self, name: str) -> fem.Function:
+        """A scalar `Function` holding the named species' values (a copy, for inspection)."""
+        fn, k = self._locate(name)
+        space = fn.function_space
+        if space.dofmap.index_map_bs == 1:  # a one-component region has no `sub(0)` to collapse
+            out = fem.Function(fem.functionspace(space.mesh, ("Lagrange", 1)), name=name)
+            out.x.array[:] = fn.x.array
+            return out
+        sub_space, dofs = space.sub(k).collapse()
+        out = fem.Function(sub_space, name=name)
+        out.x.array[:] = fn.x.array[dofs]
+        return out
+
+    def mass(self, name: str) -> float:
+        """∫ of the named species over its own mesh."""
+        fn, k = self._locate(name)
+        mesh = fn.function_space.mesh
+        local = fem.assemble_scalar(fem.form(fn[k] * ufl.dx(domain=mesh)))
+        return float(mesh.comm.allreduce(local.real, op=MPI.SUM))
+
     def total_mass(self) -> float:
-        """∫ over both compartments **and** the membrane — the conserved quantity when binding only
-        moves ligand between the bulk-free and membrane-bound pools (no external flux, no degradation)."""
-        return _mass_of(self.inner) + _mass_of(self.outer) + _mass_of(self.membrane)
+        """∫ of every species over all three meshes — the conserved total for a single-substance model
+        (free in each compartment + membrane-bound), since binding only moves it between those pools."""
+        return sum(self.mass(n) for n in (*self.inner_species, *self.outer_species, *self.membrane_species))
 
 
 def _const_params(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
@@ -403,61 +429,71 @@ def integrate_interface_coupled(
 def assemble_membrane_coupled(
     md: MathDescription, geometry: InterfaceCoupledGeometry, *, dt: float
 ) -> MembraneCoupledProblem:
-    """Assemble a backward-Euler step for a **membrane species coupled to both bulk compartments**: two
-    bulk diffusion species (one per compartment) plus one surface species on their shared membrane, the
-    full receptor–ligand cell (the §1.6.5/§1.6.6 composable pattern at an *internal* interface).
+    """Assemble a backward-Euler step for **membrane species coupled to both bulk compartments**: any
+    number of bulk diffusion species in each compartment plus any number of surface species on their
+    shared membrane, the full receptor–ligand cell (the §1.6.5/§1.6.6 composable pattern at an *internal*
+    interface). Each region is one **vector** P1 space whose components are its species.
 
-    The three fields couple at the membrane two ways: (1) the surface species' reaction `source` may
-    reference either bulk's interface trace (binding captures ligand from a side), and (2) each bulk's
-    `BCInterfaceFlux` may reference the surface species directly (the capture flux depends on the bound
-    density). The coupling is treated **semi-implicitly** (the §1.6.6 scheme): in the membrane-facet
-    coupling terms each bulk variable is *lagged* (its previous-step interface trace) while the surface
-    species stays *implicit* (trial) — so a binding reaction, linear in the surface density, lands in the
-    block bilinear and the fast surface kinetics are unconditionally stable. **Mass conservation is the
-    modeller's responsibility, and is exact** when the bulk fluxes are written as the negation of the
-    surface source's production (the same lagged expression appears in both, so the membrane-facet
-    integrals cancel termwise): total ligand (bulk-free in both compartments + membrane-bound) is then
-    conserved to round-off.
+    The regions couple at the membrane two ways: (1) each surface species' reaction `source` may
+    reference the interface trace of any bulk species in either compartment, and (2) each bulk species'
+    `BCInterfaceFlux` may reference any same-compartment trace, any adjacent-compartment trace, and any
+    membrane species. Every species is in scope via a single symbol table mapping its name to its
+    interface representation. The coupling is **fully lagged (IMEX)**: in the membrane-facet terms the
+    bulk traces *and* the surface species use previous-step values, so the binding rate is an explicit
+    RHS forcing. The SAME rate is subtracted from the bulk(s) (each flux, tested on its own side) and
+    added to the surface (each source, tested on the membrane), so the membrane-facet integrals cancel
+    termwise and **mass is conserved to round-off** when the modeller writes the fluxes as the negation
+    of the matching production. (Keeping the surface species implicit would need an off-diagonal
+    bulk-test × membrane-trial block on `dS` — a codim-0 × codim-1 coupling that leaks the cancellation;
+    full lagging sidesteps it, at the cost of conditional stability for stiff binding, which the
+    method-of-lines follow-up lifts with a Newton solve.)
 
-    Cross-mesh mechanics (extending the two-bulk substrate, §1.6.2): the per-compartment mass + diffusion
-    are integrated on the parent's region cells (`dx(parent)(region)`) and the surface mass + **intrinsic
-    surface** diffusion on the membrane submesh's own `dx` (its `grad` is the tangential ∇_Γ). The
-    coupling — surface reaction and bulk fluxes — is integrated on the parent's interior interface facets
-    (`dS`), where each bulk trace is the orientation-robust `membrane_trace(u) = u('+') + u('-')` and the
-    membrane function is restricted `ρ('+')` (single-valued on the facet). All three submesh functions are
-    pulled into the parent integrals through their `EntityMap`s; the three-block system over
-    `MixedFunctionSpace(V_inner, V_outer, V_membrane)` is solved each step.
+    Cross-mesh mechanics (extending the two-bulk substrate, §1.6.2): each species' mass + diffusion is
+    integrated on the parent's region cells (`dx(parent)(region)`, per component, with its own diffusion)
+    and the surface mass + **intrinsic surface** diffusion on the membrane submesh's own `dx` (its `grad`
+    is the tangential ∇_Γ). The coupling is integrated on the parent's interior interface facets (`dS`),
+    where each bulk trace is the orientation-robust `membrane_trace(u) = u('+') + u('-')` and a membrane
+    species is restricted `ρ('+')` (single-valued on the facet). All three submesh functions are pulled
+    into the parent integrals through their `EntityMap`s; with the coupling fully lagged the block matrix
+    is the static, block-diagonal mass + diffusion (factorised once) and only the RHS changes each step.
 
     Scope (this increment): static membrane (**no dilution term** — `ρ ∇_Γ·v_Γ` is zero without motion;
-    it becomes mandatory the moment the membrane moves), one surface species, backward Euler. The
-    fully-implicit method-of-lines integrator (nonlinear binding via Newton) and a moving membrane are
-    follow-ups.
+    it becomes mandatory the moment the membrane moves), bulk species are diffusion-only (no in-bulk
+    reaction), backward Euler. The fully-implicit method-of-lines integrator (nonlinear binding via
+    Newton) and a moving membrane are follow-ups.
     """
 
     validate_or_raise(md)
-    equations = {eq.subdomain: eq for eq in md.equations if isinstance(eq, TemplateEquation)}
-    inner_eq = _require_equation(equations, geometry.inner_subdomain)
-    outer_eq = _require_equation(equations, geometry.outer_subdomain)
-    membrane_eq = equations.get(geometry.membrane_subdomain)
-    if membrane_eq is None:
+    template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
+    inner_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.inner_subdomain]
+    outer_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.outer_subdomain]
+    membrane_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.membrane_subdomain]
+    if not inner_eqs or not outer_eqs:
+        raise NotImplementedError("membrane coupling needs at least one bulk species in each compartment")
+    if not membrane_eqs:
         raise NotImplementedError(
             f"membrane coupling needs a surface equation on the membrane subdomain "
             f"{geometry.membrane_subdomain!r} (the species coupled to both bulks)"
         )
-    inner_var, outer_var, membrane_var = inner_eq.variable, outer_eq.variable, membrane_eq.variable
+    for eq in (*inner_eqs, *outer_eqs):
+        if "diffusion" not in eq.terms:
+            raise NotImplementedError(f"membrane coupling needs a bulk diffusion equation for {eq.variable!r}")
+    inner_species = [eq.variable for eq in inner_eqs]
+    outer_species = [eq.variable for eq in outer_eqs]
+    membrane_species = [eq.variable for eq in membrane_eqs]
 
     parent = geometry.parent_mesh
     tdim = parent.topology.dim
     parent.topology.create_connectivity(tdim - 1, tdim)
-    V_in = fem.functionspace(geometry.inner_mesh, ("Lagrange", 1))
-    V_out = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1))
-    V_mem = fem.functionspace(geometry.membrane_mesh, ("Lagrange", 1))
-    u_in_fn, u_in_prev = fem.Function(V_in, name=inner_var), fem.Function(V_in)
-    u_out_fn, u_out_prev = fem.Function(V_out, name=outer_var), fem.Function(V_out)
-    rho_fn, rho_prev = fem.Function(V_mem, name=membrane_var), fem.Function(V_mem)
-    n_in = V_in.dofmap.index_map.size_local
-    n_out = V_out.dofmap.index_map.size_local
-    n_mem = V_mem.dofmap.index_map.size_local
+    V_in = fem.functionspace(geometry.inner_mesh, ("Lagrange", 1, (len(inner_species),)))
+    V_out = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1, (len(outer_species),)))
+    V_mem = fem.functionspace(geometry.membrane_mesh, ("Lagrange", 1, (len(membrane_species),)))
+    u_in_fn, u_in_prev = fem.Function(V_in), fem.Function(V_in)
+    u_out_fn, u_out_prev = fem.Function(V_out), fem.Function(V_out)
+    rho_fn, rho_prev = fem.Function(V_mem), fem.Function(V_mem)
+    n_in = V_in.dofmap.index_map.size_local * V_in.dofmap.index_map_bs
+    n_out = V_out.dofmap.index_map.size_local * V_out.dofmap.index_map_bs
+    n_mem = V_mem.dofmap.index_map.size_local * V_mem.dofmap.index_map_bs
 
     mixed = ufl.MixedFunctionSpace(V_in, V_out, V_mem)
     u_in, u_out, rho = ufl.TrialFunctions(mixed)
@@ -466,8 +502,8 @@ def assemble_membrane_coupled(
     dx_out = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.outer_region_tag)
     dx_mem = ufl.Measure("dx", domain=geometry.membrane_mesh)
     # A fixed quadrature degree on the interface so the shared binding rate integrates *identically*
-    # whether it is tested by the bulk side's `membrane_trace(w_in)` (the flux) or the surface side's
-    # `w_ρ('+')` (the source) — the termwise cancellation that gives mass conservation relies on both
+    # whether it is tested by the bulk side's `membrane_trace(w_in[k])` (a flux) or the surface side's
+    # `w_ρ[k]('+')` (a source) — the termwise cancellation that gives mass conservation relies on both
     # forcing integrals using the same quadrature.
     ds_int = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags, metadata={"quadrature_degree": 4})(
         geometry.interface_tag
@@ -476,66 +512,82 @@ def assemble_membrane_coupled(
 
     params = _const_params(md, parent)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
-    d_in = compile_expression(parse(inner_eq.terms["diffusion"]), ctx)
-    d_out = compile_expression(parse(outer_eq.terms["diffusion"]), ctx)
-
-    # A single block form cannot mix two meshes (each block needs one integration domain), so the
-    # residual splits into a LOCAL part (per-mesh mass + diffusion) and a COUPLING part (all on the
-    # parent's interface `dS`). With fully-lagged coupling (below) the bilinear form is the
-    # block-diagonal local part — static — so the matrix assembles + factorises once and only the RHS
-    # changes each step.
-    #
-    # Local: per-compartment mass + diffusion (region dx) and the surface mass + intrinsic surface
-    # diffusion (membrane dx — `grad` on the submesh is the tangential ∇_Γ). Static membrane, so no
-    # dilution term ρ ∇_Γ·v_Γ.
-    f_local = (u_in - u_in_prev) * w_in * dx_in + dt * d_in * ufl.dot(ufl.grad(u_in), ufl.grad(w_in)) * dx_in
-    f_local += (u_out - u_out_prev) * w_out * dx_out + dt * d_out * ufl.dot(ufl.grad(u_out), ufl.grad(w_out)) * dx_out
-    f_local += (rho - rho_prev) * w_rho * dx_mem
     surf_params = _const_params(md, geometry.membrane_mesh)
     surf_ctx = CompileContext(
         geometry.membrane_mesh, {"geom.x": ufl.SpatialCoordinate(geometry.membrane_mesh), **surf_params}
     )
-    diffusion_str = membrane_eq.terms.get("diffusion")
-    if diffusion_str is not None:
-        d_mem = compile_expression(parse(diffusion_str), surf_ctx)
-        f_local += dt * d_mem * ufl.dot(ufl.grad(rho), ufl.grad(w_rho)) * dx_mem
+
+    # A single block form cannot mix two meshes (each block needs one integration domain), so the
+    # residual splits into a LOCAL part (per-mesh mass + diffusion) and a COUPLING part (all on the
+    # parent's interface `dS`). With the coupling fully lagged (below) the bilinear form is the
+    # block-diagonal local part — static — so the matrix assembles + factorises once and only the RHS
+    # changes each step.
+    #
+    # Local: each species' mass + diffusion, per component with its own diffusivity. Bulk species on the
+    # parent region cells; surface species on the membrane submesh (`grad` there is the tangential ∇_Γ).
+    # Static membrane, so no dilution term ρ ∇_Γ·v_Γ.
+    terms: list[UflExpr] = []
+    for trial, prev, test, eqs, dx, region_ctx in (
+        (u_in, u_in_prev, w_in, inner_eqs, dx_in, ctx),
+        (u_out, u_out_prev, w_out, outer_eqs, dx_out, ctx),
+        (rho, rho_prev, w_rho, membrane_eqs, dx_mem, surf_ctx),
+    ):
+        for k, eq in enumerate(eqs):
+            terms.append((trial[k] - prev[k]) * test[k] * dx)
+            diffusion = eq.terms.get("diffusion")
+            if diffusion is not None:
+                d = compile_expression(parse(diffusion), region_ctx)
+                terms.append(dt * d * ufl.dot(ufl.grad(trial[k]), ufl.grad(test[k])) * dx)
+    f_local = sum(terms[1:], terms[0])
 
     # Coupling on the parent's interior interface facets, **fully lagged (IMEX)**: the bulk interface
-    # traces *and* the surface species use previous-step values, so the binding rate is an explicit RHS
-    # forcing. The SAME rate is subtracted from the bulk(s) (each `BCInterfaceFlux`, tested on its own
-    # side) and added to the surface (`source`, tested on the membrane), so the membrane-facet integrals
-    # cancel termwise and total ligand is conserved to round-off. (Keeping the surface species implicit
-    # would need an off-diagonal bulk-test × membrane-trial block on `dS` — a codim-0 × codim-1 coupling
-    # that leaks the cancellation; full lagging sidesteps it, at the cost of conditional stability for
-    # stiff binding. The method-of-lines follow-up lifts that with a Newton solve.) The three test-only
-    # structural zeros keep all three test blocks present in the coupling RHS even if a model couples one bulk.
+    # traces *and* the surface species use previous-step values, so each binding rate is an explicit RHS
+    # forcing. The SAME rate is subtracted from a bulk (its `BCInterfaceFlux`, tested on its own side)
+    # and added to the surface (a `source`, tested on the membrane), so the membrane-facet integrals
+    # cancel termwise and mass is conserved to round-off. (Keeping the surface species implicit would
+    # need an off-diagonal bulk-test × membrane-trial block on `dS` — a codim-0 × codim-1 coupling that
+    # leaks the cancellation; full lagging sidesteps it, at the cost of conditional stability for stiff
+    # binding. The method-of-lines follow-up lifts that with a Newton solve.)
+    #
+    # One symbol table puts EVERY species in scope at the membrane: each bulk species as its lagged
+    # interface trace, each membrane species as its lagged '+' restriction. Any flux or source then
+    # references any same-compartment, adjacent-compartment, or membrane species by name.
+    coupling_symbols: dict[str, UflExpr] = {"geom.x": ufl.SpatialCoordinate(parent), **params}
+    for k, name in enumerate(inner_species):
+        coupling_symbols[name] = membrane_trace(u_in_prev[k])
+    for k, name in enumerate(outer_species):
+        coupling_symbols[name] = membrane_trace(u_out_prev[k])
+    for k, name in enumerate(membrane_species):
+        coupling_symbols[name] = rho_prev[k]("+")
+    coupling_ctx = CompileContext(parent, coupling_symbols)
+
+    # Test-only structural zeros keep every test block present in the coupling RHS, even for a species
+    # that no flux/source happens to touch (else `extract_blocks` yields a None block).
     zero = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]
-    f_coupling = zero * (membrane_trace(w_in) + membrane_trace(w_out) + w_rho("+")) * ds_int
-    coupling_ctx = CompileContext(
-        parent,
-        {
-            inner_var: membrane_trace(u_in_prev),
-            outer_var: membrane_trace(u_out_prev),
-            membrane_var: rho_prev("+"),
-            "geom.x": ufl.SpatialCoordinate(parent),
-            **params,
-        },
+    structural = (
+        [membrane_trace(w_in[k]) for k in range(len(inner_species))]
+        + [membrane_trace(w_out[k]) for k in range(len(outer_species))]
+        + [w_rho[k]("+") for k in range(len(membrane_species))]
     )
-    source = membrane_eq.terms.get("source")
-    if source is not None:
-        reaction = compile_expression(parse(source), coupling_ctx)  # ∂ρ/∂t = … + reaction
-        f_coupling += -dt * reaction * w_rho("+") * ds_int
-    test_of = {inner_var: w_in, outer_var: w_out}
+    f_coupling = zero * sum(structural[1:], structural[0]) * ds_int
+    for k, eq in enumerate(membrane_eqs):
+        source = eq.terms.get("source")
+        if source is not None:
+            reaction = compile_expression(parse(source), coupling_ctx)  # ∂ρ_k/∂t = … + reaction
+            f_coupling += -dt * reaction * w_rho[k]("+") * ds_int
+    bulk_test_of = {name: (w_in, k) for k, name in enumerate(inner_species)}
+    bulk_test_of.update({name: (w_out, k) for k, name in enumerate(outer_species)})
     for bc in md.boundary_conditions:
         if isinstance(bc, BCInterfaceValueEquality):
             raise NotImplementedError(
                 "the interface value-equality constraint (u = k·u_adjacent) is a follow-up increment; "
                 "this assembler handles single-sided interface flux BCs"
             )
-        if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in test_of:
+        if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in bulk_test_of:
             continue
         flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
-        f_coupling += -dt * flux * membrane_trace(test_of[bc.variable]) * ds_int
+        test, k = bulk_test_of[bc.variable]
+        f_coupling += -dt * flux * membrane_trace(test[k]) * ds_int
 
     a_form = fem.form(ufl.extract_blocks(ufl.lhs(f_local)), entity_maps=emaps)  # block-diagonal, static
     rhs_local_form = fem.form(ufl.extract_blocks(ufl.rhs(f_local)), entity_maps=emaps)
@@ -547,9 +599,12 @@ def assemble_membrane_coupled(
     ksp.setType("preonly")
     ksp.getPC().setType("lu")
 
-    _interpolate_ic(u_in_fn, inner_eq, ctx)
-    _interpolate_ic(u_out_fn, outer_eq, ctx)
-    _interpolate_ic(rho_fn, membrane_eq, surf_ctx)
+    for fn, eqs, region_ctx in (
+        (u_in_fn, inner_eqs, ctx),
+        (u_out_fn, outer_eqs, ctx),
+        (rho_fn, membrane_eqs, surf_ctx),
+    ):
+        _interpolate_component_ics(fn, eqs, region_ctx)
     for fn, prev in ((u_in_fn, u_in_prev), (u_out_fn, u_out_prev), (rho_fn, rho_prev)):
         prev.x.array[:] = fn.x.array
     solution = matrix.createVecRight()
@@ -570,7 +625,7 @@ def assemble_membrane_coupled(
             prev.x.array[:] = fn.x.array
         rhs.destroy()
 
-    return MembraneCoupledProblem(inner_var, outer_var, membrane_var, u_in_fn, u_out_fn, rho_fn, advance)
+    return MembraneCoupledProblem(inner_species, outer_species, membrane_species, u_in_fn, u_out_fn, rho_fn, advance)
 
 
 def _require_equation(equations: dict[str, TemplateEquation], subdomain: str) -> TemplateEquation:
@@ -592,3 +647,19 @@ def _interpolate_ic(field: fem.Function, equation: TemplateEquation, ctx: Compil
         field.function_space.element.interpolation_points,
     )
     field.interpolate(expression)
+
+
+def _interpolate_component_ics(field: fem.Function, equations: list[TemplateEquation], ctx: CompileContext) -> None:
+    """Interpolate the equations' initial conditions into the vector `field` (its components are the
+    equations' variables, in order; a missing IC defaults to 0). The whole vector is interpolated at
+    once via `as_vector` — a one-component space has no `sub(0)` to interpolate into — with the
+    expressions recompiled on `field`'s own mesh (reusing the parameter constants from `ctx`)."""
+    mesh = field.function_space.mesh
+    local_ctx = CompileContext(
+        mesh, {"geom.x": ufl.SpatialCoordinate(mesh), **{k: v for k, v in ctx.symbols.items() if k != "geom.x"}}
+    )
+    components = [
+        compile_expression(parse(eq.initial_condition), local_ctx) if eq.initial_condition is not None else ufl.zero()
+        for eq in equations
+    ]
+    field.interpolate(fem.Expression(ufl.as_vector(components), field.function_space.element.interpolation_points))
