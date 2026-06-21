@@ -35,9 +35,12 @@ real ``pyvcell.vcml.models_math`` classes without a runtime import of pyvcell.
 
 **Boundary conditions.** Per-face box BCs (§2.6.2) map ``Flux``→Neumann / ``Value``→Dirichlet
 (with VCell's default-Dirichlet-from-IC rule), needing the geometry ``dim`` to tell which of the
-six faces are real. Membrane ``JumpCondition``s map to Neumann BCs on the bulk species at the
-membrane (the composable bulk-surface pattern §1.6.5), with cross-membrane volume-species
-references wrapped in ``trace(·)``.
+six faces are real. Membrane ``JumpCondition``s map to a single-sided ``interface_flux`` on the bulk
+species when the membrane is between two modelled compartments (the §1.6.2 internal interface, solved
+by the coupled backend), or a ``Neumann`` BC when the other side is an unmodelled reservoir (the
+composable bulk-surface pattern §1.6.5). In **both** the jump-condition fluxes and the membrane PDE
+**reactions**, cross-membrane volume-species references are wrapped in ``trace(·)`` — a bulk variable
+is only defined on the membrane through its trace (§1.6.5/§1.8.2); membrane species stay direct.
 
 **Loud rejection.** Constructs that would change the math if dropped are never dropped silently:
 stochastic / particle dynamics (§2.6.3) raise :class:`VcellImportError`; a boundary-bearing PDE
@@ -142,13 +145,15 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim:
         _reject_stochastic(compartment)
         subdomains.append(Subdomain(name=compartment.name, kind="volume", motion=MotionNone()))
         _translate_subdomain_equations(
-            compartment, "volume", variables, equations, boundary_conditions, resolution, dim
+            compartment, "volume", variables, equations, boundary_conditions, resolution, dim, bulk_species
         )
 
     for membrane in vcml.membrane_subdomains:
         _reject_stochastic(membrane)
         subdomains.append(Subdomain(name=membrane.name, kind="surface", motion=MotionNone()))
-        _translate_subdomain_equations(membrane, "surface", variables, equations, boundary_conditions, resolution, dim)
+        _translate_subdomain_equations(
+            membrane, "surface", variables, equations, boundary_conditions, resolution, dim, bulk_species
+        )
         boundary_conditions.extend(_translate_jump_conditions(membrane, bulk_species, species_compartments, resolution))
 
     parameters = _translate_parameters(vcml, resolution)
@@ -214,16 +219,23 @@ def _translate_subdomain_equations(
     boundary_conditions: list[BoundaryCondition],
     res: FunctionResolution,
     dim: int | None,
+    bulk_species: set[str],
 ) -> None:
     """Append the variables + template equations for one subdomain's PDEs and ODEs (inlining
-    variable-referencing functions into each expression), plus the per-face boundary conditions."""
+    variable-referencing functions into each expression), plus the per-face boundary conditions.
+
+    On a **surface** (membrane) subdomain a reaction may reference a volume species adjacent to the
+    membrane; a bulk variable is only defined on the membrane through its trace, so its references are
+    wrapped in ``trace(·)`` (§1.6.5/§1.8.2) — the same wrapping the jump-condition fluxes get. Volume
+    equations reference their own species directly and are left untouched."""
 
     pde_template = "bulk_radv_diff" if kind == "volume" else "surface_pde_with_dilution"
 
     def expr(raw: str | None) -> str | None:
         if raw is None:
             return None
-        return translate_expression(res.inline(raw) or "")
+        translated = translate_expression(res.inline(raw) or "")
+        return _trace_wrap(translated, bulk_species) if kind == "surface" else translated
 
     for pde in subdomain.pde_equations:
         boundary_conditions.extend(_translate_boundaries(pde, subdomain, kind, expr, dim))
