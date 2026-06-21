@@ -83,14 +83,20 @@ def _author(mesh: tuple[int, int, int]) -> Biomodel:
 
 
 def main() -> None:
-    # Dump the lowered geometry once (mesh size is a simulation setting, not part of the geometry).
-    geometry = VcmlReader.biomodel_from_str(to_vcml_str(_author((64, 64, 1)))).applications[0].geometry
+    # Dump the lowered geometry AND math once (mesh size is a simulation setting, not part of either).
+    # The dev side imports both — the coupled jump conditions route to a BCInterfaceFluxBalance.
+    app = VcmlReader.biomodel_from_str(to_vcml_str(_author((64, 64, 1)))).applications[0]
     (_CV / "coupled_perm_geom.yaml").write_text(
         yaml.safe_dump(
-            geometry.model_dump(
+            app.geometry.model_dump(
                 mode="json", exclude_none=True, exclude_defaults=True, exclude={"image": {"compressed_content"}}
             ),
             sort_keys=False,
+        )
+    )
+    (_CV / "coupled_perm_math.yaml").write_text(
+        yaml.safe_dump(
+            app.math_description.model_dump(mode="json", exclude_none=True, exclude_defaults=True), sort_keys=False
         )
     )
 

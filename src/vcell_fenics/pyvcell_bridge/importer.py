@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING
 
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
+    BCInterfaceFluxBalance,
     BCNeumann,
     BoundaryCondition,
     Equation,
@@ -465,28 +466,46 @@ def _translate_jump_conditions(
     species_compartments: dict[str, set[str]],
     res: FunctionResolution,
 ) -> list[BoundaryCondition]:
-    """Map a membrane's VCell ``JumpCondition``s to formalism Neumann BCs at the membrane (the
-    composable bulk-surface pattern, §1.6.5). A jump condition is two *independent* Neumann
-    conditions for one bulk species: ``in_flux`` on the inside compartment, ``out_flux`` on the
-    outside. Each flux may reference ``geom.x`` / ``sim.t``, membrane species (directly), and volume
-    species on either side (wrapped in ``trace(·)`` — a bulk variable is only defined on the membrane
-    through its trace). This is **not** ``interface_flux_balance`` (§1.6.2): the two sides are
-    specified independently, not as one implicit equal-and-opposite expression.
+    """Map a membrane's VCell ``JumpCondition``s to formalism interface BCs. A jump condition is a
+    per-side Neumann flux for a bulk species; the flux may reference ``geom.x`` / ``sim.t``, membrane
+    species (directly), and volume species on either side (wrapped in ``trace(·)`` — a bulk variable
+    is only defined on the membrane through its trace). Two patterns are distinguished by whether a
+    species' flux references a species from the **partner** compartment:
 
-    A species present in *both* compartments would need two BCs distinguished by side, which the
-    per-variable ``BCNeumann(variable, boundary)`` cannot express yet — that case is rejected."""
+    - **One-sided** (no partner reference) — a flux on a species that depends only on its own side
+      (an efflux ``−k·trace(u)``, a `g(t)` influx; §1.6.5). → ``BCNeumann`` on that side.
+    - **Coupled** (the flux references a partner-compartment species) — a species crossing the
+      membrane, e.g. a permeability flux ``P·(s_outer − s_inner)`` (§1.6.2). VCell emits the pair of
+      equal-and-opposite jump conditions (one per species); we collapse them into one
+      ``BCInterfaceFluxBalance(variable=<inner species>, partner_variable=<outer species>)`` carrying
+      the flux *into the inner side* — the partner's equal-and-opposite flux is implicit by mass
+      conservation (the coupled assembler applies it). This is exact when the two sides' volume
+      normalisations match (the usual membrane, ``VolumePerUnitVolume = 1``).
+
+    A species present in *both* compartments still raises (its per-side fluxes need a side-tagged BC)."""
 
     inside, outside = membrane.inside_compartment, membrane.outside_compartment
+    jc_by_species = {jc.name: jc for jc in membrane.jump_conditions}
 
     def flux_expr(raw: str | None) -> str | None:
         if raw is None or raw.strip() in ("0.0", "0"):
             return None  # the natural no-flux default
         return _trace_wrap(translate_expression(res.inline(raw) or ""), bulk_species)
 
+    def partner_species(raw: str | None, partner_compartment: str | None, own: str) -> set[str]:
+        """The bulk species referenced in `raw` that live in `partner_compartment` (the coupling)."""
+        if raw is None or partner_compartment is None:
+            return set()
+        return {
+            name
+            for name in _IDENT_RE.findall(res.inline(raw) or "")
+            if name in bulk_species and name != own and partner_compartment in species_compartments.get(name, set())
+        }
+
     bcs: list[BoundaryCondition] = []
+    handled: set[str] = set()
     for jc in membrane.jump_conditions:
-        inside_flux, outside_flux = flux_expr(jc.in_flux), flux_expr(jc.out_flux)
-        if inside_flux is None and outside_flux is None:
+        if jc.name in handled:
             continue
         compartments = species_compartments.get(jc.name, set())
         if len(compartments) > 1:
@@ -495,7 +514,36 @@ def _translate_jump_conditions(
                 f"both compartments, so its inside / outside membrane fluxes need per-side BCs — a "
                 f"follow-up increment (our BC identifies a variable by name + boundary only)"
             )
-        # The Neumann condition applies on the side where the species lives.
+        on_inside = inside in compartments
+        own_raw = jc.in_flux if on_inside else jc.out_flux
+        partners = partner_species(own_raw, outside if on_inside else inside, jc.name)
+
+        if partners:  # coupled cross-compartment flux → BCInterfaceFluxBalance
+            if len(partners) > 1:
+                raise NotImplementedError(
+                    f"jump condition for {jc.name!r} on membrane {membrane.name!r} couples to multiple "
+                    f"partner species {sorted(partners)}; the flux-balance BC pairs one variable with one partner"
+                )
+            partner = next(iter(partners))
+            # Key the flux-balance on the *inner* species, carrying the flux into the inner side (its
+            # in_flux), so the coupled assembler's sign convention (flux INTO `variable`) matches VCell.
+            inner = jc.name if on_inside else partner
+            partner_var = partner if on_inside else jc.name
+            inner_jc = jc_by_species.get(inner)
+            flux = flux_expr(inner_jc.in_flux) if inner_jc is not None else None
+            if flux is not None:
+                bcs.append(
+                    BCInterfaceFluxBalance(
+                        variable=inner, partner_variable=partner_var, boundary=membrane.name, expression=flux
+                    )
+                )
+            handled.update({jc.name, partner})
+            continue
+
+        # one-sided membrane flux → BCNeumann on the side where the species lives
+        inside_flux, outside_flux = flux_expr(jc.in_flux), flux_expr(jc.out_flux)
+        if inside_flux is None and outside_flux is None:
+            continue
         if inside in compartments:
             flux = inside_flux
         elif outside in compartments:
