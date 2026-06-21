@@ -218,6 +218,8 @@ def integrate_interface_coupled(
     dt_initial: float | None = None,
     rtol: float = 1.0e-6,
     atol: float = 1.0e-8,
+    ksp_type: str = "gmres",
+    pc_type: str = "ilu",
 ) -> InterfaceCoupledResult:
     """Integrate an interface-coupled two-bulk system to `t_final` with the **method-of-lines**
     integrator (PETSc TS adaptive BDF) — the same strategy as the FV solver and the single-mesh
@@ -346,8 +348,12 @@ def integrate_interface_coupled(
     ts.setMaxSNESFailures(-1)
     snes = ts.getSNES()
     snes.setUseEW(False)
-    snes.getKSP().setType("preonly")
-    snes.getKSP().getPC().setType("lu")
+    # Inner Newton linear solver. The default is a Krylov solve (GMRES) with an incomplete-LU (ILU)
+    # preconditioner — the scalable choice (≈O(N) memory and per-iteration cost), as the single-mesh
+    # MOL uses and as VCell's CVODE uses SPGMR+ILU. A *direct* sparse LU (`ksp_type="preonly"`,
+    # `pc_type="lu"`) is robust for small problems but its 2D fill-in does not scale to large meshes.
+    snes.getKSP().setType(ksp_type)
+    snes.getKSP().getPC().setType(pc_type)
     ts.setFromOptions()
 
     ts.solve(state_vec)

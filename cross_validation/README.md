@@ -140,3 +140,30 @@ O(h)), ending at **0.10 %** — the membrane solve converges to the FV solution,
 dip → 1024 recovery is grid/membrane-alignment noise: a 3-level sweep would misread it as a plateau,
 which is why the study runs **five** levels. The flux magnitude is independently exact — the total
 cytosol mass converges to the analytic `(perimeter)·∫g`.
+
+## Cross-compartment coupling (permeability flux, MOL on both solvers)
+
+`coupled_perm_fv.py` + `coupled_perm_convergence.py` are the definitive cross-solver check for the
+**bulk-bulk interface coupling** (`integrate_interface_coupled`). A disk-in-box cell with species
+`s_cyto` in the disk and `s_ext` in the surrounding box, coupled by a membrane **permeability flux**
+`J = P·(s_ext − s_cyto)` (a VCell flux reaction → exactly the flux-balance the coupled integrator
+solves; unit factor 1, so `P` maps straight across).
+
+This runs the **genuine pipeline** — the FEniCSx side imports VCell's *same* geometry and realizes it
+(`import_geometry → normalize_to_geometry_frame → realize_interface_coupled`), with no hand-built
+parallel mesh — and solves with the coupled method-of-lines integrator (PETSc TS, GMRES+ILU). Both
+solvers use MOL (≈0 time error), so refining both grids isolates the spatial discretization:
+
+| N | h | relL2(FEM, FV-N) | ratio |
+|------|------|------|------|
+| 64 | 0.031 | 1.63 % | — |
+| 128 | 0.016 | 0.64 % | 2.55× |
+| 256 | 0.008 | 0.35 % | 1.82× |
+
+~2×/level (first-order — the membrane is O(h) on each side: FV's stairstep and our body-fitted
+polygon) → the coupled solver converges to the FV solution, no hidden bug.
+
+**Scalability note.** The coupled MOL inner solve uses **GMRES + ILU** (scalable, like the single-mesh
+MOL and VCell's CVODE), not a direct LU — a direct sparse LU's 2D fill-in does not scale and made 256²
+hang. Even so, the body-fitted realize + coupled block solve cap the FEniCSx side at ~256² (~170k
+cells, ~5 min) here, where 512² is cheap for the FV grid; 3D would need AMG + MPI + AMR.

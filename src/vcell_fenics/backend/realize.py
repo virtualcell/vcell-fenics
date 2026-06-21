@@ -40,7 +40,12 @@ from mpi4py import MPI
 from numpy.typing import NDArray
 from skimage.measure import approximate_polygon, find_contours
 
-from vcell_fenics.backend.geometry import BoundaryGeometry, Geometry, SubdomainGeometry
+from vcell_fenics.backend.geometry import (
+    BoundaryGeometry,
+    Geometry,
+    InterfaceCoupledGeometry,
+    SubdomainGeometry,
+)
 from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAccess, Number, UnaryOp
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
 from vcell_fenics.formalism.parser import parse
@@ -130,17 +135,14 @@ def _lumped_mesh(comm: MPI.Comm) -> dmesh.Mesh:
 # -- dim 2: body-fitted, box-partitioned ----------------------------------------
 
 
-def _realize_2d(description: GeometryDescription, *, h: float, resolution: int | None, comm: MPI.Comm) -> Geometry:
+def _realize_2d_partition(
+    description: GeometryDescription, *, h: float, resolution: int | None, comm: MPI.Comm
+) -> tuple[dmesh.Mesh, _Tagging]:
+    """Body-fit and tag a multi-subvolume 2D geometry — the shared core of `_realize_2d` (which builds
+    a plain `Geometry`) and `realize_interface_coupled` (which builds an `InterfaceCoupledGeometry`,
+    retaining the submesh entity maps). Returns the parent mesh and its region / surface tagging."""
+
     subvolumes = description.subvolumes
-    if not subvolumes:
-        raise RealizationError(f"2D geometry {description.name!r} has no subvolumes to realize")
-    if len(subvolumes) == 1:
-        # A single subvolume is the whole bounding box (VCell's analytic background '1.0'): there is
-        # no other region for a complement to occupy, so the expression is moot. A plain structured
-        # box mesh, one region, the four box faces named — no internal contours or membranes. This is
-        # the single-compartment pattern make_disk_geometry uses: the box mesh *is* the subdomain
-        # mesh, so boundary facets index it directly (parent_mesh / tags stay None).
-        return _realize_2d_whole_box(description, h=h, comm=comm)
     # Every subvolume but the last (the background / complement) defines an analytic shape we
     # body-fit to; the background owns whatever is left.
     for subvolume in subvolumes[:-1]:
@@ -173,6 +175,22 @@ def _realize_2d(description: GeometryDescription, *, h: float, resolution: int |
     parent = _mesh_box_with_contours(contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name)
     fields = subvolume_implicit_functions(description)  # priority-resolved; classifies each cell
     tagging = _classify_and_tag(parent, description, fields, ox=ox, oy=oy, lx=lx, ly=ly)
+    return parent, tagging
+
+
+def _realize_2d(description: GeometryDescription, *, h: float, resolution: int | None, comm: MPI.Comm) -> Geometry:
+    subvolumes = description.subvolumes
+    if not subvolumes:
+        raise RealizationError(f"2D geometry {description.name!r} has no subvolumes to realize")
+    if len(subvolumes) == 1:
+        # A single subvolume is the whole bounding box (VCell's analytic background '1.0'): there is
+        # no other region for a complement to occupy, so the expression is moot. A plain structured
+        # box mesh, one region, the four box faces named — no internal contours or membranes. This is
+        # the single-compartment pattern make_disk_geometry uses: the box mesh *is* the subdomain
+        # mesh, so boundary facets index it directly (parent_mesh / tags stay None).
+        return _realize_2d_whole_box(description, h=h, comm=comm)
+
+    parent, tagging = _realize_2d_partition(description, h=h, resolution=resolution, comm=comm)
     tdim = parent.topology.dim
 
     subdomains: dict[str, SubdomainGeometry] = {}
@@ -203,6 +221,84 @@ def _realize_2d(description: GeometryDescription, *, h: float, resolution: int |
         parent_mesh=parent,
         cell_tags=tagging.cell_tags,
         facet_tags=tagging.facet_tags,
+    )
+
+
+def realize_interface_coupled(
+    description: GeometryDescription,
+    *,
+    inner_subdomain: str,
+    outer_subdomain: str,
+    membrane_subdomain: str,
+    interface: str,
+    h: float = 0.05,
+    resolution: int | None = None,
+    comm: MPI.Comm = MPI.COMM_WORLD,
+) -> InterfaceCoupledGeometry:
+    """Realize an *imported* two-compartment geometry into an :class:`InterfaceCoupledGeometry` — the
+    geometry the bulk-bulk coupled solver (`integrate_interface_coupled`) consumes. Unlike
+    :func:`realize` (which builds a plain `Geometry` and discards the submesh entity maps), this keeps
+    the three `EntityMap`s relating the two bulk submeshes and the membrane to the shared parent — the
+    cross-mesh substrate the coupling form needs (the two-sided trace on the parent's interface `dS`).
+
+    So a cross-compartment model goes end-to-end through the real pipeline: VCell geometry →
+    `import_geometry` → `realize_interface_coupled` → `integrate_interface_coupled`, with no
+    hand-built parallel mesh. `inner_subdomain` / `outer_subdomain` name the two volume compartments
+    and `membrane_subdomain` the SurfaceClass between them; `interface` is the boundary label.
+    """
+
+    expected = {inner_subdomain, outer_subdomain}
+    volume_names = {sv.name for sv in description.subvolumes}
+    if not expected <= volume_names:
+        raise RealizationError(
+            f"interface-coupled realization needs both compartments {sorted(expected)} among the "
+            f"geometry's subvolumes {sorted(volume_names)}"
+        )
+    surface = next((s for s in description.surfaces if s.name == membrane_subdomain), None)
+    if surface is None:
+        raise RealizationError(
+            f"interface-coupled realization needs a SurfaceClass named {membrane_subdomain!r}; "
+            f"geometry {description.name!r} has {[s.name for s in description.surfaces]}"
+        )
+
+    parent, tagging = _realize_2d_partition(description, h=h, resolution=resolution, comm=comm)
+    tdim = parent.topology.dim
+    interface_facets = tagging.facet_tags.find(tagging.surface_tags[membrane_subdomain])
+    if not interface_facets.size:
+        raise RealizationError(f"the membrane {membrane_subdomain!r} has no realized interface facets")
+
+    # Retain the entity maps (realize() discards them) — they relate each submesh to the parent so the
+    # coupling form on the parent's interface dS can pull in both bulk traces.
+    inner_mesh, inner_emap, *_ = dmesh.create_submesh(
+        parent, tdim, tagging.cell_tags.find(tagging.region_tags[inner_subdomain])
+    )
+    outer_mesh, outer_emap, *_ = dmesh.create_submesh(
+        parent, tdim, tagging.cell_tags.find(tagging.region_tags[outer_subdomain])
+    )
+    membrane_mesh, membrane_emap, *_ = dmesh.create_submesh(parent, tdim - 1, interface_facets)
+
+    return InterfaceCoupledGeometry(
+        name=description.name,
+        inner_subdomain=inner_subdomain,
+        outer_subdomain=outer_subdomain,
+        membrane_subdomain=membrane_subdomain,
+        inner_mesh=inner_mesh,
+        outer_mesh=outer_mesh,
+        membrane_mesh=membrane_mesh,
+        inner_entity_map=inner_emap,
+        outer_entity_map=outer_emap,
+        membrane_entity_map=membrane_emap,
+        parent_mesh=parent,
+        cell_tags=tagging.cell_tags,
+        facet_tags=tagging.facet_tags,
+        inner_region_tag=tagging.region_tags[inner_subdomain],
+        outer_region_tag=tagging.region_tags[outer_subdomain],
+        interface=interface,
+        interface_tag=tagging.surface_tags[membrane_subdomain],
+        # The external boundary is the box faces (no single reservoir circle); a reservoir Dirichlet
+        # there is a follow-up, and `integrate_interface_coupled` does not use these fields.
+        outer="exterior",
+        outer_tag=-1,
     )
 
 

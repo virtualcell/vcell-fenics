@@ -202,6 +202,63 @@ def test_2d_disk_in_box_partition() -> None:
     assert _measure(geom, "pm") == pytest.approx(2 * math.pi * radius, rel=0.05)
 
 
+def test_realize_interface_coupled_builds_a_solvable_coupled_geometry() -> None:
+    # The realize -> InterfaceCoupledGeometry bridge: the imported geometry is realized into the
+    # two-bulk + membrane object the coupled solver consumes, retaining the entity maps `realize`
+    # discards. A flux-balance permeability coupling then solves end-to-end on it, reaching the
+    # disk-in-box mass-weighted equilibrium u_eq = A_disk/A_box.
+    from vcell_fenics.backend import integrate_interface_coupled
+    from vcell_fenics.backend.realize import realize_interface_coupled
+    from vcell_fenics.formalism.schema import BCInterfaceFluxBalance, ParameterConstant
+
+    radius = 0.5
+    geometry = realize_interface_coupled(
+        _disk_in_box(radius),
+        inner_subdomain="cytosol",
+        outer_subdomain="extracellular",
+        membrane_subdomain="pm",
+        interface="pm",
+        h=0.1,
+    )
+    assert geometry.kind_of("cytosol") == "volume"
+    assert geometry.kind_of("pm") == "surface"
+    # The three entity maps relating the submeshes to the shared parent are retained.
+    for subdomain in ("cytosol", "extracellular"):
+        assert geometry.entity_map_of(subdomain) is not None
+
+    md = MathDescription(
+        geometry="cell",
+        subdomains=[Subdomain(name="cytosol", kind="volume"), Subdomain(name="extracellular", kind="volume")],
+        variables=[Variable(name="u", subdomain="cytosol"), Variable(name="v", subdomain="extracellular")],
+        parameters=[ParameterConstant(name="P", value=0.5)],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u",
+                subdomain="cytosol",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="v",
+                subdomain="extracellular",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="0.0",
+            ),
+        ],
+        boundary_conditions=[
+            BCInterfaceFluxBalance(variable="u", partner_variable="v", boundary="pm", expression="P * (v - u)")
+        ],
+    )
+    result = integrate_interface_coupled(md, geometry, t_final=4.0)
+    u_eq = (math.pi * radius**2) / 4.0  # A_disk / A_box (the box is 2x2 = 4)
+    assert result.inner.x.array.mean() == pytest.approx(u_eq, rel=5e-2)
+    assert result.outer.x.array.mean() == pytest.approx(u_eq, rel=5e-2)
+
+
 def test_2d_point_membership_agrees_across_predicate_rfunction_and_mesh() -> None:
     """Random points are classified inside/outside the cell by three independent representations —
     the original boolean predicate, the Rvachev implicit field's sign, and the realized gmsh mesh —
