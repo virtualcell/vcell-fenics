@@ -149,10 +149,12 @@ cytosol mass converges to the analytic `(perimeter)·∫g`.
 `J = P·(s_ext − s_cyto)` (a VCell flux reaction → exactly the flux-balance the coupled integrator
 solves; unit factor 1, so `P` maps straight across).
 
-This runs the **genuine pipeline** — the FEniCSx side imports VCell's *same* geometry and realizes it
-(`import_geometry → normalize_to_geometry_frame → realize_interface_coupled`), with no hand-built
-parallel mesh — and solves with the coupled method-of-lines integrator (PETSc TS, GMRES+ILU). Both
-solvers use MOL (≈0 time error), so refining both grids isolates the spatial discretization:
+This runs the **fully imported pipeline** — the FEniCSx side imports VCell's *same* geometry **and
+math** (`import_geometry` + `import_math_description`, where the coupled jump-condition pair routes to a
+`BCInterfaceFluxBalance`) → `normalize_to_geometry_frame` → `realize_interface_coupled`, with no
+hand-built parallel mesh or hand-written physics — and solves with the coupled method-of-lines
+integrator (PETSc TS, GMRES+ILU). Both solvers use MOL (≈0 time error), so refining both grids isolates
+the spatial discretization:
 
 | N | h | relL2(FEM, FV-N) | ratio |
 |------|------|------|------|

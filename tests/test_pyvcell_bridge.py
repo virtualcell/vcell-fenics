@@ -370,6 +370,42 @@ def test_jump_condition_preserves_vcell_flux_sign() -> None:
     assert not influx.expression.lstrip().startswith("-")
 
 
+def test_coupled_jump_conditions_become_an_interface_flux_balance() -> None:
+    # A species crossing the membrane — two species, one per compartment, whose fluxes reference each
+    # other (a permeability flux P·(s_ext − s_cyto)) — is a cross-compartment coupling (§1.6.2). VCell
+    # emits the equal-and-opposite jump-condition pair; the importer collapses them into ONE
+    # BCInterfaceFluxBalance keyed on the inner species, carrying the flux into the inner side.
+    vcml = vm.MathDescription(
+        name="perm",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto", pde_equations=[vm.PdeEquation(name="s_cyto", diffusion="1.0", initial="1")]
+            ),
+            vm.CompartmentSubDomain(
+                name="ec", pde_equations=[vm.PdeEquation(name="s_ext", diffusion="1.0", initial="0")]
+            ),
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                jump_conditions=[
+                    vm.JumpCondition(name="s_cyto", in_flux="P * (s_ext - s_cyto)", out_flux="0.0"),
+                    vm.JumpCondition(name="s_ext", in_flux="0.0", out_flux="-1.0 * P * (s_ext - s_cyto)"),
+                ],
+            )
+        ],
+    )
+    from vcell_fenics.formalism.schema import BCInterfaceFluxBalance
+
+    (bc,) = import_math_description(vcml).boundary_conditions  # one BC, not two
+    assert isinstance(bc, BCInterfaceFluxBalance)
+    assert bc.variable == "s_cyto" and bc.partner_variable == "s_ext" and bc.boundary == "pm"
+    # The inner species' in_flux, with both bulk traces wrapped (the partner is reachable on the membrane).
+    assert bc.expression == "P * (trace(s_ext) - trace(s_cyto))"
+
+
 def test_jump_condition_species_on_both_sides_rejected() -> None:
     # A species present in both compartments would need two side-distinguished BCs, which the
     # per-variable BCNeumann(variable, boundary) cannot yet express → reject rather than guess.
