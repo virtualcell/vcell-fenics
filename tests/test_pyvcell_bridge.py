@@ -370,11 +370,13 @@ def test_jump_condition_preserves_vcell_flux_sign() -> None:
     assert not influx.expression.lstrip().startswith("-")
 
 
-def test_coupled_jump_conditions_become_an_interface_flux_balance() -> None:
-    # A species crossing the membrane — two species, one per compartment, whose fluxes reference each
-    # other (a permeability flux P·(s_ext − s_cyto)) — is a cross-compartment coupling (§1.6.2). VCell
-    # emits the equal-and-opposite jump-condition pair; the importer collapses them into ONE
-    # BCInterfaceFluxBalance keyed on the inner species, carrying the flux into the inner side.
+def test_coupled_jump_conditions_become_single_sided_interface_fluxes() -> None:
+    # A species crossing the membrane — two domain-restricted species, one per compartment, whose
+    # fluxes reference each other (a permeability flux P·(s_ext − s_cyto)) — is a cross-compartment
+    # coupling at an internal interface (§1.6.2, both compartments modelled). VCell's in_flux /
+    # out_flux are independent single-sided fluxes, so the importer emits TWO BCInterfaceFlux, one per
+    # species, each carrying the flux into its OWN side (taken from that species' own well-posed side:
+    # in_flux for the inside species, out_flux for the outside species).
     vcml = vm.MathDescription(
         name="perm",
         compartment_subdomains=[
@@ -397,18 +399,23 @@ def test_coupled_jump_conditions_become_an_interface_flux_balance() -> None:
             )
         ],
     )
-    from vcell_fenics.formalism.schema import BCInterfaceFluxBalance
+    from vcell_fenics.formalism.schema import BCInterfaceFlux
 
-    (bc,) = import_math_description(vcml).boundary_conditions  # one BC, not two
-    assert isinstance(bc, BCInterfaceFluxBalance)
-    assert bc.variable == "s_cyto" and bc.partner_variable == "s_ext" and bc.boundary == "pm"
-    # The inner species' in_flux, with both bulk traces wrapped (the partner is reachable on the membrane).
-    assert bc.expression == "P * (trace(s_ext) - trace(s_cyto))"
+    bcs = import_math_description(vcml).boundary_conditions  # two BCs, one per side
+    assert all(isinstance(bc, BCInterfaceFlux) and bc.boundary == "pm" for bc in bcs)
+    by_var = {bc.variable: bc for bc in bcs}
+    assert set(by_var) == {"s_cyto", "s_ext"}
+    # Each side's own well-posed flux, with both bulk traces wrapped (the partner is reachable on the
+    # membrane through its trace): the inside species takes its in_flux, the outside its out_flux.
+    assert by_var["s_cyto"].expression == "P * (trace(s_ext) - trace(s_cyto))"
+    assert by_var["s_ext"].expression == "-1.0 * P * (trace(s_ext) - trace(s_cyto))"
 
 
 def test_jump_condition_species_on_both_sides_rejected() -> None:
-    # A species present in both compartments would need two side-distinguished BCs, which the
-    # per-variable BCNeumann(variable, boundary) cannot yet express → reject rather than guess.
+    # The legacy case: a single domain-less volume variable defined in BOTH compartments, where VCell's
+    # JumpCondition genuinely carried two meaningful per-side fluxes. This needs two side-distinguished
+    # BCs, which the per-variable BC(variable, boundary) cannot yet express → reject rather than guess.
+    # (Modern VCell math gives each variable one domain, so only one flux side is well-posed.)
     vcml = vm.MathDescription(
         name="m",
         compartment_subdomains=[
@@ -424,7 +431,7 @@ def test_jump_condition_species_on_both_sides_rejected() -> None:
             )
         ],
     )
-    with pytest.raises(NotImplementedError, match=r"lives in\s+both compartments"):
+    with pytest.raises(NotImplementedError, match="legacy domain-less volume variable defined on both sides"):
         import_math_description(vcml)
 
 

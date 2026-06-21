@@ -4,9 +4,9 @@
 Stage 1 of the cross-compartment-coupling convergence study (the definitive cross-solver check for
 `integrate_interface_coupled`). A disk-in-box cell: species `s_cyto` in the inner disk and `s_ext` in
 the surrounding box, coupled by a **membrane permeability flux** `J = P·(s_ext − s_cyto)` (a VCell
-flux reaction). VCell's generated jump conditions are exactly the flux-balance the FEniCSx coupled
-integrator solves (s_cyto gains +J, s_ext loses it), unit factor 1 (both volume species in µM), so P
-maps straight across.
+flux reaction). VCell's generated jump conditions become an equal-and-opposite pair of single-sided
+interface fluxes the FEniCSx coupled integrator solves (s_cyto gains +J, s_ext loses it), unit factor 1
+(both volume species in µM), so P maps straight across.
 
 The FEniCSx side imports **this same geometry** (`coupled_perm_geom.yaml`) and realizes it via
 `realize_interface_coupled` — the genuine pipeline, no hand-built parallel mesh. The FV solver uses MOL
@@ -84,7 +84,7 @@ def _author(mesh: tuple[int, int, int]) -> Biomodel:
 
 def main() -> None:
     # Dump the lowered geometry AND math once (mesh size is a simulation setting, not part of either).
-    # The dev side imports both — the coupled jump conditions route to a BCInterfaceFluxBalance.
+    # The dev side imports both — the coupled jump conditions route to a pair of BCInterfaceFlux.
     app = VcmlReader.biomodel_from_str(to_vcml_str(_author((64, 64, 1)))).applications[0]
     (_CV / "coupled_perm_geom.yaml").write_text(
         yaml.safe_dump(

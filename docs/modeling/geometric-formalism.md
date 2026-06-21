@@ -264,9 +264,9 @@ Two kinds of boundary, both named by the formalism (§1.4, §1.3):
   per-face `Value`/`Flux` on `Xm/Xp/…` (§2.6.2) maps to a `BCDirichlet`/`BCNeumann` on
   `x_minus/x_plus/…`. The default no-flux face needs no BC (it is the natural zero-Neumann boundary),
   matching how the math importer already treats default faces.
-- **Internal (interface) BCs** — value-equality / flux-balance across a surface class, between its
-  `inside` and `outside` subvolumes (VCell's `JumpCondition` → `interface_flux_balance`). The ordered
-  surface pair fixes the two-sided trace.
+- **Internal (interface) BCs** — value-equality / single-sided flux across a surface class, between
+  its `inside` and `outside` subvolumes (VCell's `JumpCondition` → a pair of `interface_flux`, one per
+  side). The ordered surface pair fixes which side each single-sided flux applies to.
 
 Once the realization names its external faces (realization v1, §3.2), per-face BC import is the small
 step it was always meant to be — the §2.6.2 mapping onto labelled boundaries the existing
@@ -303,8 +303,8 @@ analytic (level-set) → image (mesh).** This realizes the majority of importabl
    imperative `make_*` helpers as recipes over the formalism.
 3. **Per-face boundary conditions** — the §2.6.2 `Xm/Xp/…` → `x_minus/x_plus/…` mapping on the named
    faces from step 2, lifting the import layer's `reject_not_implemented` bucket (44.7%).
-4. **Interface (jump-condition) BCs** — `SurfaceClass` + `JumpCondition` → `interface_flux_balance`,
-   the cross-membrane coupling.
+4. **Interface (jump-condition) BCs** — `SurfaceClass` + `JumpCondition` → single-sided `interface_flux`
+   (a pair, one per side), the cross-membrane coupling.
 5. **Later** — arbitrary-analytic → level-set realization (cut/trace FEM); `image` → mesh.
 
 ## 7. Non-goals (for now)

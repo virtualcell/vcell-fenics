@@ -49,7 +49,7 @@ from vcell_fenics.formalism.rvachev import (
 )
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
-    BCInterfaceFluxBalance,
+    BCInterfaceFlux,
     BCInterfaceValueEquality,
     BCNeumann,
     BCRobin,
@@ -82,7 +82,7 @@ from vcell_fenics.formalism.validator import (
 
 __all__ = [
     "BCDirichlet",
-    "BCInterfaceFluxBalance",
+    "BCInterfaceFlux",
     "BCInterfaceValueEquality",
     "BCNeumann",
     "BCRobin",

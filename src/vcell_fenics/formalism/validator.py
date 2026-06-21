@@ -19,7 +19,7 @@ Schema-level checks:
   governed type, legal and required slots, T1's "at least one of
   diffusion / source" (§1.4.2).
 - Boundary-condition consistency — conflicting kinds, interface-partner
-  declaration, `interface_flux_balance` bulk-only, weak-form Dirichlet-only
+  declaration, `interface_flux` bulk-only, weak-form Dirichlet-only
   (§1.11.7).
 
 Expression-level checks (parse + AST walk):
@@ -66,7 +66,7 @@ from vcell_fenics.formalism.expr import (
 )
 from vcell_fenics.formalism.parser import ExpressionSyntaxError, parse
 from vcell_fenics.formalism.schema import (
-    BCInterfaceFluxBalance,
+    BCInterfaceFlux,
     BCInterfaceValueEquality,
     BoundaryCondition,
     Equation,
@@ -551,13 +551,10 @@ class _Validator:
             path = f"boundary_conditions[{i}]"
             if bc.variable not in self._var_subdomains:
                 self._error(path, f"references undeclared variable {bc.variable!r}")
-            if (
-                isinstance(bc, BCInterfaceValueEquality | BCInterfaceFluxBalance)
-                and bc.partner_variable not in self._var_subdomains
-            ):
+            if isinstance(bc, BCInterfaceValueEquality) and bc.partner_variable not in self._var_subdomains:
                 self._error(path, f"partner_variable {bc.partner_variable!r} is not declared")
-            if isinstance(bc, BCInterfaceFluxBalance):
-                self._check_flux_balance_bulk_only(bc, path)
+            if isinstance(bc, BCInterfaceFlux):
+                self._check_interface_flux_bulk_only(bc, path)
             self._check_weak_form_dirichlet_only(bc, path, weak_form_vars)
             groups.setdefault((bc.variable, bc.boundary), set()).add(bc.kind)
 
@@ -568,18 +565,17 @@ class _Validator:
                     f"conflicting BC kinds {sorted(kinds)} for variable {variable!r} on boundary {boundary!r}",
                 )
 
-    def _check_flux_balance_bulk_only(self, bc: BCInterfaceFluxBalance, path: str) -> None:
-        for role, name in (("variable", bc.variable), ("partner_variable", bc.partner_variable)):
-            hosts = self._var_subdomains.get(name)
-            if not hosts:
-                continue
-            kinds = {self._subdomain_by_name[s].kind for s in hosts if s in self._subdomain_by_name}
-            if kinds and "volume" not in kinds:
-                self._error(
-                    path,
-                    f"interface_flux_balance requires {role} {name!r} to live on a volume subdomain; it lives on "
-                    f"{sorted(kinds)}. Bulk-surface coupling uses the §1.6.5 Neumann + source pattern instead",
-                )
+    def _check_interface_flux_bulk_only(self, bc: BCInterfaceFlux, path: str) -> None:
+        hosts = self._var_subdomains.get(bc.variable)
+        if not hosts:
+            return
+        kinds = {self._subdomain_by_name[s].kind for s in hosts if s in self._subdomain_by_name}
+        if kinds and "volume" not in kinds:
+            self._error(
+                path,
+                f"interface_flux requires variable {bc.variable!r} to live on a volume subdomain; it lives on "
+                f"{sorted(kinds)}. Bulk-surface coupling uses the §1.6.5 Neumann + source pattern instead",
+            )
 
     def _check_weak_form_dirichlet_only(
         self, bc: BoundaryCondition, path: str, weak_form_vars: set[tuple[str, str]]

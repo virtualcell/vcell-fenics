@@ -9,12 +9,12 @@ through the genuine pipeline — import VCell's geometry → `normalize_to_geome
 compartment fields at the FV grid points in their own regions (s_cyto inside the disk, s_ext outside)
 and reports the relative L2.
 
-The math is a hand-written flux-balance model matching VCell's permeability flux (P=0.5, D=1, unit
-factor 1 — verified equal): the importer does not yet route a coupled jump condition to the flux-balance
-path, so the *geometry* comes from the import pipeline (the point of the test) while the *physics* is
-matched by hand. Both solvers use MOL (≈0 time error); refining both grids drives the FV↔FEniCSx
-difference down ~first order (the membrane is 1st-order on each side), confirming the coupled solver
-converges to the FV solution.
+The math is VCell's own permeability flux (P=0.5, D=1, unit factor 1): the importer routes the coupled
+jump conditions to a pair of single-sided `BCInterfaceFlux`, so BOTH the *geometry* and the *physics*
+come from the import pipeline (the point of the test) — no hand-built parallel mesh or hand-written
+physics. Both solvers use MOL (≈0 time error); refining both grids drives the FV↔FEniCSx difference
+down ~first order (the membrane is 1st-order on each side), confirming the coupled solver converges to
+the FV solution.
 
     ../pyvcell/.venv/bin/python cross_validation/coupled_perm_fv.py            # stage 1 (FV, heavy env)
     .pixi/envs/dev/bin/python   cross_validation/coupled_perm_convergence.py   # stage 2 (this, dev env)
@@ -47,7 +47,7 @@ def main() -> None:
     math_raw = mmod.MathDescription.model_validate(yaml.safe_load((_CV / "coupled_perm_math.yaml").read_text()))
     geometry_desc = import_geometry(geo)
     # The whole model is imported now — geometry AND math (the coupled jump conditions route to a
-    # BCInterfaceFluxBalance). Only the mesh refinement is set per N.
+    # pair of single-sided BCInterfaceFlux). Only the mesh refinement is set per N.
     math_desc = import_math_description(math_raw, geometry=geometry_desc.name, dim=2)
 
     print(f"=== permeability coupling: FV ↔ FEniCSx joint refinement, t={_T} ===")

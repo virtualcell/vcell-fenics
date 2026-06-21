@@ -17,7 +17,7 @@ import yaml
 
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
-    BCInterfaceFluxBalance,
+    BCInterfaceFlux,
     BCInterfaceValueEquality,
     BCNeumann,
     BCRobin,
@@ -216,11 +216,10 @@ def _bc_to_dict(b: BoundaryCondition) -> dict[str, object]:
         if b.expression != "1":
             out["expression"] = b.expression
         return out
-    if isinstance(b, BCInterfaceFluxBalance):
+    if isinstance(b, BCInterfaceFlux):
         return {
-            "kind": "interface_flux_balance",
+            "kind": "interface_flux",
             "variable": b.variable,
-            "partner_variable": b.partner_variable,
             "boundary": b.boundary,
             "expression": b.expression,
         }

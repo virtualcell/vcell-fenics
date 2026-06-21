@@ -396,21 +396,21 @@ class BCInterfaceValueEquality:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class BCInterfaceFluxBalance:
-    """D ∇u_L · n = f(traces, params) at a bulk-bulk internal boundary
-    (§1.6.2, post-review-pass clarification).
+class BCInterfaceFlux:
+    """A **single-sided** Neumann flux on a bulk variable at an internal membrane interface:
+    ``D ∇u·n = f`` on `variable`'s side of `boundary`, where `f` is an arbitrary (possibly nonlinear)
+    function of the adjacent traces — the variable's own ``trace(u)`` and any partner-compartment
+    bulk variable's ``trace(·)`` — plus membrane variables, parameters, coordinates and time.
 
-    The partner side's equal-and-opposite flux is implicit by mass
-    conservation; the partner variable is named so `expression` can
-    reference it. This kind is bulk-bulk only — bulk-surface accumulation
-    uses the composable Neumann + source pattern in §1.6.5, not this kind.
-    The validator (§1.11.7) rejects flux-balance entries whose variable or
-    partner_variable lives on a non-volume subdomain.
-    """
+    This is VCell's general "jump condition" side (`in_flux` / `out_flux`), faithfully: the two sides
+    of a membrane are **independent** single-sided fluxes, not an enforced equal-and-opposite balance
+    (mass conservation is whatever the modeller writes into the two sides). A species crossing the
+    membrane is then two ``BCInterfaceFlux`` entries — one per species, each carrying the flux into its
+    own side. Distinct from ``BCNeumann`` (an *external* boundary of a single subdomain, which cannot
+    reach a partner trace or a membrane variable); the coupled assembler binds those for this kind."""
 
-    kind: Literal["interface_flux_balance"] = "interface_flux_balance"
+    kind: Literal["interface_flux"] = "interface_flux"
     variable: str
-    partner_variable: str
     boundary: str
     expression: str
 
@@ -418,7 +418,7 @@ class BCInterfaceFluxBalance:
 # Clean Literal-tagged union — every member has a unique `kind`, so pydantic
 # discriminates on the field directly (no callable needed).
 BoundaryCondition: TypeAlias = Annotated[
-    BCDirichlet | BCNeumann | BCRobin | BCInterfaceValueEquality | BCInterfaceFluxBalance,
+    BCDirichlet | BCNeumann | BCRobin | BCInterfaceValueEquality | BCInterfaceFlux,
     Field(discriminator="kind"),
 ]
 
@@ -467,7 +467,7 @@ _CONFIGURED_CLASSES: tuple[type, ...] = (
     BCNeumann,
     BCRobin,
     BCInterfaceValueEquality,
-    BCInterfaceFluxBalance,
+    BCInterfaceFlux,
     MathDescription,
 )
 for _cls in _CONFIGURED_CLASSES:

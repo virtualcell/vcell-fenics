@@ -19,7 +19,7 @@ import pytest
 
 from vcell_fenics.formalism import (
     BCDirichlet,
-    BCInterfaceFluxBalance,
+    BCInterfaceFlux,
     BCInterfaceValueEquality,
     BCNeumann,
     BCRobin,
@@ -387,11 +387,10 @@ def test_all_bc_kinds_construct() -> None:
             partner_variable="u_right",
             boundary="membrane",
         ),
-        BCInterfaceFluxBalance(
+        BCInterfaceFlux(
             variable="u_left",
-            partner_variable="u_right",
             boundary="membrane",
-            expression="P * (u_left - u_right)",
+            expression="P * (trace(u_right) - trace(u_left))",
         ),
     ]
     assert bcs[0].kind == "dirichlet"
@@ -400,4 +399,4 @@ def test_all_bc_kinds_construct() -> None:
     assert bcs[3].kind == "interface_value_equality"
     assert isinstance(bcs[3], BCInterfaceValueEquality)
     assert bcs[3].expression == "1"  # default partition coefficient
-    assert bcs[4].kind == "interface_flux_balance"
+    assert bcs[4].kind == "interface_flux"

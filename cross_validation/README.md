@@ -146,12 +146,12 @@ cytosol mass converges to the analytic `(perimeter)·∫g`.
 `coupled_perm_fv.py` + `coupled_perm_convergence.py` are the definitive cross-solver check for the
 **bulk-bulk interface coupling** (`integrate_interface_coupled`). A disk-in-box cell with species
 `s_cyto` in the disk and `s_ext` in the surrounding box, coupled by a membrane **permeability flux**
-`J = P·(s_ext − s_cyto)` (a VCell flux reaction → exactly the flux-balance the coupled integrator
-solves; unit factor 1, so `P` maps straight across).
+`J = P·(s_ext − s_cyto)` (a VCell flux reaction → an equal-and-opposite pair of single-sided interface
+fluxes the coupled integrator solves; unit factor 1, so `P` maps straight across).
 
 This runs the **fully imported pipeline** — the FEniCSx side imports VCell's *same* geometry **and
 math** (`import_geometry` + `import_math_description`, where the coupled jump-condition pair routes to a
-`BCInterfaceFluxBalance`) → `normalize_to_geometry_frame` → `realize_interface_coupled`, with no
+pair of single-sided `BCInterfaceFlux`) → `normalize_to_geometry_frame` → `realize_interface_coupled`, with no
 hand-built parallel mesh or hand-written physics — and solves with the coupled method-of-lines
 integrator (PETSc TS, GMRES+ILU). Both solvers use MOL (≈0 time error), so refining both grids isolates
 the spatial discretization:
