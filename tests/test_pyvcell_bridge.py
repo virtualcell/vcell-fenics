@@ -412,6 +412,54 @@ def test_coupled_jump_conditions_become_single_sided_interface_fluxes() -> None:
     assert by_var["s_ext"].expression == "-1.0 * P * (trace(s_ext) - trace(s_cyto))"
 
 
+def test_membrane_reaction_traces_adjacent_bulk_species() -> None:
+    # A membrane receptor R binding ligand from BOTH compartments. The bulk species in the membrane
+    # reaction `source` must be wrapped in trace(·) — a volume variable is only defined on the membrane
+    # through its trace (§1.6.5/§1.8.2), the same wrapping the jump-condition fluxes get — else the
+    # model fails validation. The whole thing then routes to the three-region membrane coupling.
+    from vcell_fenics.formalism import validate
+    from vcell_fenics.formalism.schema import BCInterfaceFlux
+
+    vcml = vm.MathDescription(
+        name="receptor",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto", pde_equations=[vm.PdeEquation(name="L_in", diffusion="1.0", initial="1.0")]
+            ),
+            vm.CompartmentSubDomain(
+                name="ec", pde_equations=[vm.PdeEquation(name="L_out", diffusion="1.0", initial="1.0")]
+            ),
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                pde_equations=[
+                    vm.PdeEquation(name="R", diffusion="0.05", initial="0.0", rate="kon * (L_in + L_out) * (Rmax - R)")
+                ],
+                jump_conditions=[
+                    vm.JumpCondition(name="L_in", in_flux="-kon * L_in * (Rmax - R)", out_flux="0.0"),
+                    vm.JumpCondition(name="L_out", in_flux="0.0", out_flux="-kon * L_out * (Rmax - R)"),
+                ],
+            )
+        ],
+        constants=[vm.Constant(name="kon", exp="0.5"), vm.Constant(name="Rmax", exp="2.0")],
+    )
+    md = import_math_description(vcml, dim=2)
+    assert [d for d in validate(md) if d.severity == "error"] == []  # trace-wrapping makes it well-posed
+
+    (surface_eq,) = [eq for eq in md.equations if eq.subdomain == "pm"]
+    assert isinstance(surface_eq, TemplateEquation)
+    # Bulk species traced in the membrane reaction; the membrane species R is left direct.
+    assert surface_eq.terms["source"] == "kon * (trace(L_in) + trace(L_out)) * (Rmax - R)"
+    # Each crossing ligand becomes a single-sided interface flux that itself references R directly.
+    fluxes = {bc.variable: bc for bc in md.boundary_conditions if isinstance(bc, BCInterfaceFlux)}
+    assert set(fluxes) == {"L_in", "L_out"}
+    assert fluxes["L_in"].expression == "-kon * trace(L_in) * (Rmax - R)"
+    assert fluxes["L_out"].expression == "-kon * trace(L_out) * (Rmax - R)"
+
+
 def test_jump_condition_species_on_both_sides_rejected() -> None:
     # The legacy case: a single domain-less volume variable defined in BOTH compartments, where VCell's
     # JumpCondition genuinely carried two meaningful per-side fluxes. This needs two side-distinguished
@@ -561,6 +609,57 @@ def test_imported_reaction_diffusion_model_runs_and_decays() -> None:
     assert float(c.min()) > 0.0  # stays positive
     # uniform decay from 2.0: mean ≈ 2·exp(-0.5·1.0) ≈ 1.21, well below the IC.
     assert 1.0 < float(c.mean()) < 1.4
+
+
+def test_imported_membrane_coupled_model_solves_and_conserves() -> None:
+    from vcell_fenics.backend import assemble_membrane_coupled
+    from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
+
+    # The full receptor–ligand cell imported end-to-end: two cytosolic + extracellular ligands captured
+    # by a membrane receptor R, which routes to the three-region `assemble_membrane_coupled`. Proves the
+    # import lands on a runnable, mass-conserving model (the trace-wrapping + interface-flux routing).
+    vcml = vm.MathDescription(
+        name="receptor",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto", pde_equations=[vm.PdeEquation(name="L_in", diffusion="1.0", initial="1.0")]
+            ),
+            vm.CompartmentSubDomain(
+                name="ec", pde_equations=[vm.PdeEquation(name="L_out", diffusion="1.0", initial="1.0")]
+            ),
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                pde_equations=[
+                    vm.PdeEquation(name="R", diffusion="0.05", initial="0.0", rate="kon * (L_in + L_out) * (Rmax - R)")
+                ],
+                jump_conditions=[
+                    vm.JumpCondition(name="L_in", in_flux="-kon * L_in * (Rmax - R)", out_flux="0.0"),
+                    vm.JumpCondition(name="L_out", in_flux="0.0", out_flux="-kon * L_out * (Rmax - R)"),
+                ],
+            )
+        ],
+        constants=[vm.Constant(name="kon", exp="0.5"), vm.Constant(name="Rmax", exp="2.0")],
+    )
+    md = import_math_description(vcml, geometry="cell", dim=2)
+    geometry = make_two_bulk_membrane_geometry(
+        "cell", inner="cyto", outer_subdomain="ec", membrane="pm", interface="pm", outer="wall", h=0.13
+    )
+
+    problem = assemble_membrane_coupled(md, geometry, dt=0.02)
+    assert problem.membrane_species == ["R"]
+    total0 = problem.total_mass()
+    inner0, outer0 = problem.mass("L_in"), problem.mass("L_out")
+    for _ in range(120):
+        problem.step()
+    # Receptor captured ligand from both sides (both bulks deplete, R grows); total (free L_in + free
+    # L_out + bound R) conserved to round-off.
+    assert problem.mass("R") > 1e-2
+    assert problem.mass("L_in") < inner0 - 1e-3 and problem.mass("L_out") < outer0 - 1e-3
+    assert problem.total_mass() == pytest.approx(total0, abs=1e-9)
 
 
 # --- 4. geometry-frame normalization (the VCell z-in-2D quirk) ------------------
