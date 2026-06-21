@@ -57,9 +57,11 @@ from vcell_fenics.backend.interface_coupled import (
     InterfaceCoupledProblem,
     InterfaceCoupledResult,
     MembraneCoupledProblem,
+    MembraneCoupledResult,
     assemble_interface_coupled,
     assemble_membrane_coupled,
     integrate_interface_coupled,
+    integrate_membrane_coupled,
 )
 from vcell_fenics.backend.multiphase import (
     solve_two_phase_overdamped,
@@ -99,6 +101,7 @@ __all__ = [
     "InterfaceCoupledProblem",
     "InterfaceCoupledResult",
     "MembraneCoupledProblem",
+    "MembraneCoupledResult",
     "MeshQualityError",
     "NonlinearTermError",
     "SolveError",
@@ -122,6 +125,7 @@ __all__ = [
     "enclosed_volume",
     "integrate_discrete_problem",
     "integrate_interface_coupled",
+    "integrate_membrane_coupled",
     "integrate_reaction_diffusion",
     "load_geometry",
     "make_cell_extracellular_geometry",

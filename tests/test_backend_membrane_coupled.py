@@ -14,7 +14,12 @@ from dataclasses import replace
 
 import pytest
 
-from vcell_fenics.backend import MembraneCoupledProblem, assemble_membrane_coupled
+from vcell_fenics.backend import (
+    MembraneCoupledProblem,
+    MembraneCoupledResult,
+    assemble_membrane_coupled,
+    integrate_membrane_coupled,
+)
 from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
 from vcell_fenics.formalism.schema import (
     BCInterfaceFlux,
@@ -298,7 +303,53 @@ def test_a_membrane_site_captures_from_both_compartments() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. loud rejections
+# 7. method-of-lines integrator (PETSc TS adaptive BDF, matrix-free Newton)
+# ---------------------------------------------------------------------------
+
+
+def test_mol_integrates_conserves_and_captures() -> None:
+    # The fully-implicit MOL integrator reaches t_final, captures ligand from both compartments, and
+    # conserves total ligand to round-off — the exact cross-mesh Jacobian is un-assemblable (the
+    # ∂(binding)/∂ρ block is zero in DOLFINx 0.10/0.11), so the implicit Jacobian is applied matrix-free.
+    geom = _geom(h=0.15)
+    model = _model()
+    total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()  # the t=0 total (no stepping)
+    result = integrate_membrane_coupled(model, geom, t_final=4.0)
+    assert isinstance(result, MembraneCoupledResult)
+    assert result.time == pytest.approx(4.0)
+    assert result.membrane_species == ["R"]
+    assert result.mass("R") > 1e-2  # captured onto the membrane
+    assert result.total_mass() == pytest.approx(total0, abs=1e-9)
+
+
+def test_mol_handles_stiff_binding() -> None:
+    # kon·Rmax = 10 — fast binding that over-consumes the boundary layer in one explicit (IMEX) step and
+    # blows the backward-Euler/`assemble_membrane_coupled` path up. The fully-implicit MOL integrator
+    # (matrix-free Newton, adaptive BDF) handles it: all ligand captured, total conserved to round-off.
+    geom = _geom(h=0.15)
+    model = _model(kon=1.0, rmax=10.0)
+    total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
+    result = integrate_membrane_coupled(model, geom, t_final=4.0)
+    assert result.total_mass() == pytest.approx(total0, abs=1e-8)
+    assert result.mass("R") > 0.9 * total0  # near-complete capture (Rmax·|Γ| ≫ ligand)
+
+
+def test_mol_conserves_each_pool_with_multiple_species() -> None:
+    # The general multi-species case under MOL: two independent conserved pools (A+Lo+Ra) and (B+Rb),
+    # each conserved to round-off through the matrix-free implicit solve.
+    geom = _geom(h=0.15)
+    model = _multi_model()
+    be = assemble_membrane_coupled(model, geom, dt=0.02)
+    pool_a0 = be.mass("A") + be.mass("Lo") + be.mass("Ra")
+    pool_b0 = be.mass("B") + be.mass("Rb")
+    result = integrate_membrane_coupled(model, geom, t_final=3.0)
+    assert result.inner_species == ["A", "B"] and result.membrane_species == ["Ra", "Rb"]
+    assert result.mass("A") + result.mass("Lo") + result.mass("Ra") == pytest.approx(pool_a0, abs=1e-9)
+    assert result.mass("B") + result.mass("Rb") == pytest.approx(pool_b0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 8. loud rejections
 # ---------------------------------------------------------------------------
 
 
