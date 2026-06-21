@@ -3,7 +3,7 @@
 The first increment of cross-compartment coupling is the *geometry*, not the physics: prove that a
 form integrated on the membrane can reach the traces of **both** bulk variables at once — a membrane
 equation in `trace(u_inner)` and `trace(u_outer)`, or one bulk side's interface flux referencing the
-partner trace. The existing `CoupledGeometry` (one bulk + one surface, a single entity map) reaches
+adjacent compartment's trace. The existing `CoupledGeometry` (one bulk + one surface, a single entity map) reaches
 only one bulk natively, and integrating a term *on the membrane* that references a bulk function
 (codim −1 from the membrane) is rejected by ffcx (`codim >= 0`).
 
@@ -202,12 +202,12 @@ def test_no_permeability_leaves_the_compartments_uncoupled() -> None:
 
 
 def test_value_equality_constraint_is_rejected() -> None:
-    # The other interface kind — the u = k·partner constraint — needs a different mechanism (a
+    # The other interface kind — the u = k·u_adjacent constraint — needs a different mechanism (a
     # constrained solve, not a flux term) and is a follow-up; it must fail loudly, not silently.
     model = replace(
         _permeability_model(),
         boundary_conditions=[
-            BCInterfaceValueEquality(variable="u_in", partner_variable="u_out", boundary="membrane", expression="1")
+            BCInterfaceValueEquality(variable="u_in", adjacent_variable="u_out", boundary="membrane", expression="1")
         ],
     )
     with pytest.raises(NotImplementedError, match="value-equality"):

@@ -475,14 +475,14 @@ def _translate_jump_conditions(
     subvolume — ``calcium_inside`` vs ``calcium_outside``), so its jump condition has exactly one
     well-posed side — ``in_flux`` if the species lives on the membrane's inside, ``out_flux`` if
     outside — and the other side is zero. We therefore take each species' own-side flux verbatim and
-    never pair it with a partner: a species crossing a membrane is two independent jump conditions
-    (one per domain-restricted species), and they become two independent ``BCInterfaceFlux`` entries.
+    never pair it with another variable: a species crossing a membrane is two independent jump
+    conditions (one per domain-restricted species), each its own independent ``BCInterfaceFlux`` entry.
     The two sides need not be equal-and-opposite — VCell's ``in_flux`` / ``out_flux`` are independent
     Neumann fluxes (mass conservation is whatever the modeller writes), e.g. a permeability pair
     ``P·(s_outer − s_inner)`` into the inside and its negation into the outside (§1.6.2).
 
     Routing turns on whether the membrane is *internal* (both compartments carry bulk species, both
-    modelled as PDEs) or *external* (the partner side is an unmodelled reservoir):
+    modelled as PDEs) or *external* (the other side is an unmodelled reservoir):
 
     - **Internal interface** → ``BCInterfaceFlux`` on the species' own side, solved by the coupled
       assembler (which binds both compartments' traces so the flux can reference either; §1.6.2).
@@ -495,7 +495,8 @@ def _translate_jump_conditions(
     inside, outside = membrane.inside_compartment, membrane.outside_compartment
     # The membrane is an *internal interface* when both its compartments carry bulk species (both are
     # modelled as PDEs): then each jump-condition side is a single-sided ``BCInterfaceFlux`` on an
-    # internal boundary, solved by the coupled assembler (which can bind the partner's trace). When
+    # internal boundary, solved by the coupled assembler (which binds the adjacent compartment's
+    # trace). When
     # only one side is modelled (the other is an unmodelled reservoir) the membrane is an *external*
     # boundary of that compartment → ``BCNeumann`` (the single-compartment path; §1.6.5).
     modeled = {compartment for comps in species_compartments.values() for compartment in comps}
@@ -528,7 +529,7 @@ def _translate_jump_conditions(
             continue
         if internal:
             # A single-sided flux at the internal membrane — VCell's in_flux / out_flux are independent
-            # (not an enforced equal-and-opposite balance); the partner side is its own BCInterfaceFlux.
+            # (not an enforced equal-and-opposite balance); the other side is its own BCInterfaceFlux.
             bcs.append(BCInterfaceFlux(variable=jc.name, boundary=membrane.name, expression=flux))
         else:
             bcs.append(BCNeumann(variable=jc.name, boundary=membrane.name, expression=flux))

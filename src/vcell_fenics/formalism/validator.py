@@ -18,9 +18,9 @@ Schema-level checks:
 - Template conformance — known template, allowed temporality / subdomain kind /
   governed type, legal and required slots, T1's "at least one of
   diffusion / source" (§1.4.2).
-- Boundary-condition consistency — conflicting kinds, interface-partner
-  declaration, `interface_flux` bulk-only, weak-form Dirichlet-only
-  (§1.11.7).
+- Boundary-condition consistency — conflicting kinds, value-equality
+  adjacent-variable declaration, `interface_flux` bulk-only, weak-form
+  Dirichlet-only (§1.11.7).
 
 Expression-level checks (parse + AST walk):
 
@@ -551,8 +551,8 @@ class _Validator:
             path = f"boundary_conditions[{i}]"
             if bc.variable not in self._var_subdomains:
                 self._error(path, f"references undeclared variable {bc.variable!r}")
-            if isinstance(bc, BCInterfaceValueEquality) and bc.partner_variable not in self._var_subdomains:
-                self._error(path, f"partner_variable {bc.partner_variable!r} is not declared")
+            if isinstance(bc, BCInterfaceValueEquality) and bc.adjacent_variable not in self._var_subdomains:
+                self._error(path, f"adjacent_variable {bc.adjacent_variable!r} is not declared")
             if isinstance(bc, BCInterfaceFlux):
                 self._check_interface_flux_bulk_only(bc, path)
             self._check_weak_form_dirichlet_only(bc, path, weak_form_vars)

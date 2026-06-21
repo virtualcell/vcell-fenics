@@ -384,7 +384,7 @@ def test_all_bc_kinds_construct() -> None:
         # Default partition coefficient k is "1".
         BCInterfaceValueEquality(
             variable="u_left",
-            partner_variable="u_right",
+            adjacent_variable="u_right",
             boundary="membrane",
         ),
         BCInterfaceFlux(

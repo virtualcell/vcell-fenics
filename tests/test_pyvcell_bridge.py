@@ -405,8 +405,9 @@ def test_coupled_jump_conditions_become_single_sided_interface_fluxes() -> None:
     assert all(isinstance(bc, BCInterfaceFlux) and bc.boundary == "pm" for bc in bcs)
     by_var = {bc.variable: bc for bc in bcs}
     assert set(by_var) == {"s_cyto", "s_ext"}
-    # Each side's own well-posed flux, with both bulk traces wrapped (the partner is reachable on the
-    # membrane through its trace): the inside species takes its in_flux, the outside its out_flux.
+    # Each side's own well-posed flux, with both bulk traces wrapped (the adjacent compartment's
+    # species is reachable on the membrane through its trace): the inside species takes its in_flux,
+    # the outside its out_flux.
     assert by_var["s_cyto"].expression == "P * (trace(s_ext) - trace(s_cyto))"
     assert by_var["s_ext"].expression == "-1.0 * P * (trace(s_ext) - trace(s_cyto))"
 

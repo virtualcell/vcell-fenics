@@ -208,7 +208,7 @@ def _bc_to_dict(b: BoundaryCondition) -> dict[str, object]:
         out: dict[str, object] = {
             "kind": "interface_value_equality",
             "variable": b.variable,
-            "partner_variable": b.partner_variable,
+            "adjacent_variable": b.adjacent_variable,
             "boundary": b.boundary,
         }
         # Default partition coefficient "1" is omitted on output; the loader

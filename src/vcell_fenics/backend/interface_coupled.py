@@ -167,7 +167,7 @@ def assemble_interface_coupled(
     for bc in md.boundary_conditions:
         if isinstance(bc, BCInterfaceValueEquality):
             raise NotImplementedError(
-                "the interface value-equality constraint (u = k·partner) is a follow-up increment; "
+                "the interface value-equality constraint (u = k·u_adjacent) is a follow-up increment; "
                 "this assembler handles single-sided interface flux BCs"
             )
         if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in test_of:
@@ -280,7 +280,7 @@ def integrate_interface_coupled(
     for bc in md.boundary_conditions:
         if isinstance(bc, BCInterfaceValueEquality):
             raise NotImplementedError(
-                "the interface value-equality constraint (u = k·partner) is a follow-up increment; "
+                "the interface value-equality constraint (u = k·u_adjacent) is a follow-up increment; "
                 "this integrator handles single-sided interface flux BCs"
             )
         if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in test_of:

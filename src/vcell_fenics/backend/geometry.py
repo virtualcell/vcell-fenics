@@ -252,7 +252,7 @@ class InterfaceCoupledGeometry:
     """A coupled geometry for **two volume compartments meeting at a membrane** — the substrate
     for cross-compartment coupling where a term needs the traces of *both* bulk variables at the
     interface (a membrane equation in `trace(u_inner)` and `trace(u_outer)`, or one side's interface
-    flux referencing the partner trace; §1.6.2 / §1.6.6).
+    flux referencing the adjacent compartment's trace; §1.6.2 / §1.6.6).
 
     Unlike `CoupledGeometry` (one bulk + one surface-on-its-boundary, a single entity map), this
     carries **both** bulk submeshes, the membrane submesh, and the three `EntityMap`s relating them to
