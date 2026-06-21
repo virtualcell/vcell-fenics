@@ -611,28 +611,49 @@ def test_imported_reaction_diffusion_model_runs_and_decays() -> None:
     assert 1.0 < float(c.mean()) < 1.4
 
 
-def test_imported_membrane_coupled_model_solves_and_conserves() -> None:
-    from vcell_fenics.backend import assemble_membrane_coupled
-    from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
+def test_membrane_receptor_model_imports_geometry_and_math_end_to_end() -> None:
+    import pyvcell.vcml.models_geometry as gmod
 
-    # The full receptor–ligand cell imported end-to-end: two cytosolic + extracellular ligands captured
-    # by a membrane receptor R, which routes to the three-region `assemble_membrane_coupled`. Proves the
-    # import lands on a runnable, mass-conserving model (the trace-wrapping + interface-flux routing).
-    vcml = vm.MathDescription(
-        name="receptor",
+    from vcell_fenics.backend import assemble_membrane_coupled
+    from vcell_fenics.backend.realize import realize_interface_coupled
+    from vcell_fenics.pyvcell_bridge import import_geometry, normalize_to_geometry_frame
+
+    # The full receptor–ligand cell imported end-to-end from VCell — BOTH geometry AND math: a disk
+    # `cytosol` inside an `extracellular` box meeting at the `pm` membrane (geometry), and two ligands
+    # captured by a membrane receptor R (math). The geometry is realized into the coupled substrate
+    # (`realize_interface_coupled` — same body-fitted marched mesh the permeability study uses) and the
+    # model solves through the three-region membrane-coupled assembler, conserving total ligand. This is
+    # the whole VCell→FEniCSx pipeline for a bulk↔membrane↔bulk model, no hand-built geometry or physics.
+    vcml_geom = gmod.Geometry(
+        name="cell",
+        dim=2,
+        extent=(2.0, 2.0, 1.0),
+        origin=(-1.0, -1.0, 0.0),
+        subvolumes=[
+            gmod.SubVolume(
+                name="cytosol", handle=1, subvolume_type=gmod.SubVolumeType.analytic, analytic_expr="x^2 + y^2 < 0.25"
+            ),
+            gmod.SubVolume(
+                name="extracellular", handle=0, subvolume_type=gmod.SubVolumeType.analytic, analytic_expr="1.0"
+            ),
+        ],
+        surface_classes=[gmod.SurfaceClass(name="pm", subvolume_ref_1="cytosol", subvolume_ref_2="extracellular")],
+    )
+    vcml_math = vm.MathDescription(
+        name="cell",
         compartment_subdomains=[
             vm.CompartmentSubDomain(
-                name="cyto", pde_equations=[vm.PdeEquation(name="L_in", diffusion="1.0", initial="1.0")]
+                name="cytosol", pde_equations=[vm.PdeEquation(name="L_in", diffusion="1.0", initial="1.0")]
             ),
             vm.CompartmentSubDomain(
-                name="ec", pde_equations=[vm.PdeEquation(name="L_out", diffusion="1.0", initial="1.0")]
+                name="extracellular", pde_equations=[vm.PdeEquation(name="L_out", diffusion="1.0", initial="1.0")]
             ),
         ],
         membrane_subdomains=[
             vm.MembraneSubDomain(
                 name="pm",
-                inside_compartment="cyto",
-                outside_compartment="ec",
+                inside_compartment="cytosol",
+                outside_compartment="extracellular",
                 pde_equations=[
                     vm.PdeEquation(name="R", diffusion="0.05", initial="0.0", rate="kon * (L_in + L_out) * (Rmax - R)")
                 ],
@@ -644,9 +665,16 @@ def test_imported_membrane_coupled_model_solves_and_conserves() -> None:
         ],
         constants=[vm.Constant(name="kon", exp="0.5"), vm.Constant(name="Rmax", exp="2.0")],
     )
-    md = import_math_description(vcml, geometry="cell", dim=2)
-    geometry = make_two_bulk_membrane_geometry(
-        "cell", inner="cyto", outer_subdomain="ec", membrane="pm", interface="pm", outer="wall", h=0.13
+    gd = import_geometry(vcml_geom)
+    md = import_math_description(vcml_math, geometry=gd.name, dim=2)
+    gd, md = normalize_to_geometry_frame(gd, md)  # the genuine pipeline (a no-op for this in-plane 2D model)
+    geometry = realize_interface_coupled(
+        gd,
+        inner_subdomain="cytosol",
+        outer_subdomain="extracellular",
+        membrane_subdomain="pm",
+        interface="pm",
+        h=0.12,
     )
 
     problem = assemble_membrane_coupled(md, geometry, dt=0.02)
@@ -655,7 +683,7 @@ def test_imported_membrane_coupled_model_solves_and_conserves() -> None:
     inner0, outer0 = problem.mass("L_in"), problem.mass("L_out")
     for _ in range(120):
         problem.step()
-    # Receptor captured ligand from both sides (both bulks deplete, R grows); total (free L_in + free
+    # Receptor captured ligand from both compartments (both deplete, R grows); total (free L_in + free
     # L_out + bound R) conserved to round-off.
     assert problem.mass("R") > 1e-2
     assert problem.mass("L_in") < inner0 - 1e-3 and problem.mass("L_out") < outer0 - 1e-3
