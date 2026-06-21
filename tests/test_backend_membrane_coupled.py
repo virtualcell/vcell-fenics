@@ -16,7 +16,6 @@ import pytest
 
 from vcell_fenics.backend import MembraneCoupledProblem, assemble_membrane_coupled
 from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
-from vcell_fenics.backend.interface_coupled import _mass_of
 from vcell_fenics.formalism.schema import (
     BCInterfaceFlux,
     BCInterfaceValueEquality,
@@ -101,7 +100,7 @@ def _solve(model: MathDescription, *, steps: int, dt: float = 0.02, h: float = 0
 def test_assemble_returns_a_three_field_problem() -> None:
     problem = assemble_membrane_coupled(_model(), _geom(), dt=0.02)
     assert isinstance(problem, MembraneCoupledProblem)
-    assert (problem.inner_var, problem.outer_var, problem.membrane_var) == ("L_in", "L_out", "R")
+    assert (problem.inner_species, problem.outer_species, problem.membrane_species) == (["L_in"], ["L_out"], ["R"])
     # `field` resolves each by name; the membrane field lives on the (1-D) membrane mesh.
     assert problem.field("R").function_space.mesh.topology.dim == 1
     assert problem.field("L_in").function_space.mesh.topology.dim == 2
@@ -129,13 +128,13 @@ def test_total_ligand_is_conserved_to_round_off() -> None:
 
 def test_binding_captures_ligand_from_both_compartments() -> None:
     problem = assemble_membrane_coupled(_model(), _geom(), dt=0.02)
-    inner0, outer0, bound0 = _mass_of(problem.inner), _mass_of(problem.outer), _mass_of(problem.membrane)
+    inner0, outer0, bound0 = problem.mass("L_in"), problem.mass("L_out"), problem.mass("R")
     for _ in range(120):
         problem.step()
     # Both bulks lose ligand (capture reaches across the membrane from each side) and the membrane gains.
-    assert _mass_of(problem.inner) < inner0 - 1e-3
-    assert _mass_of(problem.outer) < outer0 - 1e-3
-    assert _mass_of(problem.membrane) > bound0 + 1e-3
+    assert problem.mass("L_in") < inner0 - 1e-3
+    assert problem.mass("L_out") < outer0 - 1e-3
+    assert problem.mass("R") > bound0 + 1e-3
 
 
 def test_no_binding_leaves_the_fields_uncoupled() -> None:
@@ -143,12 +142,12 @@ def test_no_binding_leaves_the_fields_uncoupled() -> None:
     # transfers mass to the membrane (each is conserved on its own). Pins the capture above to the
     # coupling, not spurious cross-talk in the three-mesh assembly.
     problem = assemble_membrane_coupled(_model(kon=0.0), _geom(), dt=0.02)
-    inner0, outer0 = _mass_of(problem.inner), _mass_of(problem.outer)
+    inner0, outer0 = problem.mass("L_in"), problem.mass("L_out")
     for _ in range(120):
         problem.step()
-    assert _mass_of(problem.membrane) == pytest.approx(0.0, abs=1e-12)
-    assert _mass_of(problem.inner) == pytest.approx(inner0, rel=1e-9)
-    assert _mass_of(problem.outer) == pytest.approx(outer0, rel=1e-9)
+    assert problem.mass("R") == pytest.approx(0.0, abs=1e-12)
+    assert problem.mass("L_in") == pytest.approx(inner0, rel=1e-9)
+    assert problem.mass("L_out") == pytest.approx(outer0, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +163,8 @@ def test_irreversible_capture_reaches_the_analytic_steady_state() -> None:
     total0 = problem.total_mass()
     for _ in range(300):
         problem.step()
-    assert _mass_of(problem.inner) + _mass_of(problem.outer) == pytest.approx(0.0, abs=0.1)
-    assert _mass_of(problem.membrane) == pytest.approx(total0, rel=0.05)
+    assert problem.mass("L_in") + problem.mass("L_out") == pytest.approx(0.0, abs=0.1)
+    assert problem.mass("R") == pytest.approx(total0, rel=0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +178,7 @@ def test_first_order_in_time() -> None:
     # consistency (a wrong lagging would not converge to a single value).
     def bound_at_t(dt: float) -> float:
         steps = round(0.4 / dt)
-        return _mass_of(_solve(_model(), steps=steps, dt=dt, h=0.15).membrane)
+        return _solve(_model(), steps=steps, dt=dt, h=0.15).mass("R")
 
     values = [bound_at_t(dt) for dt in (0.04, 0.02, 0.01)]
     diff_coarse = abs(values[0] - values[1])
@@ -188,7 +187,118 @@ def test_first_order_in_time() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. loud rejections
+# 6. multiple species per compartment AND on the membrane (the general case)
+# ---------------------------------------------------------------------------
+
+
+def _multi_model() -> MathDescription:
+    """Two cytosolic species A, B; one extracellular Lo; two membrane receptors Ra, Rb. Site `a`
+    captures A (from cyto) AND Lo (from ext) → Ra; site `b` captures B → Rb. So Ra is fed from BOTH
+    compartments, and each bulk species' flux is the exact negation of its contribution to a surface
+    source — the conserved pools are (A + Lo + Ra) and (B + Rb)."""
+    return MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[
+            Variable(name="A", subdomain="cyto"),
+            Variable(name="B", subdomain="cyto"),
+            Variable(name="Lo", subdomain="ext"),
+            Variable(name="Ra", subdomain="pm"),
+            Variable(name="Rb", subdomain="pm"),
+        ],
+        parameters=[
+            ParameterConstant(name="ka", value=0.4),
+            ParameterConstant(name="kb", value=0.3),
+            ParameterConstant(name="Rmax", value=3.0),
+        ],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="A",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="B",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="0.8",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="Lo",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="Ra",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": "0.05", "source": "ka * (trace(A) + trace(Lo)) * (Rmax - Ra)"},
+                initial_condition="0.0",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="Rb",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": "0.05", "source": "kb * trace(B) * (Rmax - Rb)"},
+                initial_condition="0.0",
+            ),
+        ],
+        boundary_conditions=[
+            BCInterfaceFlux(variable="A", boundary="pm", expression="-ka * trace(A) * (Rmax - Ra)"),
+            BCInterfaceFlux(variable="Lo", boundary="pm", expression="-ka * trace(Lo) * (Rmax - Ra)"),
+            BCInterfaceFlux(variable="B", boundary="pm", expression="-kb * trace(B) * (Rmax - Rb)"),
+        ],
+    )
+
+
+def test_multiple_species_per_region_construct_in_order() -> None:
+    problem = assemble_membrane_coupled(_multi_model(), _geom(), dt=0.02)
+    assert problem.inner_species == ["A", "B"]
+    assert problem.outer_species == ["Lo"]
+    assert problem.membrane_species == ["Ra", "Rb"]
+
+
+def test_each_conserved_pool_is_conserved_with_multiple_species() -> None:
+    # Two independent binding sites, one fed from both compartments. Each conserved pool — (A + Lo + Ra)
+    # and (B + Rb) — is conserved to round-off (every flux is the exact negation of its production), and
+    # the per-species symbol table keeps them from cross-contaminating.
+    problem = assemble_membrane_coupled(_multi_model(), _geom(), dt=0.02)
+    pool_a0 = problem.mass("A") + problem.mass("Lo") + problem.mass("Ra")
+    pool_b0 = problem.mass("B") + problem.mass("Rb")
+    for _ in range(120):
+        problem.step()
+    assert problem.mass("A") + problem.mass("Lo") + problem.mass("Ra") == pytest.approx(pool_a0, abs=1e-10)
+    assert problem.mass("B") + problem.mass("Rb") == pytest.approx(pool_b0, abs=1e-10)
+
+
+def test_a_membrane_site_captures_from_both_compartments() -> None:
+    # Site `a` is fed by A (cytosolic) and Lo (extracellular): the receptor Ra grows while BOTH A and Lo
+    # deplete — the general "list of same-compartment + adjacent-compartment + membrane species" coupling.
+    problem = assemble_membrane_coupled(_multi_model(), _geom(), dt=0.02)
+    a0, lo0, b0 = problem.mass("A"), problem.mass("Lo"), problem.mass("B")
+    for _ in range(120):
+        problem.step()
+    assert problem.mass("Ra") > 1e-2 and problem.mass("Rb") > 1e-2  # both sites captured
+    assert problem.mass("A") < a0 - 1e-3 and problem.mass("Lo") < lo0 - 1e-3  # Ra drew from both sides
+    assert problem.mass("B") < b0 - 1e-3
+
+
+# ---------------------------------------------------------------------------
+# 7. loud rejections
 # ---------------------------------------------------------------------------
 
 
