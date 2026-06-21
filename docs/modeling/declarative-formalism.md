@@ -39,7 +39,7 @@ The formalism covers:
 - **Algebraic constraints** alongside time-evolving equations, producing differential-algebraic systems naturally — incompressibility constraints, conserved-total constraints, instantaneous force balances (§1.4 T3, §1.9).
 - **Lumped ODE dynamics** at zero-dimensional points or in non-spatial models (§1.4 T4).
 - **Mechanics-driven moving geometries** — subdomain motion may be prescribed (a known velocity or displacement field) or itself unknown (solved by an equation in the same MathDescription, which is the path to mechanics-driven cell migration; §1.10).
-- **Boundary conditions** on labelled codim-1 sub-boundaries: Dirichlet, Neumann, Robin, and interface BCs (value-equality and flux-balance), uniformly applied to external and internal boundaries (§1.6).
+- **Boundary conditions** on labelled codim-1 sub-boundaries: Dirichlet, Neumann, Robin, and interface BCs (value-equality and single-sided flux), uniformly applied to external and internal boundaries (§1.6).
 - **Coupled multi-physics within a single MathDescription** — reaction-diffusion + mechanics + electrical signalling can coexist in one well-posed math object, coupled through shared variables, traces, and matched BC / source expressions (§1.6.5, §1.8).
 - **A weak-form escape hatch** for equations no operator template covers — custom constitutive laws, higher-order operators, mixed-FE-pair problems (§1.5).
 - **VCell-importability** — the formalism is intended to round-trip with a useful subset of VCell `MathDescription` artifacts. The full subset and the mapping rules are deferred to §2.4.
@@ -72,7 +72,7 @@ This document is the v1 design of the formalism. The headline deferrals are:
 - **Three known topological limitations** of the class-based subdomain abstraction (squashed thin layers, per-cell connected components, same-class-on-both-sides interface ambiguity).
 - **FastSystem / Events / region variables / stochastic constructs** from the VCell heritage.
 - **Per-region term overrides (Tier 2)** for structural variation within a subdomain class.
-- **General-algebraic interface BCs** for couplings that the value-equality + flux-balance kinds cannot express.
+- **General-algebraic interface BCs** for couplings that the value-equality + single-sided flux kinds cannot express.
 - **Lift / extension operators** (surface → bulk) — explicitly *not planned*; cases that need such lifts express them structurally via auxiliary variables and BCs.
 
 The full consolidated list — every item explicitly deferred or rejected, organised by category with source-section cross-references — is **Appendix B (v2 Roadmap)**. The driving principle, applied throughout: each item ships when a model that genuinely cannot be expressed without it is concretely needed — not on speculation.
@@ -514,7 +514,7 @@ Test functions for *other* variables appearing in the form (via `trace(·)` or d
 A weak-form equation's variable may carry §1.6 boundary conditions. The rule is split:
 
 - **Dirichlet BCs** declared in §1.6 are imposed as **strong** constraints (DOF elimination, exactly as for template equations). The form is solved subject to the Dirichlet condition; the user does not need to encode the Dirichlet value in the form.
-- **Neumann, Robin, value-equality, and flux-balance interface BCs** declared in §1.6 are **not** automatically added to the form. The user must encode their boundary terms in the form they write. This matches FEniCSx idiom: natural BCs become boundary integrals in the variational form via integration by parts; the form's author writes them where they belong.
+- **Neumann, Robin, value-equality, and single-sided-flux interface BCs** declared in §1.6 are **not** automatically added to the form. The user must encode their boundary terms in the form they write. This matches FEniCSx idiom: natural BCs become boundary integrals in the variational form via integration by parts; the form's author writes them where they belong.
 
 The schema rejects (or at minimum warns about) a non-Dirichlet §1.6 BC on a weak-form-governed variable, to avoid silent double-counting (the user encoding the Neumann term in the form *and* declaring a §1.6 Neumann) or silent omission (the user expecting §1.6 to handle a Neumann BC the form does not encode). The clean rule: for weak-form equations, all natural BCs live in the form; only Dirichlet is in §1.6.
 
@@ -652,33 +652,33 @@ Linear combination of value and flux. Covers permeability-type conditions (membr
 
 ##### Interface — value-equality
 
-At an internal boundary between two subdomains, with the variable's "left side" $u_L$ and the partner variable's "right side" $u_R$:
+At an internal boundary between two subdomains, with the variable's "left side" $u_L$ and the adjacent variable's "right side" $u_R$:
 
 $$u_L \;=\; k(\mathbf{x}, t) \cdot u_R$$
 
 Covers continuity ($k = 1$, the same physical quantity expressed as variables on either side — e.g. voltage continuous across a passive membrane) and partition equilibrium ($k \ne 1$, e.g. Nernst-style partitioning across a barrier). `expression` carries the partition coefficient $k$ (scalar; defaults to 1 for pure continuity).
 
-The BC names both variables: `variable` (the one on the left), `partner_variable` (the one on the right). Both must be defined on subdomains incident to `boundary`. The formalism does not privilege either side — `(u_L, u_R)` and `(u_R, u_L)` express the same condition.
+The BC names both variables: `variable` (the one on the left), `adjacent_variable` (the one on the right). Both must be defined on subdomains incident to `boundary`. The formalism does not privilege either side — `(u_L, u_R)` and `(u_R, u_L)` express the same condition.
 
-##### Interface — flux-balance
+##### Interface — single-sided flux
 
-At an internal boundary between two **bulk** subdomains, the outward normal flux of the home variable equals a user-supplied constitutive expression:
+At an internal boundary, the outward normal flux of the home variable equals a user-supplied constitutive expression:
 
-$$D \, \nabla u_L \cdot \mathbf{n} \;=\; f(u_L, u_R, \text{partner traces}, \mathbf{x}, t, \text{parameters})$$
+$$D \, \nabla u \cdot \mathbf{n} \;=\; f(\text{trace}(u),\ \text{adjacent-compartment traces},\ \text{membrane variables},\ \mathbf{x},\ t,\ \text{parameters})$$
 
-The equal-and-opposite flux into the partner subdomain is enforced automatically by mass conservation — the partner side's Neumann condition is not separately written. The constitutive expression $f$ may reference the home variable, the partner variable (named via `partner_variable`), traces of any other variable on either side's subdomain, geometric helpers, time, and parameters. This is the generalisation of VCell's `JumpCondition` without the Neumann-only restriction — $f$ can express any constitutive relation (linear permeability $P(u_L - u_R)$, saturating transport $V_{max} u_L / (K + u_L)$, voltage-gated channel kinetics, …).
+This is a **single-sided** Neumann condition on `variable`'s side of `boundary` — exactly one variable, one expression — and it is the faithful rendering of VCell's `JumpCondition` side (`in_flux` / `out_flux`). The constitutive expression $f$ may reference the home variable's own trace, the traces of any bulk variable in the *adjacent* compartment across the membrane (reachable on the interface — a bulk variable appears on the interface only through its `trace(·)`), any membrane (surface) variable that lives on the interface, geometric helpers, time, and parameters. $f$ can express any constitutive relation (linear permeability $P(u_{\text{outer}} - u_{\text{inner}})$, saturating transport $V_{max} u / (K + u)$, voltage-gated channel kinetics, …) and may be nonlinear in the unknowns (the method-of-lines integrator's Newton solve handles it; it is not promoted to the bilinear form).
 
-`partner_variable` must be supplied. The BC's sign convention is fixed by which subdomain `variable` belongs to: positive $f$ means flow *out of* the home subdomain *into* the partner subdomain.
+**The two sides are independent.** A species crossing a membrane is written as **two** `interface_flux` entries — one per bulk variable, each carrying the flux into its own side. They are *not* coupled by an enforced equal-and-opposite balance: VCell's `in_flux` and `out_flux` are independent single-sided fluxes, and mass conservation across the membrane is whatever the modeller writes into the two sides (for a permeability pair, $f_{\text{inner}} = P(u_{\text{outer}} - u_{\text{inner}})$ and $f_{\text{outer}} = -f_{\text{inner}}$, which conserve mass exactly). This is deliberate: it captures the general case where a membrane transporter need not be flux-conserving (e.g. a flux that also produces or consumes a membrane species). **Sign convention:** as for an ordinary Neumann BC (§1.6.2), positive $f$ is an **influx** into `variable`'s subdomain.
 
-**Scope: bulk-bulk only.** This BC kind is for transport between two bulk compartments where mass *crosses* the interface but does not *accumulate* on it. Use it for channel kinetics, semi-permeable wall transport, paracellular flux between cells, and similar bulk-to-bulk crossings.
+Distinct from an ordinary `kind: neumann` BC, which is for an *external* boundary of a single subdomain and cannot reach an adjacent-compartment trace or a membrane variable; the coupled assembler binds those for this kind. Use `interface_flux` for transport across an internal membrane between two modelled compartments (channel kinetics, semi-permeable wall transport, paracellular flux between cells).
 
-**For bulk-surface coupling where mass accumulates on the surface** (binding reactions, receptor capture, membrane-bound complex formation), use the **composable Neumann + source pattern** documented in §1.6.5 — not this BC kind. The composable pattern writes a regular `kind: neumann` BC on the bulk variable and a matching `source:` term on the surface variable's equation, with the user enforcing mass-balance by matching the expressions with appropriate signs. Worked end-to-end in §1.6.6.
+**For bulk-surface coupling where mass accumulates on the surface** (binding reactions, receptor capture, membrane-bound complex formation), when the membrane is an *external* boundary of a single modelled bulk (no second bulk compartment), the bulk side is an ordinary `kind: neumann` BC referencing the surface variable directly, paired with a matching `source:` term on the surface variable's equation — the **composable Neumann + source pattern** documented in §1.6.5 — with the user enforcing mass-balance by matching the expressions with appropriate signs. Worked end-to-end in §1.6.6. (Whether the bulk side is `neumann` or `interface_flux` follows the same rule as everywhere: `interface_flux` when an *adjacent bulk compartment* is modelled across the membrane, `neumann` otherwise.)
 
-A v2 "general algebraic" interface kind — any expression in traces and fluxes from either side $= 0$ — is anticipated as an escape hatch but deferred. Value-equality and flux-balance plus the §1.6.5 composable pattern together cover every interface coupling in the project's foreseeable use cases.
+A v2 "general algebraic" interface kind — any expression in traces and fluxes from either side $= 0$ — is anticipated as an escape hatch but deferred. Value-equality and single-sided flux plus the §1.6.5 composable pattern together cover every interface coupling in the project's foreseeable use cases.
 
 #### 1.6.3 Sign convention
 
-The outward unit normal $\mathbf{n}$ in Neumann, Robin, and flux-balance kinds is the outward normal of the **variable's home subdomain**. Positive flux means flow *out* of that subdomain across the boundary. On an internal interface, $\mathbf{n}$ for the left-side variable and $\mathbf{n}$ for the right-side variable therefore point in opposite directions; the formalism keeps track of this automatically when the interface BC is assembled.
+The outward unit normal $\mathbf{n}$ in Neumann, Robin, and single-sided-flux kinds is the outward normal of the **variable's home subdomain**. Positive flux means an **influx** into that subdomain across the boundary (matching the natural BC of the weak form). On an internal interface, $\mathbf{n}$ for a variable on one side and $\mathbf{n}$ for a variable on the other point in opposite directions; because each `interface_flux` is single-sided (it names one variable and deposits its flux on that variable's side only), the formalism uses each variable's own home-subdomain normal when its BC is assembled, and the two sides are written independently.
 
 This is the standard PDE textbook convention and matches the natural BC of the weak form: $\int_\Gamma (D \nabla u \cdot \mathbf{n}) \, v \, \mathrm{d}S$ appears with $\mathbf{n}$ outward.
 
@@ -686,18 +686,18 @@ This is the standard PDE textbook convention and matches the natural BC of the w
 
 **External boundaries.** When a variable has no BC declared on an external sub-boundary it touches, the implicit default is **zero-Neumann (no-flux)**: $D \nabla u \cdot \mathbf{n} = 0$. This is the natural BC of the diffusive weak form and produces conservative closed-domain models by default — the right behaviour for typical cell-shaped geometries with insulating outer boundaries.
 
-**Internal boundaries.** No default. Every internal sub-boundary that a variable touches must carry an explicit BC — Dirichlet, Neumann, Robin, value-equality interface, or flux-balance interface. The schema validates this; a missing internal BC is an error.
+**Internal boundaries.** No default. Every internal sub-boundary that a variable touches must carry an explicit BC — Dirichlet, Neumann, Robin, value-equality interface, or single-sided interface flux. The schema validates this; a missing internal BC is an error.
 
 **Compatibility checks.** Validation rules (deferred in detail to §1.11) include:
 
 - A variable cannot have two BCs of conflicting kind on the same boundary (e.g. Dirichlet and Neumann simultaneously).
-- An interface BC's `variable` and `partner_variable` must live on subdomains that are actually incident to `boundary` from opposite sides.
+- A value-equality interface BC's `variable` and `adjacent_variable` must live on subdomains that are actually incident to `boundary` from opposite sides. A single-sided `interface_flux` names only `variable`, which must live on a subdomain incident to `boundary`.
 - A Dirichlet BC on a variable with no boundary in the subdomain it constrains is a definition error (cannot fix a value on a non-existent boundary).
 - All expressions must type-check against the variable's function space.
 
 #### 1.6.5 Bulk-surface coupling — the composable pattern
 
-When a boundary is *itself* a subdomain that carries its own PDE — the canonical cell-membrane case, where Γ_mem is both the interface between cytoplasm and extracellular space *and* a surface subdomain carrying receptor density variables — the coupling between bulk and surface is expressed entirely through trace operators in expressions. Note that this is **not** the same as `interface_flux_balance` (§1.6.2): flux-balance is for bulk-bulk interfaces where mass *crosses* the boundary without accumulating; the composable pattern below is for bulk-surface interfaces where mass *accumulates* on the surface (binding, capture, complex formation).
+When a boundary is *itself* a subdomain that carries its own PDE — the canonical cell-membrane case, where Γ_mem is both the interface between cytoplasm and extracellular space *and* a surface subdomain carrying receptor density variables — the coupling between bulk and surface is expressed entirely through trace operators in expressions. A bulk-bulk `interface_flux` (§1.6.2) where the two sides are written as an equal-and-opposite pair models mass *crossing* the boundary without accumulating; the composable pattern below adds a surface `source:` term so that mass *accumulates* on the surface (binding, capture, complex formation) — the bulk `interface_flux` and the surface source need not balance.
 
 **The trace operator.** `trace(u)` is the value of a higher-dimensional variable $u$ restricted to a lower-dimensional boundary or interface within its domain. For a bulk variable $L$ defined throughout the cytoplasm Ω_cyto, `trace(L)` evaluated on the membrane Γ_mem is the value of $L$ at the membrane — formally, the limit of $L$ as you approach the membrane from inside Ω_cyto. Surface variables like $\rho_f$ that already live on Γ_mem are written directly; only higher-dimensional variables need an explicit `trace(·)` when used in a lower-dimensional expression. The trace is mathematically well-defined for the Sobolev spaces our variables live in (H¹ bulk functions have H^{1/2} traces on the boundary); FEniCSx handles trace assembly automatically. The full vocabulary of cross-dimensional reference operators is catalogued in §1.8.
 
@@ -1333,7 +1333,7 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 - Calculus operators' argument and result types must be honoured (`grad(u)` for scalar $u$ returns a vector; `div(v)` for vector $v$ returns a scalar; etc., per §1.8.5).
 - Variable initial conditions must match the variable's declared type (§1.7.4).
 - The Robin coefficient fields `alpha`, `beta`, `expression` ($\alpha$, $\beta$, $h$ in §1.6.2) must each be scalar.
-- Interface BC `partner_variable` must be defined on a subdomain incident to the BC's boundary from the opposite side (§1.6.2).
+- A value-equality interface BC's `adjacent_variable` must be defined on a subdomain incident to the BC's boundary from the opposite side (§1.6.2). A single-sided `interface_flux` has no `adjacent_variable`.
 
 #### 1.11.6 Temporality consistency
 
@@ -1349,10 +1349,10 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 **Errors** (cross-references §1.6.4, §1.5.6):
 
 - No two BCs for the same (variable, boundary) pair may declare conflicting kinds (e.g. Dirichlet and Neumann on the same variable and boundary).
-- Interface BCs must have a `partner_variable` defined on a subdomain incident to the BC's boundary from the opposite side.
+- A value-equality interface BC must have a `adjacent_variable` defined on a subdomain incident to the BC's boundary from the opposite side.
 - Dirichlet BCs must be declared on a labelled boundary that exists; the boundary must be incident to a subdomain on which the variable lives.
 - For weak-form equations (template = `weak_form`), §1.6 BCs on the governed variable must all be Dirichlet. Non-Dirichlet §1.6 BCs on a weak-form-governed variable are an error (§1.5.6); the user must encode natural BCs in the form itself.
-- **`interface_flux_balance` requires both sides to be `volume` (bulk) subdomains.** The kind enforces mass conservation across an interface where mass *crosses* but does not *accumulate*. Bulk-surface couplings (where mass accumulates on the surface, e.g. ligand binding to membrane receptors) are not expressible as flux-balance and are an error here; use the composable Neumann + source pattern in §1.6.5 instead. The validator rejects flux-balance entries whose `variable` or `partner_variable` lives on a non-volume subdomain, with an error message pointing the user at §1.6.5.
+- **`interface_flux` requires its `variable` to be a `volume` (bulk) subdomain.** The kind expresses transport across an interface where mass *crosses* into (or out of) a bulk compartment. Bulk-surface couplings where mass accumulates on the surface (e.g. ligand binding to membrane receptors) are not expressible as a flux *on the surface variable* and are an error here; use the composable Neumann + source pattern in §1.6.5 instead. The validator rejects `interface_flux` entries whose `variable` lives on a non-volume subdomain, with an error message pointing the user at §1.6.5.
 - Trace ambiguity: when an expression's `trace(u)` would have multiple resolutions (e.g. higher-dim $u$ contributes regions on both sides of the lower-dim evaluation context), the reference is ambiguous and rejected. In v1 the modeller's recourse is Tier 3 (separate subdomain classes); v2 will add side-or-region specifiers (§1.2.6, §1.8.2).
 
 #### 1.11.8 Initial-condition consistency
@@ -1387,7 +1387,7 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 
 - Every subdomain class name declared in the MathDescription must have a same-named class in the Geometry, with the same `kind`.
 - Every labelled boundary name referenced in a BC must exist in the Geometry.
-- Every internal boundary referenced by an interface BC must in fact bound two subdomains in the Geometry, matching the BC's `variable.subdomain` and `partner_variable.subdomain`.
+- Every internal boundary referenced by an interface BC must in fact bound two subdomains in the Geometry. For a value-equality BC, the two must match the BC's `variable.subdomain` and `adjacent_variable.subdomain`; for a single-sided `interface_flux`, the named `variable.subdomain` must be one of them.
 - Region-keyed parameter maps (`kind: region_map`) must cover every region the Geometry assigns to the parameter's subdomain class — missing regions are errors, not silent zero defaults.
 - **Expression-valued parameter scoping (§2.2.3).** A parameter whose body expression references any subdomain-relative geometry quantity (`geom.normal`, `geom.mean_curvature`, `geom.curvature1`, `geom.tangent`, `geom.azimuth`, `geom.radius`, …) must declare a `subdomain:` scope. Any *use* of a scoped parameter must be from an expression whose evaluation context is on (or a sub-entity of) the parameter's scope subdomain. A use from an incompatible context is an error pointing both to the parameter declaration and the offending use site.
 
@@ -1592,7 +1592,7 @@ The `form` field carries the full residual; the equation is `form = 0` for all a
 boundary_conditions:
   - variable: <variable_name>
     boundary: <boundary_name>            # labelled boundary in the Geometry
-    kind: dirichlet | neumann | robin | interface_value_equality | interface_flux_balance
+    kind: dirichlet | neumann | robin | interface_value_equality | interface_flux
     # additional fields per `kind`:
 
   # Dirichlet / Neumann: scalar expression
@@ -1609,20 +1609,23 @@ boundary_conditions:
 
   # Interface value-equality
   - variable: u_left
-    partner_variable: u_right
+    adjacent_variable: u_right
     boundary: membrane
     kind: interface_value_equality
     expression: "<scalar_expr>"          # the partition coefficient k; default 1
 
-  # Interface flux-balance
-  - variable: u_left
-    partner_variable: u_right
+  # Interface single-sided flux (one entry per side; a crossing species has two)
+  - variable: u_inner
     boundary: membrane
-    kind: interface_flux_balance
-    expression: "<scalar_expr>"          # the constitutive flux expression
+    kind: interface_flux
+    expression: "P * (trace(u_outer) - trace(u_inner))"   # flux INTO u_inner's side
+  - variable: u_outer
+    boundary: membrane
+    kind: interface_flux
+    expression: "-P * (trace(u_outer) - trace(u_inner))"  # the opposite side, written independently
 ```
 
-Interface kinds require `partner_variable` per §1.6.2. The validator checks all the BC consistency rules from §1.11.7 (no conflicting kinds on the same `(variable, boundary)`; partner subdomain incidence is correct; Dirichlet-only restriction on weak-form-governed variables; etc.).
+Value-equality requires `adjacent_variable` per §1.6.2; `interface_flux` is single-sided and names only `variable` (it reaches the adjacent compartment through `trace(·)` in its expression). The validator checks all the BC consistency rules from §1.11.7 (no conflicting kinds on the same `(variable, boundary)`; value-equality adjacent-variable subdomain incidence is correct; `interface_flux` variable is on a volume subdomain; Dirichlet-only restriction on weak-form-governed variables; etc.).
 
 ### 2.3 Expression language
 
@@ -1733,7 +1736,7 @@ The validation rules of §1.11 are implemented by a single **semantic** validati
 3. Type-checks every expression AST (§1.11.5) — node types must match slot expectations.
 4. Checks coverage (§1.11.4) — every variable governed, every internal boundary BC'd, etc.
 5. Checks temporality consistency (§1.11.6) — strict matching of `temporality` and `∂_t` presence.
-6. Checks BC consistency (§1.11.7) — no conflicts, interface partner-subdomain validity, weak-form Dirichlet-only restriction.
+6. Checks BC consistency (§1.11.7) — no conflicts, value-equality adjacent-subdomain validity, weak-form Dirichlet-only restriction.
 7. Checks IC consistency (§1.11.8) — type match, no inter-variable references, Dirichlet-compatibility warnings.
 8. Applies the operator usage rules (§1.11.9) — template slot expressions must not contain calculus on the governed variable (narrow rule), and second-order operators (`lapl`, `lapl_beltrami`) require argument variables with `space: lagrange_p2` or higher (smoothness rule).
 9. Checks parameter scoping (§1.11.10) — expression parameters with geometric helpers carry a `subdomain:` scope; their uses must be from compatible contexts.
@@ -1767,7 +1770,7 @@ This section specifies which VCell `MathDescription` constructs map to which for
 
 | VCell construct | Transformation needed |
 |---|---|
-| `JumpCondition` | Translates to one or two `boundary_condition` entries with `kind: interface_flux_balance`. The Neumann-only restriction in VCell is relaxed here; flux-balance interface BCs may have any constitutive expression. |
+| `JumpCondition` | Each well-posed side (`in_flux` / `out_flux`) of a domain-restricted volume variable becomes a single-sided `boundary_condition` entry with `kind: interface_flux` (or `kind: neumann` when the membrane is an external boundary of a single modelled bulk; the routing follows whether an adjacent bulk compartment is modelled). A species crossing a membrane between two modelled compartments yields two independent `interface_flux` entries. A modern variable has one domain, so only one of its two flux sides is well-posed; the legacy domain-less case (one variable on both sides) is rejected pending a side-tagged BC. |
 | Per-face Cartesian BCs (Xp/Xm/Yp/Ym/Zp/Zm) on a CompartmentSubDomain | Each face becomes a separate labelled-boundary BC. The Geometry must expose those faces as named boundaries (`x_minus`, `x_plus`, etc.). |
 | `MembraneSubDomain.velocityX`, `velocityY` | A `subdomain.motion` with `kind: prescribed` and `velocity: "[velocityX, velocityY]"`. Note the formalism uses a single vector expression, not per-component scalars. |
 | VCell `Expression` strings (infix math) | Parse using §2.3.2; the syntax is largely compatible. VCell's parser supports a few constructs ours does not (e.g. integer division semantics, certain function names) — translation may need minor rewrites. |
@@ -1787,7 +1790,7 @@ Models using any of these constructs cannot be imported losslessly in v1.
 
 #### 2.6.4 Round-trip considerations
 
-For models that fall entirely within §2.6.1 (direct mappings), bidirectional round-trip is feasible. For models requiring §2.6.2 transformations, round-trip is *lossy in one direction*: the formalism's richer constructs (labelled non-Cartesian boundaries, flux-balance interface BCs with arbitrary expressions, unknown motion) cannot in general be expressed back into VCell `MathDescription` without losing information. The natural direction is **VCell → formalism** (importing legacy models); **formalism → VCell** is offered only for the subset that fits in VCell's quirks (recorded as v2 if a use case earns it).
+For models that fall entirely within §2.6.1 (direct mappings), bidirectional round-trip is feasible. For models requiring §2.6.2 transformations, round-trip is *lossy in one direction*: the formalism's richer constructs (labelled non-Cartesian boundaries, single-sided interface flux BCs with arbitrary expressions, unknown motion) cannot in general be expressed back into VCell `MathDescription` without losing information. The natural direction is **VCell → formalism** (importing legacy models); **formalism → VCell** is offered only for the subset that fits in VCell's quirks (recorded as v2 if a use case earns it).
 
 SBML Spatial compatibility (the standard interchange format for spatial cell biology, which the user authored) is **not** part of v1. The schemas diverge non-trivially — SBML Spatial does not have a weak-form escape hatch, lacks first-class unknown motion, and has its own per-face BC machinery. A v2 SBML Spatial converter would be valuable but is a substantial project on its own.
 
@@ -2149,7 +2152,7 @@ The three v1 conformance models run **through the formalism** (`tests/test_backe
 **Punted in v1**:
 
 - Operator templates T3 (algebraic constraint), T4 (lumped ODE), T5–T7 (mechanics).
-- The two **interface** BC kinds (value-equality, flux-balance) — bulk-bulk coupling on an *internal* interface — and bulk↔surface coupling for >2 subdomains or a moving surface. The bulk↔surface composable pattern (§1.6.6) now runs through `assemble()` (`backend/coupled.py`); these remaining cases reuse the same cross-mesh block machinery but are not yet wired (the single-mesh `assemble()` branch still rejects interface BCs with `NotImplementedError`). External Dirichlet/Neumann/Robin are implemented. Time-dependent BC expressions are also deferred (the v1 backend has no `t` handle).
+- The **interface** BC kinds. Single-sided `interface_flux` — bulk-bulk coupling on an *internal* interface — is wired in the coupled backend (`backend/interface_coupled.py`: backward-Euler `assemble_interface_coupled` and method-of-lines `integrate_interface_coupled`), and VCell jump conditions import to it. Still deferred: value-equality (`u = k·u_adjacent`, a constrained solve, not a flux term); an `interface_flux` referencing an *adjacent membrane (surface) variable* (the membrane-species-coupled-to-both-bulks case); and bulk↔surface coupling for >2 subdomains or a moving surface. The bulk↔surface composable pattern (§1.6.6) runs through `assemble()` (`backend/coupled.py`). The single-mesh `assemble()` branch still rejects interface BCs with `NotImplementedError` (they need the coupled path). External Dirichlet/Neumann/Robin are implemented. Time-dependent BC expressions are also deferred (the v1 backend has no `t` handle).
 - Prescribed-*displacement* motion. (**Unknown / mechanics-driven** motion is now implemented for the §1.10.8 class — see the unknown-motion bullet above; remeshing / conservative field transfer is also implemented — see the ALE bullet.)
 - Region-keyed parameter maps; advection (`relative_advection`) slots; non-linear sources.
 - The full §3.4 SolverConfiguration (linear/nonlinear solver, ALE, stabilisation knobs) and a YAML carrier for it; intermediate output-time snapshots.
@@ -2170,7 +2173,7 @@ Alphabetical. Each entry links to the section that defines or first uses the ter
 - **Auto-dilution** — The $\rho \, \nabla_\Gamma \cdot \mathbf{v}_\Gamma$ term that operator templates with a $\partial_t$ slot generate automatically when their subdomain has non-zero motion. The canonical correctness check for moving-membrane surface PDEs; not user-settable (§1.4.2 T2, §1.10.5).
 - **Bare name** — A reference in an expression with no `trace(·)`, no calculus operator, and no subscripts. Resolves to a local variable, parameter, or reserved name in that order (§1.8.6).
 - **Boundary (labelled)** — A codim-1 entity in the geometry with a name. Carries BCs in the MathDescription; can also be a subdomain in its own right (membrane double-role, §1.2.4).
-- **Composable pattern** — The §1.6.5 bulk-surface coupling idiom: a regular Neumann BC on the bulk variable plus a matching `source:` term on a surface variable. Used for accumulation (binding, capture). Contrast with `interface_flux_balance` (conservation, no accumulation).
+- **Composable pattern** — The §1.6.5 bulk-surface coupling idiom: a regular Neumann BC on the bulk variable plus a matching `source:` term on a surface variable. Used for accumulation (binding, capture). Contrast with a bulk-bulk `interface_flux` pair written equal-and-opposite (crossing, no accumulation).
 - **Conformance** — A backend claim that, for some declared subset of the formalism, it reproduces the reference suite's models within tolerance (§3.5).
 - **Current configuration** — The deformed mesh position at the current time step for moving subdomains. Geometric helpers (`geom.normal`, `geom.mean_curvature`, …) evaluate against it. Contrast with reference configuration (§1.7.2, §1.10.6).
 - **DAE** — Differential-algebraic equation. The combined system when a MathDescription has both `time_dependent` and `steady_state` equations (§1.9.4).
@@ -2178,7 +2181,7 @@ Alphabetical. Each entry links to the section that defines or first uses the ter
 - **Expression-valued parameter** — A parameter whose value is an expression in `sim.t`, `geom.*`, and other parameters rather than a constant. Scalar, vector, or symmetric-tensor (§2.2.3 (b)).
 - **Form (weak)** — The UFL-style residual expression in a weak-form equation. Equation is interpreted as `form = 0` for all admissible test functions (§1.5.3).
 - **Geometry** — The external object that provides the mesh, region-to-class assignment, and labelled-boundary identifiers. Referenced by name from the MathDescription (§1.2.1).
-- **Interface BC** — A boundary condition on an internal boundary (two-sided). Two kinds in v1: value-equality and flux-balance. Both require `partner_variable` (§1.6.2). Flux-balance is bulk-bulk only; bulk-surface accumulation uses the composable pattern.
+- **Interface BC** — A boundary condition on an internal boundary. Two kinds in v1: value-equality (two-sided, requires `adjacent_variable`) and single-sided flux (`interface_flux`, names one `variable`, reaches the adjacent compartment via `trace(·)`). A species crossing a membrane is two independent `interface_flux` entries; bulk-surface accumulation uses the composable pattern (§1.6.2).
 - **Loader** — Runtime-provided machinery that turns a name into a concrete MathDescription / Geometry / SolverConfiguration object. Not specified by the formalism; common strategies are filesystem search, registry, package-bundled artifacts (§3.4).
 - **MathDescription** — The top-level declarative artifact this whole document defines. A self-contained mathematical problem in data form, independent of solver and (largely) of geometry (§2.1.2).
 - **Motion** — A subdomain field declaring how the subdomain moves: `none`, `prescribed`, or `unknown` (§1.10). Property of the subdomain, not of any equation.
@@ -2243,8 +2246,8 @@ A consolidated record of everything explicitly deferred to v2 (or beyond), pulle
 
 | Item | Source | Notes |
 |---|---|---|
-| **General-algebraic interface BC** | §1.6.2, §1.8.7 | Any expression in traces and fluxes from either side $= 0$. Escape hatch for couplings value-equality and flux-balance cannot express. |
-| **Surface-surface flux-balance** | §1.6.2 (implied) | v1 flux-balance is bulk-bulk only; surface-surface conservation across a curve interface is unaddressed. |
+| **General-algebraic interface BC** | §1.6.2, §1.8.7 | Any expression in traces and fluxes from either side $= 0$. Escape hatch for couplings value-equality and single-sided flux cannot express. |
+| **Surface-surface flux** | §1.6.2 (implied) | v1 `interface_flux` requires its `variable` to be a bulk (volume) subdomain; surface-surface flux across a curve interface is unaddressed. |
 
 ### B.6 Initial conditions
 

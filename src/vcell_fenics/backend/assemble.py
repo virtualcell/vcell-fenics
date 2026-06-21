@@ -47,7 +47,7 @@ from vcell_fenics.core import remap_bulk_function, remap_surface_function
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
-    BCInterfaceFluxBalance,
+    BCInterfaceFlux,
     BCInterfaceValueEquality,
     BCNeumann,
     BCRobin,
@@ -252,7 +252,7 @@ def _build_boundary_conditions(
     weak: list[tuple[TermKind, UflExpr, NDArray[np.int32]]] = []
     dirichlet_refreshers: list[tuple[fem.Function, fem.Expression]] = []
     for bc in md.boundary_conditions:
-        if isinstance(bc, BCInterfaceValueEquality | BCInterfaceFluxBalance):
+        if isinstance(bc, BCInterfaceValueEquality | BCInterfaceFlux):
             raise NotImplementedError(
                 "backend v1 supports external Dirichlet/Neumann/Robin BCs; an interface BC needs an internal "
                 "boundary between two subdomains (multi-compartment geometry), a later increment"

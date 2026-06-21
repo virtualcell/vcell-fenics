@@ -20,7 +20,7 @@ import pytest
 
 from vcell_fenics.formalism import (
     BCDirichlet,
-    BCInterfaceFluxBalance,
+    BCInterfaceFlux,
     BCNeumann,
     FormalismLoadError,
     MathDescription,
@@ -433,11 +433,11 @@ def test_expression_parameter_no_subdomain_round_trips() -> None:
 
 # ---------------------------------------------------------------------------
 # Heterogeneous BC list (silence the unused-import warning on
-# BCInterfaceFluxBalance and exercise the dispatcher).
+# BCInterfaceFlux and exercise the dispatcher).
 # ---------------------------------------------------------------------------
 
 
-def test_round_trip_interface_flux_balance_bc() -> None:
+def test_round_trip_interface_flux_bc() -> None:
     md = MathDescription(
         geometry="two_bulks",
         subdomains=[
@@ -468,11 +468,10 @@ def test_round_trip_interface_flux_balance_bc() -> None:
             ),
         ],
         boundary_conditions=[
-            BCInterfaceFluxBalance(
+            BCInterfaceFlux(
                 variable="u_left",
-                partner_variable="u_right",
                 boundary="membrane",
-                expression="P * (u_left - u_right)",
+                expression="P * (trace(u_right) - trace(u_left))",
             )
         ],
     )

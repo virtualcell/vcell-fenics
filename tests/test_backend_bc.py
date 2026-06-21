@@ -313,12 +313,12 @@ def test_unlabelled_boundary_is_rejected() -> None:
 
 
 def test_interface_bc_is_not_supported() -> None:
-    # Two variables on the shared subdomain so the partner resolves; an interface BC
+    # Two variables on the shared subdomain so the adjacent variable resolves; an interface BC
     # needs an internal boundary between two subdomains (multi-compartment), deferred.
     equations = f"{_eq('c')}\n{_eq('d')}"
     bc = """
   boundary_conditions:
-    - { kind: interface_value_equality, variable: c, partner_variable: d, boundary: wall, expression: "1" }
+    - { kind: interface_value_equality, variable: c, adjacent_variable: d, boundary: wall, expression: "1" }
 """
     with pytest.raises(NotImplementedError, match="interface"):
         assemble(load_yaml(_model(variables=_TWO_VARS, equations=equations, bcs=bc)), _geom(), dt=0.05)

@@ -205,11 +205,11 @@ def test_2d_disk_in_box_partition() -> None:
 def test_realize_interface_coupled_builds_a_solvable_coupled_geometry() -> None:
     # The realize -> InterfaceCoupledGeometry bridge: the imported geometry is realized into the
     # two-bulk + membrane object the coupled solver consumes, retaining the entity maps `realize`
-    # discards. A flux-balance permeability coupling then solves end-to-end on it, reaching the
+    # discards. A pair of single-sided permeability fluxes then solves end-to-end on it, reaching the
     # disk-in-box mass-weighted equilibrium u_eq = A_disk/A_box.
     from vcell_fenics.backend import integrate_interface_coupled
     from vcell_fenics.backend.realize import realize_interface_coupled
-    from vcell_fenics.formalism.schema import BCInterfaceFluxBalance, ParameterConstant
+    from vcell_fenics.formalism.schema import BCInterfaceFlux, ParameterConstant
 
     radius = 0.5
     geometry = realize_interface_coupled(
@@ -250,7 +250,8 @@ def test_realize_interface_coupled_builds_a_solvable_coupled_geometry() -> None:
             ),
         ],
         boundary_conditions=[
-            BCInterfaceFluxBalance(variable="u", partner_variable="v", boundary="pm", expression="P * (v - u)")
+            BCInterfaceFlux(variable="u", boundary="pm", expression="P * (trace(v) - trace(u))"),
+            BCInterfaceFlux(variable="v", boundary="pm", expression="P * (trace(u) - trace(v))"),
         ],
     )
     result = integrate_interface_coupled(md, geometry, t_final=4.0)

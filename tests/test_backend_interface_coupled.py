@@ -3,7 +3,7 @@
 The first increment of cross-compartment coupling is the *geometry*, not the physics: prove that a
 form integrated on the membrane can reach the traces of **both** bulk variables at once — a membrane
 equation in `trace(u_inner)` and `trace(u_outer)`, or one bulk side's interface flux referencing the
-partner trace. The existing `CoupledGeometry` (one bulk + one surface, a single entity map) reaches
+adjacent compartment's trace. The existing `CoupledGeometry` (one bulk + one surface, a single entity map) reaches
 only one bulk natively, and integrating a term *on the membrane* that references a bulk function
 (codim −1 from the membrane) is rejected by ffcx (`codim >= 0`).
 
@@ -34,7 +34,7 @@ from vcell_fenics.backend import (
 )
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.formalism.schema import (
-    BCInterfaceFluxBalance,
+    BCInterfaceFlux,
     BCInterfaceValueEquality,
     MathDescription,
     ParameterConstant,
@@ -124,14 +124,16 @@ def test_membrane_trace_picks_the_own_side_value_not_an_average() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Flux-balance interface coupling (§1.6.2) — backward Euler.
+# Single-sided interface flux coupling (§1.6.2) — backward Euler.
 # ---------------------------------------------------------------------------
 
 
-def _flux_balance_model(
+def _permeability_model(
     *, permeability: str = "P", diffusion: str = "0.1", inner_ic: str = "1.0", outer_ic: str = "0.0"
 ) -> MathDescription:
-    """Two bulk diffusion species coupled by a permeability flux P·(u_out − u_in) at the membrane."""
+    """Two bulk diffusion species coupled by a permeability flux at the membrane, expressed as a pair of
+    independent single-sided fluxes: P·(u_out − u_in) into the inner side and its negation into the
+    outer side (together conserving mass, the equal-and-opposite VCell permeability pair)."""
     return MathDescription(
         geometry="cell",
         subdomains=[Subdomain(name="cyto", kind="volume"), Subdomain(name="ext", kind="volume")],
@@ -156,17 +158,13 @@ def _flux_balance_model(
             ),
         ],
         boundary_conditions=[
-            BCInterfaceFluxBalance(
-                variable="u_in",
-                partner_variable="u_out",
-                boundary="membrane",
-                expression=f"{permeability} * (u_out - u_in)",
-            )
+            BCInterfaceFlux(variable="u_in", boundary="membrane", expression=f"{permeability} * (u_out - u_in)"),
+            BCInterfaceFlux(variable="u_out", boundary="membrane", expression=f"{permeability} * (u_in - u_out)"),
         ],
     )
 
 
-def test_flux_balance_equilibrates_and_conserves_mass() -> None:
+def test_permeability_equilibrates_and_conserves_mass() -> None:
     # A permeability flux P·(u_out − u_in) across the membrane drives the two compartments to a uniform
     # equilibrium with no external flux, conserving total mass. Starting u_in=1, u_out=0, the steady
     # value is the mass-weighted mean u_eq = (A_in·1 + A_out·0)/(A_in + A_out) = A_in/(A_in + A_out).
@@ -176,7 +174,7 @@ def test_flux_balance_equilibrates_and_conserves_mass() -> None:
     area_out = math.pi * (outer_radius**2 - inner_radius**2)
     u_eq = area_in / (area_in + area_out)
 
-    problem = assemble_interface_coupled(_flux_balance_model(), geometry, dt=0.05)
+    problem = assemble_interface_coupled(_permeability_model(), geometry, dt=0.05)
     mass0 = problem.total_mass()
     for _ in range(400):
         problem.step()
@@ -192,7 +190,7 @@ def test_no_permeability_leaves_the_compartments_uncoupled() -> None:
     # diffuses internally to its own (conserved) mean. This pins that the equilibration above is driven
     # by the coupling term, not by some spurious cross-talk in the assembly.
     geometry = _geometry(h=0.1)
-    model = _flux_balance_model()
+    model = _permeability_model()
     no_flux = replace(model, parameters=[ParameterConstant(name="P", value=0.0)])
 
     problem = assemble_interface_coupled(no_flux, geometry, dt=0.05)
@@ -204,12 +202,12 @@ def test_no_permeability_leaves_the_compartments_uncoupled() -> None:
 
 
 def test_value_equality_constraint_is_rejected() -> None:
-    # The other interface kind — the u = k·partner constraint — needs a different mechanism (a
+    # The other interface kind — the u = k·u_adjacent constraint — needs a different mechanism (a
     # constrained solve, not a flux term) and is a follow-up; it must fail loudly, not silently.
     model = replace(
-        _flux_balance_model(),
+        _permeability_model(),
         boundary_conditions=[
-            BCInterfaceValueEquality(variable="u_in", partner_variable="u_out", boundary="membrane", expression="1")
+            BCInterfaceValueEquality(variable="u_in", adjacent_variable="u_out", boundary="membrane", expression="1")
         ],
     )
     with pytest.raises(NotImplementedError, match="value-equality"):
@@ -242,7 +240,7 @@ def test_mol_equilibrates_and_conserves_mass() -> None:
 
     # Fast intra-compartment diffusion (D=1, diffusion time r²/D ≈ 0.25) so the system equilibrates by
     # t = 4 (~16 diffusion times) — keeps the test cheap while reaching the steady state.
-    result = integrate_interface_coupled(_flux_balance_model(diffusion="1.0"), geometry, t_final=4.0)
+    result = integrate_interface_coupled(_permeability_model(diffusion="1.0"), geometry, t_final=4.0)
     assert result.time == pytest.approx(4.0)
     assert _inner_mean(result) == pytest.approx(u_eq, rel=2e-2)
     assert result.total_mass() == pytest.approx(area_in, rel=2e-2)  # init mass = 1·A_in, conserved
@@ -254,7 +252,7 @@ def test_mol_transient_is_second_order_in_space() -> None:
     # self-converges at the P1 rate O(h²) under mesh refinement. Successive differences shrink ~4× per
     # halving. (The definitive cross-solver check is a joint-refinement study vs VCell's FV solver — a
     # follow-up; this pins the spatial order without an external reference.)
-    model = replace(_flux_balance_model(), parameters=[ParameterConstant(name="P", value=1.0)])
+    model = replace(_permeability_model(), parameters=[ParameterConstant(name="P", value=1.0)])
 
     def functional(h: float) -> float:
         return _inner_mean(integrate_interface_coupled(model, _geometry(h=h), t_final=0.3))
