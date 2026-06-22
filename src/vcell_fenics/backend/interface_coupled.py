@@ -32,9 +32,9 @@ un-assemblable in DOLFINx 0.10/0.11, so the implicit Jacobian is applied by fini
 residual, preconditioned by the assembled partial Jacobian) are provided; the MOL one is
 unconditionally stable for stiff binding.
 
-Scope: follow-ups are a moving membrane (which makes the `ρ ∇_Γ·v_Γ` dilution term mandatory), in-bulk
-reactions, `BCInterfaceValueEquality` (the `u_inner = k·u_outer` constraint), and a reservoir Dirichlet
-on the outer boundary.
+Implemented on this substrate: a moving membrane (prescribed or force-balance velocity, with the mandatory
+`ρ ∇_Γ·v_Γ` dilution), in-bulk reactions, and a reservoir Dirichlet on the outer wall. The remaining
+follow-up is `BCInterfaceValueEquality` (the `u_inner = k·u_outer` interface constraint).
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_tra
 from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tension
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
+    BCDirichlet,
     BCInterfaceFlux,
     BCInterfaceValueEquality,
     MathDescription,
@@ -444,6 +445,37 @@ def _sum_forms(terms: list[UflExpr]) -> UflExpr:
     for term in terms[1:]:
         total = total + term
     return total
+
+
+_RESERVOIR_PENALTY = 1.0e6
+"""Weak-Dirichlet penalty for a reservoir BC: the boundary value is held to ~1/penalty."""
+
+
+def _reservoir_dirichlet(
+    md: MathDescription, geometry: InterfaceCoupledGeometry, outer_species: list[str], ctx: CompileContext
+) -> list[tuple[int, UflExpr]]:
+    """The outer-wall **reservoir** Dirichlet BCs as `(component index, compiled value)` pairs — a held
+    concentration on the outer box boundary that sustains a bulk species against depletion (e.g. a ligand
+    reservoir feeding the membrane binding). Enforced **weakly** by a penalty term `β ∮_wall (u − g) w ds`
+    rather than a strong constraint, so it composes with the blocked cross-mesh form as an ordinary
+    boundary integral (no per-block Dirichlet bookkeeping). Only the **outer** compartment touches the box,
+    so a Dirichlet on any other boundary or species is rejected loudly."""
+    reservoirs: list[tuple[int, UflExpr]] = []
+    for bc in md.boundary_conditions:
+        if not isinstance(bc, BCDirichlet):
+            continue
+        if bc.boundary != geometry.outer:
+            raise NotImplementedError(
+                f"Dirichlet BC on boundary {bc.boundary!r}: the membrane-coupled solver supports a reservoir "
+                f"Dirichlet only on the outer box boundary {geometry.outer!r}"
+            )
+        if bc.variable not in outer_species:
+            raise NotImplementedError(
+                f"Dirichlet BC on {bc.variable!r}: only the outer-compartment species {outer_species} reach "
+                f"the outer box boundary {geometry.outer!r}"
+            )
+        reservoirs.append((outer_species.index(bc.variable), compile_expression(parse(bc.expression), ctx)))
+    return reservoirs
 
 
 def assemble_interface_coupled(
@@ -851,6 +883,13 @@ def assemble_membrane_coupled(
                 terms.append(-dt * compile_expression(parse(source), react_ctx) * test[k] * dx)
     f_local = sum(terms[1:], terms[0])
 
+    # Reservoir Dirichlet on the outer box wall (a held concentration sustaining a bulk species), enforced
+    # weakly by a penalty `β ∮_wall (u − g) w ds` — it is linear in u_out, so `ufl.lhs` routes `β u w ds`
+    # into the matrix and `ufl.rhs` the constant `β g w ds` into the RHS, no per-block Dirichlet handling.
+    ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
+    for k, g_value in _reservoir_dirichlet(md, geometry, outer_species, ctx):
+        f_local += _RESERVOIR_PENALTY * (u_out[k] - g_value) * w_out[k] * ds_wall
+
     # Coupling on the parent's interior interface facets, **fully lagged (IMEX)**: the bulk interface
     # traces *and* the surface species use previous-step values, so each binding rate is an explicit RHS
     # forcing. The SAME rate is subtracted from a bulk (its `BCInterfaceFlux`, tested on its own side)
@@ -1189,6 +1228,14 @@ def integrate_membrane_coupled(
                 precond_terms.append(ufl.derivative(reaction_form, state, trial))  # assemblable linearisation
     f_local = _sum_forms(local_terms)
     j_local = _sum_forms(precond_terms)
+
+    # Reservoir Dirichlet on the outer box wall, weakly via a penalty (see the BE assembler). Linear in the
+    # outer state, so it goes into both the residual and the assembled Jacobian (the matrix-free part stays
+    # the binding only).
+    ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
+    for k, g_value in _reservoir_dirichlet(md, geometry, outer_species, ctx):
+        f_local += _RESERVOIR_PENALTY * (u_out_fn[k] - g_value) * w_out[k] * ds_wall
+        j_local += _RESERVOIR_PENALTY * u_out[k] * w_out[k] * ds_wall
 
     # Coupling, FULLY IMPLICIT: every species in scope via its interface representation (state functions).
     coupling_symbols: dict[str, UflExpr] = {"geom.x": ufl.SpatialCoordinate(parent), **params}
