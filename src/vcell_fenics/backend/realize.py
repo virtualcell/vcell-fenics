@@ -155,9 +155,13 @@ def _realize_2d_partition(
     ox, oy = description.origin[0], description.origin[1]
     lx, ly = description.extent[0], description.extent[1]
     if resolution is None:
-        # Resample at the mesh scale: marching grid spacing ≈ h, so the faceted boundary refines with
-        # the mesh (clamped to keep a coarse mesh from under-sampling and a fine one from blowing up).
-        resolution = min(2001, max(51, round(max(lx, ly) / h) + 1))
+        # Resample at the mesh scale, **per axis** (≈ h spacing on EACH axis). A single point count for
+        # both axes would under-sample the long axis of a non-square box (e.g. a unit disk in a 12×4 box:
+        # dx = 0.08 but dy = 0.027). Per-axis counts keep dx ≈ dy ≈ h. (Clamped to keep a coarse mesh from
+        # under-sampling and a fine one from blowing up.)
+        nx, ny = (min(2001, max(51, round(length / h) + 1)) for length in (lx, ly))
+    else:
+        nx = ny = resolution
 
     # March each shape's own (raw, not priority-resolved) boundary so the mesh conforms to every
     # analytic surface; priority then decides each cell's owner. For nested shapes (nucleus in
@@ -166,15 +170,15 @@ def _realize_2d_partition(
     for subvolume in subvolumes[:-1]:
         assert subvolume.expression is not None  # checked above
         raw_field = lower_predicate(parse(subvolume.expression))
-        contours.extend(
-            _march_contours(raw_field, ox=ox, oy=oy, lx=lx, ly=ly, resolution=resolution, name=subvolume.name)
-        )
+        contours.extend(_march_contours(raw_field, ox=ox, oy=oy, lx=lx, ly=ly, nx=nx, ny=ny, name=subvolume.name))
     if not contours:
         raise RealizationError(f"2D geometry {description.name!r} has no interior contours to mesh")
 
-    parent = _mesh_box_with_contours(contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name)
+    parent, cell_face = _mesh_box_with_contours(
+        contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name
+    )
     fields = subvolume_implicit_functions(description)  # priority-resolved; classifies each cell
-    tagging = _classify_and_tag(parent, description, fields, ox=ox, oy=oy, lx=lx, ly=ly)
+    tagging = _classify_and_tag(parent, description, fields, cell_face=cell_face, ox=ox, oy=oy, lx=lx, ly=ly)
     return parent, tagging
 
 
@@ -335,18 +339,19 @@ def _realize_2d_whole_box(description: GeometryDescription, *, h: float, comm: M
 
 
 def _march_contours(
-    field: Expr, *, ox: float, oy: float, lx: float, ly: float, resolution: int, name: str
+    field: Expr, *, ox: float, oy: float, lx: float, ly: float, nx: int, ny: int, name: str
 ) -> list[NDArray[np.float64]]:
-    """Sample ``field`` over the box and march every ``φ = 0`` contour, each returned as physical
-    (x, y) vertices. v1 requires each contour to be strictly inside the box (a subvolume touching
-    the box boundary is a later slice)."""
+    """Sample ``field`` over the box on an ``nx × ny`` grid and march every ``φ = 0`` contour, each
+    returned as physical (x, y) vertices. ``nx`` / ``ny`` are per-axis point counts (so the spacing is
+    ≈ h on each axis even for a non-square box). v1 requires each contour to be strictly inside the box
+    (a subvolume touching the box boundary is a later slice)."""
 
-    xs = np.linspace(ox, ox + lx, resolution)
-    ys = np.linspace(oy, oy + ly, resolution)
+    xs = np.linspace(ox, ox + lx, nx)
+    ys = np.linspace(oy, oy + ly, ny)
     grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
     phi = _eval_field(field, (grid_x, grid_y))
 
-    dx, dy = lx / (resolution - 1), ly / (resolution - 1)
+    dx, dy = lx / (nx - 1), ly / (ny - 1)
     out: list[NDArray[np.float64]] = []
     for rows_cols in find_contours(phi, 0.0):
         xy = np.column_stack([ox + rows_cols[:, 1] * dx, oy + rows_cols[:, 0] * dy])
@@ -375,10 +380,11 @@ def _mesh_box_with_contours(
     h: float,
     comm: MPI.Comm,
     name: str,
-) -> dmesh.Mesh:
-    """Build a gmsh model of the box with every ``contours`` polyline embedded and fragment it so
-    each is a conforming internal edge, returning the body-fitted DOLFINx mesh. Region / membrane /
-    face tagging is done afterwards in DOLFINx (:func:`_classify_and_tag`), by field sign."""
+) -> tuple[dmesh.Mesh, dmesh.MeshTags]:
+    """Build a gmsh model of the box with every ``contours`` polyline embedded and fragment it so each
+    is a conforming internal edge, returning the body-fitted DOLFINx mesh **and** a cell→fragment-face
+    tag. Region / membrane / face tagging is done afterwards in DOLFINx (:func:`_classify_and_tag`); the
+    fragment-face tag lets that step keep each body-fit region whole (one owner per face)."""
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
@@ -400,16 +406,22 @@ def _mesh_box_with_contours(
         box = occ.addRectangle(ox, oy, 0.0, lx, ly)
         occ.fragment([(2, box)], tools)
         occ.synchronize()
-        # One physical group over every fragment so model_to_mesh returns the whole mesh.
-        gmsh.model.addPhysicalGroup(2, [s for _, s in gmsh.model.getEntities(2)], tag=1, name="domain")
+        # One physical group PER fragment face, so model_to_mesh returns a cell→face tag. Each face is a
+        # single body-fit region (no contour crosses it), so all of its cells share one owner — letting
+        # `_classify_and_tag` assign whole faces instead of per-cell midpoints, which would mis-tag a
+        # boundary cell that straddles the (chord-)simplified contour and bulge the region boundary.
+        for face_tag, (_, surface) in enumerate(gmsh.model.getEntities(2), start=1):
+            gmsh.model.addPhysicalGroup(2, [surface], tag=face_tag)
 
         gmsh.option.setNumber("Mesh.MeshSizeMin", h)
         gmsh.option.setNumber("Mesh.MeshSizeMax", h)
         gmsh.model.mesh.generate(2)
-        mesh = model_to_mesh(gmsh.model, comm, rank=0, gdim=2).mesh
+        result = model_to_mesh(gmsh.model, comm, rank=0, gdim=2)
+        mesh, cell_face = result.mesh, result.cell_tags
+        assert cell_face is not None  # one physical group per face ⇒ model_to_mesh always returns cell tags
     finally:
         gmsh.finalize()
-    return mesh
+    return mesh, cell_face
 
 
 def _classify_and_tag(
@@ -417,16 +429,20 @@ def _classify_and_tag(
     description: GeometryDescription,
     fields: dict[str, Expr],
     *,
+    cell_face: dmesh.MeshTags,
     ox: float,
     oy: float,
     lx: float,
     ly: float,
 ) -> _Tagging:
-    """Tag the body-fitted mesh by the priority-resolved implicit fields — each cell is assigned to
-    the subvolume whose `φ` is negative at the cell midpoint (the per-cell analogue of SBML Spatial's
-    interior points; the fields partition the plane, so exactly one is negative). A membrane facet
-    (interior, between two regions) is named by the `SurfaceClass` for that subvolume pair; box faces
-    are exterior facets, classified by position and the region they touch."""
+    """Tag the body-fitted mesh by the priority-resolved implicit fields. Each cell is provisionally
+    assigned to the subvolume whose `φ` is negative at its midpoint (the fields partition the plane, so
+    exactly one is negative), then each fragment FACE is given its **majority** vote: a face is one
+    body-fit region, so resolving it as a whole keeps a boundary cell — body-fit outside the simplified
+    contour but with its midpoint still inside the exact shape — from being mis-assigned across the
+    boundary (which would bulge the region boundary by ~½ a cell). A membrane facet (interior, between two
+    regions) is named by the `SurfaceClass` for that pair; box faces are exterior facets, classified by
+    position and the region they touch."""
 
     subvolumes = description.subvolumes
     region_tags = {sv.name: i + 1 for i, sv in enumerate(subvolumes)}
@@ -435,11 +451,19 @@ def _classify_and_tag(
 
     cells = np.arange(parent.topology.index_map(tdim).size_local, dtype=np.int32)
     cell_mid = dmesh.compute_midpoints(parent, tdim, cells)
-    cell_values = np.zeros(cells.size, dtype=np.int32)
+    per_cell = np.zeros(cells.size, dtype=np.int32)
     for name, tag in region_tags.items():
-        inside = _eval_field(fields[name], (cell_mid[:, 0], cell_mid[:, 1])) < 0
-        cell_values[inside] = tag
-    cell_values[cell_values == 0] = region_tags[subvolumes[-1].name]  # any unclaimed cell → background
+        per_cell[_eval_field(fields[name], (cell_mid[:, 0], cell_mid[:, 1])) < 0] = tag
+    per_cell[per_cell == 0] = region_tags[subvolumes[-1].name]  # any unclaimed cell → background
+
+    # Resolve each body-fit face as a whole by the majority of its cells' votes (consistent with the
+    # conforming boundary, vs a per-cell midpoint test that frays it).
+    cell_values = per_cell.copy()
+    face_of_cell = np.zeros(cells.size, dtype=cell_face.values.dtype)
+    face_of_cell[cell_face.indices] = cell_face.values
+    for face_id in np.unique(face_of_cell):
+        in_face = face_of_cell == face_id
+        cell_values[in_face] = np.bincount(per_cell[in_face]).argmax()
     cell_tags = dmesh.meshtags(parent, tdim, cells, cell_values)
 
     surface_tags = {sc.name: _SURFACE_TAG_BASE + i for i, sc in enumerate(description.surfaces)}
