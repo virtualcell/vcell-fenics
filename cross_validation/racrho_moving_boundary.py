@@ -96,9 +96,17 @@ def main() -> None:
     rac_space, rac_dofs = problem.unknown.function_space.sub(0).collapse()
     rac_x = rac_space.tabulate_dof_coordinates()[:, 0]
 
+    frames: list[tuple[pyvista.UnstructuredGrid, float]] = []
+
+    def capture(t: float) -> None:
+        field = problem.unknown.sub(0).collapse()
+        field.name = _FIELD
+        frames.append((_function_to_pyvista(field), t))
+
+    capture(0.0)  # the initial (undeformed) cell with its polarized IC, before any motion
+
     print(f"  membrane velocity v = {_MOTION_GAIN}·(a−1)|a−1|·n̂   (protrude where a>1, retract where a<1)\n")
     print(f"  {'t':>5} {'front +x':>10} {'back −x':>10} {'a @front':>9} {'a @back':>9}")
-    frames: list[tuple[pyvista.UnstructuredGrid, float]] = []
     for step in range(_STEPS):
         integrate_discrete_problem(problem, t_final=_INTERVAL, dt_initial=1.0e-4)  # MOL — nonlinear GTPase
         _advance_ale_mesh(cell, velocity, _INTERVAL)  # move boundary by interval·v(a), harmonic interior
@@ -110,16 +118,14 @@ def main() -> None:
             f"{float(rac_values[rac_x > 0.5].mean()):9.3f} {float(rac_values[rac_x < -0.5].mean()):9.3f}"
         )
         if step % _FRAME_EVERY == _FRAME_EVERY - 1:
-            field = problem.unknown.sub(0).collapse()
-            field.name = _FIELD
-            frames.append((_function_to_pyvista(field), t))
+            capture(t)
 
     print("\n  the front (+x, a>1) protruded and the back (−x, a<1) retracted — directed migration up the")
     print("  Rac gradient. The cell membrane moved under a velocity set by its own biochemistry, on a mesh")
     print("  the bulk solve followed each step: the moving boundary, reproduced through the pipeline.")
 
     out = _HERE / "racrho_moving_boundary.png"
-    _write_tiled_image(frames, out)
+    _write_tiled_image(frames[:-1], out)  # t = 0.0 … 0.28 (the initial frame in, the last dropped)
     print(f"\n  wrote {out.name} — the deforming cell mesh coloured by Rac over time")
 
 
