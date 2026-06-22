@@ -429,8 +429,11 @@ def _translate_boundaries(
       default-Dirichlet rule).
 
     Faces outside the geometry dimension (`dim`) are skipped (VCell lists all six). Without `dim` we
-    cannot tell which faces are real, so any non-default boundary is rejected. Surface (membrane)
-    box-face BCs are not realized yet — a membrane PDE with explicit boundary values raises."""
+    cannot tell which faces are real, so any non-default boundary is rejected. A surface (membrane) PDE's
+    box-face BCs are dropped: a membrane is realized as the *closed* interface curve between two
+    subvolumes (`realize_interface_coupled`), which never touches the box, so VCell's per-face values —
+    boilerplate it emits for every species (`R_boundaryXm` → `0.0` for a cell membrane) — have no face to
+    apply to. (A membrane that genuinely spans to the box edge is not a realizable geometry here.)"""
 
     boundaries = pde.boundaries
     has_explicit = boundaries is not None and any(
@@ -446,12 +449,7 @@ def _translate_boundaries(
             )
         return []
     if kind != "volume":
-        if has_explicit:
-            raise NotImplementedError(
-                f"membrane PDE {pde.name!r} on {subdomain.name!r} has explicit box-face boundary values; "
-                f"surface boundary-condition import is a follow-up increment"
-            )
-        return []
+        return []  # a closed membrane has no box faces — VCell's per-face values have nothing to apply to
 
     bcs: list[BoundaryCondition] = []
     for face in _BOX_FACES_BY_DIM.get(dim, ()):

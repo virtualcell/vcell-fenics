@@ -114,6 +114,32 @@ def test_membrane_pde_maps_to_surface_template_and_geometry_defaults_to_name() -
     assert eq.template == "surface_pde_with_dilution"
 
 
+def test_membrane_pde_box_face_boundaries_are_dropped() -> None:
+    # VCell emits per-face boundary_types for every species, including a membrane species (R_boundaryXm
+    # → 0.0 for a cell membrane). A membrane is realized as the *closed* interface curve, which never
+    # touches the box, so those faces have nothing to apply to → dropped (not rejected). This is what
+    # lets a real receptor model import.
+    vcml = vm.MathDescription(
+        name="m",
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                pde_equations=[
+                    vm.PdeEquation(
+                        name="R",
+                        diffusion="0.05",
+                        initial="0.0",
+                        boundaries=vm.Boundaries(xm="0.0", xp="0.0", ym="0.0", yp="0.0", zm="0.0", zp="0.0"),
+                    )
+                ],
+            )
+        ],
+    )
+    md = import_math_description(vcml, dim=2)
+    assert [v.name for v in md.variables] == ["R"]
+    assert md.boundary_conditions == []  # the spurious membrane box-face BCs are dropped
+
+
 def test_steady_pde_is_steady_state_and_ode_maps_to_lumped_ode() -> None:
     vcml = vm.MathDescription(
         name="m",
