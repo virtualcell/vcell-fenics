@@ -28,6 +28,7 @@ from vcell_fenics.backend import (
     make_disk_geometry,
     solve_incompressible_stokes,
     solve_incompressible_stokes_slip,
+    solve_incompressible_stokes_surface_tension,
     solve_incompressible_stokes_traction,
 )
 
@@ -153,3 +154,43 @@ def test_membrane_tension_sets_the_bulk_pressure_by_laplace_law(radius: float, g
     assert np.abs(u.x.array).max() < 1e-9  # static equilibrium (no flow)
     assert p.x.array.std() < 1e-9  # uniform interior pressure
     assert p.x.array.mean() == pytest.approx(gamma / radius, rel=1e-9)  # Laplace's law
+
+
+# ---------------------------------------------------------------------------
+# spatially-varying surface tension (the mechano-chemical load)
+# ---------------------------------------------------------------------------
+
+
+def test_uniform_tension_field_matches_the_scalar() -> None:
+    # A constant tension *field* must reproduce the scalar-tension solve exactly — the field generalisation
+    # is a strict superset.
+    mesh = _disk(h=0.05)
+    u_scalar, _ = solve_incompressible_stokes_surface_tension(mesh, tension=0.5)
+    gamma = fem.Function(fem.functionspace(mesh, ("Lagrange", 1)))
+    gamma.x.array[:] = 0.5
+    u_field, _ = solve_incompressible_stokes_surface_tension(mesh, tension=gamma)
+    assert np.abs(u_scalar.x.array - u_field.x.array).max() < 1e-12
+
+
+def test_tension_gradient_drives_a_marangoni_flow() -> None:
+    # A non-uniform tension breaks the circle's symmetry: the membrane contracts harder where γ is larger,
+    # so the cell acquires a NET velocity (a mean drift) toward the high-tension side — the Marangoni force
+    # `∇_Γγ` carried automatically by the Laplace–Beltrami load. A uniform tension gives no net drift.
+    mesh = _disk(h=0.05)
+    gdim = mesh.geometry.dim
+    scalar_space = fem.functionspace(mesh, ("Lagrange", 1))
+
+    def mean_drift_x(gamma: float | fem.Function) -> float:
+        u, _ = solve_incompressible_stokes_surface_tension(mesh, tension=gamma)
+        u1 = fem.Function(fem.functionspace(mesh, ("Lagrange", 1, (gdim,))))
+        u1.interpolate(u)
+        return float(u1.x.array.reshape((-1, gdim))[:, 0].mean())
+
+    gradient = fem.Function(scalar_space)
+    gradient.interpolate(
+        fem.Expression(0.5 + 0.4 * ufl.SpatialCoordinate(mesh)[0], scalar_space.element.interpolation_points)
+    )
+    drift_x = mean_drift_x(gradient)
+    uniform_drift_x = mean_drift_x(0.5)
+    assert abs(drift_x) > 50 * abs(uniform_drift_x)  # gradient drives a real net flow; uniform does not
+    assert drift_x > 0.0  # toward +x, the high-tension side

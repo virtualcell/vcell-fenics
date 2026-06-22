@@ -313,10 +313,16 @@ class ForceBalanceMeshMotion:
     `parent_displacement` / `membrane_velocity` / `advance()` interface).
 
     Mechanics. `solve_incompressible_stokes_surface_tension` on the cyto gives a divergence-free velocity
-    `v` (Taylor–Hood) whose boundary trace is the membrane velocity; the uniform tension γ enters as the
-    Laplace–Beltrami continuous-surface-force load (no explicit curvature). A *circle* is the Laplace
-    fixed point (v ≈ 0, pressure γ/R), so it stays put; a deformed cell relaxes toward the minimal-perimeter
-    circle. Because the flow is incompressible, `∮ v·n = 0` and the cell area is conserved.
+    `v` (Taylor–Hood) whose boundary trace is the membrane velocity; the tension γ enters as the
+    Laplace–Beltrami continuous-surface-force load (no explicit curvature). A *circle* of uniform γ is the
+    Laplace fixed point (v ≈ 0, pressure γ/R), so it stays put; a deformed cell relaxes toward the
+    minimal-perimeter circle. Because the flow is incompressible, `∮ v·n = 0` and the cell area is conserved.
+
+    **Mechano-chemical coupling.** The tension is a field, not a constant: `update_tension_from_receptor`
+    sets `γ = base + sensitivity·R` from a membrane species (a receptor density), so the biochemistry
+    actively reshapes the cell. A non-uniform `R` breaks the circle's symmetry — the membrane contracts
+    harder where γ (and so R) is larger, and the cell migrates (the Marangoni force `∇_Γγ` is carried
+    automatically by the Laplace–Beltrami load). Call it in the stepping loop after each `step()`.
 
     Cross-mesh motion mirrors `MembraneCoupledMeshMotion`: the membrane moves by `dt·v`, the parent
     interior by a harmonic extension of that boundary displacement, and the bulk submeshes inherit the
@@ -341,7 +347,15 @@ class ForceBalanceMeshMotion:
         parent.topology.create_connectivity(tdim - 1, tdim)
         self._gdim, self._dt = gdim, dt
         self._cyto, self._membrane = cyto, membrane
-        self._tension, self._viscosity, self._screening = tension, viscosity, screening
+        self._viscosity, self._screening = viscosity, screening
+
+        # The surface tension as a P1 scalar **field** on the cyto (only its boundary values enter the
+        # Stokes load). Uniform by default; `update_tension_from_receptor` drives it from a membrane species
+        # for the mechano-chemical case (γ = base + sensitivity·R), making the tension — and so the motion —
+        # depend on the biochemistry.
+        self._tension_space = fem.functionspace(cyto, ("Lagrange", 1))
+        self._tension = fem.Function(self._tension_space)
+        self._tension.x.array[:] = tension
 
         # The cyto velocity (Taylor–Hood P2) is sampled on this P1 vector space each step for node transfer.
         self._v1 = fem.Function(fem.functionspace(cyto, ("Lagrange", 1, (gdim,))))
@@ -381,17 +395,34 @@ class ForceBalanceMeshMotion:
         mem_dof_x = self.membrane_velocity.function_space.tabulate_dof_coordinates()
         self._mem_to_cyto = cyto_tree.query(mem_dof_x)[1]
         self._mem_perm = cKDTree(mem_dof_x).query(membrane.geometry.x)[1]
+        # Membrane (scalar P1) dofs → cyto tension dofs, for transferring a surface species onto the tension.
+        mem_scalar_x = fem.functionspace(membrane, ("Lagrange", 1)).tabulate_dof_coordinates()
+        self._mem_to_tension = cKDTree(self._tension_space.tabulate_dof_coordinates()).query(mem_scalar_x)[1]
 
     @property
     def parent_displacement(self) -> fem.Function:
         """The parent's nodal displacement this step (= `dt·v_mesh`); `∇·` of it is the bulk dilution."""
         return self._disp
 
+    @property
+    def tension(self) -> fem.Function:
+        """The current surface-tension field (a cyto P1 scalar; only boundary values drive the flow)."""
+        return self._tension
+
+    def update_tension_from_receptor(self, receptor: fem.Function, *, base: float, sensitivity: float) -> None:
+        """Set the membrane tension to ``base + sensitivity·receptor`` — the mechano-chemical law making the
+        force balance depend on a surface species (e.g. a receptor density `R`). `receptor` is a membrane
+        P1 scalar `Function` (e.g. ``problem.field("R")``); its values are transferred to the coincident
+        cyto-boundary tension dofs. Call it in the stepping loop after each `step()` so the next motion uses
+        the freshly-solved density. A non-uniform `R` makes the tension non-uniform → the cell migrates."""
+        self._tension.x.array[:] = base
+        self._tension.x.array[self._mem_to_tension] = base + sensitivity * receptor.x.array
+
     def advance(self) -> None:
         # Solve the surface-tension force balance on the (current) cyto; sample the velocity on P1.
         velocity, _ = solve_incompressible_stokes_surface_tension(
             self._cyto, tension=self._tension, viscosity=self._viscosity, screening=self._screening
-        )
+        )  # `self._tension` is a field: uniform, or coupled to a surface species (mechano-chemical)
         self._v1.interpolate(velocity)
         cyto_v = self._v1.x.array.reshape((-1, self._gdim))
         # Harmonic-extend the boundary velocity over the parent, then move the parent + bulk submeshes.
