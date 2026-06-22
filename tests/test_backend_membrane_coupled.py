@@ -23,6 +23,7 @@ from vcell_fenics.backend import (
 from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
 from vcell_fenics.formalism.schema import (
+    BCDirichlet,
     BCInterfaceFlux,
     BCInterfaceValueEquality,
     MathDescription,
@@ -791,6 +792,112 @@ def test_self_organizing_chemotaxis_migrates_up_a_ligand_gradient() -> None:
     flat_polarity, flat_shift, _ = run("1.0")  # uniform ligand — the control
     assert abs(flat_polarity[-1]) < 1e-3  # no polarity emerges without a gradient
     assert abs(flat_shift) < 0.2 * shift  # and the cell does not migrate
+
+
+# ---------------------------------------------------------------------------
+# 7e. sustained ligand reservoir — a Dirichlet on the outer box wall
+# ---------------------------------------------------------------------------
+
+_RESERVOIR_GRADIENT = "0.6 + 0.6 * geom.x[0]"
+
+
+def _reservoir_model(*, reservoir: bool, kon: float = 0.8, rmax: float = 3.0) -> MathDescription:
+    """The chemotaxis model with an optional Dirichlet reservoir holding L_out at a gradient on the wall."""
+    bcs: list[object] = [
+        BCInterfaceFlux(variable="L_in", boundary="pm", expression="-kon * trace(L_in) * (Rmax - R)"),
+        BCInterfaceFlux(variable="L_out", boundary="pm", expression="-kon * trace(L_out) * (Rmax - R)"),
+    ]
+    if reservoir:
+        bcs.append(BCDirichlet(variable="L_out", boundary="wall", expression=_RESERVOIR_GRADIENT))
+    return MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[
+            Variable(name="L_in", subdomain="cyto"),
+            Variable(name="L_out", subdomain="ext"),
+            Variable(name="R", subdomain="pm"),
+        ],
+        parameters=[ParameterConstant(name="kon", value=kon), ParameterConstant(name="Rmax", value=rmax)],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="0.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "0.3"},
+                initial_condition=_RESERVOIR_GRADIENT,
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="R",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": "0.02", "source": "kon * (trace(L_in) + trace(L_out)) * (Rmax - R)"},
+                initial_condition="0.0",
+            ),
+        ],
+        boundary_conditions=bcs,  # type: ignore[arg-type]
+    )
+
+
+def _wall_ligand_error(problem: MembraneCoupledProblem | MembraneCoupledResult) -> tuple[float, float]:
+    """(max |L_out − reservoir target| on the wall, mean L_out on the wall) — how well the wall is held."""
+    import numpy as np
+
+    field = problem.field("L_out")
+    coords = field.function_space.tabulate_dof_coordinates()
+    on_wall = np.sqrt((coords[:, :2] ** 2).sum(axis=1)) > 0.98  # the outer boundary at r = 1
+    target = 0.6 + 0.6 * coords[on_wall, 0]
+    values = field.x.array[on_wall]
+    return float(np.abs(values - target).max()), float(values.mean())
+
+
+def test_reservoir_dirichlet_holds_the_wall_against_depletion() -> None:
+    # The sustained ligand reservoir: a Dirichlet on the outer box wall holds L_out at a fixed gradient,
+    # enforced weakly by a penalty. Binding continuously consumes ligand, so WITHOUT the reservoir the wall
+    # concentration depletes far below its initial value; WITH it the wall stays pinned at the gradient —
+    # the supply that lets a chemotactic gradient persist instead of washing out.
+    with_reservoir = assemble_membrane_coupled(_reservoir_model(reservoir=True), _geom(h=0.07), dt=0.02)
+    without = assemble_membrane_coupled(_reservoir_model(reservoir=False), _geom(h=0.07), dt=0.02)
+    for _ in range(60):
+        with_reservoir.step()
+        without.step()
+    held_err, held_mean = _wall_ligand_error(with_reservoir)
+    _, depleted_mean = _wall_ligand_error(without)
+    assert held_err < 1e-2  # the wall is pinned to the reservoir gradient
+    assert depleted_mean < 0.5 * held_mean  # without it, binding drains the wall well below the held level
+
+
+def test_mol_reservoir_holds_the_wall() -> None:
+    # The reservoir under the adaptive MOL — implicit in the residual and the assembled Jacobian.
+    geom = _geom(h=0.07)
+    result = integrate_membrane_coupled(_reservoir_model(reservoir=True), geom, t_final=1.0)
+    held_err, held_mean = _wall_ligand_error(result)
+    assert held_err < 1e-2
+    assert held_mean == pytest.approx(0.6, abs=0.05)  # mean of 0.6 + 0.6x over the symmetric wall
+
+
+def test_reservoir_dirichlet_on_an_unreachable_target_is_rejected() -> None:
+    # Only the outer compartment touches the box wall, so a Dirichlet on an inner species (or any non-outer
+    # boundary) is a modelling error — rejected loudly rather than silently ignored.
+    inner_target = replace(
+        _reservoir_model(reservoir=False),
+        boundary_conditions=[BCDirichlet(variable="L_in", boundary="wall", expression="1.0")],
+    )
+    with pytest.raises(NotImplementedError, match="outer"):
+        assemble_membrane_coupled(inner_target, _geom(), dt=0.02)
 
 
 # ---------------------------------------------------------------------------
