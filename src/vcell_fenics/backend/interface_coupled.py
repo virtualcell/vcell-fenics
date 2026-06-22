@@ -552,7 +552,7 @@ def integrate_interface_coupled(
 
 
 def assemble_membrane_coupled(
-    md: MathDescription, geometry: InterfaceCoupledGeometry, *, dt: float
+    md: MathDescription, geometry: InterfaceCoupledGeometry, *, dt: float, velocity: str | None = None
 ) -> MembraneCoupledProblem:
     """Assemble a backward-Euler step for **membrane species coupled to both bulk compartments**: any
     number of bulk diffusion species in each compartment plus any number of surface species on their
@@ -582,10 +582,25 @@ def assemble_membrane_coupled(
     into the parent integrals through their `EntityMap`s; with the coupling fully lagged the block matrix
     is the static, block-diagonal mass + diffusion (factorised once) and only the RHS changes each step.
 
-    Scope (this increment): static membrane (**no dilution term** — `ρ ∇_Γ·v_Γ` is zero without motion;
-    it becomes mandatory the moment the membrane moves), bulk species are diffusion-only (no in-bulk
-    reaction), backward Euler. The fully-implicit method-of-lines integrator (nonlinear binding via
-    Newton) and a moving membrane are follow-ups.
+    **Moving membrane (`velocity` given).** Pass a prescribed membrane velocity expression (e.g.
+    ``"[0.3*geom.x[0], 0.3*geom.x[1]]"``) to advance the substrate conservative-ALE style: each `step()`
+    first moves the mesh (`MembraneCoupledMeshMotion` — membrane by `dt·v`, parent interior by harmonic
+    extension, bulk submeshes inherited) and then re-assembles + solves on the deformed geometry. Because
+    every field co-moves with its mesh, each gains a **lagged dilution** forcing so its integral tracks the
+    local volume/area change:
+      - bulk species: ``− c^n (∇·v_mesh) w`` on the region cells, with `∇·v_mesh` the (ambient) divergence
+        of the parent harmonic displacement — material concentrates/dilutes as the compartment shrinks/grows;
+      - surface species: ``− ρ^n (∇_Γ·v_Γ) w`` on the membrane, the **mandatory** `ρ ∇_Γ·v_Γ` stretch term.
+        Critically `∇_Γ·v_Γ` is the *surface* divergence ``div(v) − n·(∇v)·n`` (`n = CellNormal`), **not**
+        `ufl.div(v)`: on the membrane manifold `ufl.div` returns the ambient divergence (e.g. `2a` for
+        `v=a·x` vs the true `a`), which silently over-dilutes and loses ~6% of the surface mass per growth.
+    Dilution moves no mass between pools (it is per-region), so total ligand stays conserved — to round-off
+    from the termwise-cancelling binding, and to O(dt) from the lagged dilution (refines away). The mesh
+    moves so the block matrix is **re-assembled and re-factorised every step** (no longer static).
+
+    Scope (this increment): bulk species are diffusion-only (no in-bulk reaction), backward Euler, a
+    *prescribed* membrane velocity (no force balance). The fully-implicit method-of-lines integrator
+    (nonlinear binding via Newton) and a moving membrane *under MOL* are follow-ups.
     """
 
     validate_or_raise(md)
@@ -714,7 +729,32 @@ def assemble_membrane_coupled(
         test, k = bulk_test_of[bc.variable]
         f_coupling += -dt * flux * membrane_trace(test[k]) * ds_int
 
-    a_form = fem.form(ufl.extract_blocks(ufl.lhs(f_local)), entity_maps=emaps)  # block-diagonal, static
+    # Moving membrane (optional): build the mesh-motion driver and the per-region **lagged dilution**
+    # forcing so each co-moving field's integral tracks its volume/area change (see the docstring). Bulk:
+    # − c^n (∇·v_mesh) w over the region cells, with `∇·v_mesh` the ambient divergence of the parent
+    # harmonic displacement (= dt·v_mesh, so div(disp) already carries the dt). Surface: − dt·ρ^n (∇_Γ·v_Γ) w,
+    # where ∇_Γ·v_Γ is the SURFACE divergence `div(v) − n·(∇v)·n` (n = CellNormal) — `ufl.div` on the
+    # membrane manifold is the *ambient* divergence and would over-dilute by the curvature term.
+    motion: MembraneCoupledMeshMotion | None = None
+    rhs_dilution_form = None
+    if velocity is not None:
+        motion = MembraneCoupledMeshMotion(md, geometry, velocity=velocity, dt=dt)
+        disp = motion.parent_displacement
+        n_hat = ufl.CellNormal(geometry.membrane_mesh)
+        v_mem = motion.membrane_velocity
+        surf_div = ufl.div(v_mem) - ufl.dot(ufl.dot(ufl.grad(v_mem), n_hat), n_hat)
+        dilution_terms: list[UflExpr] = []
+        for k in range(len(inner_species)):
+            dilution_terms.append(-u_in_prev[k] * ufl.div(disp) * w_in[k] * dx_in)
+        for k in range(len(outer_species)):
+            dilution_terms.append(-u_out_prev[k] * ufl.div(disp) * w_out[k] * dx_out)
+        for k in range(len(membrane_species)):
+            dilution_terms.append(-dt * rho_prev[k] * surf_div * w_rho[k] * dx_mem)
+        rhs_dilution_form = fem.form(ufl.extract_blocks(_sum_forms(dilution_terms)), entity_maps=emaps)
+
+    # Block-diagonal mass + diffusion. Static unless the membrane moves, in which case the geometry — and
+    # so this matrix — is re-assembled and re-factorised every step (below).
+    a_form = fem.form(ufl.extract_blocks(ufl.lhs(f_local)), entity_maps=emaps)
     rhs_local_form = fem.form(ufl.extract_blocks(ufl.rhs(f_local)), entity_maps=emaps)
     rhs_coupling_form = fem.form(ufl.extract_blocks(ufl.rhs(f_coupling)), entity_maps=emaps)
     matrix = petsc.assemble_matrix(a_form)
@@ -733,12 +773,24 @@ def assemble_membrane_coupled(
     for fn, prev in ((u_in_fn, u_in_prev), (u_out_fn, u_out_prev), (rho_fn, rho_prev)):
         prev.x.array[:] = fn.x.array
     solution = matrix.createVecRight()
+    matrix_cell = [matrix]  # mutable holder so a moving-mesh step can swap in the re-assembled matrix
 
     def advance() -> None:
+        if motion is not None:
+            motion.advance()  # move the substrate, then re-assemble mass + diffusion on the deformed geometry
+            fresh = petsc.assemble_matrix(a_form)
+            fresh.assemble()
+            ksp.setOperators(fresh)
+            matrix_cell[0].destroy()
+            matrix_cell[0] = fresh
         rhs = petsc.assemble_vector(rhs_local_form)
         coupling_b = petsc.assemble_vector(rhs_coupling_form)  # the lagged binding forcing
         rhs.axpy(1.0, coupling_b)
         coupling_b.destroy()
+        if rhs_dilution_form is not None:
+            dilution_b = petsc.assemble_vector(rhs_dilution_form)  # the lagged ALE dilution forcing
+            rhs.axpy(1.0, dilution_b)
+            dilution_b.destroy()
         ksp.solve(rhs, solution)
         values = solution.array_r
         u_in_fn.x.array[:n_in] = values[:n_in]
