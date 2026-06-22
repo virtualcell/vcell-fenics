@@ -416,6 +416,58 @@ def test_membrane_mesh_motion_moves_the_substrate_coherently() -> None:
     assert problem.mass("L_in") > 0.0  # a sane solve on the deformed mesh
 
 
+def test_moving_membrane_dilutes_the_bulk_to_the_analytic_value() -> None:
+    # The bulk dilution term, verified against an exact solution. Decouple binding (kon=0) and expand the
+    # cell radially with v = a·x. In the cyto disk the harmonic mesh velocity equals a·x exactly, so a
+    # uniform ligand field (diffusion of a constant is zero) stays uniform and must dilute as the area
+    # grows: c(T) = c₀·e^{-2aT} (∇·v = 2a in 2D). Without the `c ∇·v_mesh` term the value would not change
+    # at all (the node-following BE update leaves a uniform field fixed) and mass would be created.
+    import numpy as np
+    from mpi4py import MPI
+
+    a, dt, steps = 0.3, 0.02, 15
+    geom = _geom(h=0.1)
+    problem = assemble_membrane_coupled(_model(kon=0.0), geom, dt=dt, velocity=f"[{a} * geom.x[0], {a} * geom.x[1]]")
+    for _ in range(steps):
+        problem.step()
+    values = problem.field("L_in").x.array
+    comm = geom.inner_mesh.comm
+    cmax = float(comm.allreduce(values.max(), op=MPI.MAX))
+    cmin = float(comm.allreduce(values.min(), op=MPI.MIN))
+    assert cmax - cmin < 1e-3  # stayed uniform — pure dilution, no spurious gradients
+    assert cmax == pytest.approx(np.exp(-2 * a * dt * steps), rel=1e-3)  # the analytic dilution factor
+
+
+def test_moving_membrane_conserves_total_ligand_under_expansion_and_shrinkage() -> None:
+    # The headline conservation check under motion, both directions. As the cell deforms (area changes by
+    # ~20%), the bulk `c ∇·v_mesh` and the MANDATORY surface `ρ ∇_Γ·v_Γ` dilution keep every co-moving
+    # pool's integral consistent with its geometry — so total ligand (free L_in + free L_out + bound R) is
+    # conserved to ~1e-4 (the lagged-dilution O(dt) error). The discrimination is the magnitude: WITHOUT
+    # the dilution terms the total would drift by the full volume change (~0.2), 1000× the tolerance here.
+    for velocity in ("[0.3 * geom.x[0], 0.3 * geom.x[1]]", "[-0.3 * geom.x[0], -0.3 * geom.x[1]]"):
+        geom = _geom(h=0.1)
+        area0 = _inner_area(geom)
+        problem = assemble_membrane_coupled(_model(), geom, dt=0.02, velocity=velocity)
+        total0 = problem.total_mass()
+        for _ in range(15):
+            problem.step()
+        assert abs(_inner_area(geom) / area0 - 1.0) > 0.15  # the cell actually deformed substantially
+        assert problem.total_mass() == pytest.approx(total0, rel=1e-3)  # ≪ the ~0.2 a no-dilution run drifts
+
+
+def test_velocity_none_is_the_static_solve() -> None:
+    # The moving-membrane path is opt-in: omitting `velocity` (or passing None) leaves the membrane fixed
+    # and recovers the static, round-off-conservative solve — the matrix is never re-assembled.
+    geom = _geom(h=0.12)
+    area0 = _inner_area(geom)
+    problem = assemble_membrane_coupled(_model(), geom, dt=0.02, velocity=None)
+    total0 = problem.total_mass()
+    for _ in range(5):
+        problem.step()
+    assert _inner_area(geom) == pytest.approx(area0, abs=1e-12)  # mesh did not move
+    assert problem.total_mass() == pytest.approx(total0, abs=1e-10)  # static ⇒ round-off conservation
+
+
 # ---------------------------------------------------------------------------
 # 10. loud rejections
 # ---------------------------------------------------------------------------
