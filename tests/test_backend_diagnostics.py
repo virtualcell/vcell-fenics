@@ -115,6 +115,53 @@ def test_method_of_lines_still_accepts_the_same_nonlinear_source() -> None:
     assert abs(float(solved.unknown.x.array.mean()) - 1.0) < 1e-2
 
 
+# A *rational* nonlinearity — a trial function in a denominator (a Hill / GTPase switch). Unlike the
+# polynomial case above (which `ufl.lhs` mis-buckets, caught by the arity check), `ufl.lhs` raises a
+# ValueError on this one. The backward-Euler split is composed lazily so that even a rational-nonlinear
+# model can be assembled and handed to the method-of-lines integrator — this is what lets the real Rac/Rho
+# public BioModel (source `a²/(1+a²)·b − a`) solve through the formalism pipeline.
+_RATIONAL_NONLINEAR = """
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - { name: cyto, kind: volume, motion: { kind: none } }
+  variables:
+    - { name: c, subdomain: cyto }
+  parameters:
+    - { name: rate, value: 3.0 }
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: { diffusion: "0.05", source: "rate * c * c / (1.0 + c * c) - c" }
+      initial_condition: "0.6"
+"""
+
+
+def test_method_of_lines_accepts_a_rational_nonlinear_source() -> None:
+    # The key check for the lazy backward-Euler composition: a rational source (a trial in a denominator)
+    # makes `ufl.lhs` raise outright — so eagerly composing the BE split at assembly used to crash this
+    # model even for method-of-lines. Deferring the split lets it assemble and integrate via the Newton
+    # solve, settling to a finite bistable-switch steady state (c² − 3c + 1 = 0 ⇒ c ≈ 0.38 or 2.62).
+    md = load_yaml(_RATIONAL_NONLINEAR)
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.2)
+    solved = run(md, geometry, SolverConfiguration(dt=0.05, t_final=8.0, time_integration="method_of_lines"))
+    mean = float(solved.unknown.x.array.mean())
+    assert 0.0 < mean < 5.0  # solved to a finite, positive steady state (did not crash or blow up)
+
+
+def test_backward_euler_rejects_a_rational_nonlinear_source() -> None:
+    # Backward Euler still rejects it loudly — now via the ValueError `ufl.lhs` raises on the denominator,
+    # reported as the same NonlinearTermError naming the method-of-lines fix.
+    md = load_yaml(_RATIONAL_NONLINEAR)
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.2)
+    with pytest.raises(NonlinearTermError) as excinfo:
+        run(md, geometry, SolverConfiguration(dt=0.05, t_final=0.1))  # backward_euler default
+    assert "method-of-lines" in str(excinfo.value) or "method_of_lines" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, ValueError)  # the UFL 'Argument in denominator' detail
+
+
 # ---------------------------------------------------------------------------
 # t = 0 pre-flight (validation-and-diagnostics.md §5.3): a model already broken
 # at the initial condition (a non-finite residual) is caught before any step.

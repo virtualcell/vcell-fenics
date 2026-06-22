@@ -1,0 +1,195 @@
+name: Copy of Application0_generated
+constants:
+- name: _F_
+  exp: '96485.3321'
+- name: _F_nmol_
+  exp: '9.64853321E-5'
+- name: _K_GHK_
+  exp: '1.0E-9'
+- name: _N_pmol_
+  exp: 6.02214179E11
+- name: _PI_
+  exp: '3.141592653589793'
+- name: _R_
+  exp: '8314.46261815'
+- name: _T_
+  exp: '300.0'
+- name: a_diffusionRate
+  exp: '0.4'
+- name: AreaPerUnitArea_mem
+  exp: '1.0'
+- name: b_diffusionRate
+  exp: '1.0'
+- name: b_init_uM
+  exp: '1.0'
+- name: K_millivolts_per_volt
+  exp: '1000.0'
+- name: KMOLE
+  exp: '0.001660538783162726'
+- name: Voltage_mem
+  exp: '0.0'
+- name: VolumePerUnitVolume_cell
+  exp: '1.0'
+- name: VolumePerUnitVolume_extra
+  exp: '1.0'
+functions:
+- name: a_init_uM
+  exp: ((0.1 * x) + 1.0)
+  domain: cell
+- name: a_velocityX
+  exp: vobj_cell1_velX
+  domain: cell
+- name: a_velocityY
+  exp: vobj_cell1_velY
+  domain: cell
+- name: b_velocityX
+  exp: vobj_cell1_velX
+  domain: cell
+- name: b_velocityY
+  exp: vobj_cell1_velY
+  domain: cell
+- name: J_r0
+  exp: '- (((0.067 + ((a ^ 2.0) / (1.0 + (a ^ 2.0)))) * b) - a)'
+  domain: cell
+- name: pobj_0_directionX
+  exp: ((pproc_0.positionX - x) / (sqrt((((pproc_0.positionX - x) * (pproc_0.positionX
+    - x)) + ((pproc_0.positionY - y) * (pproc_0.positionY - y)))) + 1.0E-8))
+- name: pobj_0_directionY
+  exp: ((pproc_0.positionY - y) / (sqrt((((pproc_0.positionX - x) * (pproc_0.positionX
+    - x)) + ((pproc_0.positionY - y) * (pproc_0.positionY - y)))) + 1.0E-8))
+- name: pobj_0_distance
+  exp: sqrt((((pproc_0.positionX - x) * (pproc_0.positionX - x)) + ((pproc_0.positionY
+    - y) * (pproc_0.positionY - y))))
+- name: pobj_0_posX
+  exp: pproc_0.positionX
+- name: pobj_0_posY
+  exp: pproc_0.positionY
+- name: pproc_0.positionX
+  exp: (2.0 + (0.6 * t))
+- name: pproc_0.positionY
+  exp: sin((1.5 * t))
+- name: Size_cell
+  exp: (VolumePerUnitVolume_cell * vcRegionVolume('cell'))
+  domain: cell
+- name: Size_extra
+  exp: (VolumePerUnitVolume_extra * vcRegionVolume('extr'))
+  domain: extr
+- name: Size_mem
+  exp: (AreaPerUnitArea_mem * vcRegionArea('cell_extr_membrane'))
+  domain: cell_extr_membrane
+- name: sobj_cell1_extr0_normalX
+  exp: normalX()
+  domain: cell_extr_membrane
+- name: sobj_cell1_extr0_normalY
+  exp: normalY()
+  domain: cell_extr_membrane
+- name: sobj_cell1_extr0_size
+  exp: vcRegionArea('cell_extr_membrane')
+  domain: cell_extr_membrane
+- name: sobj_cell1_extr0_velX
+  exp: sproc_0.velocityX
+  domain: cell_extr_membrane
+- name: sobj_cell1_extr0_velY
+  exp: sproc_0.velocityY
+  domain: cell_extr_membrane
+- name: sproc_0.velocityX
+  exp: ((a - 1.0) * abs((a - 1.0)) * sobj_cell1_extr0_normalX)
+  domain: cell_extr_membrane
+- name: sproc_0.velocityY
+  exp: ((a - 1.0) * abs((a - 1.0)) * sobj_cell1_extr0_normalY)
+  domain: cell_extr_membrane
+- name: vobj_cell1_size
+  exp: vcRegionVolume('cell')
+  domain: cell
+- name: vobj_cell1_velX
+  exp: vproc_1.velocityX
+  domain: cell
+- name: vobj_cell1_velY
+  exp: vproc_1.velocityY
+  domain: cell
+- name: vobj_extr0_size
+  exp: vcRegionVolume('extr')
+  domain: extr
+- name: vproc_1.velocityX
+  exp: pobj_0_directionX
+  domain: cell
+- name: vproc_1.velocityY
+  exp: pobj_0_directionY
+  domain: cell
+variables:
+- name: a
+  var_type: VolumeVariable
+  domain: cell
+- name: b
+  var_type: VolumeVariable
+  domain: cell
+compartment_subdomains:
+- name: cell
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  pde_equations:
+  - name: a
+    rate: '- J_r0'
+    diffusion: a_diffusionRate
+    initial: a_init_uM
+    solution_type: Unknown
+    velocity:
+      x: a_velocityX
+      y: a_velocityY
+  - name: b
+    rate: J_r0
+    diffusion: b_diffusionRate
+    initial: b_init_uM
+    solution_type: Unknown
+    velocity:
+      x: b_velocityX
+      y: b_velocityY
+- name: extr
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+membrane_subdomains:
+- name: cell_extr_membrane
+  inside_compartment: cell
+  outside_compartment: extr
+  boundary_types:
+  - boundary: Xm
+    type: Value
+  - boundary: Xp
+    type: Value
+  - boundary: Ym
+    type: Value
+  - boundary: Yp
+    type: Value
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  jump_conditions:
+  - name: a
+    in_flux: '0.0'
+    out_flux: '0.0'
+  - name: b
+    in_flux: '0.0'
+    out_flux: '0.0'

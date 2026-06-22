@@ -292,31 +292,42 @@ class DiscreteProblem:
     dirichlet_refreshers: tuple[tuple[fem.Function, fem.Expression], ...] = ()
 
     def __post_init__(self) -> None:
-        # Compose the backward-Euler forms symbolically (cheap, no JIT). The DOLFINx
-        # `LinearProblem` (which form-compiles `a`/`L`) is built lazily on the first `step`, so a
-        # problem can be assembled and handed to an alternative integrator (the method-of-lines
-        # `TS`, `backend/reaction_diffusion.py`) without paying for — or, for a model with a
-        # nonlinear source that backward Euler cannot represent, failing on — the BE lowering.
-        self._a, self._L = self.scheme.compose(self)
+        # The backward-Euler `ufl.lhs`/`rhs` split is composed LAZILY (`_compose_backward_euler`), not
+        # here. A model with a nonlinear source cannot be represented by that split — for a *polynomial*
+        # nonlinearity (e.g. `c*c`) the split silently mis-buckets it (caught later by the arity check),
+        # and for a *rational* one (a trial in a denominator, e.g. `c**2/(1+c**2)`) `ufl.lhs` raises
+        # outright. Deferring the split means such a model can still be assembled and handed to the
+        # method-of-lines integrator (`backend/reaction_diffusion.py`, which builds its own nonlinear
+        # residual) — only a backward-Euler solve (or `bilinear_form`/`linear_form`) triggers the split.
+        self._a: ufl.Form | None = None
+        self._L: ufl.Form | None = None
         self._problem: LinearProblem | None = None
         self._motion = (
             _MeshMotion(self.V.mesh, self.motion_velocity, self.dt) if self.motion_velocity is not None else None
         )
 
+    def _compose_backward_euler(self) -> tuple[ufl.Form, ufl.Form]:
+        # The BE bilinear/linear forms, composed once on first use. Backward Euler can only assemble a
+        # residual affine in the unknown; checking arity here, in pure UFL *before* `fem.form`/FFCx, gives
+        # the modeller a named fix instead of a deep traceback (and never form-compiles a bad form, which
+        # would poison the JIT cache). A rational nonlinearity instead makes `ufl.lhs` raise a `ValueError`
+        # ("Argument in denominator"); both routes are reported as the same `NonlinearTermError`.
+        a, ell = self._a, self._L
+        if a is None or ell is None:
+            try:
+                a, ell = self.scheme.compose(self)
+                check_form_arity(a, a.arguments())
+            except (ArityMismatch, ValueError) as nonlinear:
+                raise NonlinearTermError(nonlinear_backward_euler_message()) from nonlinear
+            self._a, self._L = a, ell
+        return a, ell
+
     def _backward_euler_problem(self) -> LinearProblem:
         if self._problem is None:
-            # Backward Euler can only assemble a residual affine in the unknown (`ufl.lhs/rhs`).
-            # A nonlinear term (e.g. a `c*c` source) makes `_a` non-affine; check the arity here,
-            # in pure UFL *before* `fem.form` / FFCx, so the modeler gets a named fix instead of a
-            # deep arity-mismatch traceback (and we never form-compile the bad form — which would
-            # poison the JIT cache). The method-of-lines integrator handles such terms via Newton.
-            try:
-                check_form_arity(self._a, self._a.arguments())
-            except ArityMismatch as nonlinear:
-                raise NonlinearTermError(nonlinear_backward_euler_message()) from nonlinear
+            a, ell = self._compose_backward_euler()
             self._problem = LinearProblem(
-                self._a,
-                self._L,
+                a,
+                ell,
                 u=self.unknown,
                 bcs=self.bcs,
                 petsc_options_prefix=f"vcellfenics_dp_{id(self):x}_",
@@ -352,11 +363,11 @@ class DiscreteProblem:
 
     @property
     def bilinear_form(self) -> ufl.Form:
-        return self._a
+        return self._compose_backward_euler()[0]
 
     @property
     def linear_form(self) -> ufl.Form:
-        return self._L
+        return self._compose_backward_euler()[1]
 
     # -- solve / state -------------------------------------------------------
 
