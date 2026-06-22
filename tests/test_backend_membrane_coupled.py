@@ -350,6 +350,67 @@ def test_mol_conserves_each_pool_with_multiple_species() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 7b. moving membrane under the method-of-lines integrator (the migrating cell)
+# ---------------------------------------------------------------------------
+
+
+def test_mol_velocity_none_is_the_static_integration() -> None:
+    # Opt-in: omitting `velocity` is the original single-TS static solve — round-off conservation, no motion.
+    geom = _geom(h=0.13)
+    area0 = _inner_area(geom)
+    model = _model()
+    total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
+    result = integrate_membrane_coupled(model, geom, t_final=2.0, velocity=None)
+    assert _inner_area(geom) == pytest.approx(area0, abs=1e-12)  # mesh did not move
+    assert result.total_mass() == pytest.approx(total0, abs=1e-9)  # static ⇒ round-off conservation
+
+
+def test_mol_conserves_total_ligand_under_motion() -> None:
+    # The migrating-cell headline: the stiff binding integrates adaptively WHILE the cell deforms, and the
+    # implicit bulk `c ∇·v_mesh` + surface `ρ ∇_Γ·v_Γ` dilution keep total ligand conserved (round-off from
+    # the binding cancellation, O(motion-step) from the move/dilute split). Both expansion and shrinkage.
+    for velocity in ("[0.3 * geom.x[0], 0.3 * geom.x[1]]", "[-0.3 * geom.x[0], -0.3 * geom.x[1]]"):
+        geom = _geom(h=0.11)
+        area0 = _inner_area(geom)
+        model = _model()
+        total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
+        result = integrate_membrane_coupled(model, geom, t_final=0.3, velocity=velocity, motion_steps=10)
+        assert abs(_inner_area(geom) / area0 - 1.0) > 0.15  # the cell deformed substantially
+        assert result.total_mass() == pytest.approx(total0, rel=2e-3)  # ≪ the ~0.2 a no-dilution run drifts
+
+
+def test_mol_motion_splitting_error_is_first_order() -> None:
+    # The conservation error under motion is the move-vs-dilute operator split — first order in the outer
+    # motion step. Halving the interval (doubling motion_steps) halves the drift; this is the clean,
+    # predictable convergence the BE/IMEX path can't give (its two lagging errors cross zero non-monotonically).
+    velocity = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
+    model = _model()
+
+    def drift(motion_steps: int) -> float:
+        geom = _geom(h=0.11)
+        total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
+        result = integrate_membrane_coupled(model, geom, t_final=0.3, velocity=velocity, motion_steps=motion_steps)
+        return abs(result.total_mass() / total0 - 1.0)
+
+    coarse, fine = drift(10), drift(20)
+    assert coarse / fine == pytest.approx(2.0, abs=0.3)  # first-order: ~2× reduction per halved interval
+
+
+def test_mol_handles_stiff_binding_under_motion() -> None:
+    # The reason MOL-under-motion exists: stiff binding (kon·Rmax large) that the explicit IMEX-BE step
+    # cannot take while the membrane also moves. The adaptive implicit solve captures strongly and stays
+    # conserved on the deforming cell.
+    geom = _geom(h=0.11)
+    model = _model(kon=1.0, rmax=10.0)
+    total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
+    result = integrate_membrane_coupled(
+        model, geom, t_final=0.3, velocity="[0.3 * geom.x[0], 0.3 * geom.x[1]]", motion_steps=10
+    )
+    assert result.mass("R") > 2.0  # strong stiff capture (≫ the gentle-kon ~1.1)
+    assert result.total_mass() == pytest.approx(total0, rel=5e-3)
+
+
+# ---------------------------------------------------------------------------
 # 8. expression-valued parameters (VCell unit factors)
 # ---------------------------------------------------------------------------
 
