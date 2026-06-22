@@ -57,6 +57,7 @@ from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_trace
+from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tension
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
     BCInterfaceFlux,
@@ -301,6 +302,109 @@ class MembraneCoupledMeshMotion:
         self._membrane_mesh.geometry.x[:, : self._gdim] += self._mem_disp.x.array.reshape((-1, self._gdim))[
             self._mem_perm
         ]
+
+
+class ForceBalanceMeshMotion:
+    """Advances the three-region substrate under a membrane velocity **solved from a force balance**,
+    rather than prescribed: each step solves an incompressible surface-tension Stokes flow on the cyto
+    (the cell interior) and moves the substrate by the resulting boundary velocity. This is the
+    migrating-cell mechanics — the membrane moves under its own tension + bulk pressure, no scripted
+    field — and it is a drop-in for `MembraneCoupledMeshMotion` in the coupled solvers (same
+    `parent_displacement` / `membrane_velocity` / `advance()` interface).
+
+    Mechanics. `solve_incompressible_stokes_surface_tension` on the cyto gives a divergence-free velocity
+    `v` (Taylor–Hood) whose boundary trace is the membrane velocity; the uniform tension γ enters as the
+    Laplace–Beltrami continuous-surface-force load (no explicit curvature). A *circle* is the Laplace
+    fixed point (v ≈ 0, pressure γ/R), so it stays put; a deformed cell relaxes toward the minimal-perimeter
+    circle. Because the flow is incompressible, `∮ v·n = 0` and the cell area is conserved.
+
+    Cross-mesh motion mirrors `MembraneCoupledMeshMotion`: the membrane moves by `dt·v`, the parent
+    interior by a harmonic extension of that boundary displacement, and the bulk submeshes inherit the
+    parent displacement — so the topological `EntityMap`s stay valid. The cyto velocity (P2) is sampled on
+    a P1 space and transferred to the parent interface dofs and the membrane via **fixed** node→dof
+    permutations (the cell boundary, parent interface, and membrane nodes are coincident and co-move).
+    `membrane_velocity` is the solved boundary velocity as a P1 Function (updated each step), feeding the
+    mandatory surface dilution `ρ ∇_Γ·v_Γ`; `parent_displacement` (= dt·v_mesh) feeds the bulk dilution.
+    """
+
+    def __init__(
+        self,
+        geometry: InterfaceCoupledGeometry,
+        *,
+        tension: float,
+        dt: float,
+        viscosity: float = 1.0,
+        screening: float = 1.0,
+    ) -> None:
+        parent, cyto, membrane = geometry.parent_mesh, geometry.inner_mesh, geometry.membrane_mesh
+        gdim, tdim = parent.geometry.dim, parent.topology.dim
+        parent.topology.create_connectivity(tdim - 1, tdim)
+        self._gdim, self._dt = gdim, dt
+        self._cyto, self._membrane = cyto, membrane
+        self._tension, self._viscosity, self._screening = tension, viscosity, screening
+
+        # The cyto velocity (Taylor–Hood P2) is sampled on this P1 vector space each step for node transfer.
+        self._v1 = fem.Function(fem.functionspace(cyto, ("Lagrange", 1, (gdim,))))
+
+        # Harmonic extension on the parent: ∇²d = 0, d = dt·v on the membrane facets, d = 0 on the exterior.
+        space = fem.functionspace(parent, ("Lagrange", 1, (gdim,)))
+        self._disp = fem.Function(space)
+        self._interface_disp = fem.Function(space)
+        trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
+        a = ufl.inner(ufl.grad(trial), ufl.grad(test)) * ufl.dx
+        rhs = ufl.inner(fem.Constant(parent, np.zeros(gdim, dtype=PETSc.ScalarType)), test) * ufl.dx
+        self._idofs = fem.locate_dofs_topological(space, tdim - 1, geometry.facet_tags.find(geometry.interface_tag))
+        exterior_dofs = fem.locate_dofs_topological(space, tdim - 1, exterior_facet_indices(parent.topology))
+        self._problem = LinearProblem(
+            a,
+            rhs,
+            u=self._disp,
+            bcs=[
+                fem.dirichletbc(self._interface_disp, self._idofs),
+                fem.dirichletbc(fem.Function(space), exterior_dofs),
+            ],
+            petsc_options_prefix=f"vcellfenics_force_balance_{id(self):x}_",
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        )
+
+        # The boundary velocity as a P1 Function on the membrane mesh — feeds the surface dilution.
+        self.membrane_velocity = fem.Function(fem.functionspace(membrane, ("Lagrange", 1, (gdim,))))
+
+        # FIXED node→dof permutations (all topological): the bulk meshes follow the parent harmonic
+        # displacement; the parent interface dofs and the membrane dofs sample the cyto velocity. The cell
+        # boundary, parent interface, and membrane nodes are coincident and co-move, so these never change.
+        self._bulk_meshes = (parent, cyto, geometry.outer_mesh)
+        bulk_tree = cKDTree(space.tabulate_dof_coordinates())
+        self._perms = [bulk_tree.query(mesh.geometry.x)[1] for mesh in self._bulk_meshes]
+        cyto_tree = cKDTree(self._v1.function_space.tabulate_dof_coordinates())
+        self._iface_to_cyto = cyto_tree.query(space.tabulate_dof_coordinates()[self._idofs])[1]
+        mem_dof_x = self.membrane_velocity.function_space.tabulate_dof_coordinates()
+        self._mem_to_cyto = cyto_tree.query(mem_dof_x)[1]
+        self._mem_perm = cKDTree(mem_dof_x).query(membrane.geometry.x)[1]
+
+    @property
+    def parent_displacement(self) -> fem.Function:
+        """The parent's nodal displacement this step (= `dt·v_mesh`); `∇·` of it is the bulk dilution."""
+        return self._disp
+
+    def advance(self) -> None:
+        # Solve the surface-tension force balance on the (current) cyto; sample the velocity on P1.
+        velocity, _ = solve_incompressible_stokes_surface_tension(
+            self._cyto, tension=self._tension, viscosity=self._viscosity, screening=self._screening
+        )
+        self._v1.interpolate(velocity)
+        cyto_v = self._v1.x.array.reshape((-1, self._gdim))
+        # Harmonic-extend the boundary velocity over the parent, then move the parent + bulk submeshes.
+        self._interface_disp.x.array.reshape((-1, self._gdim))[self._idofs] = self._dt * cyto_v[self._iface_to_cyto]
+        self._problem.solve()
+        disp = self._disp.x.array.reshape((-1, self._gdim))
+        for mesh, perm in zip(self._bulk_meshes, self._perms, strict=True):
+            mesh.geometry.x[:, : self._gdim] += disp[perm]
+        # The membrane velocity Function (for the surface dilution) + move the membrane by dt·v.
+        self.membrane_velocity.x.array.reshape((-1, self._gdim))[:] = cyto_v[self._mem_to_cyto]
+        self._membrane.geometry.x[:, : self._gdim] += (
+            self._dt * self.membrane_velocity.x.array.reshape((-1, self._gdim))[self._mem_perm]
+        )
 
 
 def _sum_forms(terms: list[UflExpr]) -> UflExpr:
@@ -558,7 +662,12 @@ def integrate_interface_coupled(
 
 
 def assemble_membrane_coupled(
-    md: MathDescription, geometry: InterfaceCoupledGeometry, *, dt: float, velocity: str | None = None
+    md: MathDescription,
+    geometry: InterfaceCoupledGeometry,
+    *,
+    dt: float,
+    velocity: str | None = None,
+    motion: MembraneCoupledMeshMotion | ForceBalanceMeshMotion | None = None,
 ) -> MembraneCoupledProblem:
     """Assemble a backward-Euler step for **membrane species coupled to both bulk compartments**: any
     number of bulk diffusion species in each compartment plus any number of surface species on their
@@ -588,10 +697,13 @@ def assemble_membrane_coupled(
     into the parent integrals through their `EntityMap`s; with the coupling fully lagged the block matrix
     is the static, block-diagonal mass + diffusion (factorised once) and only the RHS changes each step.
 
-    **Moving membrane (`velocity` given).** Pass a prescribed membrane velocity expression (e.g.
-    ``"[0.3*geom.x[0], 0.3*geom.x[1]]"``) to advance the substrate conservative-ALE style: each `step()`
-    first moves the mesh (`MembraneCoupledMeshMotion` — membrane by `dt·v`, parent interior by harmonic
-    extension, bulk submeshes inherited) and then re-assembles + solves on the deformed geometry. Because
+    **Moving membrane (`velocity` or `motion` given).** Pass a prescribed membrane velocity expression
+    (e.g. ``"[0.3*geom.x[0], 0.3*geom.x[1]]"``), OR a pre-built motion driver via `motion=` — a
+    `MembraneCoupledMeshMotion` (prescribed) or a `ForceBalanceMeshMotion` (the membrane velocity SOLVED
+    from a surface-tension force balance, so the cell migrates under its own mechanics; build it with
+    `dt` equal to this assembler's `dt`). Either way each `step()` first moves the mesh (membrane by `dt·v`,
+    parent interior by harmonic extension, bulk submeshes inherited) and then re-assembles + solves on the
+    deformed geometry. Because
     every field co-moves with its mesh, each gains a **lagged dilution** forcing so its integral tracks the
     local volume/area change:
       - bulk species: ``− c^n (∇·v_mesh) w`` on the region cells, with `∇·v_mesh` the (ambient) divergence
@@ -763,10 +875,10 @@ def assemble_membrane_coupled(
     # harmonic displacement (= dt·v_mesh, so div(disp) already carries the dt). Surface: − dt·ρ^n (∇_Γ·v_Γ) w,
     # where ∇_Γ·v_Γ is the SURFACE divergence `div(v) − n·(∇v)·n` (n = CellNormal) — `ufl.div` on the
     # membrane manifold is the *ambient* divergence and would over-dilute by the curvature term.
-    motion: MembraneCoupledMeshMotion | None = None
-    rhs_dilution_form = None
-    if velocity is not None:
+    if motion is None and velocity is not None:
         motion = MembraneCoupledMeshMotion(md, geometry, velocity=velocity, dt=dt)
+    rhs_dilution_form = None
+    if motion is not None:
         disp = motion.parent_displacement
         n_hat = ufl.CellNormal(geometry.membrane_mesh)
         v_mem = motion.membrane_velocity
@@ -901,6 +1013,7 @@ def integrate_membrane_coupled(
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
     velocity: str | None = None,
+    motion: MembraneCoupledMeshMotion | ForceBalanceMeshMotion | None = None,
     motion_steps: int = 10,
 ) -> MembraneCoupledResult:
     """Integrate a **membrane species coupled to both bulks** to `t_final` with the method-of-lines
@@ -920,10 +1033,12 @@ def integrate_membrane_coupled(
     `membrane_trace`). The residual splits into a per-mesh local part (mass/rate + diffusion) and an
     interface coupling part (all on the parent `dS`), summed monolithically (`kind="mpi"`).
 
-    **Moving membrane (`velocity` given).** The migrating-cell solve: the stiff binding is integrated
-    adaptively *while* the membrane deforms. The motion is taken in `motion_steps` discrete outer steps
-    (a prescribed `MembraneCoupledMeshMotion`); each outer step moves the substrate, then runs the
-    adaptive BDF over that sub-interval on the (frozen) deformed geometry. The **dilution is fully
+    **Moving membrane (`velocity` or `motion` given).** The migrating-cell solve: the stiff binding is
+    integrated adaptively *while* the membrane deforms. The motion is taken in `motion_steps` discrete outer
+    steps — a prescribed `MembraneCoupledMeshMotion` (from `velocity`), or a pre-built `motion=` driver such
+    as `ForceBalanceMeshMotion` (the membrane velocity SOLVED from a surface-tension force balance — build
+    it with `dt = t_final / motion_steps`, the outer interval). Each outer step moves the substrate, then
+    runs the adaptive BDF over that sub-interval on the (frozen) deformed geometry. The **dilution is fully
     implicit** here — unlike the BE/IMEX lagging — because its coefficient is *geometry* (the mesh
     divergence), not a state, so its Jacobian block IS assemblable and goes into both the residual and the
     preconditioner (only the binding stays matrix-free): the residual gains `+ c (∇·v_mesh) w` on the bulk
@@ -994,11 +1109,13 @@ def integrate_membrane_coupled(
     # mesh moves in `motion_steps` outer steps of length `interval`, so the harmonic displacement carries
     # that dt and `∇·v_mesh = div(disp)/interval`. The membrane uses the SURFACE divergence (see the BE
     # assembler). These coefficients reference the (moving) geometry, so they update as the mesh advances.
-    motion: MembraneCoupledMeshMotion | None = None
     interval = t_final / motion_steps
-    dil_in = dil_out = dil_mem = None
-    if velocity is not None:
+    if motion is None and velocity is not None:
         motion = MembraneCoupledMeshMotion(md, geometry, velocity=velocity, dt=interval)
+    dil_in = dil_out = dil_mem = None
+    if motion is not None:
+        # A pre-built motion (e.g. `ForceBalanceMeshMotion`) must be constructed with dt == the outer
+        # interval, so its `parent_displacement` is `interval·v_mesh` and `div(disp)/interval` = ∇·v_mesh.
         dil_in = dil_out = ufl.div(motion.parent_displacement) / interval
         n_hat = ufl.CellNormal(membrane_mesh)
         v_mem = motion.membrane_velocity

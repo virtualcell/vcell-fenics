@@ -559,6 +559,70 @@ def test_mol_nonlinear_in_bulk_reaction_conserves_under_motion() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 7d. force-balance velocity — the membrane moves under its own surface tension
+# ---------------------------------------------------------------------------
+
+
+def _aspect(geom) -> float:  # type: ignore[no-untyped-def]
+    x = geom.inner_mesh.geometry.x
+    return float((x[:, 0].max() - x[:, 0].min()) / (x[:, 1].max() - x[:, 1].min()))
+
+
+def test_force_balance_circle_is_a_fixed_point_with_conserving_biochemistry() -> None:
+    # The membrane velocity is SOLVED from a surface-tension Stokes force balance on the cyto, not
+    # prescribed. A circle under uniform tension is the Laplace fixed point: it stays circular (aspect ≈ 1,
+    # no spurious deformation). The biochemistry rides along and total ligand is conserved to round-off —
+    # the dilution is self-consistent with whatever the force balance does to the mesh.
+    from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion
+
+    geom = _geom(h=0.07)
+    motion = ForceBalanceMeshMotion(geom, tension=0.5, dt=0.02)
+    problem = assemble_membrane_coupled(_model(), geom, dt=0.02, motion=motion)
+    total0 = problem.total_mass()
+    for _ in range(10):
+        problem.step()
+    assert _aspect(geom) == pytest.approx(1.0, abs=0.02)  # stayed circular — a fixed point, no spurious flow
+    assert problem.total_mass() == pytest.approx(total0, abs=1e-5)  # biochemistry conserved through the motion
+
+
+def test_force_balance_relaxes_a_deformed_cell_with_biochemistry_riding_along() -> None:
+    # The migrating-cell mechanics: a pre-deformed (elliptical) cell relaxes back toward the
+    # minimal-perimeter circle under its own surface tension — the aspect ratio decreases — while the
+    # receptor binding runs and total ligand stays conserved. Pre-deform with a prescribed area-preserving
+    # strain, then hand the substrate to the force-balance driver.
+    from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion, MembraneCoupledMeshMotion
+
+    geom = _geom(h=0.07)
+    pre = MembraneCoupledMeshMotion(_model(), geom, velocity="[0.3 * geom.x[0], -0.3 * geom.x[1]]", dt=0.05)
+    for _ in range(5):
+        pre.advance()
+    aspect0 = _aspect(geom)
+    assert aspect0 > 1.1  # genuinely deformed into an ellipse
+
+    motion = ForceBalanceMeshMotion(geom, tension=0.5, dt=0.02)
+    problem = assemble_membrane_coupled(_model(), geom, dt=0.02, motion=motion)
+    total0 = problem.total_mass()
+    for _ in range(25):
+        problem.step()
+    assert _aspect(geom) < aspect0 - 0.02  # relaxed toward the circle (tension did mechanical work)
+    assert problem.total_mass() == pytest.approx(total0, abs=1e-4)  # ligand conserved while the shape changed
+
+
+def test_mol_force_balance_circle_is_a_fixed_point() -> None:
+    # Force balance under the adaptive MOL: the circle stays a fixed point and total ligand is conserved to
+    # the O(motion-step) split error while the stiff binding integrates adaptively. The driver's dt must
+    # equal the outer interval t_final / motion_steps.
+    from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion
+
+    geom = _geom(h=0.07)
+    total0 = assemble_membrane_coupled(_model(), geom, dt=0.02).total_mass()
+    motion = ForceBalanceMeshMotion(geom, tension=0.5, dt=0.3 / 10)
+    result = integrate_membrane_coupled(_model(), geom, t_final=0.3, motion=motion, motion_steps=10)
+    assert _aspect(geom) == pytest.approx(1.0, abs=0.02)  # fixed point
+    assert result.total_mass() == pytest.approx(total0, rel=1e-3)  # conserved through the adaptive solve
+
+
+# ---------------------------------------------------------------------------
 # 8. expression-valued parameters (VCell unit factors)
 # ---------------------------------------------------------------------------
 
