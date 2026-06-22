@@ -56,6 +56,7 @@ from vcell_fenics.backend.geometry import (
 from vcell_fenics.backend.interface_coupled import (
     InterfaceCoupledProblem,
     InterfaceCoupledResult,
+    MembraneCoupledMeshMotion,
     MembraneCoupledProblem,
     MembraneCoupledResult,
     assemble_interface_coupled,
@@ -100,6 +101,7 @@ __all__ = [
     "InterfaceCoupledGeometry",
     "InterfaceCoupledProblem",
     "InterfaceCoupledResult",
+    "MembraneCoupledMeshMotion",
     "MembraneCoupledProblem",
     "MembraneCoupledResult",
     "MeshQualityError",

@@ -42,12 +42,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.fem import petsc
-from dolfinx.mesh import Mesh
+from dolfinx.fem.petsc import LinearProblem
+from dolfinx.mesh import Mesh, exterior_facet_indices
 from mpi4py import MPI
 from petsc4py import PETSc
+from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
@@ -210,6 +213,88 @@ def _param_symbols(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
             raise NotImplementedError(f"coupled assembly cannot bind parameter {p.name!r} of type {type(p).__name__}")
         scratch[p.name] = params[p.name] = value  # later parameters may reference this one
     return params
+
+
+class MembraneCoupledMeshMotion:
+    """Advances the three-region substrate (parent + two bulk submeshes + membrane) under a **prescribed
+    membrane velocity**, conservative-ALE style. The membrane moves by `dt·v`; the parent's interior
+    follows by a **harmonic extension** (∇²d = 0 with d = `dt·v` on the membrane facets and d = 0 on the
+    exterior box/wall — so the cell deforms while the outer boundary stays put); the two bulk submeshes
+    inherit the parent's displacement at their (coincident) nodes. All four meshes therefore move by the
+    *same* field at coincident nodes, so the **topological** `EntityMap`s stay valid and the coupling
+    form re-assembles on the deformed geometry.
+
+    `parent_displacement` is `dt·v_mesh` on the parent — its `∇·` is the coefficient of the bulk dilution
+    `L ∇·v_mesh` (the volumetric analogue); `membrane_velocity` is `v` on the membrane mesh, whose
+    surface divergence `∇_Γ·v_Γ` is the **mandatory** surface dilution `ρ ∇_Γ·v_Γ`. Both bulk and surface
+    fields co-move with the deforming domain, so the membrane flux is the ordinary diffusive one (no
+    moving-boundary relative-flux correction) and total ligand is conserved across the motion."""
+
+    def __init__(self, md: MathDescription, geometry: InterfaceCoupledGeometry, velocity: str, dt: float) -> None:
+        parent = geometry.parent_mesh
+        gdim, tdim = parent.geometry.dim, parent.topology.dim
+        parent.topology.create_connectivity(tdim - 1, tdim)
+        self._gdim = gdim
+        v_parent = compile_expression(
+            parse(velocity),
+            CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **_param_symbols(md, parent)}),
+        )
+
+        # Harmonic extension on the parent: ∇²d = 0, d = dt·v on the membrane, d = 0 on the exterior.
+        space = fem.functionspace(parent, ("Lagrange", 1, (gdim,)))
+        self._disp = fem.Function(space)
+        self._interface_disp = fem.Function(space)
+        self._interface_expr = fem.Expression(dt * v_parent, space.element.interpolation_points)
+        trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
+        a = ufl.inner(ufl.grad(trial), ufl.grad(test)) * ufl.dx
+        rhs = ufl.inner(fem.Constant(parent, np.zeros(gdim, dtype=PETSc.ScalarType)), test) * ufl.dx
+        interface_dofs = fem.locate_dofs_topological(space, tdim - 1, geometry.facet_tags.find(geometry.interface_tag))
+        exterior_dofs = fem.locate_dofs_topological(space, tdim - 1, exterior_facet_indices(parent.topology))
+        self._problem = LinearProblem(
+            a,
+            rhs,
+            u=self._disp,
+            bcs=[
+                fem.dirichletbc(self._interface_disp, interface_dofs),
+                fem.dirichletbc(fem.Function(space), exterior_dofs),
+            ],
+            petsc_options_prefix=f"vcellfenics_membrane_motion_{id(self):x}_",
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        )
+        # The parent + both bulk submeshes move by the harmonic displacement (cKDTree maps the
+        # displacement dofs to each mesh's nodes; coincident submesh nodes match exactly).
+        self._tree = cKDTree(space.tabulate_dof_coordinates())
+        self._bulk_meshes = (parent, geometry.inner_mesh, geometry.outer_mesh)
+
+        # The membrane moves by dt·v directly (every node is on the boundary); `v_membrane` feeds the
+        # surface dilution.
+        membrane = geometry.membrane_mesh
+        self.membrane_velocity = compile_expression(
+            parse(velocity),
+            CompileContext(membrane, {"geom.x": ufl.SpatialCoordinate(membrane), **_param_symbols(md, membrane)}),
+        )
+        mem_space = fem.functionspace(membrane, ("Lagrange", 1, (gdim,)))
+        self._mem_disp = fem.Function(mem_space)
+        self._mem_expr = fem.Expression(dt * self.membrane_velocity, mem_space.element.interpolation_points)
+        self._mem_tree = cKDTree(mem_space.tabulate_dof_coordinates())
+        self._membrane_mesh = membrane
+
+    @property
+    def parent_displacement(self) -> fem.Function:
+        """The parent's nodal displacement this step (= `dt·v_mesh`); `∇·` of it is the bulk dilution
+        coefficient `L ∇·v_mesh`."""
+        return self._disp
+
+    def advance(self) -> None:
+        self._interface_disp.interpolate(self._interface_expr)
+        self._problem.solve()
+        disp = self._disp.x.array.reshape((-1, self._gdim))
+        for mesh in self._bulk_meshes:
+            mesh.geometry.x[:, : self._gdim] += disp[self._tree.query(mesh.geometry.x)[1]]
+        self._mem_disp.interpolate(self._mem_expr)
+        self._membrane_mesh.geometry.x[:, : self._gdim] += self._mem_disp.x.array.reshape((-1, self._gdim))[
+            self._mem_tree.query(self._membrane_mesh.geometry.x)[1]
+        ]
 
 
 def _sum_forms(terms: list[UflExpr]) -> UflExpr:
