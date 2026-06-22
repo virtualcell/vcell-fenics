@@ -54,6 +54,7 @@ from vcell_fenics.backend.geometry import (
     register_geometry,
 )
 from vcell_fenics.backend.interface_coupled import (
+    ForceBalanceMeshMotion,
     InterfaceCoupledProblem,
     InterfaceCoupledResult,
     MembraneCoupledMeshMotion,
@@ -96,6 +97,7 @@ __all__ = [
     "CoupledGeometry",
     "CoupledProblem",
     "DiscreteProblem",
+    "ForceBalanceMeshMotion",
     "Geometry",
     "IntegrationResult",
     "InterfaceCoupledGeometry",
