@@ -202,6 +202,38 @@ def test_2d_disk_in_box_partition() -> None:
     assert _measure(geom, "pm") == pytest.approx(2 * math.pi * radius, rel=0.05)
 
 
+def test_2d_disk_boundary_stays_inside_the_circle_in_a_nonsquare_box() -> None:
+    # Regression for a high-curvature boundary artifact. In a NON-SQUARE box (12×4, the RacRho
+    # moving-boundary domain) the marched contour sits just INSIDE the circle (chords), so every
+    # body-fit boundary node must have r ≤ radius. Before the fix, a boundary cell that straddled the
+    # simplified contour got tagged into the disk by a per-cell midpoint test, bulging one node ~3%
+    # OUTSIDE the circle (r ≈ 1.03). Per-axis isotropic sampling + whole-face (majority) classification
+    # keep the cell boundary on the polygon.
+    from dolfinx import mesh as dmesh
+
+    radius = 1.0
+    geom = realize(
+        GeometryDescription(
+            name="cell",
+            dim=2,
+            extent=(12.0, 4.0, 1.0),
+            origin=(-1.8, -1.8, 0.0),
+            subvolumes=(
+                SubVolume(name="cyto", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 < 1.0"),
+                SubVolume(name="ext", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 > 1.0"),
+            ),
+            surfaces=(SurfaceClass(name="pm", inside="cyto", outside="ext"),),
+        ),
+        h=0.08,
+    )
+    cyto = geom.mesh_of("cyto")
+    tdim = cyto.topology.dim
+    cyto.topology.create_connectivity(tdim - 1, tdim)
+    boundary = dmesh.compute_incident_entities(cyto.topology, dmesh.exterior_facet_indices(cyto.topology), tdim - 1, 0)
+    r = np.sqrt((cyto.geometry.x[boundary][:, :2] ** 2).sum(axis=1))
+    assert r.max() <= radius * 1.005  # no boundary node bulges outside the circle (the artifact hit ~1.03)
+
+
 def test_realize_interface_coupled_builds_a_solvable_coupled_geometry() -> None:
     # The realize -> InterfaceCoupledGeometry bridge: the imported geometry is realized into the
     # two-bulk + membrane object the coupled solver consumes, retaining the entity maps `realize`
