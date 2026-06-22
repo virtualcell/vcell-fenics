@@ -16,6 +16,9 @@ higher on +x), the front (+x, a > 1) protrudes while the back (−x, a < 1) retr
 the Rac gradient. (The imported GTPase eventually homogenises to its low state, after which the boundary
 retracts everywhere; sustaining the polarity needs the full feedback that isn't all in the lowered math.)
 
+It also writes a tiled image `racrho_moving_boundary.png` — the deforming cell mesh coloured by Rac at a
+sequence of times — so the migration and the bulk field are visible at a glance.
+
 A near-circular cell's outward normal is approximated by the radial direction `x̂ = x/|x|`, which is
 interpolable for the harmonic mesh move (`ufl.FacetNormal` is not defined in the interior). `_MOTION_GAIN`
 makes the small `(a−1)|a−1|` displacement visible on the demo timescale; the model's units set the true
@@ -30,6 +33,7 @@ from pathlib import Path
 
 import pyvcell.vcml.models_geometry as vg
 import pyvcell.vcml.models_math as vm
+import pyvista
 import ufl
 import yaml
 
@@ -37,9 +41,40 @@ from vcell_fenics.backend import assemble, integrate_discrete_problem
 from vcell_fenics.backend.fsi import _advance_ale_mesh
 from vcell_fenics.backend.realize import realize
 from vcell_fenics.pyvcell_bridge import import_geometry, import_math_description
+from vcell_fenics.viz import _function_to_pyvista
 
 _HERE = Path(__file__).parent
-_MOTION_GAIN, _INTERVAL, _OUTER_STEPS = 30.0, 0.02, 8
+_MOTION_GAIN, _INTERVAL, _STEPS, _FRAME_EVERY = 70.0, 0.02, 16, 2
+_FIELD = "Rac (a)"
+
+
+def _write_tiled_image(frames: list[tuple[pyvista.UnstructuredGrid, float]], path: Path) -> None:
+    """Tile the captured frames (deforming mesh coloured by Rac) into a single 2×N PNG, with a shared
+    colour scale and a fixed reference box so the migration reads across frames."""
+    pyvista.OFF_SCREEN = True
+    lo = min(grid.point_data[_FIELD].min() for grid, _ in frames)
+    hi = max(grid.point_data[_FIELD].max() for grid, _ in frames)
+    cols = (len(frames) + 1) // 2
+    plotter = pyvista.Plotter(shape=(2, cols), off_screen=True, window_size=(200 * cols, 420), border=False)
+    box = pyvista.Box(bounds=(-1.15, 1.15, -1.15, 1.15, -0.01, 0.01))
+    for i, (grid, t) in enumerate(frames):
+        plotter.subplot(i // cols, i % cols)
+        plotter.add_mesh(box, style="wireframe", color="lightgray", opacity=0.4)
+        plotter.add_mesh(
+            grid,
+            scalars=_FIELD,
+            clim=[lo, hi],
+            cmap="viridis",
+            show_edges=True,
+            edge_color="gray",
+            line_width=0.5,
+            show_scalar_bar=(i == 0),
+        )
+        plotter.add_text(f"t = {t:.2f}", font_size=9)
+        plotter.view_xy()
+        plotter.camera.zoom(1.15)
+    plotter.screenshot(str(path))
+    plotter.close()
 
 
 def main() -> None:
@@ -48,7 +83,7 @@ def main() -> None:
     geometry_desc = import_geometry(geom_vcml)
     math_desc = import_math_description(math_vcml, geometry=geometry_desc.name, dim=2)
 
-    mesh = realize(geometry_desc, h=0.1)
+    mesh = realize(geometry_desc, h=0.08)
     problem = assemble(math_desc, mesh, dt=0.02)
     cell = problem.unknown.function_space.mesh
 
@@ -63,21 +98,29 @@ def main() -> None:
 
     print(f"  membrane velocity v = {_MOTION_GAIN}·(a−1)|a−1|·n̂   (protrude where a>1, retract where a<1)\n")
     print(f"  {'t':>5} {'front +x':>10} {'back −x':>10} {'a @front':>9} {'a @back':>9}")
-    for step in range(_OUTER_STEPS):
+    frames: list[tuple[pyvista.UnstructuredGrid, float]] = []
+    for step in range(_STEPS):
         integrate_discrete_problem(problem, t_final=_INTERVAL, dt_initial=1.0e-4)  # MOL — nonlinear GTPase
         _advance_ale_mesh(cell, velocity, _INTERVAL)  # move boundary by interval·v(a), harmonic interior
         coords = cell.geometry.x
         rac_values = problem.unknown.x.array[rac_dofs]
-        a_front = float(rac_values[rac_x > 0.5].mean())
-        a_back = float(rac_values[rac_x < -0.5].mean())
+        t = (step + 1) * _INTERVAL
         print(
-            f"  {(step + 1) * _INTERVAL:5.2f} {coords[:, 0].max():10.3f} {coords[:, 0].min():10.3f} "
-            f"{a_front:9.3f} {a_back:9.3f}"
+            f"  {t:5.2f} {coords[:, 0].max():10.3f} {coords[:, 0].min():10.3f} "
+            f"{float(rac_values[rac_x > 0.5].mean()):9.3f} {float(rac_values[rac_x < -0.5].mean()):9.3f}"
         )
+        if step % _FRAME_EVERY == _FRAME_EVERY - 1:
+            field = problem.unknown.sub(0).collapse()
+            field.name = _FIELD
+            frames.append((_function_to_pyvista(field), t))
 
     print("\n  the front (+x, a>1) protruded and the back (−x, a<1) retracted — directed migration up the")
     print("  Rac gradient. The cell membrane moved under a velocity set by its own biochemistry, on a mesh")
     print("  the bulk solve followed each step: the moving boundary, reproduced through the pipeline.")
+
+    out = _HERE / "racrho_moving_boundary.png"
+    _write_tiled_image(frames, out)
+    print(f"\n  wrote {out.name} — the deforming cell mesh coloured by Rac over time")
 
 
 if __name__ == "__main__":
