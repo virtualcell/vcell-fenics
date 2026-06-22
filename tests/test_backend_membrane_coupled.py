@@ -622,6 +622,87 @@ def test_mol_force_balance_circle_is_a_fixed_point() -> None:
     assert result.total_mass() == pytest.approx(total0, rel=1e-3)  # conserved through the adaptive solve
 
 
+def _centroid(geom) -> tuple[float, float]:  # type: ignore[no-untyped-def]
+    x = geom.membrane_mesh.geometry.x
+    return float(x[:, 0].mean()), float(x[:, 1].mean())
+
+
+def _mechano_model(r_ic: str) -> MathDescription:
+    """A receptor R on the membrane with a *prescribed asymmetric* initial density (no binding) — the
+    knob that drives mechano-chemical migration once the tension is coupled to R."""
+    return MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[
+            Variable(name="L_in", subdomain="cyto"),
+            Variable(name="L_out", subdomain="ext"),
+            Variable(name="R", subdomain="pm"),
+        ],
+        parameters=[ParameterConstant(name="kon", value=0.0)],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="0.5",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="R",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": "0.02"},
+                initial_condition=r_ic,
+            ),
+        ],
+        boundary_conditions=[],
+    )
+
+
+def test_mechano_chemical_coupling_migrates_the_cell() -> None:
+    # The migration North Star: the membrane tension is coupled to the receptor density (γ = base +
+    # sensitivity·R). An asymmetric R (higher on +x) makes the tension asymmetric, the membrane contracts
+    # harder there, and the cell MIGRATES toward the high-R side. The discrimination is the coupling: with
+    # sensitivity = 0 (same asymmetric R, no tension coupling) the cell stays put.
+    import math
+
+    from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion
+
+    def migrate(sensitivity: float) -> float:
+        geom = _geom(h=0.06)
+        problem = assemble_membrane_coupled(
+            _mechano_model("1.0 + 0.8 * geom.x[0]"),  # receptor density higher on the +x side
+            geom,
+            dt=0.02,
+            motion=(motion := ForceBalanceMeshMotion(geom, tension=0.5, dt=0.02)),
+        )
+        motion.update_tension_from_receptor(problem.field("R"), base=0.5, sensitivity=sensitivity)
+        (x0, y0) = _centroid(geom)
+        for _ in range(25):
+            problem.step()
+            motion.update_tension_from_receptor(problem.field("R"), base=0.5, sensitivity=sensitivity)
+        (x1, y1) = _centroid(geom)
+        return math.hypot(x1 - x0, y1 - y0)
+
+    coupled, uncoupled = migrate(0.4), migrate(0.0)
+    assert coupled > 0.01  # the cell migrated under the tension asymmetry
+    assert coupled > 20 * uncoupled  # and only because of the coupling (uncoupled stays put)
+
+
 # ---------------------------------------------------------------------------
 # 8. expression-valued parameters (VCell unit factors)
 # ---------------------------------------------------------------------------

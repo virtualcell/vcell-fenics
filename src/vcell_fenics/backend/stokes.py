@@ -238,18 +238,24 @@ def solve_incompressible_stokes_traction(
 def solve_incompressible_stokes_surface_tension(
     mesh: Mesh,
     *,
-    tension: float,
+    tension: float | UflExpr,
     viscosity: float = 1.0,
     screening: float = 1.0,
 ) -> tuple[fem.Function, fem.Function]:
-    """Incompressible Stokes driven by a uniform membrane **surface tension** `γ`, for the
-    force-balance FSI closure (the membrane moves under its own tension + the bulk pressure).
+    """Incompressible Stokes driven by a membrane **surface tension** `γ`, for the force-balance
+    FSI closure (the membrane moves under its own tension + the bulk pressure). `tension` is a
+    uniform scalar *or* a **field** (a boundary-valued `Function`/expression) for a spatially
+    varying tension — the mechano-chemical case where γ depends on a surface species (e.g.
+    `γ = γ₀ + α·R` for a receptor density R).
 
-    The tension enters as the weak boundary load `−γ ∮_Γ ∇_Γ·v ds` — the Laplace–Beltrami /
+    The tension enters as the weak boundary load `−∮_Γ γ ∇_Γ·v ds` — the Laplace–Beltrami /
     continuous-surface-force form, so **no explicit curvature** is computed (the surface
-    divergence of the test velocity *is* the curvature force, integrated by parts). At
-    equilibrium a circle gives the Laplace pressure `p = γ/R` with `v ≈ 0`; out of equilibrium
-    the tension drives the shape toward minimal perimeter at fixed (incompressible) area.
+    divergence of the test velocity *is* the curvature force, integrated by parts). With γ inside
+    the integral this automatically carries BOTH the normal curvature force `γκn` AND the
+    tangential **Marangoni** force `∇_Γγ` from tension gradients — so a non-uniform tension drives
+    a net flow (the surface contracts harder where γ is larger). At equilibrium a circle of
+    uniform γ gives the Laplace pressure `p = γ/R` with `v ≈ 0`; a tension gradient breaks that
+    symmetry and moves the cell.
 
     Taylor–Hood (P2/P1), so the velocity is **continuous** — moving the ALE mesh by it
     conserves area, since the constant-pressure mode enforces `∮ v·n = 0` exactly (an H(div)
