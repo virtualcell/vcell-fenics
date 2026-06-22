@@ -51,9 +51,11 @@ from dolfinx.mesh import Mesh, exterior_facet_indices
 from mpi4py import MPI
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
+from ufl.algorithms.check_arities import ArityMismatch, check_form_arity
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_trace
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
@@ -261,10 +263,14 @@ class MembraneCoupledMeshMotion:
             petsc_options_prefix=f"vcellfenics_membrane_motion_{id(self):x}_",
             petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
         )
-        # The parent + both bulk submeshes move by the harmonic displacement (cKDTree maps the
-        # displacement dofs to each mesh's nodes; coincident submesh nodes match exactly).
-        self._tree = cKDTree(space.tabulate_dof_coordinates())
+        # The parent + both bulk submeshes move by the harmonic displacement. The node→dof permutation
+        # (cKDTree match of each mesh's nodes to the displacement dofs; coincident submesh nodes match
+        # exactly) is TOPOLOGICAL and fixed, so it is computed ONCE here on the initial geometry and reused
+        # — querying the moved node positions each step (against the initial dof tree) would mis-match and
+        # progressively distort the mesh.
         self._bulk_meshes = (parent, geometry.inner_mesh, geometry.outer_mesh)
+        tree = cKDTree(space.tabulate_dof_coordinates())
+        self._perms = [tree.query(mesh.geometry.x)[1] for mesh in self._bulk_meshes]
 
         # The membrane moves by dt·v directly (every node is on the boundary); `v_membrane` feeds the
         # surface dilution.
@@ -276,7 +282,7 @@ class MembraneCoupledMeshMotion:
         mem_space = fem.functionspace(membrane, ("Lagrange", 1, (gdim,)))
         self._mem_disp = fem.Function(mem_space)
         self._mem_expr = fem.Expression(dt * self.membrane_velocity, mem_space.element.interpolation_points)
-        self._mem_tree = cKDTree(mem_space.tabulate_dof_coordinates())
+        self._mem_perm = cKDTree(mem_space.tabulate_dof_coordinates()).query(membrane.geometry.x)[1]
         self._membrane_mesh = membrane
 
     @property
@@ -289,11 +295,11 @@ class MembraneCoupledMeshMotion:
         self._interface_disp.interpolate(self._interface_expr)
         self._problem.solve()
         disp = self._disp.x.array.reshape((-1, self._gdim))
-        for mesh in self._bulk_meshes:
-            mesh.geometry.x[:, : self._gdim] += disp[self._tree.query(mesh.geometry.x)[1]]
+        for mesh, perm in zip(self._bulk_meshes, self._perms, strict=True):
+            mesh.geometry.x[:, : self._gdim] += disp[perm]
         self._mem_disp.interpolate(self._mem_expr)
         self._membrane_mesh.geometry.x[:, : self._gdim] += self._mem_disp.x.array.reshape((-1, self._gdim))[
-            self._mem_tree.query(self._membrane_mesh.geometry.x)[1]
+            self._mem_perm
         ]
 
 
@@ -598,9 +604,15 @@ def assemble_membrane_coupled(
     from the termwise-cancelling binding, and to O(dt) from the lagged dilution (refines away). The mesh
     moves so the block matrix is **re-assembled and re-factorised every step** (no longer static).
 
-    Scope (this increment): bulk species are diffusion-only (no in-bulk reaction), backward Euler, a
-    *prescribed* membrane velocity (no force balance). The fully-implicit method-of-lines integrator
-    (nonlinear binding via Newton) and a moving membrane *under MOL* are follow-ups.
+    **In-bulk reactions.** A bulk species may carry a `source` (`∂c/∂t = … + source`) referencing any
+    sibling species in its own compartment by name — assembled implicitly into the block matrix. It must be
+    **affine** in the unknowns (e.g. a within-compartment `A ⇌ B`); a nonlinear source (a product of
+    species) is rejected here with a `NonlinearTermError` pointing at `integrate_membrane_coupled`, whose
+    matrix-free Newton handles it.
+
+    Scope (this increment): backward Euler with affine in-bulk reactions, a *prescribed* membrane velocity
+    (no force balance). Nonlinear in-bulk reactions (via the MOL) and a moving membrane *under MOL* are the
+    method-of-lines integrator's; force-balance velocity is a follow-up.
     """
 
     validate_or_raise(md)
@@ -663,21 +675,37 @@ def assemble_membrane_coupled(
     # block-diagonal local part — static — so the matrix assembles + factorises once and only the RHS
     # changes each step.
     #
-    # Local: each species' mass + diffusion, per component with its own diffusivity. Bulk species on the
-    # parent region cells; surface species on the membrane submesh (`grad` there is the tangential ∇_Γ).
-    # Static membrane, so no dilution term ρ ∇_Γ·v_Γ.
+    # Local: each species' mass + diffusion + in-bulk reaction, per component with its own diffusivity.
+    # Bulk species on the parent region cells; surface species on the membrane submesh (`grad` there is the
+    # tangential ∇_Γ). Static membrane, so no dilution term ρ ∇_Γ·v_Γ.
+    #
+    # In-bulk reaction (a `source` on a *bulk* species, `∂c/∂t = … + source`): compiled IMPLICITLY against
+    # the region's trials so it lands in the block matrix (an affine source is unconditionally stable; a
+    # nonlinear one — a product of species — is rejected below for this BE path and handed to the MOL). Its
+    # symbol table binds every sibling species in the SAME compartment by name, so a within-compartment
+    # reaction `A ⇌ B` resolves both. A surface species' `source` stays the membrane *coupling* reaction
+    # (below, on `dS`), not a local term.
     terms: list[UflExpr] = []
-    for trial, prev, test, eqs, dx, region_ctx in (
-        (u_in, u_in_prev, w_in, inner_eqs, dx_in, ctx),
-        (u_out, u_out_prev, w_out, outer_eqs, dx_out, ctx),
-        (rho, rho_prev, w_rho, membrane_eqs, dx_mem, surf_ctx),
+    for trial, prev, test, eqs, dx, is_bulk in (
+        (u_in, u_in_prev, w_in, inner_eqs, dx_in, True),
+        (u_out, u_out_prev, w_out, outer_eqs, dx_out, True),
+        (rho, rho_prev, w_rho, membrane_eqs, dx_mem, False),
     ):
+        region_ctx = ctx if is_bulk else surf_ctx
+        react_ctx = (
+            CompileContext(parent, {**ctx.symbols, **{e.variable: trial[j] for j, e in enumerate(eqs)}})
+            if is_bulk
+            else None
+        )
         for k, eq in enumerate(eqs):
             terms.append((trial[k] - prev[k]) * test[k] * dx)
             diffusion = eq.terms.get("diffusion")
             if diffusion is not None:
                 d = compile_expression(parse(diffusion), region_ctx)
                 terms.append(dt * d * ufl.dot(ufl.grad(trial[k]), ufl.grad(test[k])) * dx)
+            source = eq.terms.get("source")
+            if is_bulk and source is not None and react_ctx is not None:
+                terms.append(-dt * compile_expression(parse(source), react_ctx) * test[k] * dx)
     f_local = sum(terms[1:], terms[0])
 
     # Coupling on the parent's interior interface facets, **fully lagged (IMEX)**: the bulk interface
@@ -752,9 +780,27 @@ def assemble_membrane_coupled(
             dilution_terms.append(-dt * rho_prev[k] * surf_div * w_rho[k] * dx_mem)
         rhs_dilution_form = fem.form(ufl.extract_blocks(_sum_forms(dilution_terms)), entity_maps=emaps)
 
-    # Block-diagonal mass + diffusion. Static unless the membrane moves, in which case the geometry — and
-    # so this matrix — is re-assembled and re-factorised every step (below).
-    a_form = fem.form(ufl.extract_blocks(ufl.lhs(f_local)), entity_maps=emaps)
+    # Block-diagonal mass + diffusion (+ any affine in-bulk reaction). Static unless the membrane moves, in
+    # which case the geometry — and so this matrix — is re-assembled and re-factorised every step (below).
+    # A nonlinear in-bulk source makes the bilinear part non-affine: catch the arity mismatch in pure UFL
+    # (before form compilation, so we never poison the FFCx cache) and name the fix — the MOL integrator.
+    lhs_blocks = ufl.extract_blocks(ufl.lhs(f_local))
+    try:
+        # Per-BLOCK arity (not the monolithic mixed form: each per-mesh integral carries only a subset of
+        # the mixed arguments, which the whole-form checker misreads as a mismatch). A single-space block
+        # with a species appearing quadratically (a nonlinear source) trips the mismatch here.
+        for row in lhs_blocks:
+            for block in row if isinstance(row, list | tuple) else (row,):
+                if block is not None:
+                    check_form_arity(block, block.arguments())
+    except ArityMismatch as nonlinear:
+        raise NonlinearTermError(
+            "an in-bulk reaction `source` is nonlinear in the species (e.g. a product like A*B) — the "
+            "backward-Euler membrane-coupled assembler can only lower a source affine in the unknowns. Use "
+            "`integrate_membrane_coupled` (its matrix-free Newton handles nonlinear reactions), or "
+            "linearise / lag the term."
+        ) from nonlinear
+    a_form = fem.form(lhs_blocks, entity_maps=emaps)
     rhs_local_form = fem.form(ufl.extract_blocks(ufl.rhs(f_local)), entity_maps=emaps)
     rhs_coupling_form = fem.form(ufl.extract_blocks(ufl.rhs(f_coupling)), entity_maps=emaps)
     matrix = petsc.assemble_matrix(a_form)
@@ -886,8 +932,14 @@ def integrate_membrane_coupled(
     conserved to round-off from the binding cancellation and to O(motion-step) from the outer splitting of
     move-vs-dilute.
 
-    Scope: bulk species diffusion-only (no in-bulk reaction); a *prescribed* membrane velocity; the moving
-    case freezes geometry within each outer interval (operator-split). Force-balance velocity is a follow-up.
+    **In-bulk reactions.** A bulk species may carry a `source` (`∂c/∂t = … + source`) referencing any
+    sibling species in its own compartment by name. Unlike the BE assembler (affine only), here it may be
+    **nonlinear** (e.g. mass-action `A*B`): the residual is evaluated at the state functions so the
+    matrix-free Newton differences it exactly, and the assemblable linearisation (`ufl.derivative`) is added
+    to the preconditioner.
+
+    Scope: a *prescribed* membrane velocity; the moving case freezes geometry within each outer interval
+    (operator-split). Force-balance velocity is a follow-up.
     """
 
     validate_or_raise(md)
@@ -958,11 +1010,19 @@ def integrate_membrane_coupled(
     shift_mem = fem.Constant(membrane_mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]  # σ on the membrane mesh
     local_terms: list[UflExpr] = []
     precond_terms: list[UflExpr] = []
-    for state, rate, trial, test, eqs, dx, region_ctx, sigma, dilution in (
-        (u_in_fn, rate_in, u_in, w_in, inner_eqs, dx_in, ctx, shift, dil_in),
-        (u_out_fn, rate_out, u_out, w_out, outer_eqs, dx_out, ctx, shift, dil_out),
-        (rho_fn, rate_mem, rho, w_rho, membrane_eqs, dx_mem, surf_ctx, shift_mem, dil_mem),
+    for state, rate, trial, test, eqs, dx, region_ctx, sigma, dilution, is_bulk in (
+        (u_in_fn, rate_in, u_in, w_in, inner_eqs, dx_in, ctx, shift, dil_in, True),
+        (u_out_fn, rate_out, u_out, w_out, outer_eqs, dx_out, ctx, shift, dil_out, True),
+        (rho_fn, rate_mem, rho, w_rho, membrane_eqs, dx_mem, surf_ctx, shift_mem, dil_mem, False),
     ):
+        # In-bulk reactions reference sibling species in the same compartment via the STATE functions, so a
+        # nonlinear source (e.g. mass-action A*B) is fine here — the matrix-free Newton differences the
+        # residual; the assemblable linearisation is added to the preconditioner.
+        react_ctx = (
+            CompileContext(parent, {**ctx.symbols, **{e.variable: state[j] for j, e in enumerate(eqs)}})
+            if is_bulk
+            else None
+        )
         for k, eq in enumerate(eqs):
             local_terms.append(rate[k] * test[k] * dx)  # ċ·w
             precond_terms.append(sigma * trial[k] * test[k] * dx)  # σ·mass (the preconditioner's ∂/∂rate)
@@ -974,6 +1034,11 @@ def integrate_membrane_coupled(
             if dilution is not None:  # implicit ALE dilution: coefficient is geometry, so its Jacobian assembles
                 local_terms.append(dilution * state[k] * test[k] * dx)
                 precond_terms.append(dilution * trial[k] * test[k] * dx)
+            source = eq.terms.get("source")
+            if is_bulk and source is not None and react_ctx is not None:  # in-bulk reaction (∂c/∂t = … + source)
+                reaction_form = -compile_expression(parse(source), react_ctx) * test[k] * dx
+                local_terms.append(reaction_form)
+                precond_terms.append(ufl.derivative(reaction_form, state, trial))  # assemblable linearisation
     f_local = _sum_forms(local_terms)
     j_local = _sum_forms(precond_terms)
 

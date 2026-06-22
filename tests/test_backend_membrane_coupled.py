@@ -20,6 +20,7 @@ from vcell_fenics.backend import (
     assemble_membrane_coupled,
     integrate_membrane_coupled,
 )
+from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
 from vcell_fenics.formalism.schema import (
     BCInterfaceFlux,
@@ -408,6 +409,153 @@ def test_mol_handles_stiff_binding_under_motion() -> None:
     )
     assert result.mass("R") > 2.0  # strong stiff capture (≫ the gentle-kon ~1.1)
     assert result.total_mass() == pytest.approx(total0, rel=5e-3)
+
+
+def test_motion_grows_the_cell_to_the_analytic_homothety() -> None:
+    # Guards the mesh-motion node→dof permutation: it is topological/fixed and must be computed ONCE on the
+    # initial geometry, NOT re-queried from the moved node positions each step (which mis-matches and
+    # progressively distorts/under-grows the mesh). Under v = a·x the cell is a pure homothety, so its area
+    # must reach a₀·e^{2aT}; the permutation bug under-grew it by ~9% (independent of dt — a geometric, not
+    # time-stepping, error). Only the legitimate O(dt) forward-Euler motion error should remain.
+    import numpy as np
+
+    from vcell_fenics.backend.interface_coupled import MembraneCoupledMeshMotion
+
+    a, dt, steps = 0.3, 0.02, 50
+    geom = _geom(h=0.13)
+    area0 = _inner_area(geom)
+    motion = MembraneCoupledMeshMotion(_model(), geom, velocity=f"[{a} * geom.x[0], {a} * geom.x[1]]", dt=dt)
+    for _ in range(steps):
+        motion.advance()
+    assert _inner_area(geom) == pytest.approx(area0 * np.exp(2 * a * dt * steps), rel=5e-3)
+
+
+# ---------------------------------------------------------------------------
+# 7c. in-bulk volume reactions (a `source` on a bulk species)
+# ---------------------------------------------------------------------------
+
+
+def _reacting_model(*, src_a: str, src_b: str, src_c: str | None = None) -> MathDescription:
+    """A cyto compartment with reacting species A, B (+ optional C), an inert ext ligand, and a membrane
+    receptor with no binding (kon implicit 0). The reaction lives entirely in the bulk via each species'
+    `source`; conserved pools depend on the stoichiometry the caller encodes in the source strings."""
+    cyto_vars = [Variable(name="A", subdomain="cyto"), Variable(name="B", subdomain="cyto")]
+    cyto_eqs = [
+        TemplateEquation(
+            template="bulk_radv_diff",
+            variable="A",
+            subdomain="cyto",
+            temporality="time_dependent",
+            terms={"diffusion": "1.0", "source": src_a},
+            initial_condition="1.0",
+        ),
+        TemplateEquation(
+            template="bulk_radv_diff",
+            variable="B",
+            subdomain="cyto",
+            temporality="time_dependent",
+            terms={"diffusion": "1.0", "source": src_b},
+            initial_condition="0.8",
+        ),
+    ]
+    if src_c is not None:
+        cyto_vars.append(Variable(name="C", subdomain="cyto"))
+        cyto_eqs.append(
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="C",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0", "source": src_c},
+                initial_condition="0.0",
+            )
+        )
+    return MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[*cyto_vars, Variable(name="L_out", subdomain="ext"), Variable(name="R", subdomain="pm")],
+        parameters=[
+            ParameterConstant(name="k1", value=0.8),
+            ParameterConstant(name="k2", value=0.3),
+            ParameterConstant(name="kf", value=1.0),
+        ],
+        equations=[
+            *cyto_eqs,
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="0.5",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="R",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": "0.05"},
+                initial_condition="0.0",
+            ),
+        ],
+        boundary_conditions=[],
+    )
+
+
+def test_affine_in_bulk_reaction_conserves_the_reacting_pool() -> None:
+    # Affine within-compartment A ⇌ B (k1·A reverse, k2·B forward) under backward Euler: assembled
+    # implicitly into the block matrix, so it is unconditionally stable. Mass shifts A→B but the closed
+    # pool A+B is conserved to round-off, and the ratio approaches detailed balance A/B → k2/k1.
+    model = _reacting_model(src_a="-k1*A + k2*B", src_b="k1*A - k2*B")
+    problem = assemble_membrane_coupled(model, _geom(h=0.13), dt=0.02)
+    pool0, a0 = problem.mass("A") + problem.mass("B"), problem.mass("A")
+    for _ in range(300):
+        problem.step()
+    assert problem.mass("A") < a0 - 1e-3  # A is consumed into B
+    assert problem.mass("A") + problem.mass("B") == pytest.approx(pool0, abs=1e-10)  # closed reaction
+    assert problem.mass("A") / problem.mass("B") == pytest.approx(0.3 / 0.8, abs=0.02)  # detailed balance k2/k1
+
+
+def test_nonlinear_in_bulk_reaction_is_rejected_by_backward_euler() -> None:
+    # The BE assembler can only lower an affine source. A mass-action product A*B is nonlinear in the
+    # unknowns ⇒ a loud `NonlinearTermError` (named, before form compilation) pointing at the MOL — not a
+    # deep UFL arity traceback or a silently-wrong solve.
+    model = _reacting_model(src_a="-kf*A*B", src_b="-kf*A*B", src_c="kf*A*B")
+    with pytest.raises(NonlinearTermError, match="nonlinear"):
+        assemble_membrane_coupled(model, _geom(h=0.13), dt=0.02)
+
+
+def test_mol_handles_nonlinear_in_bulk_mass_action() -> None:
+    # The MOL counterpart: a nonlinear mass-action A + B → C in the bulk (rate kf·A·B). The matrix-free
+    # Newton differences the residual, so the nonlinearity is handled implicitly; the conserved pools (A+C)
+    # and (B+C) — each consumed/produced one-for-one — hold to round-off.
+    model = _reacting_model(src_a="-kf*A*B", src_b="-kf*A*B", src_c="kf*A*B")
+    geom = _geom(h=0.13)
+    area0 = _inner_area(geom)
+    pool_ac0, pool_bc0 = 1.0 * area0, 0.8 * area0  # uniform ICs: (A+C)=1.0·area, (B+C)=0.8·area at t=0
+    result = integrate_membrane_coupled(model, geom, t_final=1.0)
+    assert result.mass("C") > 0.1  # the reaction actually ran
+    assert result.mass("A") + result.mass("C") == pytest.approx(pool_ac0, rel=1e-9)
+    assert result.mass("B") + result.mass("C") == pytest.approx(pool_bc0, rel=1e-9)
+
+
+def test_mol_nonlinear_in_bulk_reaction_conserves_under_motion() -> None:
+    # The migrating cell with a nonlinear in-bulk reaction: A + B → C while the membrane expands. The
+    # conserved pool (A+C) holds to the O(motion-step) split error (no external flux through the membrane),
+    # combining the implicit dilution, the moving mesh, and the matrix-free reaction in one solve.
+    model = _reacting_model(src_a="-kf*A*B", src_b="-kf*A*B", src_c="kf*A*B")
+    geom = _geom(h=0.13)
+    area0 = _inner_area(geom)
+    pool_ac0 = 1.0 * area0
+    result = integrate_membrane_coupled(
+        model, geom, t_final=0.6, velocity="[0.25 * geom.x[0], 0.25 * geom.x[1]]", motion_steps=24
+    )
+    assert abs(_inner_area(geom) / area0 - 1.0) > 0.15  # the cell deformed substantially
+    assert result.mass("A") + result.mass("C") == pytest.approx(pool_ac0, rel=1e-2)
 
 
 # ---------------------------------------------------------------------------
