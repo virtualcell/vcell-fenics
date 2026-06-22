@@ -380,7 +380,44 @@ def test_expression_valued_unit_factor_binds_in_the_coupling() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. loud rejections
+# 9. moving membrane — the three-region ALE mesh-motion substrate
+# ---------------------------------------------------------------------------
+
+
+def _inner_area(geom) -> float:  # type: ignore[no-untyped-def]
+    import ufl
+    from dolfinx import fem
+    from mpi4py import MPI
+
+    mesh = geom.inner_mesh
+    local = fem.assemble_scalar(fem.form(fem.Constant(mesh, 1.0) * ufl.dx(domain=mesh)))
+    return float(mesh.comm.allreduce(local.real, op=MPI.SUM))
+
+
+def test_membrane_mesh_motion_moves_the_substrate_coherently() -> None:
+    # The moving-membrane substrate: a prescribed outward radial velocity expands the cell. The membrane
+    # moves by dt·v, the parent's interior follows by harmonic extension, and the two bulk submeshes
+    # inherit it — all four meshes by the same field at coincident nodes, so the topological entity maps
+    # stay valid. The inner disk grows, and the coupled assembler still builds (and steps) on the
+    # deformed geometry — the foundation the moving-membrane solve is built on. (Nothing else in the
+    # codebase moves a parent + multiple submeshes coherently.)
+    from vcell_fenics.backend.interface_coupled import MembraneCoupledMeshMotion
+
+    geom = _geom(h=0.13)
+    area0 = _inner_area(geom)
+    motion = MembraneCoupledMeshMotion(_model(), geom, velocity="[0.3 * geom.x[0], 0.3 * geom.x[1]]", dt=0.05)
+    for _ in range(3):
+        motion.advance()
+    assert _inner_area(geom) > area0 * 1.02  # the membrane expanded outward → the disk grew
+
+    # The coupling form re-assembles + steps on the DEFORMED geometry (entity maps survived the move).
+    problem = assemble_membrane_coupled(_model(kon=0.0), geom, dt=0.02)
+    problem.step()
+    assert problem.mass("L_in") > 0.0  # a sane solve on the deformed mesh
+
+
+# ---------------------------------------------------------------------------
+# 10. loud rejections
 # ---------------------------------------------------------------------------
 
 
