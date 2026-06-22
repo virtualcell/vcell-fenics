@@ -854,6 +854,8 @@ def integrate_membrane_coupled(
     atol: float = 1.0e-8,
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
+    velocity: str | None = None,
+    motion_steps: int = 10,
 ) -> MembraneCoupledResult:
     """Integrate a **membrane species coupled to both bulks** to `t_final` with the method-of-lines
     integrator (PETSc TS adaptive BDF) — the fully-implicit counterpart of `assemble_membrane_coupled`'s
@@ -870,8 +872,22 @@ def integrate_membrane_coupled(
 
     Cross-mesh mechanics are the BE assembler's (region `dx`, surface `dx`, interface `dS`, `EntityMap`s,
     `membrane_trace`). The residual splits into a per-mesh local part (mass/rate + diffusion) and an
-    interface coupling part (all on the parent `dS`), summed monolithically (`kind="mpi"`). Scope: static
-    membrane (no `ρ ∇_Γ·v_Γ` dilution), bulk species diffusion-only; a moving membrane is a follow-up.
+    interface coupling part (all on the parent `dS`), summed monolithically (`kind="mpi"`).
+
+    **Moving membrane (`velocity` given).** The migrating-cell solve: the stiff binding is integrated
+    adaptively *while* the membrane deforms. The motion is taken in `motion_steps` discrete outer steps
+    (a prescribed `MembraneCoupledMeshMotion`); each outer step moves the substrate, then runs the
+    adaptive BDF over that sub-interval on the (frozen) deformed geometry. The **dilution is fully
+    implicit** here — unlike the BE/IMEX lagging — because its coefficient is *geometry* (the mesh
+    divergence), not a state, so its Jacobian block IS assemblable and goes into both the residual and the
+    preconditioner (only the binding stays matrix-free): the residual gains `+ c (∇·v_mesh) w` on the bulk
+    regions and the mandatory `+ ρ (∇_Γ·v_Γ) w` on the membrane, with `∇_Γ·v_Γ` the **surface** divergence
+    `div(v) − n·(∇v)·n` (n = CellNormal), not `ufl.div` (see `assemble_membrane_coupled`). Total ligand is
+    conserved to round-off from the binding cancellation and to O(motion-step) from the outer splitting of
+    move-vs-dilute.
+
+    Scope: bulk species diffusion-only (no in-bulk reaction); a *prescribed* membrane velocity; the moving
+    case freezes geometry within each outer interval (operator-split). Force-balance velocity is a follow-up.
     """
 
     validate_or_raise(md)
@@ -922,16 +938,30 @@ def integrate_membrane_coupled(
     surf_params = _param_symbols(md, membrane_mesh)
     surf_ctx = CompileContext(membrane_mesh, {"geom.x": ufl.SpatialCoordinate(membrane_mesh), **surf_params})
 
-    # --- residual: local (per-mesh mass/rate + diffusion) + coupling (interface dS, implicit) ----------
+    # Moving membrane (optional): the motion driver + the per-region dilution coefficient `∇·v_mesh`. The
+    # mesh moves in `motion_steps` outer steps of length `interval`, so the harmonic displacement carries
+    # that dt and `∇·v_mesh = div(disp)/interval`. The membrane uses the SURFACE divergence (see the BE
+    # assembler). These coefficients reference the (moving) geometry, so they update as the mesh advances.
+    motion: MembraneCoupledMeshMotion | None = None
+    interval = t_final / motion_steps
+    dil_in = dil_out = dil_mem = None
+    if velocity is not None:
+        motion = MembraneCoupledMeshMotion(md, geometry, velocity=velocity, dt=interval)
+        dil_in = dil_out = ufl.div(motion.parent_displacement) / interval
+        n_hat = ufl.CellNormal(membrane_mesh)
+        v_mem = motion.membrane_velocity
+        dil_mem = ufl.div(v_mem) - ufl.dot(ufl.dot(ufl.grad(v_mem), n_hat), n_hat)
+
+    # --- residual: local (per-mesh mass/rate + diffusion + dilution) + coupling (interface dS, implicit) -
     # MOL form: the time derivative ċ = rate (a Function the TS supplies); diffusion uses the state.
     shift = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # the TS σ on the bulk meshes
     shift_mem = fem.Constant(membrane_mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]  # σ on the membrane mesh
     local_terms: list[UflExpr] = []
     precond_terms: list[UflExpr] = []
-    for state, rate, trial, test, eqs, dx, region_ctx, sigma in (
-        (u_in_fn, rate_in, u_in, w_in, inner_eqs, dx_in, ctx, shift),
-        (u_out_fn, rate_out, u_out, w_out, outer_eqs, dx_out, ctx, shift),
-        (rho_fn, rate_mem, rho, w_rho, membrane_eqs, dx_mem, surf_ctx, shift_mem),
+    for state, rate, trial, test, eqs, dx, region_ctx, sigma, dilution in (
+        (u_in_fn, rate_in, u_in, w_in, inner_eqs, dx_in, ctx, shift, dil_in),
+        (u_out_fn, rate_out, u_out, w_out, outer_eqs, dx_out, ctx, shift, dil_out),
+        (rho_fn, rate_mem, rho, w_rho, membrane_eqs, dx_mem, surf_ctx, shift_mem, dil_mem),
     ):
         for k, eq in enumerate(eqs):
             local_terms.append(rate[k] * test[k] * dx)  # ċ·w
@@ -941,6 +971,9 @@ def integrate_membrane_coupled(
                 d = compile_expression(parse(diffusion), region_ctx)
                 local_terms.append(d * ufl.dot(ufl.grad(state[k]), ufl.grad(test[k])) * dx)
                 precond_terms.append(d * ufl.dot(ufl.grad(trial[k]), ufl.grad(test[k])) * dx)
+            if dilution is not None:  # implicit ALE dilution: coefficient is geometry, so its Jacobian assembles
+                local_terms.append(dilution * state[k] * test[k] * dx)
+                precond_terms.append(dilution * trial[k] * test[k] * dx)
     f_local = _sum_forms(local_terms)
     j_local = _sum_forms(precond_terms)
 
@@ -1054,26 +1087,44 @@ def integrate_membrane_coupled(
         fresh.destroy()
         coupling_fresh.destroy()
 
-    ts = PETSc.TS().create(parent.comm)
-    ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
-    ts.setType("bdf")
-    ts.setIFunction(evaluate_residual, state_vec.duplicate())
-    ts.setIJacobian(evaluate_jacobian, operator, precond)  # matrix-free operator, assembled preconditioner
-    ts.setTimeStep(dt_initial if dt_initial is not None else t_final / 1.0e4)
-    ts.setMaxTime(t_final)
-    ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-    ts.setTolerances(atol, rtol)
-    ts.setMaxSNESFailures(-1)
-    snes = ts.getSNES()
-    snes.setUseEW(False)
-    snes.getKSP().setType(ksp_type)
-    snes.getKSP().getPC().setType(pc_type)
-    ts.setFromOptions()
+    def make_ts(t0: float, t1: float) -> PETSc.TS:
+        ts = PETSc.TS().create(parent.comm)
+        ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
+        ts.setType("bdf")
+        ts.setIFunction(evaluate_residual, state_vec.duplicate())
+        ts.setIJacobian(evaluate_jacobian, operator, precond)  # matrix-free operator, assembled preconditioner
+        ts.setTime(t0)
+        ts.setTimeStep(dt_initial if dt_initial is not None else (t1 - t0) / 1.0e4)
+        ts.setMaxTime(t1)
+        ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
+        ts.setTolerances(atol, rtol)
+        ts.setMaxSNESFailures(-1)
+        snes = ts.getSNES()
+        snes.setUseEW(False)
+        snes.getKSP().setType(ksp_type)
+        snes.getKSP().getPC().setType(pc_type)
+        ts.setFromOptions()
+        return ts
 
-    ts.solve(state_vec)
+    if motion is None:
+        ts = make_ts(0.0, t_final)
+        ts.solve(state_vec)
+        steps, final_time = ts.getStepNumber(), float(ts.getTime())
+        ts.destroy()
+    else:
+        # Operator-split moving solve: each outer step moves the substrate, then the adaptive BDF integrates
+        # the stiff binding over that interval on the (frozen) deformed geometry — a FRESH TS per interval so
+        # the BDF history never spans a geometry jump. `state_vec` carries the co-moving field across moves.
+        steps = 0
+        for i in range(motion_steps):
+            motion.advance()
+            ts = make_ts(i * interval, (i + 1) * interval)
+            ts.solve(state_vec)
+            steps += ts.getStepNumber()
+            ts.destroy()
+        final_time = t_final
     unpack(state_vec)
-    steps, final_time = ts.getStepNumber(), float(ts.getTime())
-    for obj in (ts, state_vec, operator, precond):
+    for obj in (state_vec, operator, precond):
         obj.destroy()
     return MembraneCoupledResult(
         inner_species, outer_species, membrane_species, u_in_fn, u_out_fn, rho_fn, steps, final_time
