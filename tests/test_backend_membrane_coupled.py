@@ -901,6 +901,96 @@ def test_reservoir_dirichlet_on_an_unreachable_target_is_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 7f. bulk advection (a `relative_advection` velocity on a bulk species)
+# ---------------------------------------------------------------------------
+
+
+def _advection_model(advection: str | None) -> MathDescription:
+    """A cyto blob (off-centre at x ≈ −0.2) optionally advected by a prescribed velocity — the bulk
+    `relative_advection` slot that VCell's `<Velocity>` lowers to (e.g. the Rac/Rho moving-boundary models)."""
+    cyto_terms: dict[str, str] = {"diffusion": "0.05"}
+    if advection is not None:
+        cyto_terms["relative_advection"] = advection
+    return MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[
+            Variable(name="a", subdomain="cyto"),
+            Variable(name="L", subdomain="ext"),
+            Variable(name="R", subdomain="pm"),
+        ],
+        parameters=[ParameterConstant(name="k", value=0.0)],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="a",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms=cyto_terms,
+                initial_condition="exp(-((geom.x[0] + 0.2) * (geom.x[0] + 0.2) + geom.x[1] * geom.x[1]) / 0.04)",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="0.5",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="R",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": "0.05"},
+                initial_condition="0.0",
+            ),
+        ],
+        boundary_conditions=[],
+    )
+
+
+def _blob_centroid_x(problem: MembraneCoupledProblem | MembraneCoupledResult) -> float:
+    import ufl
+    from dolfinx import fem
+    from mpi4py import MPI
+
+    a = problem.field("a")
+    mesh = a.function_space.mesh
+    num = fem.assemble_scalar(fem.form(a * ufl.SpatialCoordinate(mesh)[0] * ufl.dx(domain=mesh)))
+    den = fem.assemble_scalar(fem.form(a * ufl.dx(domain=mesh)))
+    return float(mesh.comm.allreduce(num, op=MPI.SUM) / mesh.comm.allreduce(den, op=MPI.SUM))
+
+
+def test_bulk_advection_transports_the_species_along_the_velocity() -> None:
+    # A prescribed bulk velocity transports the species: a blob starting off-centre at x ≈ −0.2 is carried
+    # in +x by v = [0.5, 0]. The advected centroid moves much further than the diffusion-only control (which
+    # only relaxes toward the centre). This is the `relative_advection` term the Rac/Rho models lower to.
+    advected = assemble_membrane_coupled(_advection_model("[0.5, 0.0]"), _geom(h=0.05), dt=0.01)
+    diffusive = assemble_membrane_coupled(_advection_model(None), _geom(h=0.05), dt=0.01)
+    start = _blob_centroid_x(advected)
+    for _ in range(30):
+        advected.step()
+        diffusive.step()
+    advected_shift = _blob_centroid_x(advected) - start
+    diffusive_shift = _blob_centroid_x(diffusive) - start
+    assert advected_shift > 0.06  # carried downstream in +x
+    assert advected_shift > 3 * diffusive_shift  # ≫ the diffusion-only relaxation
+
+
+def test_mol_bulk_advection_transports_the_species() -> None:
+    # The same advective transport under the adaptive MOL (the term enters the residual and the Jacobian).
+    geom = _geom(h=0.05)
+    start = _blob_centroid_x(assemble_membrane_coupled(_advection_model("[0.5, 0.0]"), geom, dt=0.01))
+    result = integrate_membrane_coupled(_advection_model("[0.5, 0.0]"), geom, t_final=0.3)
+    assert _blob_centroid_x(result) - start > 0.06  # advected downstream
+
+
+# ---------------------------------------------------------------------------
 # 8. expression-valued parameters (VCell unit factors)
 # ---------------------------------------------------------------------------
 

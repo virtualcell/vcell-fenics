@@ -878,6 +878,12 @@ def assemble_membrane_coupled(
             if diffusion is not None:
                 d = compile_expression(parse(diffusion), region_ctx)
                 terms.append(dt * d * ufl.dot(ufl.grad(trial[k]), ufl.grad(test[k])) * dx)
+            advection = eq.terms.get("relative_advection")
+            if advection is not None:
+                # Species drift relative to the mesh, `w_rel·∇u` (linear in u → implicit; `grad` on the
+                # membrane submesh is tangential, so the same term serves bulk and surface species).
+                drift = compile_expression(parse(advection), region_ctx)
+                terms.append(dt * ufl.dot(drift, ufl.grad(trial[k])) * test[k] * dx)
             source = eq.terms.get("source")
             if is_bulk and source is not None and react_ctx is not None:
                 terms.append(-dt * compile_expression(parse(source), react_ctx) * test[k] * dx)
@@ -1218,6 +1224,11 @@ def integrate_membrane_coupled(
                 d = compile_expression(parse(diffusion), region_ctx)
                 local_terms.append(d * ufl.dot(ufl.grad(state[k]), ufl.grad(test[k])) * dx)
                 precond_terms.append(d * ufl.dot(ufl.grad(trial[k]), ufl.grad(test[k])) * dx)
+            advection = eq.terms.get("relative_advection")
+            if advection is not None:  # drift relative to the mesh, `w_rel·∇c` (linear → into residual + Jacobian)
+                drift = compile_expression(parse(advection), region_ctx)
+                local_terms.append(ufl.dot(drift, ufl.grad(state[k])) * test[k] * dx)
+                precond_terms.append(ufl.dot(drift, ufl.grad(trial[k])) * test[k] * dx)
             if dilution is not None:  # implicit ALE dilution: coefficient is geometry, so its Jacobian assembles
                 local_terms.append(dilution * state[k] * test[k] * dx)
                 precond_terms.append(dilution * trial[k] * test[k] * dx)
