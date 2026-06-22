@@ -58,6 +58,7 @@ from vcell_fenics.formalism.schema import (
     BCInterfaceValueEquality,
     MathDescription,
     ParameterConstant,
+    ParameterExpression,
     TemplateEquation,
 )
 from vcell_fenics.formalism.validator import validate_or_raise
@@ -189,13 +190,26 @@ class MembraneCoupledResult(_MembraneCoupledFields):
     time: float
 
 
-def _const_params(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
-    """The model's constant parameters as `fem.Constant`s on `mesh` (the parent integration mesh)."""
-    return {
-        p.name: fem.Constant(mesh, PETSc.ScalarType(p.value))  # type: ignore[operator]
-        for p in md.parameters
-        if isinstance(p, ParameterConstant)
+def _param_symbols(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
+    """The model's parameters as symbols on `mesh`: constants as `fem.Constant`, expressions compiled in
+    declaration order (the import keeps them dependency-ordered) — so a VCell unit factor like
+    `KFlux = AreaPerUnitArea/VolumePerUnitVolume` or `UnitFactor = pow(KMOLE, 1)` binds as a UFL
+    expression, not only bare constants. Mirrors the single-mesh `_compile_context` parameter loop."""
+    scratch: dict[str, UflExpr] = {
+        "geom.x": ufl.SpatialCoordinate(mesh),
+        "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
     }
+    ctx = CompileContext(mesh=mesh, symbols=scratch)
+    params: dict[str, UflExpr] = {}
+    for p in md.parameters:
+        if isinstance(p, ParameterConstant):
+            value: UflExpr = fem.Constant(mesh, PETSc.ScalarType(p.value))  # type: ignore[operator]
+        elif isinstance(p, ParameterExpression):
+            value = compile_expression(parse(p.expression), ctx)
+        else:
+            raise NotImplementedError(f"coupled assembly cannot bind parameter {p.name!r} of type {type(p).__name__}")
+        scratch[p.name] = params[p.name] = value  # later parameters may reference this one
+    return params
 
 
 def _sum_forms(terms: list[UflExpr]) -> UflExpr:
@@ -236,7 +250,7 @@ def assemble_interface_coupled(
     ds_int = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)(geometry.interface_tag)
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
 
-    params = _const_params(md, parent)
+    params = _param_symbols(md, parent)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
     d_in = compile_expression(parse(inner_eq.terms["diffusion"]), ctx)
     d_out = compile_expression(parse(outer_eq.terms["diffusion"]), ctx)
@@ -347,7 +361,7 @@ def integrate_interface_coupled(
     ds_int = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)(geometry.interface_tag)
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
 
-    params = _const_params(md, parent)
+    params = _param_symbols(md, parent)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
     d_in = compile_expression(parse(inner_eq.terms["diffusion"]), ctx)
     d_out = compile_expression(parse(outer_eq.terms["diffusion"]), ctx)
@@ -536,9 +550,9 @@ def assemble_membrane_coupled(
     )
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map, geometry.membrane_entity_map]
 
-    params = _const_params(md, parent)
+    params = _param_symbols(md, parent)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
-    surf_params = _const_params(md, geometry.membrane_mesh)
+    surf_params = _param_symbols(md, geometry.membrane_mesh)
     surf_ctx = CompileContext(
         geometry.membrane_mesh, {"geom.x": ufl.SpatialCoordinate(geometry.membrane_mesh), **surf_params}
     )
@@ -766,9 +780,9 @@ def integrate_membrane_coupled(
     )
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map, geometry.membrane_entity_map]
 
-    params = _const_params(md, parent)
+    params = _param_symbols(md, parent)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
-    surf_params = _const_params(md, membrane_mesh)
+    surf_params = _param_symbols(md, membrane_mesh)
     surf_ctx = CompileContext(membrane_mesh, {"geom.x": ufl.SpatialCoordinate(membrane_mesh), **surf_params})
 
     # --- residual: local (per-mesh mass/rate + diffusion) + coupling (interface dS, implicit) ----------

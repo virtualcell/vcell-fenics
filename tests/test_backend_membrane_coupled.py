@@ -26,6 +26,7 @@ from vcell_fenics.formalism.schema import (
     BCInterfaceValueEquality,
     MathDescription,
     ParameterConstant,
+    ParameterExpression,
     Subdomain,
     TemplateEquation,
     Variable,
@@ -349,7 +350,37 @@ def test_mol_conserves_each_pool_with_multiple_species() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. loud rejections
+# 8. expression-valued parameters (VCell unit factors)
+# ---------------------------------------------------------------------------
+
+
+def test_expression_valued_unit_factor_binds_in_the_coupling() -> None:
+    # An imported VCell membrane model carries volume↔membrane unit factors as *expression* parameters
+    # (e.g. KFlux = Area/Volume, UnitFactor = pow(KMOLE, 1)). The coupled solver must bind those — not
+    # only bare constants — in the coupling context. Here `uf` (= 2·0.5 = 1) multiplies the binding; the
+    # solve reproduces the no-factor result, proving `_param_symbols` compiles the expression.
+    model = replace(
+        _model(),
+        parameters=[
+            ParameterConstant(name="kon", value=0.5),
+            ParameterConstant(name="Rmax", value=2.0),
+            ParameterExpression(name="uf", expression="2.0 * 0.5"),  # a unit factor that reduces to 1
+        ],
+        boundary_conditions=[
+            BCInterfaceFlux(variable="L_in", boundary="pm", expression="-uf * kon * trace(L_in) * (Rmax - R)"),
+            BCInterfaceFlux(variable="L_out", boundary="pm", expression="-uf * kon * trace(L_out) * (Rmax - R)"),
+        ],
+    )
+    problem = assemble_membrane_coupled(model, _geom(), dt=0.02)
+    total0 = problem.total_mass()
+    for _ in range(120):
+        problem.step()
+    assert problem.mass("R") > 1e-2  # binding happened — uf bound as a parameter
+    assert problem.total_mass() == pytest.approx(total0, abs=1e-10)  # uf=1 on both sides → conserved
+
+
+# ---------------------------------------------------------------------------
+# 9. loud rejections
 # ---------------------------------------------------------------------------
 
 

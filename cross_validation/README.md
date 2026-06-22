@@ -169,3 +169,30 @@ polygon) → the coupled solver converges to the FV solution, no hidden bug.
 MOL and VCell's CVODE), not a direct LU — a direct sparse LU's 2D fill-in does not scale and made 256²
 hang. Even so, the body-fitted realize + coupled block solve cap the FEniCSx side at ~256² (~170k
 cells, ~5 min) here, where 512² is cheap for the FV grid; 3D would need AMG + MPI + AMR.
+
+## Membrane species coupled to both bulks (receptor binding, matrix-free MOL)
+
+`receptor_fv.py` + `receptor_convergence.py` are the cross-solver check for the **three-region
+membrane coupling** (`integrate_membrane_coupled`). The same disk-in-box cell, now with a membrane
+receptor `R` (bound density) that captures ligand from *both* compartments via two saturating binding
+reactions `kon·s·(Rmax − R)` (VCell membrane reactions: volume reactant → membrane product). VCell lowers
+these to a membrane PDE for `R` plus the jump conditions that deplete the ligands, carrying the
+volume↔membrane unit factors `KFlux·KMOLE` (`KMOLE ≈ 1/602`); the FEniCSx side imports that math
+verbatim — the membrane reaction trace-wrapped, the jumps → `interface_flux`, the unit factors as
+expression-valued parameters — so **both solvers solve VCell's identical math**, with no hand-written
+physics. `Rmax`/`kon` are tuned so the ligands deplete visibly under `KMOLE` (else the bulk barely moves).
+
+The membrane species' `∂(binding)/∂R` Jacobian block is un-assemblable in DOLFINx (a bulk-coefficient ×
+membrane-trial term on the interface facet → 0), so `integrate_membrane_coupled` applies the implicit
+Jacobian **matrix-free** (finite-differencing the conservative residual), preconditioned by the
+assembled partial Jacobian. Comparing it to FV (Sundials/CVODE) under joint refinement at `t = 2`
+(both ligands clearly depleted: `s_cyto ≈ 0.77`, `s_ext ≈ 0.94`):
+
+| N | h | relL2(FEM, FV-N) | ratio |
+|------|------|------|------|
+| 64 | 0.031 | 0.118 % | — |
+| 128 | 0.016 | 0.056 % | 2.09× |
+| 256 | 0.008 | 0.028 % | 2.03× |
+
+Clean ~2×/level (first-order — the body-fitted membrane is O(h) on each side) → the matrix-free
+membrane-coupled MOL converges to VCell's fvsolver on a receptor-ligand model imported end-to-end.
