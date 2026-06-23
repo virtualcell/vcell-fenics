@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from vcell_fenics.backend import (
@@ -621,6 +622,74 @@ def test_mol_force_balance_circle_is_a_fixed_point() -> None:
     result = integrate_membrane_coupled(_model(), geom, t_final=0.3, motion=motion, motion_steps=10)
     assert _aspect(geom) == pytest.approx(1.0, abs=0.02)  # fixed point
     assert result.total_mass() == pytest.approx(total0, rel=1e-3)  # conserved through the adaptive solve
+
+
+def _cyto_area(geom) -> float:  # type: ignore[no-untyped-def]
+    import ufl
+    from dolfinx import fem
+    from petsc4py import PETSc
+
+    one = fem.Constant(geom.inner_mesh, PETSc.ScalarType(1.0))  # type: ignore[operator]
+    return float(fem.assemble_scalar(fem.form(one * ufl.dx)).real)
+
+
+def _membrane_roughness(geom) -> float:  # type: ignore[no-untyped-def]
+    # Node-scale radial roughness about the centroid: max |r_i − ½(r_{i−1}+r_{i+1})| over the angle-sorted
+    # membrane loop — a detector for the leading-edge spike (a single node lurching off the smooth front).
+    x = geom.membrane_mesh.geometry.x[:, :2]
+    c = x.mean(axis=0)
+    order = np.argsort(np.arctan2(x[:, 1] - c[1], x[:, 0] - c[0]))
+    r = np.linalg.norm(x[order] - c, axis=1)
+    smooth = 0.5 * (np.roll(r, 1) + np.roll(r, -1))
+    return float(np.max(np.abs(r - smooth)))
+
+
+def test_force_balance_area_correction_conserves_cell_area() -> None:
+    # The continuous Stokes velocity is divergence-free, so a cell under uniform tension conserves area
+    # exactly — but moving the P1 polygon vertices by the sampled velocity leaks it (a discrete
+    # curve-shortening drift) and the cell slowly shrinks. `area_correction=True` restores it with a lagged
+    # radial rescale about the centroid, holding the area to ≪1% over a long run; the negative control (no
+    # correction) shrinks by several percent over the same steps.
+    from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion
+
+    geom = _geom(h=0.09)
+    motion = ForceBalanceMeshMotion(geom, tension=0.5, dt=0.02, area_correction=True)
+    a0 = _cyto_area(geom)
+    for _ in range(40):
+        motion.advance()
+    assert _cyto_area(geom) == pytest.approx(a0, rel=0.01)  # area held to <1%
+
+    geom_raw = _geom(h=0.09)
+    raw = ForceBalanceMeshMotion(geom_raw, tension=0.5, dt=0.02)  # no correction
+    b0 = _cyto_area(geom_raw)
+    for _ in range(40):
+        raw.advance()
+    assert _cyto_area(geom_raw) < 0.97 * b0  # the uncorrected drift is real and several percent
+
+
+def test_force_balance_tension_smoothing_damps_the_leading_edge_spike() -> None:
+    # A node-scale spike in the tension (γ = base + α·signal where the signal localizes) drives a node-scale
+    # Laplace–Beltrami force that lurches one membrane node out and kinks the front — the leading-edge
+    # instability. The surface-Helmholtz tension filter removes the sub-mesh-scale forcing and keeps the
+    # membrane smooth; area correction is on in both runs so the comparison isolates the roughness.
+    from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion
+
+    def run(smoothing: float) -> float:
+        geom = _geom(h=0.07)
+        motion = ForceBalanceMeshMotion(geom, tension=0.5, dt=0.02, tension_smoothing=smoothing, area_correction=True)
+        coords = motion.tension.function_space.tabulate_dof_coordinates()
+        lead = int(np.argmin(np.linalg.norm(coords[:, :2] - np.array([0.5, 0.0]), axis=1)))  # leading-edge dof
+        spike = np.full(coords.shape[0], 0.5)
+        spike[lead] = 6.0  # a single-dof (node-scale) tension spike
+        for _ in range(50):
+            motion.tension.x.array[:] = spike  # re-force it each step
+            motion.advance()
+        return _membrane_roughness(geom)
+
+    rough_raw = run(0.0)
+    rough_smoothed = run(0.21)  # smoothing length 3·h
+    assert rough_raw > 0.1  # without the filter the spike genuinely blows up — a node lurches off the front
+    assert rough_smoothed < 0.01  # with it the membrane stays smooth (the spike is damped before it loads)
 
 
 def _centroid(geom) -> tuple[float, float]:  # type: ignore[no-untyped-def]

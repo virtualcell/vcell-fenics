@@ -342,6 +342,8 @@ class ForceBalanceMeshMotion:
         dt: float,
         viscosity: float = 1.0,
         screening: float = 1.0,
+        tension_smoothing: float = 0.0,
+        area_correction: bool = False,
     ) -> None:
         parent, cyto, membrane = geometry.parent_mesh, geometry.inner_mesh, geometry.membrane_mesh
         gdim, tdim = parent.geometry.dim, parent.topology.dim
@@ -349,6 +351,8 @@ class ForceBalanceMeshMotion:
         self._gdim, self._dt = gdim, dt
         self._cyto, self._membrane = cyto, membrane
         self._viscosity, self._screening = viscosity, screening
+        self._tension_smoothing = tension_smoothing
+        self._area_correction = area_correction
 
         # The surface tension as a P1 scalar **field** on the cyto (only its boundary values enter the
         # Stokes load). Uniform by default; `update_tension_from_receptor` drives it from a membrane species
@@ -397,8 +401,48 @@ class ForceBalanceMeshMotion:
         self._mem_to_cyto = cyto_tree.query(mem_dof_x)[1]
         self._mem_perm = cKDTree(mem_dof_x).query(membrane.geometry.x)[1]
         # Membrane (scalar P1) dofs → cyto tension dofs, for transferring a surface species onto the tension.
-        mem_scalar_x = fem.functionspace(membrane, ("Lagrange", 1)).tabulate_dof_coordinates()
-        self._mem_to_tension = cKDTree(self._tension_space.tabulate_dof_coordinates()).query(mem_scalar_x)[1]
+        mem_scalar = fem.functionspace(membrane, ("Lagrange", 1))
+        self._mem_to_tension = cKDTree(self._tension_space.tabulate_dof_coordinates()).query(
+            mem_scalar.tabulate_dof_coordinates()
+        )[1]
+
+        # Tension regularization (default off): an implicit surface-Helmholtz filter on the membrane that
+        # smooths the boundary tension over a length `tension_smoothing` BEFORE it drives the Stokes load.
+        # The mechano-chemical tension γ = base + α·(a − h) can develop a node-scale spike where the signaling
+        # field localizes; the Laplace–Beltrami load then turns that into a node-scale force that lurches a
+        # single membrane node out, kinks the front, and the curvature feedback blows up (the leading-edge
+        # instability). Cortical tension has a finite spatial correlation length, so a sub-mesh-scale spike in
+        # a signaling field should not produce a sub-mesh-scale mechanical force; filtering γ removes the
+        # driver while leaving the incompressible `∮ v·n = 0` area conservation exactly intact (we never touch
+        # the velocity). The filter solves `(I − ℓ² Δ_Γ) γ̃ = γ` on the membrane curve — mass + ℓ² stiffness,
+        # unconditionally stable — damping wavelengths ≲ ℓ and passing the smooth large-scale tension through.
+        if tension_smoothing > 0.0:
+            self._gamma_raw = fem.Function(mem_scalar)
+            self._gamma_smooth = fem.Function(mem_scalar)
+            tr, te = ufl.TrialFunction(mem_scalar), ufl.TestFunction(mem_scalar)
+            eps = tension_smoothing**2
+            a_filter = (tr * te + eps * ufl.inner(ufl.grad(tr), ufl.grad(te))) * ufl.dx
+            self._filter_problem = LinearProblem(
+                a_filter,
+                self._gamma_raw * te * ufl.dx,
+                u=self._gamma_smooth,
+                petsc_options_prefix=f"vcellfenics_tension_filter_{id(self):x}_",
+                petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+            )
+
+        # Area-conservation correction (default off): the continuous Stokes velocity is divergence-free, so a
+        # cell under uniform tension conserves area exactly — but moving the P1 polygon vertices by the sampled
+        # velocity does NOT preserve the *discrete* area (a discrete curve-shortening drift), so the cell slowly
+        # shrinks (~0.13%/step here), which collapses any long run before the tension regularization can matter.
+        # Restore it with a lagged isotropic radial rescale about the cell centroid: each step measure the cyto
+        # area, and fold a displacement `(√(A₀/A) − 1)·(x − centroid)` on the interface into the SAME harmonic
+        # extension as the flow (so the bulk meshes stay consistent and the EntityMaps stay valid). Rescaling
+        # about the moving centroid is size-only — it does not bias the migration — and is smooth, so it adds no
+        # roughness. The lag (area measured before this step's move) leaves a residual of one step's drift (≪1%).
+        self._space_for_iface = space
+        if area_correction:
+            self._area_form = fem.form(fem.Constant(cyto, PETSc.ScalarType(1.0)) * ufl.dx)  # type: ignore[operator]
+            self._target_area = fem.assemble_scalar(self._area_form).real
 
     @property
     def parent_displacement(self) -> fem.Function:
@@ -420,22 +464,45 @@ class ForceBalanceMeshMotion:
         self._tension.x.array[self._mem_to_tension] = base + sensitivity * receptor.x.array
 
     def advance(self) -> None:
+        # Regularize the tension first (if enabled): smooth its boundary trace along the membrane so a
+        # node-scale signaling spike cannot drive the leading-edge curvature instability. Read the current
+        # boundary γ onto the membrane, filter, write it back to the coincident cyto-boundary dofs — the
+        # interior cyto γ dofs are unused by the (ds-only) Stokes load, so they need not be touched.
+        if self._tension_smoothing > 0.0:
+            self._gamma_raw.x.array[:] = self._tension.x.array[self._mem_to_tension]
+            self._filter_problem.solve()
+            self._tension.x.array[self._mem_to_tension] = self._gamma_smooth.x.array
         # Solve the surface-tension force balance on the (current) cyto; sample the velocity on P1.
         velocity, _ = solve_incompressible_stokes_surface_tension(
             self._cyto, tension=self._tension, viscosity=self._viscosity, screening=self._screening
         )  # `self._tension` is a field: uniform, or coupled to a surface species (mechano-chemical)
         self._v1.interpolate(velocity)
         cyto_v = self._v1.x.array.reshape((-1, self._gdim))
-        # Harmonic-extend the boundary velocity over the parent, then move the parent + bulk submeshes.
-        self._interface_disp.x.array.reshape((-1, self._gdim))[self._idofs] = self._dt * cyto_v[self._iface_to_cyto]
+
+        # Lagged radial area-restoring displacement (if enabled): `(√(A₀/A) − 1)·(x − centroid)`, folded into
+        # the interface displacement so the flow + correction ride the SAME harmonic extension. Centroid is the
+        # current membrane centroid, so the rescale is size-only and tracks the migrating cell.
+        iface_correction = np.zeros((self._idofs.size, self._gdim))
+        mem_correction = np.zeros_like(self._membrane.geometry.x[:, : self._gdim])
+        if self._area_correction:
+            scale = float(np.sqrt(self._target_area / fem.assemble_scalar(self._area_form).real)) - 1.0
+            centroid = self._membrane.geometry.x[:, : self._gdim].mean(axis=0)
+            iface_x = self._space_for_iface.tabulate_dof_coordinates()[self._idofs][:, : self._gdim]
+            iface_correction = scale * (iface_x - centroid)
+            mem_correction = scale * (self._membrane.geometry.x[:, : self._gdim] - centroid)
+
+        # Harmonic-extend the boundary velocity (+ correction) over the parent, then move parent + bulk submeshes.
+        self._interface_disp.x.array.reshape((-1, self._gdim))[self._idofs] = (
+            self._dt * cyto_v[self._iface_to_cyto] + iface_correction
+        )
         self._problem.solve()
         disp = self._disp.x.array.reshape((-1, self._gdim))
         for mesh, perm in zip(self._bulk_meshes, self._perms, strict=True):
             mesh.geometry.x[:, : self._gdim] += disp[perm]
-        # The membrane velocity Function (for the surface dilution) + move the membrane by dt·v.
+        # The membrane velocity Function (for the surface dilution) + move the membrane by dt·v (+ correction).
         self.membrane_velocity.x.array.reshape((-1, self._gdim))[:] = cyto_v[self._mem_to_cyto]
         self._membrane.geometry.x[:, : self._gdim] += (
-            self._dt * self.membrane_velocity.x.array.reshape((-1, self._gdim))[self._mem_perm]
+            self._dt * self.membrane_velocity.x.array.reshape((-1, self._gdim))[self._mem_perm] + mem_correction
         )
 
 
