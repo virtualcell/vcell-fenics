@@ -70,7 +70,7 @@ def test_free_energy_helper_is_zero_at_a_well() -> None:
 
 # --- the solidified formal template: a MathDescription with a `cahn_hilliard` equation ---
 
-from vcell_fenics.backend import make_disk_geometry, run_cahn_hilliard  # noqa: E402
+from vcell_fenics.backend import iter_cahn_hilliard, make_disk_geometry, run_cahn_hilliard  # noqa: E402
 from vcell_fenics.formalism import load_yaml, validate  # noqa: E402
 
 _CH_MODEL = """
@@ -113,3 +113,25 @@ def test_run_cahn_hilliard_drives_the_model_conserving_and_separating() -> None:
     phi = run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.06)
     assert abs(_total(phi) - total0) < 1e-10  # ∫c conserved through the template driver
     assert float(phi.x.array.min()) < 0.3 and float(phi.x.array.max()) > 0.7  # separated into phases
+
+
+def test_iter_cahn_hilliard_streams_snapshots_consistent_with_run() -> None:
+    # The time-lapse driver yields (t, φ) snapshots from the same declarative model — at the initial
+    # state, every `every` steps, and the final step. The snapshots conserve ∫c across the stream, the
+    # free energy relaxes, and the final snapshot equals run_cahn_hilliard's final φ (the two entry
+    # points share one expansion) — so a time-resolved demo needs no solver internals.
+    md = load_yaml(_CH_MODEL.format(temporality="time_dependent"))
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.06)
+    snapshots = list(iter_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.02, every=5))
+
+    times = [t for t, _ in snapshots]
+    assert times[0] == 0.0 and times[-1] == pytest.approx(0.02)
+    assert len(snapshots) == 5  # 20 steps, every 5 ⇒ steps 0, 5, 10, 15, 20
+
+    total0 = _total(snapshots[0][1])
+    assert all(abs(_total(phi) - total0) < 1e-10 for _, phi in snapshots)  # conserved across the stream
+    energies = [cahn_hilliard_free_energy(phi, epsilon=0.08) for _, phi in snapshots]
+    assert energies[-1] < energies[0]  # the gradient flow ran downhill
+
+    final = run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.02)
+    assert np.allclose(snapshots[-1][1].x.array, final.x.array, atol=1e-9)  # same final state, two entry points

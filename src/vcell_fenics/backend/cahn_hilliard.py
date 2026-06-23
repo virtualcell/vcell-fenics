@@ -34,6 +34,9 @@ and the free energy decreases monotonically.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import NamedTuple
+
 import basix.ufl
 import ufl
 from dolfinx import fem
@@ -93,7 +96,43 @@ def solve_cahn_hilliard(
     to a transient energy bump). Neither is *unconditionally* energy-stable with the fully-implicit
     `f'`, so the step must be small enough. No-flux (natural) boundary, so `φ` is conserved. Each
     step is a Newton solve of the coupled `(φ, μ)` residual.
+
+    A whole-history convenience over `_step_cahn_hilliard`: it consumes the per-step generator and
+    records the free energy at each yielded state. For a time-lapse of the *template* (snapshots at
+    chosen times, from a declarative model), use `iter_cahn_hilliard`.
     """
+
+    energies: list[float] = []
+    phi_final = initial
+    for phi_final in _step_cahn_hilliard(
+        mesh,
+        initial=initial,
+        dt=dt,
+        n_steps=n_steps,
+        mobility=mobility,
+        epsilon=epsilon,
+        well_height=well_height,
+        theta=theta,
+    ):
+        energies.append(cahn_hilliard_free_energy(phi_final, epsilon=epsilon, well_height=well_height))
+    return phi_final, energies
+
+
+def _step_cahn_hilliard(
+    mesh: Mesh,
+    *,
+    initial: fem.Function,
+    dt: float,
+    n_steps: int,
+    mobility: float,
+    epsilon: float,
+    well_height: float,
+    theta: float,
+) -> Iterator[fem.Function]:
+    """The Cahn–Hilliard time loop as a generator: assemble the mixed `(φ, μ)` Newton problem once,
+    then yield the order parameter `φ` (a fresh collapsed `Function`) at the initial state and after
+    each of `n_steps` solves — `n_steps + 1` yields in all. Yielding per step lets the caller stream
+    snapshots, track energy, or stop early without the solver knowing about any of it."""
 
     p1 = basix.ufl.element("Lagrange", mesh.basix_cell(), 1)
     mixed = fem.functionspace(mesh, basix.ufl.mixed_element([p1, p1]))
@@ -122,14 +161,11 @@ def solve_cahn_hilliard(
         petsc_options={"snes_type": "newtonls", "snes_rtol": 1.0e-9, "ksp_type": "preonly", "pc_type": "lu"},
     )
 
-    phi_final = solution.sub(0).collapse()
-    energies = [cahn_hilliard_free_energy(phi_final, epsilon=epsilon, well_height=well_height)]
+    yield solution.sub(0).collapse()  # the initial state
     for _ in range(n_steps):
         problem.solve()
         previous.x.array[:] = solution.x.array
-        phi_final = solution.sub(0).collapse()
-        energies.append(cahn_hilliard_free_energy(phi_final, epsilon=epsilon, well_height=well_height))
-    return phi_final, energies
+        yield solution.sub(0).collapse()
 
 
 def _constant_slot(terms: dict[str, str], name: str, default: float, ctx: CompileContext) -> float:
@@ -145,17 +181,23 @@ def _constant_slot(terms: dict[str, str], name: str, default: float, ctx: Compil
     return float(compiled.value)
 
 
-def run_cahn_hilliard(
-    md: MathDescription, geometry: Geometry, *, dt: float, t_final: float, theta: float = 1.0
-) -> fem.Function:
-    """Drive the Cahn–Hilliard *template* from a validated MathDescription — the solidified
-    formal template (`formalism/templates.py`) on top of the `solve_cahn_hilliard` expansion.
+class _CahnHilliardSetup(NamedTuple):
+    """The realized inputs of a `cahn_hilliard` template equation: the mesh, the interpolated initial
+    `φ`, and the three physical scales (M, ε, W). Shared by `run_cahn_hilliard` and `iter_cahn_hilliard`."""
 
-    The model declares one `cahn_hilliard` equation governing a scalar `φ` on a volume subdomain,
-    with the physical scales as slots (`mobility`, `interface_width` = ε, `well_height` = W, each
-    a constant; defaults `1`, `0.1`, `100`) and `φ`'s `initial_condition`. The auxiliary chemical
-    potential `μ` is internal to the expansion, so it needs no variable and no reserved name.
-    Integrates from the IC to `t_final` in steps of `dt`, returning the final `φ`."""
+    mesh: Mesh
+    initial: fem.Function
+    mobility: float
+    epsilon: float
+    well_height: float
+
+
+def _prepare_cahn_hilliard(md: MathDescription, geometry: Geometry) -> _CahnHilliardSetup:
+    """Validate a Cahn–Hilliard model + geometry and realize the template inputs. The model declares
+    one `cahn_hilliard` equation governing a scalar `φ` on a volume subdomain, with the physical
+    scales as slots (`mobility`, `interface_width` = ε, `well_height` = W, each a constant; defaults
+    `1`, `0.1`, `100`) and `φ`'s `initial_condition`. The auxiliary chemical potential `μ` is
+    internal to the expansion, so it needs no variable and no reserved name."""
 
     validate_or_raise(md)
     geometry_errors = cross_validate(md, geometry)
@@ -175,14 +217,62 @@ def run_cahn_hilliard(
     ic = compile_expression(parse(equation.initial_condition), ctx)
     initial.interpolate(fem.Expression(ic, space.element.interpolation_points))
 
-    phi, _ = solve_cahn_hilliard(
-        mesh,
+    return _CahnHilliardSetup(
+        mesh=mesh,
         initial=initial,
-        dt=dt,
-        n_steps=round(t_final / dt),
         mobility=_constant_slot(equation.terms, "mobility", 1.0, ctx),
         epsilon=_constant_slot(equation.terms, "interface_width", 0.1, ctx),
         well_height=_constant_slot(equation.terms, "well_height", _DEFAULT_WELL_HEIGHT, ctx),
+    )
+
+
+def run_cahn_hilliard(
+    md: MathDescription, geometry: Geometry, *, dt: float, t_final: float, theta: float = 1.0
+) -> fem.Function:
+    """Drive the Cahn–Hilliard *template* from a validated MathDescription — the solidified formal
+    template (`formalism/templates.py`) on top of the `solve_cahn_hilliard` expansion. Integrates
+    from the IC to `t_final` in steps of `dt`, returning the final `φ`. For a time-lapse (snapshots
+    at chosen times), use `iter_cahn_hilliard`."""
+
+    setup = _prepare_cahn_hilliard(md, geometry)
+    phi, _ = solve_cahn_hilliard(
+        setup.mesh,
+        initial=setup.initial,
+        dt=dt,
+        n_steps=round(t_final / dt),
+        mobility=setup.mobility,
+        epsilon=setup.epsilon,
+        well_height=setup.well_height,
         theta=theta,
     )
     return phi
+
+
+def iter_cahn_hilliard(
+    md: MathDescription, geometry: Geometry, *, dt: float, t_final: float, every: int = 1, theta: float = 1.0
+) -> Iterator[tuple[float, fem.Function]]:
+    """Drive the Cahn–Hilliard template as a **time-lapse**: yield `(t, φ)` snapshots from the
+    declarative model, at the initial state and then every `every` steps (and always the final
+    step), through to `t_final`. This is the realization's first-class stepping interface — a
+    time-resolved demo (e.g. a tiled phase-separation sequence) is a thin consumer of it, with no
+    solver internals leaking into the caller. Each yielded `φ` is a fresh collapsed `Function`, so
+    snapshots can be retained. Conservation and energy decay hold across the stream exactly as for
+    `run_cahn_hilliard` (same expansion); compute the free energy of any snapshot with
+    `cahn_hilliard_free_energy`."""
+
+    setup = _prepare_cahn_hilliard(md, geometry)
+    n_steps = round(t_final / dt)
+    for step, phi in enumerate(
+        _step_cahn_hilliard(
+            setup.mesh,
+            initial=setup.initial,
+            dt=dt,
+            n_steps=n_steps,
+            mobility=setup.mobility,
+            epsilon=setup.epsilon,
+            well_height=setup.well_height,
+            theta=theta,
+        )
+    ):
+        if step % every == 0 or step == n_steps:
+            yield step * dt, phi
