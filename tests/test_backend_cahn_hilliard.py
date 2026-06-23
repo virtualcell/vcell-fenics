@@ -68,6 +68,74 @@ def test_free_energy_helper_is_zero_at_a_well() -> None:
     assert abs(cahn_hilliard_free_energy(phi, epsilon=0.1)) < 1e-14
 
 
+# ---------------------------------------------------------------------------
+# Verification against the exact 1D equilibrium interface (the diffuse-interface
+# width). For F = ∫[W φ²(1−φ)² + ε²/2 |∇φ|²] the stationary interface is
+#     φ(x) = ½[1 + tanh((x − c)/2δ)],   δ = ε/√(2W),
+# so the peak slope is max|∂ₓφ| = 1/(4δ). These pin the *physical* interface
+# width to theory (it is δ, not a free knob), independently of how many mesh
+# cells happen to resolve it.
+# ---------------------------------------------------------------------------
+
+_IFACE_EPS, _IFACE_WELL = 0.05, 1.0
+_IFACE_DELTA = _IFACE_EPS / np.sqrt(2.0 * _IFACE_WELL)
+
+
+def _strip(nx: int, ny: int = 4):  # type: ignore[no-untyped-def]
+    # A thin strip so φ varies only across x — a 1D interface embedded in the 2D solver.
+    return dolfinx.mesh.create_rectangle(MPI.COMM_WORLD, [[0.0, 0.0], [1.0, 0.2]], [nx, ny])
+
+
+def _tanh_interface(x: np.ndarray, center: float, delta: float) -> np.ndarray:
+    return 0.5 * (1.0 + np.tanh((x - center) / (2.0 * delta)))
+
+
+def _measured_delta(phi: fem.Function) -> float:
+    # Read the interface scale from the peak slope: max|∂ₓφ| = 1/(4δ) at the tanh's centre.
+    v0 = fem.functionspace(phi.function_space.mesh, ("DG", 0))
+    gx = fem.Function(v0)
+    gx.interpolate(fem.Expression(ufl.grad(phi)[0], v0.element.interpolation_points))
+    return 0.25 / float(np.abs(gx.x.array).max())
+
+
+def _relax_interface(nx: int, init_delta: float, n_steps: int) -> tuple[fem.Function, float]:
+    mesh = _strip(nx)
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    xc = space.tabulate_dof_coordinates()[:, 0]
+    phi = fem.Function(space)
+    phi.x.array[:] = _tanh_interface(xc, 0.5, init_delta)
+    phi, _ = solve_cahn_hilliard(
+        mesh, initial=phi, dt=2e-4, n_steps=n_steps, epsilon=_IFACE_EPS, well_height=_IFACE_WELL
+    )
+    analytic = _tanh_interface(xc, 0.5, _IFACE_DELTA)
+    rms = float(np.sqrt(np.mean((phi.x.array - analytic) ** 2)))
+    return phi, rms
+
+
+def test_cahn_hilliard_reproduces_the_analytic_tanh_interface() -> None:
+    # The exact equilibrium interface is held stationary: initialized as the analytic tanh it stays put
+    # (small rms to the profile) and its width, read from the peak slope, matches δ = ε/√(2W) to ~1%.
+    phi, rms = _relax_interface(160, _IFACE_DELTA, 150)
+    assert rms < 0.003  # reproduced (held stationary) to discretization error
+    assert _measured_delta(phi) == pytest.approx(_IFACE_DELTA, rel=0.03)  # width matches ε/√(2W)
+
+
+def test_cahn_hilliard_interface_error_decreases_under_refinement() -> None:
+    # h-refinement: the L2 distance from the analytic interface to the discrete solution falls as the
+    # strip is refined — the discretisation converges to the exact interface.
+    _, coarse = _relax_interface(80, _IFACE_DELTA, 150)
+    _, fine = _relax_interface(160, _IFACE_DELTA, 150)
+    assert fine < 0.6 * coarse  # error at least halves when h halves
+
+
+def test_cahn_hilliard_relaxes_a_wrong_width_interface_to_delta() -> None:
+    # The equilibrium width is an attractor of the dynamics, not just an IC we imposed: start from a
+    # too-diffuse interface (2δ) and the gradient flow sharpens it to the analytic δ (conserving ∫φ).
+    phi, rms = _relax_interface(160, 2.0 * _IFACE_DELTA, 1500)
+    assert _measured_delta(phi) == pytest.approx(_IFACE_DELTA, rel=0.05)  # sharpened to the analytic width
+    assert rms < 0.005  # and the whole profile matches the analytic tanh
+
+
 # --- the solidified formal template: a MathDescription with a `cahn_hilliard` equation ---
 
 from vcell_fenics.backend import iter_cahn_hilliard, make_disk_geometry, run_cahn_hilliard  # noqa: E402
@@ -135,3 +203,47 @@ def test_iter_cahn_hilliard_streams_snapshots_consistent_with_run() -> None:
 
     final = run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.02)
     assert np.allclose(snapshots[-1][1].x.array, final.x.array, atol=1e-9)  # same final state, two entry points
+
+
+_NOISE_MODEL = """
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - {{ name: cyto, kind: volume, motion: {{ kind: none }} }}
+  variables:
+    - {{ name: c, subdomain: cyto, type: scalar }}
+  equations:
+    - template: cahn_hilliard
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: {{ interface_width: "0.08" }}
+      initial_condition: "{ic}"
+"""
+
+
+def test_random_initial_condition_is_a_reproducible_stored_field() -> None:
+    # A declarative spinodal seed `mean + normal(0, σ)` is realized ONCE into a stored field: same seed
+    # reproduces it exactly, a different seed differs, and the drawn field matches the requested
+    # distribution. Storing the realization (not drawing per evaluation) is what makes it a fixed
+    # function of space — re-interpolation/substitution returns the same value at the same point.
+    md = load_yaml(_NOISE_MODEL.format(ic="0.5 + normal(0, 0.05)"))
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.08)
+
+    a = run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.0, seed=7)  # 0 steps ⇒ just the realized IC
+    b = run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.0, seed=7)
+    c = run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.0, seed=8)
+    assert np.array_equal(a.x.array, b.x.array)  # same seed ⇒ identical realization
+    assert not np.allclose(a.x.array, c.x.array)  # different seed ⇒ different realization
+    assert a.x.array.mean() == pytest.approx(0.5, abs=0.02) and a.x.array.std() == pytest.approx(0.05, abs=0.01)
+
+
+def test_spinodal_via_random_primitive_separates_and_conserves() -> None:
+    # The narrow `spinodal_noise` IC is unnecessary: `0.5 + normal(0, …)` seeds spinodal decomposition
+    # through the general primitive — ∫c is conserved through the run and the field separates.
+    md = load_yaml(_NOISE_MODEL.format(ic="0.5 + normal(0, 0.05)"))
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.06)
+    total0 = _total(run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.0, seed=3))
+    phi = run_cahn_hilliard(md, geometry, dt=1e-3, t_final=0.05, seed=3)
+    assert abs(_total(phi) - total0) < 1e-10  # conserved
+    assert float(phi.x.array.min()) < 0.3 and float(phi.x.array.max()) > 0.7  # separated into two phases

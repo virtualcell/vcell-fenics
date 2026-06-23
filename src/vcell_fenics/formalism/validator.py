@@ -90,6 +90,7 @@ from vcell_fenics.formalism.vocabulary import (
     GEOMETRY_MEMBERS,
     MEASURES,
     QUALIFIED_BUILTINS,
+    RANDOM_FUNCTIONS,
     RESERVED_CALLABLES,
     RESERVED_NAMES,
     SCOPED_GEOMETRY_NAMES,
@@ -740,6 +741,18 @@ class _Validator:
             for arg in node.args:
                 self._walk(arg, ctx)
             return
+        if callee in RANDOM_FUNCTIONS:
+            if ctx.kind != "initial_condition":
+                self._error(
+                    ctx.path,
+                    f"{callee}(...) is a random draw, valid only in an initial_condition (§1.8.9); a draw in a "
+                    f"re-assembled term/BC would not be a fixed function of space",
+                )
+            if len(node.args) != 2:
+                self._error(ctx.path, f"{callee}(...) takes two arguments (the distribution parameters) (§1.8.9)")
+            for arg in node.args:
+                self._walk(arg, ctx)
+            return
         if callee in STANDARD_FUNCTIONS or callee in TENSOR_ALGEBRA:
             for arg in node.args:
                 self._walk(arg, ctx)
@@ -1117,7 +1130,7 @@ class _Validator:
             return "vector"
         if callee == "partial_t":
             return self._infer(args[0], ctx) if args else "error"
-        if callee in STANDARD_FUNCTIONS:
+        if callee in STANDARD_FUNCTIONS or callee in RANDOM_FUNCTIONS:
             for a in args:
                 arg_type = self._infer(a, ctx)
                 if arg_type not in ("scalar", "error"):

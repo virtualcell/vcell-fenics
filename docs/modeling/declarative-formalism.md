@@ -820,7 +820,7 @@ IC expressions use the §1.8 vocabulary with two restrictions:
 
 - **No bare reference to time `sim.t`.** ICs are evaluated at $t = 0$ by definition; a bare `sim.t` in an IC expression has no useful meaning beyond a constant substitution. The schema rejects `sim.t` in IC expressions to catch the misconception cleanly (a user writing `initial_condition: "exp(-sim.t)"` likely meant a *forcing* expression, not an IC, and should be told). This rule applies to the IC expression directly; if the IC references a parameter (§2.2.3) whose body expression contains `sim.t`, the parameter is evaluated at $t = 0$ in the usual way — referencing such a parameter from an IC is permitted and produces the parameter's value at $t = 0$.
 
-What IC expressions **may** reference: the spatial coordinate `geom.x` and its accessors (`geom.x[0]`, `geom.azimuth`, `geom.radius`, …); named parameters, including region-keyed parameter maps (§1.2.5); geometry quantities (`geom.normal`, `geom.mean_curvature`, principal curvatures, tangent basis); standard functions (`sin`, `cos`, `exp`, `if`, `step`, etc.).
+What IC expressions **may** reference: the spatial coordinate `geom.x` and its accessors (`geom.x[0]`, `geom.azimuth`, `geom.radius`, …); named parameters, including region-keyed parameter maps (§1.2.5); geometry quantities (`geom.normal`, `geom.mean_curvature`, principal curvatures, tangent basis); standard functions (`sin`, `cos`, `exp`, `if`, `step`, etc.); and — uniquely to ICs — the random-variable primitives `normal`/`uniform` (§1.8.9), which realize a seeded random field for stochastic ICs such as a spinodal seed `0.5 + normal(0, 0.02)`.
 
 #### 1.7.4 Type matching
 
@@ -945,6 +945,15 @@ Namespaced geometry quantities (ADR 006), addressed as `geom.<member>`. Availabl
 **Standard mathematical functions.** The usual elementary, transcendental, and piecewise primitives: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log10`, `sqrt`, `abs`, `min`, `max`, `pow`, `floor`, `ceil`, `if(cond, a, b)` for conditional evaluation, `step(x)` for Heaviside, `sign(x)`. These have no usage restrictions — they appear anywhere an expression appears. (`floor`/`ceil` are accepted but non-differentiable, so they do not compile to a finite-element coefficient; they exist for round-tripping models that use them.)
 
 **Relational and logical operators.** Comparisons `<`, `>`, `<=`, `>=`, `==`, `!=` and the logical connectives `&&`, `||`, `!` produce a boolean condition. A condition used in **arithmetic** coerces to its 0/1 numeric value (VCell semantics), so `10*(x < 5)` is identical to `if(x < 5, 10, 0)`, and the common pulse idiom `A*((t > t0) && (t < t1))` is `A` inside the window and `0` outside. A condition used as the first argument of `if(cond, then, else)` stays boolean. Operands are scalars; precedence (low→high) is `||` < `&&` < `==`/`!=` < relational < arithmetic, so `a + b > c && d` reads as `((a + b) > c) && d`.
+
+##### §1.8.9 Random-variable primitives (initial conditions only)
+
+`normal(mean, std)` and `uniform(lo, hi)` draw a random sample. They are scalar-valued and compose like any other function — `0.5 + normal(0, 0.02)` is a noisy critical field, `0.5 + 0.1*cos(6*geom.x[0]) + normal(0, 0.05)` a structured one — and they subsume special-cased stochastic ICs (spinodal decomposition is just `mean + normal(0, amplitude)`).
+
+Two rules make them well-defined:
+
+- **Initial conditions only.** A random draw is valid only in an `initial_condition` expression, never in a term slot, boundary condition, or parameter. The reason is referential transparency: an expression must be a *function of space*, the same at a point however often it is evaluated. An IC is realized exactly once, so its draw is fixed; a draw inside a re-assembled term would change between assemblies, which is meaningless.
+- **Realized once into a stored field.** The realization draws one sample per degree of freedom into a stored (seeded) coefficient field, *not* a fresh draw per evaluation — so even within the IC the value at a point is fixed under substitution/re-interpolation. The draw is per-DOF (a discretized white-noise field, mesh-dependent), which is the right thing for a symmetry-breaking seed; it is **not** a mesh-independent correlated random field (that would be a separate covariance/SPDE construction). The distribution parameters are constants in v1. A driver `seed` makes a model's random ICs reproducible.
 
 **Calculus operators on variables:**
 

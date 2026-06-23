@@ -343,3 +343,25 @@ def test_time_dependent_weak_form_without_partial_t_is_rejected() -> None:
 def test_partial_t_outside_weak_form_is_rejected() -> None:
     # partial_t in a template slot (not a weak form) is invalid.
     assert any("only valid in a weak-form" in m for m in _errors(_surface_model(source="partial_t(rho)")))
+
+
+# ---------------------------------------------------------------------------
+# Random IC primitives (§1.8.9) — normal/uniform, initial-condition only.
+# ---------------------------------------------------------------------------
+
+
+def test_random_primitive_in_initial_condition_is_valid() -> None:
+    # A random draw is fine in an IC (composable with spatial structure); the realization stores it
+    # once as a fixed field, so it stays a pure function of space.
+    assert validate(_surface_model(ic="1.0 + 0.1*geom.x[0] + normal(0, 0.05)")) == []
+    assert validate(_surface_model(ic="uniform(0.4, 0.6)")) == []
+
+
+def test_random_primitive_outside_initial_condition_is_rejected() -> None:
+    # A draw in a re-assembled term would not be a fixed function of space (the value at a point
+    # would change between assemblies), so it is confined to the once-realized IC.
+    assert any("only in an initial_condition" in m for m in _errors(_surface_model(source="normal(0, 1) * rho")))
+
+
+def test_random_primitive_arity_is_checked() -> None:
+    assert any("takes two arguments" in m for m in _errors(_surface_model(ic="normal(0)")))
