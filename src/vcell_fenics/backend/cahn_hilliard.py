@@ -192,12 +192,13 @@ class _CahnHilliardSetup(NamedTuple):
     well_height: float
 
 
-def _prepare_cahn_hilliard(md: MathDescription, geometry: Geometry) -> _CahnHilliardSetup:
+def _prepare_cahn_hilliard(md: MathDescription, geometry: Geometry, *, seed: int = 0) -> _CahnHilliardSetup:
     """Validate a Cahn–Hilliard model + geometry and realize the template inputs. The model declares
     one `cahn_hilliard` equation governing a scalar `φ` on a volume subdomain, with the physical
     scales as slots (`mobility`, `interface_width` = ε, `well_height` = W, each a constant; defaults
     `1`, `0.1`, `100`) and `φ`'s `initial_condition`. The auxiliary chemical potential `μ` is
-    internal to the expansion, so it needs no variable and no reserved name."""
+    internal to the expansion, so it needs no variable and no reserved name. `seed` seeds any random
+    primitives (`normal`/`uniform`) in the IC — e.g. spinodal noise `0.5 + normal(0, 0.02)`."""
 
     validate_or_raise(md)
     geometry_errors = cross_validate(md, geometry)
@@ -211,7 +212,7 @@ def _prepare_cahn_hilliard(md: MathDescription, geometry: Geometry) -> _CahnHill
         raise ValueError("run_cahn_hilliard needs a model with a cahn_hilliard equation and an initial condition")
 
     mesh = geometry.mesh_of(equation.subdomain)
-    ctx = _compile_context(md, mesh)
+    ctx = _compile_context(md, mesh, seed=seed)
     space = fem.functionspace(mesh, ("Lagrange", 1))
     initial = fem.Function(space)
     ic = compile_expression(parse(equation.initial_condition), ctx)
@@ -227,14 +228,14 @@ def _prepare_cahn_hilliard(md: MathDescription, geometry: Geometry) -> _CahnHill
 
 
 def run_cahn_hilliard(
-    md: MathDescription, geometry: Geometry, *, dt: float, t_final: float, theta: float = 1.0
+    md: MathDescription, geometry: Geometry, *, dt: float, t_final: float, theta: float = 1.0, seed: int = 0
 ) -> fem.Function:
     """Drive the Cahn–Hilliard *template* from a validated MathDescription — the solidified formal
     template (`formalism/templates.py`) on top of the `solve_cahn_hilliard` expansion. Integrates
-    from the IC to `t_final` in steps of `dt`, returning the final `φ`. For a time-lapse (snapshots
-    at chosen times), use `iter_cahn_hilliard`."""
+    from the IC to `t_final` in steps of `dt`, returning the final `φ`. `seed` seeds any random IC
+    primitives. For a time-lapse (snapshots at chosen times), use `iter_cahn_hilliard`."""
 
-    setup = _prepare_cahn_hilliard(md, geometry)
+    setup = _prepare_cahn_hilliard(md, geometry, seed=seed)
     phi, _ = solve_cahn_hilliard(
         setup.mesh,
         initial=setup.initial,
@@ -249,18 +250,25 @@ def run_cahn_hilliard(
 
 
 def iter_cahn_hilliard(
-    md: MathDescription, geometry: Geometry, *, dt: float, t_final: float, every: int = 1, theta: float = 1.0
+    md: MathDescription,
+    geometry: Geometry,
+    *,
+    dt: float,
+    t_final: float,
+    every: int = 1,
+    theta: float = 1.0,
+    seed: int = 0,
 ) -> Iterator[tuple[float, fem.Function]]:
     """Drive the Cahn–Hilliard template as a **time-lapse**: yield `(t, φ)` snapshots from the
     declarative model, at the initial state and then every `every` steps (and always the final
     step), through to `t_final`. This is the realization's first-class stepping interface — a
     time-resolved demo (e.g. a tiled phase-separation sequence) is a thin consumer of it, with no
     solver internals leaking into the caller. Each yielded `φ` is a fresh collapsed `Function`, so
-    snapshots can be retained. Conservation and energy decay hold across the stream exactly as for
-    `run_cahn_hilliard` (same expansion); compute the free energy of any snapshot with
-    `cahn_hilliard_free_energy`."""
+    snapshots can be retained. `seed` seeds any random IC primitives. Conservation and energy decay
+    hold across the stream exactly as for `run_cahn_hilliard` (same expansion); compute the free
+    energy of any snapshot with `cahn_hilliard_free_energy`."""
 
-    setup = _prepare_cahn_hilliard(md, geometry)
+    setup = _prepare_cahn_hilliard(md, geometry, seed=seed)
     n_steps = round(t_final / dt)
     for step, phi in enumerate(
         _step_cahn_hilliard(

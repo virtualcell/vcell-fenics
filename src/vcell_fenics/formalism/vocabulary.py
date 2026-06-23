@@ -63,6 +63,13 @@ CALCULUS_OPERATORS: frozenset[str] = frozenset({"grad", "div", "lapl", "grad_sur
 TRACE: frozenset[str] = frozenset({"trace"})
 TENSOR_ALGEBRA: frozenset[str] = frozenset({"inner", "outer", "cross"})
 
+# Random-variable primitives, valid only in an initial condition. `normal(mean, std)` and
+# `uniform(lo, hi)` draw a per-DOF sample; each is realized ONCE into a fixed (seeded) field, so the
+# expression stays a pure function of space — a fresh draw on every evaluation would not be (the value
+# at a point would change under re-assembly/substitution), which is why they are confined to the IC
+# (realized exactly once). Spinodal noise is then just `mean + normal(0, amplitude)`.
+RANDOM_FUNCTIONS: frozenset[str] = frozenset({"normal", "uniform"})
+
 # Time derivative, valid only in weak-form residuals (§2.3.4).
 TIME_DERIVATIVE: frozenset[str] = frozenset({"partial_t"})
 
@@ -71,7 +78,9 @@ TIME_DERIVATIVE: frozenset[str] = frozenset({"partial_t"})
 MEASURES: frozenset[str] = frozenset({"dx", "dx_Gamma", "dl", "dp", "ds", "dS", "dl_Gamma"})
 
 # Names that may appear only as a call's callee, never as a bare value.
-RESERVED_CALLABLES: frozenset[str] = STANDARD_FUNCTIONS | CALCULUS_OPERATORS | TRACE | TENSOR_ALGEBRA | TIME_DERIVATIVE
+RESERVED_CALLABLES: frozenset[str] = (
+    STANDARD_FUNCTIONS | CALCULUS_OPERATORS | TRACE | TENSOR_ALGEBRA | RANDOM_FUNCTIONS | TIME_DERIVATIVE
+)
 
 # Names a user may NOT take for a subdomain, variable, or parameter (§1.11.3, §2.4.1). Per ADR 006
 # the bare value namespace is the user's: only the two namespace roots and the measures (bare

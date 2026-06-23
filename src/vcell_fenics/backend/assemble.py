@@ -451,16 +451,17 @@ def _motion_velocity(md: MathDescription, subdomain: str, ctx: CompileContext) -
     )
 
 
-def _compile_context(md: MathDescription, mesh: Mesh) -> CompileContext:
+def _compile_context(md: MathDescription, mesh: Mesh, *, seed: int = 0) -> CompileContext:
     # The namespaced built-ins (ADR 006): `geom.x` is the position field, `sim.t` a mutable time
     # Constant. Expressions outside the IC (which the validator forbids `sim.t` in) may reference
     # the time, and the driver advances it each step — e.g. a time-dependent Dirichlet value
-    # g(sim.t). It stays 0 unless a step updates it.
+    # g(sim.t). It stays 0 unless a step updates it. `seed` seeds the generator the random IC
+    # primitives (`normal`/`uniform`) draw from, so a model's random ICs are reproducible.
     symbols: dict[str, UflExpr] = {
         "geom.x": ufl.SpatialCoordinate(mesh),
         "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
     }
-    ctx = CompileContext(mesh=mesh, symbols=symbols)
+    ctx = CompileContext(mesh=mesh, symbols=symbols, rng=np.random.default_rng(seed))
     # A ParameterExpression compiles against the symbols defined so far (constants, coordinates, time,
     # and earlier parameters) — so a VCell unit factor like KFlux = Area/Volume or
     # UnitFactor = pow(KMOLE, 1) binds as a UFL expression, as do (legitimately) spatial geom.x or

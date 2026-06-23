@@ -39,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.mesh import Mesh
@@ -87,6 +88,13 @@ _UFL_BINARY_MATH: dict[str, Any] = {
 # same UFL calls — the distinction is the mesh, not the operator.
 _UFL_CALCULUS: dict[str, Any] = {"grad": ufl.grad, "div": ufl.div, "grad_surf": ufl.grad, "div_surf": ufl.div}
 
+# Random-variable primitives (IC-only): `(generator, p, q, n) -> n samples`. Realized once into a
+# stored field so the draw is a fixed function of space (see `_compile_random`).
+_RANDOM_SAMPLERS: dict[str, Any] = {
+    "normal": lambda rng, mean, std, n: rng.normal(mean, std, n),
+    "uniform": lambda rng, lo, hi, n: rng.uniform(lo, hi, n),
+}
+
 
 def _as_value(compiled: Any) -> Any:
     """Coerce a relational/logical result (a UFL `Condition`) to its 0/1 numeric value, so a
@@ -114,11 +122,17 @@ class CompileContext:
     Constants, variables/test functions/measures in a weak-form context).
     `time_derivatives` maps a variable name to the UFL object `partial_t(<var>)`
     compiles to — the backend's time-discretised derivative (e.g. `(uⁿ⁺¹ − uⁿ)/dt`
-    for backward Euler) — populated only for a time-dependent weak form."""
+    for backward Euler) — populated only for a time-dependent weak form.
+
+    `rng` is the seeded generator the random IC primitives (`normal`/`uniform`) draw
+    from — once each, into a stored field — so a model's random initial conditions are
+    reproducible (one generator per compile, drawn in compile order); set its seed via
+    `_compile_context(..., seed=...)`."""
 
     mesh: Mesh
     symbols: dict[str, UflExpr] = field(default_factory=dict)
     time_derivatives: dict[str, UflExpr] = field(default_factory=dict)
+    rng: np.random.Generator = field(default_factory=lambda: np.random.default_rng(0))
 
 
 def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
@@ -272,7 +286,29 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
         if len(args) != 2:
             raise CompileError(f"{node.callee}(...) takes two arguments")
         return binary_math(*[_as_value(a) for a in args])
+    if node.callee in _RANDOM_SAMPLERS:
+        return _compile_random(node.callee, args, ctx)
     fn = _UFL_UNARY_FUNCTIONS.get(node.callee)
     if fn is not None:
         return fn(*[_as_value(a) for a in args])
     raise CompileError(f"function {node.callee!r} is not supported by the backend yet")
+
+
+def _compile_random(callee: str, args: list[Any], ctx: CompileContext) -> UflExpr:
+    """Realize a random IC primitive (`normal(mean, std)` / `uniform(lo, hi)`) into a **stored** P1
+    field: draw one sample per DOF from `ctx.rng`, fill a `Function`, and return it as a UFL coefficient.
+    Drawing once (not per evaluation) is what makes the noise a fixed function of space — the same point
+    returns the same value under any later substitution/assembly. The distribution parameters must be
+    constants in v1 (a spatially varying scale is a later increment)."""
+
+    if len(args) != 2:
+        raise CompileError(f"{callee}(...) takes two arguments (the distribution parameters)")
+    params = []
+    for a in args:
+        if not isinstance(a, fem.Constant):
+            raise CompileError(f"{callee}(...) parameters must be constants in v1, got a non-constant expression")
+        params.append(float(a.value))
+    field_function = fem.Function(fem.functionspace(ctx.mesh, ("Lagrange", 1)))
+    field_function.x.array[:] = _RANDOM_SAMPLERS[callee](ctx.rng, params[0], params[1], field_function.x.array.size)
+    field_function.x.scatter_forward()
+    return field_function
