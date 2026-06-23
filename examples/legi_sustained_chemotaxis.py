@@ -17,6 +17,12 @@ The contrast with the imported RacRho wave-pinning reaction (see `cross_validati
 de-pins and homogenises, so its polarity (and migration) decays after a transient. LEGI sensing an
 imposed gradient is self-sustaining — the cell migrates and does not stall.
 
+The force balance runs **regularized** so the migration can be followed over a long horizon (`ForceBalanceMeshMotion(..., tension_smoothing=…, area_correction=True)`): the surface-Helmholtz tension filter
+stops a node-scale spike in `a − h` from kinking the leading edge, and the lagged radial area correction
+holds the cell area against the explicit-update incompressibility leak (uncorrected, the cell shrinks ~20%
+over this run). Without these the cell would either collapse or grow a leading-edge protrusion before the
+sustained migration became visible.
+
 Writes `legi_sustained_chemotaxis.png`: the migrating cell (coloured by the LEGI response a − h) at a
 sequence of times, in a fixed box frame, so the steady up-gradient migration is visible at a glance.
 
@@ -44,7 +50,8 @@ from vcell_fenics.formalism.schema import (
 from vcell_fenics.viz import _function_to_pyvista
 
 _HERE = Path(__file__).parent
-_BASE_TENSION, _ALPHA, _DT, _STEPS, _FRAME_EVERY = 0.5, 0.10, 0.02, 160, 20
+_BASE_TENSION, _ALPHA, _DT, _STEPS, _FRAME_EVERY = 0.5, 0.12, 0.02, 280, 35
+_SMOOTHING = 0.06  # surface-Helmholtz tension-filter length: damps node-scale γ spikes (leading-edge fix)
 _GRADIENT = "1.0 + 0.6 * geom.x[0]"
 
 
@@ -148,7 +155,9 @@ def main() -> None:
         outer_radius=1.5,
         h=0.06,
     )
-    motion = ForceBalanceMeshMotion(geom, tension=_BASE_TENSION, dt=_DT)
+    motion = ForceBalanceMeshMotion(
+        geom, tension=_BASE_TENSION, dt=_DT, tension_smoothing=_SMOOTHING, area_correction=True
+    )
     problem = assemble_membrane_coupled(model(), geom, dt=_DT, motion=motion)
     start_x = float(geom.membrane_mesh.geometry.x[:, 0].mean())
 
