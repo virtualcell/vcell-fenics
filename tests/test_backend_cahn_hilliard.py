@@ -136,6 +136,65 @@ def test_cahn_hilliard_relaxes_a_wrong_width_interface_to_delta() -> None:
     assert rms < 0.005  # and the whole profile matches the analytic tanh
 
 
+# ---------------------------------------------------------------------------
+# Verification against the spinodal dispersion relation (the linearised dynamics).
+# Linearising CH about the unstable homogeneous state φ̄ = ½ (where f''(½) = −W) a
+# single Fourier mode cos(kx) grows/decays exponentially at
+#     σ(k) = M k² (W − ε²k²),
+# positive (unstable) for k < k* = √W/ε and negative above it — the cutoff that
+# selects the spinodal length scale, with fastest growth at k = √(W/2)/ε. Seeding
+# admissible modes k_n = nπ/L (zero slope at the no-flux walls) and fitting the
+# early-time amplitude growth recovers σ(k).
+# ---------------------------------------------------------------------------
+
+_DISP_WELL, _DISP_EPS = 1.0, 0.08  # ⇒ cutoff k* = √W/ε = 12.5, fastest mode at √(W/2)/ε ≈ 8.8
+
+
+def _dispersion_sigma(k: float) -> float:
+    return k**2 * (_DISP_WELL - _DISP_EPS**2 * k**2)  # M = 1
+
+
+def _mode_amplitude(phi: fem.Function, k: float) -> float:
+    # Project φ − ½ onto cos(kx): for a pure mode φ = ½ + a cos(kx) this returns a (since ∫cos² over an
+    # admissible mode is half the domain). Isolates the seeded mode from any harmonics.
+    mesh = phi.function_space.mesh
+    span = mesh.geometry.x.max(axis=0) - mesh.geometry.x.min(axis=0)
+    x = ufl.SpatialCoordinate(mesh)
+    integ = fem.assemble_scalar(fem.form((phi - 0.5) * ufl.cos(k * x[0]) * ufl.dx))
+    return 2.0 * float(integ.real) / float(span[0] * span[1])
+
+
+def _growth_rate(n: int) -> float:
+    # Seed mode n, evolve briefly, and fit σ as the slope of ln|amplitude| vs t (the linear regime).
+    k = n * np.pi  # L = 1 ⇒ admissible k_n = nπ
+    mesh = _strip(80, 8)
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    xc = space.tabulate_dof_coordinates()[:, 0]
+    phi = fem.Function(space)
+    phi.x.array[:] = 0.5 + 0.005 * np.cos(k * xc)  # small amplitude ⇒ stays linear
+    times, amps = [0.0], [_mode_amplitude(phi, k)]
+    for c in range(5):
+        phi, _ = solve_cahn_hilliard(mesh, initial=phi, dt=2e-4, n_steps=50, epsilon=_DISP_EPS, well_height=_DISP_WELL)
+        times.append((c + 1) * 50 * 2e-4)
+        amps.append(_mode_amplitude(phi, k))
+    return float(np.polyfit(times, np.log(np.abs(amps)), 1)[0])
+
+
+@pytest.mark.parametrize("n", [1, 2, 3])
+def test_cahn_hilliard_growth_rate_matches_the_dispersion_relation(n: int) -> None:
+    # A growing spinodal mode (k = nπ < k* = 12.5): the measured early-time growth rate matches
+    # σ(k) = M k²(W − ε²k²) to a few percent.
+    assert _growth_rate(n) == pytest.approx(_dispersion_sigma(n * np.pi), rel=0.05)
+
+
+def test_cahn_hilliard_supercritical_mode_decays() -> None:
+    # Above the cutoff k* = √W/ε the gradient penalty wins: the mode decays (σ < 0), and the measured
+    # rate matches the (negative) dispersion relation — the sign change that sets the spinodal scale.
+    rate = _growth_rate(5)  # k = 5π ≈ 15.7 > k* ≈ 12.5
+    assert rate < 0
+    assert rate == pytest.approx(_dispersion_sigma(5 * np.pi), rel=0.05)
+
+
 # --- the solidified formal template: a MathDescription with a `cahn_hilliard` equation ---
 
 from vcell_fenics.backend import iter_cahn_hilliard, make_disk_geometry, run_cahn_hilliard  # noqa: E402
