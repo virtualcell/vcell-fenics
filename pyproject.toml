@@ -96,7 +96,8 @@ default = { features = [], solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
 
 [tool.pixi.tasks]
-test = "pytest"
+test = "pytest -m 'not integration'"
+test-integration = "pytest -m integration"
 lint = "ruff check src tests"
 format = "ruff format src tests"
 format-check = "ruff format --check src tests"
@@ -111,6 +112,9 @@ testpaths = ["tests"]
 # write inspectable artifacts (viz, ParaView output) surface the paths
 # without requiring `-s`.
 addopts = ["-rP"]
+# `integration`: slow verification/convergence tests (minutes), excluded from the default
+# `test`/`check` run. Run them with `pixi run -e dev test-integration`.
+markers = ["integration: slow verification/convergence test, excluded from the default run"]
 filterwarnings = [
     # PETSc on some platforms warns when LU is chosen on a tiny linear problem.
     "ignore::DeprecationWarning",

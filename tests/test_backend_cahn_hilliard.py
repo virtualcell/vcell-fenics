@@ -238,6 +238,18 @@ def test_cahn_hilliard_droplet_obeys_gibbs_thomson() -> None:
     assert min_large * r_large == pytest.approx(_DROP_GT, rel=0.12)
 
 
+@pytest.mark.integration
+def test_cahn_hilliard_droplet_curvature_is_mesh_converged() -> None:
+    # SLOW convergence verification of the Gibbs-Thomson coefficient. The matrix supersaturation φ_out
+    # (the bulk plateau, read as the far-field min φ) times R equals σ/(2W), σ = ε√(2W)/6 — and this is
+    # mesh-CONVERGED: refining h leaves it unchanged (the residual ~2% is the O(δ/R) finite-size
+    # correction, not discretisation). A coarse and a 2×-finer mesh agree, and both match σ/(2W).
+    coarse_r, coarse_min = _relax_droplet(0.30, nx=80)
+    fine_r, fine_min = _relax_droplet(0.30, nx=160)
+    assert fine_min * fine_r == pytest.approx(coarse_min * coarse_r, rel=0.02)  # mesh-converged (h-independent)
+    assert fine_min * fine_r == pytest.approx(_DROP_GT, rel=0.05)  # converged value matches σ/(2W)
+
+
 # --- the solidified formal template: a MathDescription with a `cahn_hilliard` equation ---
 
 from vcell_fenics.backend import iter_cahn_hilliard, make_disk_geometry, run_cahn_hilliard  # noqa: E402

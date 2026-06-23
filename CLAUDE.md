@@ -50,8 +50,9 @@ Environments defined:
 pixi install                  # resolve and install (run after editing deps)
 pixi shell                    # activate the default env
 pixi shell -e dev             # activate the dev env (pytest, ipython, ruff, mypy)
-pixi run -e dev test          # run pytest
+pixi run -e dev test          # run pytest (excludes the slow `integration`-marked tests)
 pixi run -e dev test path/to/test_x.py::test_y   # run a single test
+pixi run -e dev test-integration   # run only the slow integration/convergence tests (minutes)
 pixi run -e dev lint          # ruff lint
 pixi run -e dev format        # ruff format (writes)
 pixi run -e dev typecheck     # mypy --strict
