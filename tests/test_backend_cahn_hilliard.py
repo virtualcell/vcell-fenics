@@ -195,6 +195,49 @@ def test_cahn_hilliard_supercritical_mode_decays() -> None:
     assert rate == pytest.approx(_dispersion_sigma(5 * np.pi), rel=0.05)
 
 
+# ---------------------------------------------------------------------------
+# Verification against the curvature (Gibbs-Thomson) relation for a droplet.
+# A curved interface raises the chemical potential by the Laplace/Gibbs-Thomson
+# amount μ = σκ (κ = 1/R in 2D, σ = ε√(2W)/6 the surface tension), so a circular
+# drop of radius R sets the matrix just outside it to φ_out = μ/f''(0) = σ/(2WR),
+# i.e. the supersaturation scales as the curvature 1/R. The drop also shrinks
+# (curvature drives dissolution). `min φ` reads φ_out directly. (In a closed box,
+# conservation slowly raises the matrix above the ideal value, so the clean
+# window is just after the interface locally equilibrates.)
+# ---------------------------------------------------------------------------
+
+_DROP_WELL, _DROP_EPS = 1.0, 0.06
+_DROP_SIGMA = _DROP_EPS * np.sqrt(2.0 * _DROP_WELL) / 6.0  # CH surface tension ε√(2W)/6
+_DROP_GT = _DROP_SIGMA / (2.0 * _DROP_WELL)  # φ_out · R should equal this (the Gibbs-Thomson coefficient)
+
+
+def _relax_droplet(r0: float, nx: int = 64, n_steps: int = 250) -> tuple[float, float]:
+    # Seed a circular drop (φ=1 inside, 0 outside, tanh interface) in a unit box, relax briefly, and
+    # return (radius from the φ>½ area, matrix concentration = min φ).
+    delta = _DROP_EPS / np.sqrt(2.0 * _DROP_WELL)
+    mesh = dolfinx.mesh.create_rectangle(MPI.COMM_WORLD, [[0.0, 0.0], [1.0, 1.0]], [nx, nx])
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    xy = space.tabulate_dof_coordinates()
+    r = np.sqrt((xy[:, 0] - 0.5) ** 2 + (xy[:, 1] - 0.5) ** 2)
+    phi = fem.Function(space)
+    phi.x.array[:] = 0.5 * (1.0 - np.tanh((r - r0) / (2.0 * delta)))
+    phi, _ = solve_cahn_hilliard(mesh, initial=phi, dt=2e-4, n_steps=n_steps, epsilon=_DROP_EPS, well_height=_DROP_WELL)
+    area = fem.assemble_scalar(fem.form(ufl.conditional(phi > 0.5, 1.0, 0.0) * ufl.dx))
+    return float(np.sqrt(float(area.real) / np.pi)), float(phi.x.array.min())
+
+
+def test_cahn_hilliard_droplet_obeys_gibbs_thomson() -> None:
+    # Two drops verify the curvature law on three counts: both shrink (curvature drives dissolution);
+    # the tighter-curvature (smaller) drop sets a higher matrix supersaturation (the 1/R direction); and
+    # the product φ_out·R matches the Gibbs-Thomson coefficient σ/(2W) for each (the magnitude).
+    r_small, min_small = _relax_droplet(0.30)
+    r_large, min_large = _relax_droplet(0.35)
+    assert r_small < 0.30 and r_large < 0.35  # both shrank
+    assert min_small > min_large  # tighter curvature ⇒ more supersaturation, φ_out ∝ 1/R
+    assert min_small * r_small == pytest.approx(_DROP_GT, rel=0.12)  # φ_out·R = σ/(2W)
+    assert min_large * r_large == pytest.approx(_DROP_GT, rel=0.12)
+
+
 # --- the solidified formal template: a MathDescription with a `cahn_hilliard` equation ---
 
 from vcell_fenics.backend import iter_cahn_hilliard, make_disk_geometry, run_cahn_hilliard  # noqa: E402
