@@ -13,6 +13,7 @@ from vcell_fenics.backend.ale import ALEState, StepTooLarge, run_with_remeshing,
 from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
 from vcell_fenics.backend.cahn_hilliard import (
     cahn_hilliard_free_energy,
+    iter_cahn_hilliard,
     run_cahn_hilliard,
     solve_cahn_hilliard,
 )
@@ -131,6 +132,7 @@ __all__ = [
     "integrate_interface_coupled",
     "integrate_membrane_coupled",
     "integrate_reaction_diffusion",
+    "iter_cahn_hilliard",
     "load_geometry",
     "make_cell_extracellular_geometry",
     "make_disk_geometry",
