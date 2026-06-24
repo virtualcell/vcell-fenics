@@ -645,11 +645,10 @@ def _membrane_roughness(geom) -> float:  # type: ignore[no-untyped-def]
 
 
 def test_force_balance_area_correction_conserves_cell_area() -> None:
-    # The continuous Stokes velocity is divergence-free, so a cell under uniform tension conserves area
-    # exactly — but moving the P1 polygon vertices by the sampled velocity leaks it (a discrete
-    # curve-shortening drift) and the cell slowly shrinks. `area_correction=True` restores it with a lagged
-    # radial rescale about the centroid, holding the area to ≪1% over a long run; the negative control (no
-    # correction) shrinks by several percent over the same steps.
+    # The P2 Stokes velocity is divergence-free (∮u·n=0), but its P1 interpolation is not — moving the
+    # polygon vertices by it leaks a spurious O(h) inward flux that shrinks the cell. `area_correction=True`
+    # cancels exactly that flux each step (a radial α(x−c) with α=−∮v1·n/(2A)), holding the area to ~machine
+    # precision over a long run; the negative control (no correction) shrinks by several percent.
     from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion
 
     geom = _geom(h=0.09)
@@ -657,7 +656,7 @@ def test_force_balance_area_correction_conserves_cell_area() -> None:
     a0 = _cyto_area(geom)
     for _ in range(40):
         motion.advance()
-    assert _cyto_area(geom) == pytest.approx(a0, rel=0.01)  # area held to <1%
+    assert _cyto_area(geom) == pytest.approx(a0, rel=1e-5)  # flux cancellation conserves area to ~round-off
 
     geom_raw = _geom(h=0.09)
     raw = ForceBalanceMeshMotion(geom_raw, tension=0.5, dt=0.02)  # no correction
