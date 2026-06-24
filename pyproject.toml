@@ -28,12 +28,14 @@ platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.pypi-dependencies]
 vcell-fenics = { path = ".", editable = true }
-# VCell integration (pyvcell_bridge). pyvcell >= 0.3.0 publishes the pure-Pydantic VCML data
+# VCell integration (pyvcell_bridge). pyvcell >= 0.4.0 publishes the pure-Pydantic VCML data
 # model (pyvcell.vcml.models_math / models_geometry) with a minimal default dependency set
 # (lxml + numexpr on top of pydantic/numpy) — its heavy solver/viz/binary stack is behind
 # optional extras we don't request. So it's a normal, lock-reproducible dependency now; no
-# --no-deps editable workaround. The remote-client / full-stack scripts still use ../pyvcell/.venv.
-pyvcell = ">=0.3.1,<0.4"
+# --no-deps editable workaround. (0.4.0 also adds the moving-boundary FV solver, pyvcell-mbsolver,
+# behind an extra — the cross-validation baseline for our kinematic moving boundary; that heavy
+# path runs in ../pyvcell/.venv, not this DOLFINx env.)
+pyvcell = ">=0.4.0,<0.5"
 
 [tool.pixi.dependencies]
 # Pin Python >= 3.12 across platforms (it is otherwise unconstrained, so platforms
