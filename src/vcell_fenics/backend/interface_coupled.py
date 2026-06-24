@@ -430,19 +430,17 @@ class ForceBalanceMeshMotion:
                 petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
             )
 
-        # Area-conservation correction (default off): the continuous Stokes velocity is divergence-free, so a
-        # cell under uniform tension conserves area exactly — but moving the P1 polygon vertices by the sampled
-        # velocity does NOT preserve the *discrete* area (a discrete curve-shortening drift), so the cell slowly
-        # shrinks (~0.13%/step here), which collapses any long run before the tension regularization can matter.
-        # Restore it with a lagged isotropic radial rescale about the cell centroid: each step measure the cyto
-        # area, and fold a displacement `(√(A₀/A) − 1)·(x − centroid)` on the interface into the SAME harmonic
-        # extension as the flow (so the bulk meshes stay consistent and the EntityMaps stay valid). Rescaling
-        # about the moving centroid is size-only — it does not bias the migration — and is smooth, so it adds no
-        # roughness. The lag (area measured before this step's move) leaves a residual of one step's drift (≪1%).
-        self._space_for_iface = space
+        # Area conservation (default off) — a divergence-free re-projection of the velocity, applied at the
+        # interpolation. The P2 (Taylor–Hood) Stokes velocity is divergence-free, so ∮ u·n = 0 over the cyto
+        # boundary to machine precision (the constant pressure test gives ∫∇·u = 0). But the mesh is moved by
+        # the P1 interpolation of u, and ∮ (P1 u)·n ≠ 0: interpolating to P1 drops the P2 edge-midpoint velocity,
+        # which a straight-edged polygon cannot carry — a spurious inward flux ∝ h that shrinks the cell
+        # (~0.13%/step at h=0.06), intrinsic to a P1 ALE polygon. `advance` removes exactly that net flux from
+        # the interpolated velocity (a radial α(x − centroid) with α = −∮ v1·n / 2A), restoring ∮ ·n = 0; the
+        # area form supplies A and the flux form supplies ∮ v1·n.
         if area_correction:
             self._area_form = fem.form(fem.Constant(cyto, PETSc.ScalarType(1.0)) * ufl.dx)  # type: ignore[operator]
-            self._target_area = fem.assemble_scalar(self._area_form).real
+            self._flux_form = fem.form(ufl.dot(self._v1, ufl.FacetNormal(cyto)) * ufl.ds(domain=cyto))
 
     @property
     def parent_displacement(self) -> fem.Function:
@@ -477,32 +475,34 @@ class ForceBalanceMeshMotion:
             self._cyto, tension=self._tension, viscosity=self._viscosity, screening=self._screening
         )  # `self._tension` is a field: uniform, or coupled to a surface species (mechano-chemical)
         self._v1.interpolate(velocity)
+
+        # Re-project the interpolated velocity to be discretely divergence-free (if enabled) — a correction ON
+        # the velocity, at the interpolation, not a separate geometric area rescale. The P2 Stokes velocity is
+        # divergence-free, so ∮ u·n = 0 over the cyto boundary; but its P1 interpolation (which moves the mesh)
+        # is not — ∮ (P1 u)·n drops the P2 edge-midpoint flux that a straight-edged polygon cannot carry, a
+        # spurious inward flux ∝ h. Remove exactly that net flux as a radial field α(x − centroid), whose flux
+        # ∮ α(x − c)·n = α∫∇·(x − c) = 2αA, so α = −(∮ v1·n)/(2A) makes the corrected velocity satisfy ∮ ·n = 0.
+        # The explicit mesh move by it then conserves area to O(dt²). (Assemble the flux off the *uncorrected*
+        # v1, then add the correction in place; the downstream interface/membrane motion uses the result.)
+        if self._area_correction:
+            flux = float(fem.assemble_scalar(self._flux_form).real)  # ∮ v1·n: the spurious interpolation flux
+            area_now = float(fem.assemble_scalar(self._area_form).real)
+            alpha = -flux / (2.0 * area_now)
+            centroid = self._membrane.geometry.x[:, : self._gdim].mean(axis=0)
+            coords = self._v1.function_space.tabulate_dof_coordinates()[:, : self._gdim]
+            self._v1.x.array.reshape((-1, self._gdim))[:] += alpha * (coords - centroid)
         cyto_v = self._v1.x.array.reshape((-1, self._gdim))
 
-        # Lagged radial area-restoring displacement (if enabled): `(√(A₀/A) − 1)·(x − centroid)`, folded into
-        # the interface displacement so the flow + correction ride the SAME harmonic extension. Centroid is the
-        # current membrane centroid, so the rescale is size-only and tracks the migrating cell.
-        iface_correction = np.zeros((self._idofs.size, self._gdim))
-        mem_correction = np.zeros_like(self._membrane.geometry.x[:, : self._gdim])
-        if self._area_correction:
-            scale = float(np.sqrt(self._target_area / fem.assemble_scalar(self._area_form).real)) - 1.0
-            centroid = self._membrane.geometry.x[:, : self._gdim].mean(axis=0)
-            iface_x = self._space_for_iface.tabulate_dof_coordinates()[self._idofs][:, : self._gdim]
-            iface_correction = scale * (iface_x - centroid)
-            mem_correction = scale * (self._membrane.geometry.x[:, : self._gdim] - centroid)
-
-        # Harmonic-extend the boundary velocity (+ correction) over the parent, then move parent + bulk submeshes.
-        self._interface_disp.x.array.reshape((-1, self._gdim))[self._idofs] = (
-            self._dt * cyto_v[self._iface_to_cyto] + iface_correction
-        )
+        # Harmonic-extend the (corrected) boundary velocity over the parent, then move parent + bulk submeshes.
+        self._interface_disp.x.array.reshape((-1, self._gdim))[self._idofs] = self._dt * cyto_v[self._iface_to_cyto]
         self._problem.solve()
         disp = self._disp.x.array.reshape((-1, self._gdim))
         for mesh, perm in zip(self._bulk_meshes, self._perms, strict=True):
             mesh.geometry.x[:, : self._gdim] += disp[perm]
-        # The membrane velocity Function (for the surface dilution) + move the membrane by dt·v (+ correction).
+        # The membrane velocity Function (for the surface dilution) + move the membrane by dt·v.
         self.membrane_velocity.x.array.reshape((-1, self._gdim))[:] = cyto_v[self._mem_to_cyto]
         self._membrane.geometry.x[:, : self._gdim] += (
-            self._dt * self.membrane_velocity.x.array.reshape((-1, self._gdim))[self._mem_perm] + mem_correction
+            self._dt * self.membrane_velocity.x.array.reshape((-1, self._gdim))[self._mem_perm]
         )
 
 
