@@ -1,30 +1,38 @@
-"""Sustained chemotaxis by LEGI gradient sensing: a cell migrates up a chemoattractant gradient and KEEPS
-going, because the polarity is held by the external cue (unlike a wave-pinning front, which stalls).
+"""LEGI gradient SENSING with a surface-tension force balance — the sensing works; net migration does
+NOT (yet). An honest intermediate result; proper migration is a follow-up.
 
-LEGI = Local Excitation, Global Inhibition — the standard model for eukaryotic gradient sensing. Here, in
-a disk-in-a-box:
+LEGI = Local Excitation, Global Inhibition, the standard eukaryotic gradient-sensing model. In a
+disk-in-a-box the SENSING chain works and is held by the external cue:
 
     chemoattractant C in the ext, held in a gradient by a DIRICHLET on the box wall  (C = 1 + 0.6·x)
         → membrane receptor R reads the LOCAL C (occupancy, polarized)
             → cyto LOCAL activator a (slow diffusion, tracks local R) and GLOBAL inhibitor h
               (fast diffusion ≈ cell-mean drive) — both produced from R at the membrane
-                → response  a − h  is the RELATIVE-gradient polarity: high on the up-gradient side,
-                  negative on the down-gradient side, and SUSTAINED (the external Dirichlet cue holds it)
-                    → it sets the membrane tension γ = base + α·(a − h), and the surface-tension force
-                      balance migrates the cell up-gradient.
+                → response  a − h  is the RELATIVE-gradient polarity: high on the up-gradient (+x) side,
+                  negative down-gradient, and SUSTAINED (the external Dirichlet cue holds it).
 
-The contrast with the imported RacRho wave-pinning reaction (see `cross_validation/racrho_*`): that front
-de-pins and homogenises, so its polarity (and migration) decays after a transient. LEGI sensing an
-imposed gradient is self-sustaining — the cell migrates and does not stall.
+The response sets the membrane tension γ = base + α·(a − h), and the surface-tension force balance
+(`ForceBalanceMeshMotion`) responds — but with a **Marangoni surface flow, not migration**. The cell's
+center of mass does NOT translate: a closed, incompressible cell under a *pure* surface-tension balance
+has no net propulsive force, so a tension gradient drives a tangential (Marangoni) circulation that
+treadmills the membrane while the CoM stays put. `legi_diagnostic.py` shows this directly (see
+`legi_diag.png`): every membrane outline from t=0 to t=5.6 overlaps as a centered circle with its area
+centroid at the origin, and the velocity field at t=4 is a recirculating Marangoni flow (max|u| ≈ 0.12).
+(An earlier version of this demo reported a "+0.2 migration" — that was the membrane node-MEAN sliding
+along the fixed circle with the surface flow, not CoM translation. A misleading diagnostic.)
 
-The force balance runs **regularized** so the migration can be followed over a long horizon (`ForceBalanceMeshMotion(..., tension_smoothing=…, area_correction=True)`): the surface-Helmholtz tension filter
-stops a node-scale spike in `a − h` from kinking the leading edge, and the lagged radial area correction
-holds the cell area against the explicit-update incompressibility leak (uncorrected, the cell shrinks ~20%
-over this run). Without these the cell would either collapse or grow a leading-edge protrusion before the
-sustained migration became visible.
+So this demonstrates correct LEGI **sensing** and the mechano-chemical response. Genuine migration needs
+an active, front–back-asymmetric mechanism the force balance lacks — a *normal* protrusion/retraction
+velocity, an active cortical stress, or asymmetric substrate adhesion — left to a follow-up.
 
-Writes `legi_sustained_chemotaxis.png`: the migrating cell (coloured by the LEGI response a − h) at a
-sequence of times, in a fixed box frame, so the steady up-gradient migration is visible at a glance.
+The force balance runs with `area_correction=True`. The P2 Stokes velocity is divergence-free, but its
+P1 interpolation (which moves the mesh) is not, leaking a spurious inward flux that would shrink the cell
+~20% over this run; the correction re-projects that interpolated velocity to be divergence-free, at the
+interpolation (see `ForceBalanceMeshMotion`).
+
+Writes `legi_sustained_chemotaxis.png`: the LEGI response a − h over time (the polarized, sustained
+sensing). The cell shape stays a centered circle — the apparent shift is the node parametrization
+treadmilling, not translation; `legi_diag.png` makes that explicit.
 
     .pixi/envs/dev/bin/python examples/legi_sustained_chemotaxis.py
 """
@@ -35,6 +43,9 @@ from pathlib import Path
 
 import numpy as np
 import pyvista
+import ufl
+from dolfinx import fem
+from petsc4py import PETSc
 
 from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
 from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion, assemble_membrane_coupled
@@ -51,7 +62,6 @@ from vcell_fenics.viz import _function_to_pyvista
 
 _HERE = Path(__file__).parent
 _BASE_TENSION, _ALPHA, _DT, _STEPS, _FRAME_EVERY = 0.5, 0.12, 0.02, 280, 35
-_SMOOTHING = 0.06  # surface-Helmholtz tension-filter length: damps node-scale γ spikes (leading-edge fix)
 _GRADIENT = "1.0 + 0.6 * geom.x[0]"
 
 
@@ -155,17 +165,28 @@ def main() -> None:
         outer_radius=1.5,
         h=0.06,
     )
-    motion = ForceBalanceMeshMotion(
-        geom, tension=_BASE_TENSION, dt=_DT, tension_smoothing=_SMOOTHING, area_correction=True
-    )
+    motion = ForceBalanceMeshMotion(geom, tension=_BASE_TENSION, dt=_DT, area_correction=True)
     problem = assemble_membrane_coupled(model(), geom, dt=_DT, motion=motion)
-    start_x = float(geom.membrane_mesh.geometry.x[:, 0].mean())
+    mem = geom.membrane_mesh
+    node_mean_0 = float(mem.geometry.x[:, 0].mean())
 
-    def response_field():  # type: ignore[no-untyped-def]
+    # The TRUE centre of mass is the area centroid ∫x dx / ∫dx — not the membrane node-mean, which slides
+    # with the (treadmilling) surface flow. Comparing the two is the whole point of this intermediate result.
+    cyto = geom.inner_mesh
+    _one = fem.form(fem.Constant(cyto, PETSc.ScalarType(1.0)) * ufl.dx)  # type: ignore[operator]
+    _mom_x = fem.form(ufl.SpatialCoordinate(cyto)[0] * ufl.dx)
+
+    def com_x() -> float:
+        return float(fem.assemble_scalar(_mom_x).real) / float(fem.assemble_scalar(_one).real)
+
+    com_x_0 = com_x()
+
+    def response_grid() -> pyvista.UnstructuredGrid:  # NON-destructive: does not modify the a field
         a, h = problem.field("a"), problem.field("h")
-        a.x.array[:] = a.x.array - h.x.array  # reuse a's space to hold a − h
-        a.name = "response"
-        return a
+        grid = _function_to_pyvista(a)
+        grid.point_data["response"] = (a.x.array - h.x.array).real
+        grid.set_active_scalars("response")
+        return grid
 
     def set_tension() -> None:  # γ = base + α·(a − h): the sustained LEGI response drives the tension
         motion.tension.x.array[:] = _BASE_TENSION + _ALPHA * (problem.field("a").x.array - problem.field("h").x.array)
@@ -176,27 +197,27 @@ def main() -> None:
         xc = a.function_space.tabulate_dof_coordinates()[:, 0]
         return float(resp[xc > 0.2].mean() - resp[xc < -0.2].mean())
 
-    frames: list[tuple[pyvista.UnstructuredGrid, float]] = [(_function_to_pyvista(response_field()), 0.0)]
+    frames: list[tuple[pyvista.UnstructuredGrid, float]] = [(response_grid(), 0.0)]
     print(
         f"  chemoattractant gradient on the box wall: C = {_GRADIENT}   tension γ = {_BASE_TENSION} + {_ALPHA}·(a−h)\n"
     )
-    print(f"  {'t':>5} {'migration Δx':>13} {'response polarity':>18}")
+    print(f"  {'t':>5} {'CoM Δx (centroid)':>18} {'node-mean Δx (treadmill)':>26} {'polarity':>10}")
     for step in range(_STEPS):
         problem.step()
         set_tension()
         t = (step + 1) * _DT
         if step % _FRAME_EVERY == _FRAME_EVERY - 1:
-            frames.append((_function_to_pyvista(response_field()), t))
-            print(
-                f"  {t:5.2f} {float(geom.membrane_mesh.geometry.x[:, 0].mean()) - start_x:>+13.4f} {polarity():>18.3f}"
-            )
+            frames.append((response_grid(), t))
+            node_drift = float(mem.geometry.x[:, 0].mean()) - node_mean_0
+            print(f"  {t:5.2f} {com_x() - com_x_0:>+18.4f} {node_drift:>+26.4f} {polarity():>10.3f}")
 
-    print("\n  the cell migrated up the chemoattractant gradient and kept going — the LEGI response is held")
-    print("  by the external (box-Dirichlet) cue, so the polarity (and the migration) is SUSTAINED, not a")
-    print("  decaying transient. Local excitation + global inhibition reads the RELATIVE gradient.")
+    print("\n  LEGI sensing works: the response a−h polarises up-gradient and is SUSTAINED by the external cue.")
+    print("  But the surface-tension force balance only TREADMILLS the membrane — the centre of mass (CoM Δx,")
+    print("  the area centroid) does not translate, while the node-mean drifts with the Marangoni surface flow.")
+    print("  Genuine migration needs an active front–back-asymmetric mechanism (a follow-up). See legi_diag.png.")
     out = _HERE / "legi_sustained_chemotaxis.png"
     _write_tiled_image(frames[:-1], out)
-    print(f"\n  wrote {out.name} — the migrating cell coloured by the LEGI response (a − h) over time")
+    print(f"\n  wrote {out.name} — the LEGI response (a − h) over time (the cell shape stays centred)")
     assert np  # used in the helper above
 
 
