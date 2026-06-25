@@ -74,6 +74,7 @@ from vcell_fenics.backend.multiphase import (
 from vcell_fenics.backend.reaction_diffusion import (
     IntegrationResult,
     integrate_discrete_problem,
+    integrate_discrete_problem_moving,
     integrate_reaction_diffusion,
 )
 from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
@@ -129,6 +130,7 @@ __all__ = [
     "cross_validate",
     "enclosed_volume",
     "integrate_discrete_problem",
+    "integrate_discrete_problem_moving",
     "integrate_interface_coupled",
     "integrate_membrane_coupled",
     "integrate_reaction_diffusion",

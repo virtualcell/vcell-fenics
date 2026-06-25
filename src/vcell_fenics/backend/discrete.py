@@ -396,6 +396,17 @@ class DiscreteProblem:
         self._backward_euler_problem().solve()
         self.previous.x.array[:] = self.unknown.x.array
 
+    def advance_mesh(self) -> None:
+        """Move the mesh by `dt·velocity` (prescribed motion), carrying the field values, **without**
+        solving — the mesh-move half of `step` on its own. The method-of-lines ALE driver
+        (`integrate_discrete_problem_moving`) calls this once per stride and then `TS`-integrates the
+        reaction–diffusion on the now-fixed configuration, so the move magnitude per stride is set via
+        `dt`. Raises on a static subdomain (no prescribed motion)."""
+
+        if self._motion is None:
+            raise RuntimeError("advance_mesh requires a prescribed motion velocity; this subdomain is static")
+        self._motion.advance()
+
     def set_time(self, t: float) -> None:
         """Advance the bound time `t` and refresh any time-dependent boundary values.
 
