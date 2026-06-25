@@ -198,3 +198,75 @@ def test_translation_transports_a_comoving_bulk_rigidly() -> None:
     assert _area() == pytest.approx(area0, rel=1e-12)  # rigid: area unchanged
     assert dp.total_mass() == pytest.approx(mass0, rel=1e-12)  # no spurious dilution
     assert np.abs(dp.unknown.x.array - c0).max() < 1e-10  # each material node keeps its value
+
+
+# ---------------------------------------------------------------------------
+# 6. chemistry-coupled velocity — the substrate speed is a function of the field
+# ---------------------------------------------------------------------------
+
+
+def _coupled_model(velocity: str, ic: str, *, source: str | None = None) -> str:
+    """A bulk moving subdomain whose prescribed velocity references the species `c`.
+    Diffusion 0 so a uniform field stays uniform (the velocity then stays spatially
+    constant and the bulk translates rigidly), making the displacement analytic."""
+    terms = '{ diffusion: "0.0"' + (f', source: "{source}"' if source else "") + " }"
+    return f"""
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - {{ name: cyto, kind: volume, motion: {{ kind: prescribed, velocity: "{velocity}" }} }}
+  variables:
+    - {{ name: c, subdomain: cyto }}
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: {terms}
+      initial_condition: "{ic}"
+"""
+
+
+def _translation_x(model: str, *, steps: int, dt: float = 0.01) -> float:
+    geom = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.15)
+    dp = assemble(load_yaml(model), geom, dt=dt)
+    x0 = float(dp.V.mesh.geometry.x[:, 0].mean())
+    for _ in range(steps):
+        dp.step()
+    return float(dp.V.mesh.geometry.x[:, 0].mean()) - x0
+
+
+def test_chemistry_coupled_velocity_scales_with_the_field() -> None:
+    # velocity = [0.5·c, 0]: the substrate speed is a function of the species field. A uniform field
+    # (D = 0, no reaction → stays uniform) gives a constant speed 0.5·c0, so the bulk translates rigidly
+    # by 0.5·c0·T. Doubling the field doubles the displacement — the decisive proof the motion reads the
+    # *current chemistry*, not a fixed space/time expression (which is all the backend evaluated before).
+    steps, dt = 20, 0.01
+    d1 = _translation_x(_coupled_model("[0.5*c, 0.0]", "1.0"), steps=steps, dt=dt)
+    d2 = _translation_x(_coupled_model("[0.5*c, 0.0]", "2.0"), steps=steps, dt=dt)
+
+    assert d1 == pytest.approx(0.5 * 1.0 * dt * steps, rel=1e-6)  # 0.5·c0·T, c0 = 1
+    assert d2 == pytest.approx(0.5 * 2.0 * dt * steps, rel=1e-6)  # 0.5·c0·T, c0 = 2
+    assert d2 == pytest.approx(2.0 * d1, rel=1e-9)  # field value drives the speed
+
+
+def test_chemistry_coupled_velocity_tracks_the_evolving_field() -> None:
+    # Add first-order decay (source = −k·c): the uniform field decays, c(t) = c0·e^(−k t), so the
+    # velocity 0.5·c decays with it and the bulk *slows*. The displacement is then strictly less than the
+    # no-decay run — proof the velocity is re-evaluated against the field each step, not frozen at t = 0.
+    steps, dt = 30, 0.01
+    geom = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.15)
+    dp = assemble(load_yaml(_coupled_model("[0.5*c, 0.0]", "1.0", source="-4.0*c")), geom, dt=dt)
+    x0 = float(dp.V.mesh.geometry.x[:, 0].mean())
+    # Discrete explicit-lag integral: each step advances by dt·0.5·cⁿ, with cⁿ the (uniform) field
+    # before the step; backward Euler decays it as cⁿ⁺¹ = cⁿ/(1 + k·dt).
+    c, expected = 1.0, 0.0
+    for _ in range(steps):
+        expected += dt * 0.5 * c
+        c /= 1.0 + 4.0 * dt
+        dp.step()
+    moved = float(dp.V.mesh.geometry.x[:, 0].mean()) - x0
+
+    assert dp.unknown.x.array.mean() < 0.5  # the field decayed (c0 = 1 → < 0.5 after k·T = 1.2)
+    assert moved == pytest.approx(expected, rel=1e-5)  # matches the integral of the *evolving* speed
+    assert moved < 0.5 * 1.0 * dt * steps  # strictly less than the undamped (constant-field) run

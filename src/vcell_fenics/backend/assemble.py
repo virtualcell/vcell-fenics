@@ -156,10 +156,17 @@ def _build_problem(
     trial, test = ufl.TrialFunction(V), ufl.TestFunction(V)
     components = [(trial, test)] if n == 1 else [(trial[k], test[k]) for k in range(n)]
     dx = ufl.Measure("dx", domain=mesh)
-    velocity = _motion_velocity(md, subdomain, ctx)
+    names = ",".join(eq.variable for eq in equations)
+    unknown = fem.Function(V, name=names)
+    previous = fem.Function(V, name=f"{names}_old")
     # Each governed variable bound to its component trial, so a source linear in
     # the unknowns (incl. cross-variable terms) lands in the implicit bilinear.
     var_trials = {eq.variable: components[k][0] for k, eq in enumerate(equations)}
+    # The same variables bound to the *solution* Function components — for the substrate velocity,
+    # which is interpolated to a concrete displacement (not assembled into a form), so a
+    # chemistry-coupled motion `v = f(species)` reads the current field each step (explicit/lagged ALE).
+    var_funcs = {eq.variable: (unknown if n == 1 else unknown[k]) for k, eq in enumerate(equations)}
+    velocity = _motion_velocity(md, subdomain, ctx, var_funcs)
 
     terms: list[Term] = [Term(TermKind.TIME_DERIVATIVE)]
     for (u, w), eq in zip(components, equations, strict=True):
@@ -187,15 +194,14 @@ def _build_problem(
         else ([], [], [])
     )
 
-    names = ",".join(eq.variable for eq in equations)
     return DiscreteProblem(
         variable_name=names,
         V=V,
         trial=trial,
         test=test,
         dx=dx,
-        unknown=fem.Function(V, name=names),
-        previous=fem.Function(V, name=f"{names}_old"),
+        unknown=unknown,
+        previous=previous,
         dt=fem.Constant(mesh, PETSc.ScalarType(float(dt))),  # type: ignore[operator]
         terms=tuple(terms),
         scheme=BackwardEuler(),
@@ -436,15 +442,25 @@ def _resolve_equations(md: MathDescription) -> list[TemplateEquation]:
     return equations
 
 
-def _motion_velocity(md: MathDescription, subdomain: str, ctx: CompileContext) -> UflExpr | None:
+def _motion_velocity(
+    md: MathDescription, subdomain: str, ctx: CompileContext, species: dict[str, UflExpr]
+) -> UflExpr | None:
     """The compiled substrate velocity for `subdomain`, or None if static.
-    Prescribed displacement and unknown motion are later increments."""
+    Prescribed displacement and unknown motion are later increments.
+
+    `species` binds each governed variable to its *solution* Function component, so a
+    chemistry-coupled prescribed velocity `v = f(species)` (e.g. an actin-driven front whose
+    speed is a function of a signalling field) compiles against the current field. The velocity
+    is interpolated to a concrete displacement each step (`_MeshMotion`), so this is an explicit,
+    lagged coupling — the mesh moves on the previous step's chemistry. The same `div(velocity)`
+    drives the auto-dilution term, which then carries the field dependence too (semi-implicit)."""
 
     motion = next((s.motion for s in md.subdomains if s.name == subdomain), None)
     if motion is None or isinstance(motion, MotionNone):
         return None
     if isinstance(motion, MotionPrescribedVelocity):
-        return compile_expression(parse(motion.velocity), ctx)
+        velocity_ctx = CompileContext(mesh=ctx.mesh, symbols={**ctx.symbols, **species})
+        return compile_expression(parse(motion.velocity), velocity_ctx)
     raise NotImplementedError(
         "backend v1 supports static or prescribed-velocity motion; "
         "prescribed displacement and unknown motion are later increments"
