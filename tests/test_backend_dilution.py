@@ -34,6 +34,7 @@ from vcell_fenics.backend import (
     Term,
     TermKind,
     assemble,
+    make_disk_geometry,
     make_disk_membrane_geometry,
 )
 from vcell_fenics.formalism import load_yaml
@@ -227,3 +228,50 @@ def test_translation_transports_rigidly_with_no_spurious_dilution() -> None:
     assert _measure(dp) == pytest.approx(length0, rel=1e-12)  # rigid: length unchanged
     assert dp.total_mass() == pytest.approx(mass0, rel=1e-12)  # no spurious dilution
     assert np.abs(dp.unknown.x.array - rho0).max() < 1e-10  # each material node keeps its ρ
+
+
+# ---------------------------------------------------------------------------
+# 6. Bulk — the dilution reads the *actual* (harmonic) mesh velocity.
+# ---------------------------------------------------------------------------
+
+_DISTORTING_BULK = """
+math_description:
+  geometry: disk_2d
+  subdomains:
+    - name: cyto
+      kind: volume
+      motion:
+        kind: prescribed
+        velocity: "(1.0 + 0.7 * cos(2 * geom.azimuth)) * geom.x / geom.radius"
+  variables:
+    - { name: c, subdomain: cyto }
+  equations:
+    - template: bulk_radv_diff
+      variable: c
+      subdomain: cyto
+      temporality: time_dependent
+      terms: { diffusion: "0.0" }
+      initial_condition: "1.0"
+"""
+
+
+def _bulk_mass_drift(dt: float, *, t_final: float = 0.6) -> float:
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", radius=1.0, h=0.10)
+    dp = assemble(load_yaml(_DISTORTING_BULK), geometry, dt=dt)
+    mass0 = dp.total_mass()
+    for _ in range(round(t_final / dt)):
+        dp.step()
+    return abs(dp.total_mass() - mass0) / mass0
+
+
+def test_nonaffine_bulk_dilution_uses_the_harmonic_mesh_velocity() -> None:
+    # On a *bulk* the interior nodes move by the harmonic extension of the boundary velocity, not the
+    # raw prescribed velocity — so for a non-affine motion ((1 + 0.7 cos 2θ) radial here) ∇·v_mesh ≠
+    # ∇·v_prescribed in the interior. The dilution must use the actual mesh velocity: reading
+    # ∇·v_prescribed instead let mass grow ~80 % over this run (an O(1) inconsistency), while the
+    # harmonic divergence restores first-order consistency — a small drift that ~halves as dt halves.
+    coarse = _bulk_mass_drift(0.02)
+    fine = _bulk_mass_drift(0.01)
+
+    assert coarse < 0.05  # small — the raw-divergence dilution drifted ~0.8 here
+    assert fine < 0.6 * coarse  # ~first-order: refining the step markedly cuts the drift
