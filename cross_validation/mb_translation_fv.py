@@ -9,8 +9,9 @@ reduces to plain no-flux. (Setting only the front velocity, `v = 0`, instead swe
 field — a traveling exponential — a *different* physical problem; that is the discrepancy this comparison
 resolves.)
 
-Writes `mb_translation_fv.npz` (output times, front-centroid x, C spread, C mean). The file is tiny and
-**is** committed, so the fenics-side comparison runs standalone; regenerate with:
+Writes `mb_translation_fv.npz` (output times, front-centroid x, C spread, C mean) for the comparison
+report, and `mb_translation_fv_fields.npz` (per-frame front polygon + inside scatter) for the picture.
+Both are gitignored and regenerable; run before the fenics-side stage 2:
 
     ../pyvcell/.venv/bin/python cross_validation/mb_translation_fv.py
 """
@@ -75,7 +76,26 @@ def main() -> None:
 
     out = Path(__file__).parent / "mb_translation_fv.npz"
     np.savez(out, times=times, front_cx=front_cx, c_spread=c_spread, c_mean=c_mean, R=R, D=D, V=V)
-    print(f"  wrote {out.name}")
+
+    # Per-frame spatial fields for the picture (mb_translation_plot.py): the moving front polygon and
+    # the inside scatter. NB this mbsolver build's per-node `x`/`y` accessors return the front centroid
+    # for every node (all collapse to the cell centre), so we save the reliable integer `grid_i`/`grid_j`
+    # instead and reconstruct positions from the background grid in the plotter. Ragged across frames →
+    # object arrays (loaded with allow_pickle).
+    fields = Path(__file__).parent / "mb_translation_fv_fields.npz"
+    np.savez(
+        fields,
+        times=times,
+        fronts=np.array([f.front for f in result.frames], dtype=object),
+        grid_i=np.array([f.grid_i for f in result.frames], dtype=object),
+        grid_j=np.array([f.grid_j for f in result.frames], dtype=object),
+        cs=np.array([f.concentrations["C"] for f in result.frames], dtype=object),
+        extent=10.0,
+        mesh_n=31,
+        R=R,
+        V=V,
+    )
+    print(f"  wrote {out.name}, {fields.name}")
     print(f"    front centroid Δx over t={DURATION}: {front_cx[-1] - front_cx[0]:+.3f}  (ideal {V * DURATION:+.3f})")
     print(f"    C spread {c_spread[0]:.3f} -> {c_spread[-1]:.4f}; mean ~ {c_mean.mean():.3f} (conserved)")
 

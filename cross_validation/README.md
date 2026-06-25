@@ -214,8 +214,9 @@ different problem — which is why an initial front-only run disagreed ~290× on
 species advection with a zero component surfaced a pyvcell writer bug, virtualcell/pyvcell#54.)
 
 ```bash
-../pyvcell/.venv/bin/python  cross_validation/mb_translation_fv.py   # stage 1: writes mb_translation_fv.npz (gitignored, regenerable)
-.pixi/envs/dev/bin/python    cross_validation/mb_translation.py      # stage 2: fenics ALE + the comparison
+../pyvcell/.venv/bin/python  cross_validation/mb_translation_fv.py    # stage 1: FV reference + per-frame fields (gitignored, regenerable)
+.pixi/envs/dev/bin/python    cross_validation/mb_translation.py       # stage 2a: fenics ALE + the comparison table
+.pixi/envs/dev/bin/python    cross_validation/mb_translation_plot.py  # stage 2b: the tiled figure (mb_translation.png)
 ```
 
 | t | fenics CoM Δx | FV front Δx | fenics C spread | FV C spread |
@@ -225,6 +226,21 @@ species advection with a zero component surfaced a pyvcell writer bug, virtualce
 | 2.0 | **1.000** | **0.978** | **0.0050** | **0.0026** |
 
 Both translate by ~1 (fenics exact ALE; FV 2.3 % short from front redistribution) and both interiors
-homogenise — the solvers agree on the front motion and on diffusion-in-the-moving-frame. Next:
-drive both from one VCML (extend the bridge to import the moving-boundary front velocity as the
-subdomain motion), and compare the *active-gel migration* model (`docs/modeling/active-protrusion-migration.md`).
+homogenise — the solvers agree on the front motion and on diffusion-in-the-moving-frame.
+
+![mbsolver vs fenics, moving-boundary translation](mb_translation.png)
+
+The figure tiles the two solvers (rows = output times). Positions are recentred to a common start (the FV
+domain places the cell at `(5, 5)`, the fenics disk at the origin) and the colour is `C − mean` — the
+decaying gradient — since diffusion conserves the mean and the setups differ only by that offset. The
+mbsolver shows the field on its square cut-cell FV grid (with the tracked front polygon), fenics on the
+smooth moving ALE mesh; both start from the same `C = x` gradient, homogenise at the same rate, and drift
+right of the dotted start line by ~1 at `t = 2`. (This mbsolver build's per-node `x`/`y` accessors return
+the cell centroid, so the plot reconstructs node positions from the reliable integer grid indices,
+calibrated against the front.)
+
+The front velocity is now importable end-to-end: `pyvcell_bridge.import_model(..., front_velocity=...)`
+maps an `app.front_velocity` (a single moving surface) to a `MotionPrescribedVelocity` on the surface's
+interior compartment — so one VCML can drive both solvers. Next: chemistry-coupled front velocities (the
+ALE backend evaluates only space/time motion today) and the *active-gel migration* model
+(`docs/modeling/active-protrusion-migration.md`).
