@@ -212,6 +212,7 @@ class _MeshMotion:
 
     def __init__(self, mesh: Mesh, velocity: UflExpr, dt: fem.Constant) -> None:
         self._mesh = mesh
+        self._dt = dt
         self._gdim = mesh.geometry.dim
         space = fem.functionspace(mesh, ("Lagrange", 1, (self._gdim,)))
         self._displacement = fem.Function(space)
@@ -220,15 +221,35 @@ class _MeshMotion:
         # A bulk mesh (codim 0) has interior nodes to fill harmonically; a membrane
         # (codim 1) is all boundary, so dt·v moves every node directly.
         self._extension = _HarmonicExtension(space) if mesh.topology.dim == self._gdim else None
+        # Per-cell dilution rate ∇·v_mesh as a DG0 field — the divergence of the *actual* substrate
+        # velocity (the harmonic extension for a bulk), evaluated on the pre-move config each advance.
+        # The bulk dilution term reads this instead of the raw `∇·v_prescribed`: the two agree on an
+        # affine motion (the extension reproduces it) but differ in a non-affine bulk interior, where
+        # the raw divergence mis-states the volume change and breaks mass conservation.
+        dg0 = fem.functionspace(mesh, ("DG", 0))
+        self._dilution_rate = fem.Function(dg0)
+        self._dilution_expr = fem.Expression(ufl.div(self._displacement / dt), dg0.element.interpolation_points)
         # Per-cell volume form (DG0 test function integrates to each cell's
         # volume); re-assembling after a move reports the deformed cell sizes.
-        self._cell_volume_form = fem.form(ufl.TestFunction(fem.functionspace(mesh, ("DG", 0))) * ufl.dx)
+        self._cell_volume_form = fem.form(ufl.TestFunction(dg0) * ufl.dx)
         self._reference_ratio = self._cell_volume_ratio()
+
+    def dilution_rate(self) -> fem.Function:
+        """The per-cell `∇·v_mesh` (DG0) the dilution term `ρ ∇·v_mesh` must use on a **bulk** — the
+        divergence of the actual harmonic-extension mesh velocity, evaluated on the pre-move config
+        (so an affine motion gives exactly `∇·v_prescribed`, unchanged, while a non-affine interior
+        gets the real volume-change rate). Updated each `advance`; zero before the first move (the
+        dilution is only ever assembled after a move). A membrane keeps the raw `∇_Γ·v_prescribed`."""
+        return self._dilution_rate
 
     def advance(self) -> None:
         self._displacement.interpolate(self._expression)
         if self._extension is not None:
             self._extension.fill(self._displacement)
+        # ∇·v_mesh on the *pre-move* config — the displacement field's nodal values are the
+        # to-be-applied move, so its divergence here is the substrate velocity's divergence before the
+        # nodes shift (computing it after the move would rescale it by the cell stretch, ~1/(1+dt)).
+        self._dilution_rate.interpolate(self._dilution_expr)
         increment = self._displacement.x.array.reshape((-1, self._gdim))[self._geom_from_dof]
         self._mesh.geometry.x[:, : self._gdim] += increment
         ratio = self._cell_volume_ratio()
@@ -284,6 +305,11 @@ class DiscreteProblem:
     # advances the mesh by dt·velocity before solving — the moving-subdomain
     # protocol of §1.10. None means a static subdomain.
     motion_velocity: UflExpr | None = None
+    # The mesh-motion object. The assembler builds it *before* the dilution term so that term can read
+    # the actual mesh (substrate) velocity (`substrate_velocity`, the harmonic extension for a bulk),
+    # not the raw prescribed velocity. When omitted, it is created here from `motion_velocity` (the raw
+    # velocity — correct for a membrane or affine bulk; a direct-construction convenience).
+    motion: _MeshMotion | None = None
     # The bound time Constant `t` (compile context). A driver advances it via
     # `set_time` so a time-dependent expression — e.g. a Dirichlet g(t) — tracks it.
     time: fem.Constant | None = None
@@ -302,9 +328,12 @@ class DiscreteProblem:
         self._a: ufl.Form | None = None
         self._L: ufl.Form | None = None
         self._problem: LinearProblem | None = None
-        self._motion = (
-            _MeshMotion(self.V.mesh, self.motion_velocity, self.dt) if self.motion_velocity is not None else None
-        )
+        if self.motion is not None:
+            self._motion: _MeshMotion | None = self.motion
+        elif self.motion_velocity is not None:
+            self._motion = _MeshMotion(self.V.mesh, self.motion_velocity, self.dt)
+        else:
+            self._motion = None
 
     def _compose_backward_euler(self) -> tuple[ufl.Form, ufl.Form]:
         # The BE bilinear/linear forms, composed once on first use. Backward Euler can only assemble a

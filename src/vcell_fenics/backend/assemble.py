@@ -41,7 +41,7 @@ from scipy.spatial import cKDTree
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
-from vcell_fenics.backend.discrete import BackwardEuler, BoundaryTerm, DiscreteProblem, Term, TermKind
+from vcell_fenics.backend.discrete import BackwardEuler, BoundaryTerm, DiscreteProblem, Term, TermKind, _MeshMotion
 from vcell_fenics.backend.geometry import CoupledGeometry, Geometry, cross_validate
 from vcell_fenics.core import remap_bulk_function, remap_surface_function
 from vcell_fenics.formalism.parser import parse
@@ -167,6 +167,12 @@ def _build_problem(
     # chemistry-coupled motion `v = f(species)` reads the current field each step (explicit/lagged ALE).
     var_funcs = {eq.variable: (unknown if n == 1 else unknown[k]) for k, eq in enumerate(equations)}
     velocity = _motion_velocity(md, subdomain, ctx, var_funcs)
+    # Build the mesh motion *now* (not in DiscreteProblem.__post_init__) so the dilution term can read
+    # the actual substrate velocity it will move at — the harmonic extension for a bulk — rather than
+    # the raw prescribed velocity. The two agree on a membrane and for an affine bulk motion; they
+    # differ in a non-affine bulk interior, where the raw `∇·v` mis-states the volume change.
+    dt_const = fem.Constant(mesh, PETSc.ScalarType(float(dt)))  # type: ignore[operator]
+    motion = _MeshMotion(mesh, velocity, dt_const) if velocity is not None else None
 
     terms: list[Term] = [Term(TermKind.TIME_DERIVATIVE)]
     for (u, w), eq in zip(components, equations, strict=True):
@@ -181,9 +187,14 @@ def _build_problem(
             # a (sub)mesh is the surface gradient, so the same term serves bulk and surface.
             drift = compile_expression(parse(eq.terms["relative_advection"]), ctx)
             terms.append(Term(TermKind.ADVECTION, ufl.dot(drift, ufl.grad(u)) * w))
-        if velocity is not None:
-            # Auto-dilution ρ ∇_Γ·v_Γ; div on a (sub)mesh is the surface divergence.
-            terms.append(Term(TermKind.DILUTION, ufl.div(velocity) * u * w))
+        if motion is not None:
+            # Auto-dilution ρ ∇·v_mesh. On a **bulk** the interior moves by the harmonic extension, not
+            # the raw prescribed velocity, so the rate is read off the actual mesh motion (DG0 field);
+            # on a **membrane** every node moves at the prescribed v, so the raw surface divergence is
+            # both correct and exactly the prior behaviour.
+            is_bulk = mesh.topology.dim == mesh.geometry.dim
+            dilution_rate = motion.dilution_rate() if is_bulk else ufl.div(velocity)
+            terms.append(Term(TermKind.DILUTION, dilution_rate * u * w))
         if "source" in eq.terms:
             source = compile_expression(parse(eq.terms["source"]), CompileContext(mesh, {**ctx.symbols, **var_trials}))
             terms.append(Term(TermKind.SOURCE, source * w))
@@ -202,12 +213,13 @@ def _build_problem(
         dx=dx,
         unknown=unknown,
         previous=previous,
-        dt=fem.Constant(mesh, PETSc.ScalarType(float(dt))),  # type: ignore[operator]
+        dt=dt_const,
         terms=tuple(terms),
         scheme=BackwardEuler(),
         bcs=bcs,
         boundary_terms=tuple(boundary_terms),
         motion_velocity=velocity,
+        motion=motion,
         time=ctx.symbols["sim.t"],
         dirichlet_refreshers=tuple(dirichlet_refreshers),
     )
