@@ -63,6 +63,7 @@ from vcell_fenics.formalism.schema import (
     Equation,
     MathDescription,
     MotionNone,
+    MotionPrescribedVelocity,
     Parameter,
     ParameterConstant,
     ParameterExpression,
@@ -74,6 +75,7 @@ from vcell_fenics.pyvcell_bridge.expression import translate_expression
 from vcell_fenics.pyvcell_bridge.inlining import _IDENT_RE, FunctionResolution, resolve_functions
 
 if TYPE_CHECKING:
+    from pyvcell.vcml.models_app import FrontVelocity
     from pyvcell.vcml.models_math import (
         CompartmentSubDomain,
         MembraneSubDomain,
@@ -114,7 +116,13 @@ class ImportResult:
     observables: tuple[Observable, ...] = field(default=())
 
 
-def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim: int | None = None) -> ImportResult:
+def import_model(
+    vcml: VcmlMathDescription,
+    *,
+    geometry: str | None = None,
+    dim: int | None = None,
+    front_velocity: FrontVelocity | None = None,
+) -> ImportResult:
     """Translate a pyvcell ``MathDescription`` into a formalism ``MathDescription`` plus its
     observables. ``geometry`` defaults to the VCell math description's ``name`` (it is
     cross-checked against a real Geometry at solve time, not here).
@@ -123,7 +131,14 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim:
     boundary conditions (§2.6.2): VCell's `boundary_types` are model-wide and list all six box
     faces (`Xm…Zp`) even for a 2D model, so the dimension says which faces are real (`x_minus` /
     `x_plus` for 2D, plus `z_*` for 3D). Without ``dim`` a PDE that carries any non-default
-    boundary is rejected rather than mis-imported."""
+    boundary is rejected rather than mis-imported.
+
+    ``front_velocity`` is the application's moving-boundary front kinematics (``app.front_velocity``
+    — *not* part of the lowered ``MathDescription``, so the caller threads it in). It moves a
+    geometry *surface* class; we attach it as a prescribed-velocity motion (§1.10) on the volume
+    subdomain that surface encloses (its membrane's ``inside_compartment``): the cell carries its
+    cytoplasm, the Lagrangian ``v = v_b`` convention the moving-boundary FV solver uses (the bulk
+    rides the moving mesh, with no-flux on the front). See ``cross_validation/mb_translation.py``."""
 
     variable_names = _collect_variable_names(vcml)
     resolution = resolve_functions(list(vcml.functions), variable_names)
@@ -141,9 +156,12 @@ def import_model(vcml: VcmlMathDescription, *, geometry: str | None = None, dim:
     equations: list[Equation] = []
     boundary_conditions: list[BoundaryCondition] = []
 
+    motion_by_compartment = _front_motion(vcml, front_velocity, resolution, dim)
+
     for compartment in vcml.compartment_subdomains:
         _reject_stochastic(compartment)
-        subdomains.append(Subdomain(name=compartment.name, kind="volume", motion=MotionNone()))
+        motion = motion_by_compartment.get(compartment.name, MotionNone())
+        subdomains.append(Subdomain(name=compartment.name, kind="volume", motion=motion))
         _translate_subdomain_equations(
             compartment, "volume", variables, equations, boundary_conditions, resolution, dim, bulk_species
         )
@@ -189,12 +207,16 @@ def _is_zero_neumann(bc: BoundaryCondition, numeric: dict[str, float]) -> bool:
 
 
 def import_math_description(
-    vcml: VcmlMathDescription, *, geometry: str | None = None, dim: int | None = None
+    vcml: VcmlMathDescription,
+    *,
+    geometry: str | None = None,
+    dim: int | None = None,
+    front_velocity: FrontVelocity | None = None,
 ) -> MathDescription:
     """Convenience wrapper returning just the formalism ``MathDescription`` (the observables
     sidecar is dropped). See :func:`import_model`."""
 
-    return import_model(vcml, geometry=geometry, dim=dim).math
+    return import_model(vcml, geometry=geometry, dim=dim, front_velocity=front_velocity).math
 
 
 def _collect_variable_names(vcml: VcmlMathDescription) -> set[str]:
@@ -273,6 +295,54 @@ def _translate_subdomain_equations(
                 initial_condition=expr(ode.initial),
             )
         )
+
+
+def _front_motion(
+    vcml: VcmlMathDescription,
+    front_velocity: FrontVelocity | None,
+    res: FunctionResolution,
+    dim: int | None,
+) -> dict[str, MotionPrescribedVelocity]:
+    """Resolve the application's moving-boundary ``front_velocity`` to a prescribed-velocity motion
+    on the volume subdomain it moves. Returns ``{compartment_name: MotionPrescribedVelocity}`` (empty
+    when there is no front).
+
+    The front moves a geometry *surface* class (``FrontVelocity.surface_name``); the moving volume is
+    that surface's ``inside_compartment`` (the cell interior — the bulk it encloses rides along, the
+    ``v = v_b`` carry). With no ``surface_name`` we require the model to have exactly one membrane so
+    the target is unambiguous."""
+
+    if front_velocity is None:
+        return {}
+
+    membranes = list(vcml.membrane_subdomains)
+    if not membranes:
+        raise VcellImportError("a moving-boundary front_velocity was given but the model has no membrane subdomain")
+
+    name = front_velocity.surface_name
+    if name is not None:
+        moving = next((m for m in membranes if m.name == name), None)
+        if moving is None:
+            raise VcellImportError(f"front_velocity.surface_name {name!r} matches no membrane subdomain")
+    elif len(membranes) == 1:
+        moving = membranes[0]
+    else:
+        raise VcellImportError(
+            "front_velocity has no surface_name and the model has multiple membranes; "
+            "set surface_name to say which surface moves"
+        )
+
+    interior = moving.inside_compartment
+    if interior is None:
+        raise VcellImportError(
+            f"membrane {moving.name!r} has no inside_compartment, so the moving (interior) volume is undefined"
+        )
+
+    components = [front_velocity.velocity_x, front_velocity.velocity_y]
+    if dim == 3:
+        components.append(front_velocity.velocity_z)
+    rendered = [translate_expression(res.inline(str(c)) or "") for c in components]
+    return {interior: MotionPrescribedVelocity(velocity="[" + ", ".join(rendered) + "]")}
 
 
 def _velocity_vector(velocity: Velocity | None, res: FunctionResolution) -> str | None:
