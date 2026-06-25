@@ -10,8 +10,10 @@ kinetics without an explicit-stability `dt` cap.
 This is "Option 2" of the time-integration options (see the FSI `step_two_phase_fsi_with_*`
 docstrings for "Option 1", the per-step Newton used on the *moving* cell). MOL fits a *fixed*
 domain cleanly — the spatial operators do not change in time, so the whole trajectory is one
-`TS.solve`. For the moving ALE cell the operators change with the geometry, which is why that
-path stays a per-step implicit instead.
+`TS.solve`. For a moving ALE subdomain the operators change with the geometry, so `TS` cannot run
+the whole trajectory; `integrate_discrete_problem_moving` instead **strides** — move the mesh
+discretely, then `TS`-integrate each inter-move interval on the now-fixed configuration (first-order
+in the mesh motion, adaptive-high-order in the reaction–diffusion within a stride).
 
 `n` species live in one vector P1 space (component `k` ↔ species `k`). Each obeys
 
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as _dataclass_replace
 from typing import Any
 
 import numpy as np
@@ -136,6 +139,7 @@ def _run_time_stepper(
     bcs: Sequence[fem.DirichletBC] = (),
     on_time: Callable[[float], None] | None = None,
     localize: Callable[[], str | None] | None = None,
+    t_start: float = 0.0,
 ) -> tuple[int, float]:
     """Integrate the implicit residual `F(state, rate) = 0` to `options.t_final` with PETSc `TS`,
     mutating `state` in place. `residual` is the UFL form of `F` (`rate` the time derivative `ċ`,
@@ -201,7 +205,8 @@ def _run_time_stepper(
     # constant over-diffusion ≈ the initial step — independent of `rtol`. The remedy is a small
     # startup step the controller then grows: `t_final / 1e4` drives the cold-start error below the
     # spatial floor here while adding only a handful of steps (the controller ramps geometrically).
-    ts.setTimeStep(options.dt_initial if options.dt_initial is not None else options.t_final / 1.0e4)
+    ts.setTimeStep(options.dt_initial if options.dt_initial is not None else (options.t_final - t_start) / 1.0e4)
+    ts.setTime(t_start)  # integrate the sub-interval [t_start, t_final] (the moving driver strides over these)
     ts.setMaxTime(options.t_final)
     ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
     ts.setTolerances(options.atol, options.rtol)
@@ -221,7 +226,7 @@ def _run_time_stepper(
     ts.setFromOptions()
 
     if on_time is not None:
-        on_time(0.0)  # evaluate g(t), time-dependent terms etc. at the initial time
+        on_time(t_start)  # evaluate g(t), time-dependent terms etc. at the interval's start time
     if bcs:  # make the initial state consistent with the Dirichlet boundary values g(t=0)
         fem_petsc.set_bc(state.x.petsc_vec, bcs)
         state.x.scatter_forward()
@@ -297,29 +302,20 @@ def integrate_discrete_problem(
     where the backward-Euler driver would need it linear (or lagged). The `unknown` carries the
     IC `assemble` applied and is integrated in place to `t_final`.
 
-    Fixed-domain only: a prescribed `motion_velocity` (moving subdomain) raises — the moving
-    cell uses the per-step Newton path (`backend/fsi.py`). All boundary kinds are supported:
+    Fixed-domain only: a prescribed `motion_velocity` (moving subdomain) raises — use
+    `integrate_discrete_problem_moving` (strided ALE-MOL). All boundary kinds are supported:
     natural / Neumann / Robin enter the residual, and strong **Dirichlet** BCs (`problem.bcs`)
     are imposed as algebraic constraints in the `TS` callbacks. Returns an `IntegrationResult`.
     """
 
     if problem.motion_velocity is not None:
-        raise NotImplementedError("method-of-lines is fixed-domain; a moving subdomain uses the per-step Newton path")
+        raise NotImplementedError(
+            "method-of-lines is fixed-domain; a moving subdomain uses integrate_discrete_problem_moving"
+        )
     if TermKind.TIME_DERIVATIVE not in problem.term_kinds():
         raise NotImplementedError("method-of-lines integrates time-dependent problems only")
 
-    state, trial, test, dx = problem.unknown, problem.trial, problem.test, problem.dx
-    rate = fem.Function(state.function_space)  # ċ
-    residual = ufl.inner(rate, test) * dx  # mass term ċ·v
-    for term in problem.terms:
-        if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
-            continue
-        integrand = ufl.replace(term.integrand, {trial: state})  # trial → unknown ⇒ a nonlinear residual
-        # Same signs as backward Euler: source on the PDE RHS ⇒ −source in the residual.
-        residual = residual - integrand * dx if term.kind is TermKind.SOURCE else residual + integrand * dx
-    for boundary in problem.boundary_terms:
-        residual = residual + ufl.replace(boundary.integrand, {trial: state}) * boundary.measure
-
+    state, rate, residual = _mol_residual(problem)
     options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
     steps, final_time = _run_time_stepper(
         state,
@@ -332,3 +328,93 @@ def integrate_discrete_problem(
     )
     problem.previous.x.array[:] = state.x.array
     return IntegrationResult(solution=state, steps=steps, time=final_time)
+
+
+def _mol_residual(problem: DiscreteProblem) -> tuple[fem.Function, fem.Function, UflExpr]:
+    """The method-of-lines implicit residual `F(c, ċ)` for an assembled `DiscreteProblem`: the IR's
+    tagged spatial terms (diffusion, advection, **dilution**, source, …) with `trial → unknown` (so a
+    nonlinear source is a genuine residual), the backward-Euler time term swapped for `ċ·v`, plus the
+    boundary terms. Returns `(state, rate, residual)` — `rate` is the fresh `ċ` Function `TS` drives.
+    The DILUTION term is kept, so on a moving mesh the residual is the ALE referential form."""
+
+    state, trial, test, dx = problem.unknown, problem.trial, problem.test, problem.dx
+    rate = fem.Function(state.function_space)  # ċ
+    residual = ufl.inner(rate, test) * dx  # mass term ċ·v
+    for term in problem.terms:
+        if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
+            continue
+        integrand = ufl.replace(term.integrand, {trial: state})  # trial → unknown ⇒ a nonlinear residual
+        # Same signs as backward Euler: source on the PDE RHS ⇒ −source in the residual.
+        residual = residual - integrand * dx if term.kind is TermKind.SOURCE else residual + integrand * dx
+    for boundary in problem.boundary_terms:
+        residual = residual + ufl.replace(boundary.integrand, {trial: state}) * boundary.measure
+    return state, rate, residual
+
+
+def integrate_discrete_problem_moving(
+    problem: DiscreteProblem,
+    *,
+    t_final: float,
+    motion_steps: int,
+    dt_initial: float | None = None,
+    ts_type: str = "bdf",
+    rtol: float = 1.0e-6,
+    atol: float = 1.0e-8,
+    ksp_type: str = "gmres",
+    pc_type: str = "ilu",
+    ksp_rtol: float = 1.0e-9,
+) -> IntegrationResult:
+    """Method-of-lines on a **moving** subdomain (strided ALE), to `t_final`.
+
+    PETSc `TS` integrates a fixed spatial operator, but an ALE mesh moves the operator in time. This
+    mirrors what the backward-Euler `step` does — move the mesh discretely, then solve — except each
+    interval is integrated with the adaptive-BDF `TS` instead of a single backward-Euler step. The run
+    is split into `motion_steps` equal strides of length `h = t_final / motion_steps`; each stride:
+
+    1. **moves the mesh** by `h·v` (`advance_mesh`: nodes carried in the material frame, the field
+       values riding along, harmonic-extended in the interior for a bulk);
+    2. **`TS`-integrates** the reaction–diffusion–**dilution** residual over `[t, t+h]` on the
+       now-fixed configuration — the DILUTION term `(∇·v)c` makes this the ALE referential form, so a
+       volume-changing motion dilutes the field correctly.
+
+    So it is **first-order in the mesh motion** (the mesh is frozen within a stride — refine
+    `motion_steps` to tighten that split) but keeps MOL's **adaptive high-order** time integration of
+    the reaction–diffusion *within* each stride: the win is a stiff reaction under a slow/smooth motion,
+    where few strides suffice yet the kinetics need fine, error-controlled sub-stepping. The mesh-move
+    magnitude per stride is set through `problem.dt`. No remeshing — a motion that tangles the mesh
+    raises `MeshQualityError` (combine with the `ale` remesh driver for large motions). Returns an
+    `IntegrationResult` whose `steps` is the total `TS` steps across all strides.
+    """
+
+    if problem.motion_velocity is None:
+        raise NotImplementedError(
+            "integrate_discrete_problem_moving needs a moving subdomain; the fixed-domain "
+            "case uses integrate_discrete_problem"
+        )
+    if TermKind.TIME_DERIVATIVE not in problem.term_kinds():
+        raise NotImplementedError("method-of-lines integrates time-dependent problems only")
+    if motion_steps < 1:
+        raise ValueError(f"motion_steps must be >= 1, got {motion_steps}")
+
+    h = t_final / motion_steps
+    problem.dt.value = h  # the per-stride mesh-move magnitude (advance_mesh moves by dt·v)
+    state, rate, residual = _mol_residual(problem)
+    options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
+
+    total_steps = 0
+    for i in range(motion_steps):
+        problem.advance_mesh()  # move the mesh by h·v, carrying the field (material frame)
+        stride = _dataclass_replace(options, t_final=(i + 1) * h)
+        steps, _ = _run_time_stepper(
+            state,
+            rate,
+            residual,
+            stride,
+            bcs=problem.bcs,
+            on_time=problem.set_time,
+            localize=lambda: _localize_nonfinite_term(problem),
+            t_start=i * h,
+        )
+        total_steps += steps
+    problem.previous.x.array[:] = state.x.array
+    return IntegrationResult(solution=state, steps=total_steps, time=motion_steps * h)
