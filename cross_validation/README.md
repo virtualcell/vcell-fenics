@@ -196,3 +196,35 @@ assembled partial Jacobian. Comparing it to FV (Sundials/CVODE) under joint refi
 
 Clean ~2×/level (first-order — the body-fitted membrane is O(h) on each side) → the matrix-free
 membrane-coupled MOL converges to VCell's fvsolver on a receptor-ligand model imported end-to-end.
+
+## Moving-boundary translation (ALE ↔ FronTier FV)
+
+A first cross-validation of a **moving boundary** against `../vcell-mbsolver` (the FronTier
+front-tracking + conservative-Voronoi FV solver, now `pyvcell-mbsolver`; algorithm: Novak & Slepchenko,
+*J. Comput. Phys.* 270, 2014). A disk of cytoplasm (radius 3) carrying an interior species `C`
+(`D = 10`, IC `C = x`) is translated rigidly at velocity `(0.5, 0)`; both solvers run it and we compare
+the centre-of-mass trajectory and the `C` homogenisation to `t = 2`.
+
+**The convention that makes them agree.** The mbsolver separates the **front** velocity `v_b` (moves the
+boundary) from the **volume** velocity `v` (advects the species). For a migrating cell carrying its
+cytoplasm, set `v = v_b`: then the parabolic equation is pure diffusion in the moving frame and the
+Rankine–Hugoniot BC `(J − v_b u)·n = 0` reduces to no-flux — exactly our ALE `MotionPrescribedVelocity`.
+Setting only the front (`v = 0`) instead sweeps a fixed lab-frame field (a traveling exponential), a
+different problem — which is why an initial front-only run disagreed ~290× on the interior. (Driving the
+species advection with a zero component surfaced a pyvcell writer bug, virtualcell/pyvcell#54.)
+
+```bash
+../pyvcell/.venv/bin/python  cross_validation/mb_translation_fv.py   # stage 1: writes mb_translation_fv.npz (gitignored, regenerable)
+.pixi/envs/dev/bin/python    cross_validation/mb_translation.py      # stage 2: fenics ALE + the comparison
+```
+
+| t | fenics CoM Δx | FV front Δx | fenics C spread | FV C spread |
+|---|---|---|---|---|
+| 0.5 | 0.250 | 0.227 | 0.894 | 0.749 |
+| 1.0 | 0.500 | 0.486 | 0.159 | 0.112 |
+| 2.0 | **1.000** | **0.978** | **0.0050** | **0.0026** |
+
+Both translate by ~1 (fenics exact ALE; FV 2.3 % short from front redistribution) and both interiors
+homogenise — the solvers agree on the front motion and on diffusion-in-the-moving-frame. Next:
+drive both from one VCML (extend the bridge to import the moving-boundary front velocity as the
+subdomain motion), and compare the *active-gel migration* model (`docs/modeling/active-protrusion-migration.md`).
