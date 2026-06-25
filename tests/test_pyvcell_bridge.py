@@ -177,6 +177,121 @@ def test_velocity_becomes_a_relative_advection_vector() -> None:
     assert eq.terms["relative_advection"] == "[vx, 2*geom.x[1]]"
 
 
+def _moving_boundary_vcml(membranes: int = 1) -> vm.MathDescription:
+    """A cyto disk (with a diffusing species) inside ec, joined by one (or more) membranes whose
+    ``inside_compartment`` is the moving interior — the moving-boundary import target."""
+    membrane_subdomains = [
+        vm.MembraneSubDomain(name=f"cyto_ec_{i}", inside_compartment="cyto", outside_compartment="ec")
+        for i in range(membranes)
+    ]
+    return vm.MathDescription(
+        name="cell",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto",
+                pde_equations=[vm.PdeEquation(name="C", diffusion="10", rate="0", initial="x", steady=False)],
+            ),
+            vm.CompartmentSubDomain(name="ec"),
+        ],
+        membrane_subdomains=membrane_subdomains,
+    )
+
+
+def test_front_velocity_imports_as_prescribed_motion_on_the_interior() -> None:
+    from pyvcell.vcml.models_app import FrontVelocity
+
+    from vcell_fenics.formalism.schema import MotionNone, MotionPrescribedVelocity
+
+    md = import_math_description(
+        _moving_boundary_vcml(),
+        geometry="disk",
+        dim=2,
+        front_velocity=FrontVelocity(velocity_x=0.5, velocity_y=0.0),
+    )
+    motions = {s.name: s.motion for s in md.subdomains}
+    # The moving front carries the cell interior (v = v_b); ec stays the static lab frame.
+    assert isinstance(motions["cyto"], MotionPrescribedVelocity)
+    assert motions["cyto"].velocity == "[0.5, 0.0]"
+    assert isinstance(motions["ec"], MotionNone)
+
+
+def test_front_velocity_expression_components_are_translated() -> None:
+    from pyvcell.vcml.models_app import FrontVelocity
+
+    from vcell_fenics.formalism.schema import MotionPrescribedVelocity
+
+    md = import_math_description(
+        _moving_boundary_vcml(),
+        dim=2,
+        front_velocity=FrontVelocity(velocity_x="sin(t)", velocity_y="2*y"),
+    )
+    motion = next(s.motion for s in md.subdomains if s.name == "cyto")
+    assert isinstance(motion, MotionPrescribedVelocity)
+    assert motion.velocity == "[sin(sim.t), 2*geom.x[1]]"
+
+
+def test_front_velocity_includes_z_only_for_a_3d_geometry() -> None:
+    from pyvcell.vcml.models_app import FrontVelocity
+
+    from vcell_fenics.formalism.schema import MotionPrescribedVelocity
+
+    front = FrontVelocity(velocity_x=0.5, velocity_y=0.0, velocity_z=0.25)
+    md = import_math_description(_moving_boundary_vcml(), dim=3, front_velocity=front)
+    motion = next(s.motion for s in md.subdomains if s.name == "cyto")
+    assert isinstance(motion, MotionPrescribedVelocity)
+    assert motion.velocity == "[0.5, 0.0, 0.25]"
+
+
+def test_no_front_velocity_leaves_all_subdomains_static() -> None:
+    from vcell_fenics.formalism.schema import MotionNone
+
+    md = import_math_description(_moving_boundary_vcml())
+    assert all(isinstance(s.motion, MotionNone) for s in md.subdomains)
+
+
+def test_front_velocity_surface_name_selects_the_moving_membrane() -> None:
+    from pyvcell.vcml.models_app import FrontVelocity
+
+    from vcell_fenics.formalism.schema import MotionPrescribedVelocity
+
+    front = FrontVelocity(velocity_x=0.5, velocity_y=0.0, surface_name="cyto_ec_1")
+    md = import_math_description(_moving_boundary_vcml(membranes=2), dim=2, front_velocity=front)
+    motion = next(s.motion for s in md.subdomains if s.name == "cyto")
+    assert isinstance(motion, MotionPrescribedVelocity)
+
+
+def test_front_velocity_is_ambiguous_without_a_surface_name() -> None:
+    from pyvcell.vcml.models_app import FrontVelocity
+
+    with pytest.raises(VcellImportError, match="multiple membranes"):
+        import_math_description(_moving_boundary_vcml(membranes=2), dim=2, front_velocity=FrontVelocity(velocity_x=0.5))
+
+
+def test_front_velocity_surface_name_must_match_a_membrane() -> None:
+    from pyvcell.vcml.models_app import FrontVelocity
+
+    with pytest.raises(VcellImportError, match="matches no membrane"):
+        import_math_description(
+            _moving_boundary_vcml(), dim=2, front_velocity=FrontVelocity(velocity_x=0.5, surface_name="nope")
+        )
+
+
+def test_front_velocity_requires_a_membrane() -> None:
+    from pyvcell.vcml.models_app import FrontVelocity
+
+    vcml = vm.MathDescription(
+        name="cell",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto",
+                pde_equations=[vm.PdeEquation(name="C", diffusion="10", rate="0", initial="x", steady=False)],
+            )
+        ],
+    )
+    with pytest.raises(VcellImportError, match="no membrane"):
+        import_math_description(vcml, dim=2, front_velocity=FrontVelocity(velocity_x=0.5))
+
+
 def test_numeric_and_symbolic_constants_and_functions() -> None:
     from vcell_fenics.formalism.schema import ParameterConstant, ParameterExpression
 
