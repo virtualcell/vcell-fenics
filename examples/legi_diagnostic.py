@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import cast
 
 import matplotlib
 import numpy as np
 import ufl
 from dolfinx import fem
+from numpy.typing import NDArray
 from petsc4py import PETSc
 
 matplotlib.use("Agg")
@@ -33,23 +35,31 @@ from vcell_fenics.backend.interface_coupled import (
     assemble_membrane_coupled,
 )
 from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tension
+from vcell_fenics.formalism.schema import MathDescription
 
 _HERE = Path(__file__).parent
 _DT, _BASE, _ALPHA = 0.02, 0.5, 0.12
 
 
-def _demo_model():  # type: ignore[no-untyped-def]
+def _demo_model() -> MathDescription:
     spec = importlib.util.spec_from_file_location("legi_demo", _HERE / "legi_sustained_chemotaxis.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.model()
+    return cast(MathDescription, module.model())  # dynamically loaded module → cast its Any return
 
 
 def main() -> None:
     geom = make_two_bulk_membrane_geometry(
-        "cell", inner="cyto", outer_subdomain="ext", membrane="pm", interface="pm",
-        outer="wall", inner_radius=0.5, outer_radius=1.5, h=0.06,
+        "cell",
+        inner="cyto",
+        outer_subdomain="ext",
+        membrane="pm",
+        interface="pm",
+        outer="wall",
+        inner_radius=0.5,
+        outer_radius=1.5,
+        h=0.06,
     )
     motion = ForceBalanceMeshMotion(geom, tension=_BASE, dt=_DT, area_correction=True)
     problem = assemble_membrane_coupled(_demo_model(), geom, dt=_DT, motion=motion)
@@ -58,7 +68,7 @@ def main() -> None:
     area_form = fem.form(fem.Constant(cyto, PETSc.ScalarType(1.0)) * ufl.dx)  # type: ignore[operator]
     coord = ufl.SpatialCoordinate(cyto)
 
-    def outline() -> np.ndarray:  # type: ignore[type-arg]
+    def outline() -> NDArray[np.float64]:
         x = mem.geometry.x[:, :2]
         c = x.mean(axis=0)
         loop = x[np.argsort(np.arctan2(x[:, 1] - c[1], x[:, 0] - c[0]))]
@@ -93,7 +103,7 @@ def main() -> None:
 
     fig, (ax_out, ax_vel) = plt.subplots(1, 2, figsize=(13, 6.2))
     for i, (t, loop, com) in enumerate(outlines):
-        color = plt.cm.viridis(i / (len(outlines) - 1))
+        color = plt.get_cmap("viridis")(i / (len(outlines) - 1))
         ax_out.plot(loop[:, 0], loop[:, 1], color=color, lw=1.3, label=f"t={t:.1f}")
         ax_out.plot(com[0], com[1], "o", color=color, ms=5)
     ax_out.axvline(0, color="gray", lw=0.5)

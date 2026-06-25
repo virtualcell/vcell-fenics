@@ -132,7 +132,7 @@ def _write_tiled_image(frames: list[tuple[pyvista.UnstructuredGrid, float]], pat
     lo = min(grid.point_data["response"].min() for grid, _ in frames)
     hi = max(grid.point_data["response"].max() for grid, _ in frames)
     cols = (len(frames) + 1) // 2
-    plotter = pyvista.Plotter(shape=(2, cols), off_screen=True, window_size=(200 * cols, 440), border=False)
+    plotter = pyvista.Plotter(shape=(2, cols), off_screen=True, window_size=[200 * cols, 440], border=False)
     box = pyvista.Box(bounds=(-1.55, 1.55, -1.55, 1.55, -0.01, 0.01))
     for i, (grid, t) in enumerate(frames):
         plotter.subplot(i // cols, i % cols)
@@ -147,7 +147,7 @@ def _write_tiled_image(frames: list[tuple[pyvista.UnstructuredGrid, float]], pat
             scalar_bar_args={"title": "response a-h", "n_labels": 3, "fmt": "%.1f", "label_font_size": 10},
         )
         plotter.add_text(f"t = {t:.1f}", font_size=9)
-        plotter.view_xy()
+        plotter.view_xy()  # type: ignore[call-arg]  # pyvista stub drops self on the @wraps-decorated method
         plotter.camera.zoom(1.1)
     plotter.screenshot(str(path))
     plotter.close()

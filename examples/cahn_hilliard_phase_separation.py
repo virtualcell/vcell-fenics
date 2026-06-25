@@ -84,7 +84,7 @@ def model() -> MathDescription:
 def _write_tiled_image(frames: list[tuple[pyvista.UnstructuredGrid, float]], path: Path) -> None:
     pyvista.OFF_SCREEN = True
     cols = (len(frames) + 1) // 2
-    plotter = pyvista.Plotter(shape=(2, cols), off_screen=True, window_size=(210 * cols, 440), border=False)
+    plotter = pyvista.Plotter(shape=(2, cols), off_screen=True, window_size=[210 * cols, 440], border=False)
     for i, (grid, t) in enumerate(frames):
         plotter.subplot(i // cols, i % cols)
         plotter.add_mesh(
@@ -97,7 +97,7 @@ def _write_tiled_image(frames: list[tuple[pyvista.UnstructuredGrid, float]], pat
             scalar_bar_args={"title": "phase phi", "n_labels": 3, "fmt": "%.1f", "label_font_size": 10},
         )
         plotter.add_text(f"t = {t:.3f}", font_size=9)
-        plotter.view_xy()
+        plotter.view_xy()  # type: ignore[call-arg]  # pyvista stub drops self on the @wraps-decorated method
         plotter.camera.zoom(1.3)
     plotter.screenshot(str(path))
     plotter.close()

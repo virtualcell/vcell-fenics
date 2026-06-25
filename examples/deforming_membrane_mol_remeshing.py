@@ -33,9 +33,12 @@ from pathlib import Path
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
+from numpy.typing import NDArray
 
 from vcell_fenics.backend import (
     ALEState,
+    DiscreteProblem,
+    Geometry,
     SolverConfiguration,
     assemble,
     integrate_discrete_problem_stride,
@@ -45,6 +48,9 @@ from vcell_fenics.backend import (
 from vcell_fenics.formalism import load_yaml
 
 _HERE = Path(__file__).parent
+
+# An ordered closed membrane loop as parallel (x, y, rho) arrays.
+Curve = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
 
 VELOCITY = "(1.0 + 0.8 * cos(2 * geom.azimuth)) * geom.x / geom.radius"  # elongating (cos 2θ) outward motion
 T_FINAL, MOTION_STEPS, MESH_H, QUALITY_LIMIT = 2.0, 60, 0.10, 1.4
@@ -67,11 +73,11 @@ math_description:
 """
 
 
-def _geom():  # type: ignore[no-untyped-def]
+def _geom() -> Geometry:
     return make_disk_membrane_geometry("disk_membrane", surface_subdomain="membrane", radius=1.0, h=MESH_H)
 
 
-def _membrane_curve(problem):  # type: ignore[no-untyped-def]
+def _membrane_curve(problem: DiscreteProblem) -> Curve:
     """The membrane as an ordered closed loop `(x, y, rho)`. The curve is star-convex here, so the dof
     coordinates order by azimuth; pairing them with the P1 dof values avoids any node/dof reshuffle."""
     coords = problem.V.tabulate_dof_coordinates()[:, :2]
@@ -81,7 +87,7 @@ def _membrane_curve(problem):  # type: ignore[no-untyped-def]
     return np.append(x, x[0]), np.append(y, y[0]), np.append(r, r[0])  # close the loop
 
 
-def _run_remeshed():  # type: ignore[no-untyped-def]
+def _run_remeshed() -> tuple[ALEState, NDArray[np.float64], NDArray[np.float64], list[float], dict[float, Curve]]:
     """Strided MOL with remeshing, capturing the quality trace, remesh times, and snapshots."""
     state = ALEState.initial(load_yaml(MODEL), _geom(), SolverConfiguration(dt=0.01, t_final=T_FINAL))
     h = T_FINAL / MOTION_STEPS
@@ -103,7 +109,7 @@ def _run_remeshed():  # type: ignore[no-untyped-def]
     return state, np.array(times), np.array(quality), remesh_marks, snapshots
 
 
-def _run_no_remesh():  # type: ignore[no-untyped-def]
+def _run_no_remesh() -> tuple[DiscreteProblem, NDArray[np.float64], NDArray[np.float64]]:
     """The same motion with no remeshing — the quality climbs as the mesh degrades."""
     problem = assemble(load_yaml(MODEL), _geom(), dt=0.01)
     h = T_FINAL / MOTION_STEPS
@@ -137,7 +143,7 @@ def main() -> None:
         ax = fig.add_subplot(gs[0, col])
         pts = np.column_stack([x, y]).reshape(-1, 1, 2)
         segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-        lc = LineCollection(segs, cmap="viridis", array=(r[:-1] + r[1:]) / 2, linewidth=4)
+        lc = LineCollection(list(segs), cmap="viridis", array=(r[:-1] + r[1:]) / 2, linewidth=4)
         lc.set_clim(0.0, vmax)
         ax.add_collection(lc)
         mappable = lc

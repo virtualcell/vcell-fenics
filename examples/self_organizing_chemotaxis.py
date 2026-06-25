@@ -23,9 +23,14 @@ Run (in the dev env):
 from __future__ import annotations
 
 import numpy as np
+from numpy.typing import NDArray
 
-from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
-from vcell_fenics.backend.interface_coupled import ForceBalanceMeshMotion, assemble_membrane_coupled
+from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, make_two_bulk_membrane_geometry
+from vcell_fenics.backend.interface_coupled import (
+    ForceBalanceMeshMotion,
+    MembraneCoupledProblem,
+    assemble_membrane_coupled,
+)
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
     BCInterfaceFlux,
@@ -90,12 +95,12 @@ def model() -> MathDescription:
     )
 
 
-def centroid(geom) -> np.ndarray:  # type: ignore[no-untyped-def]
+def centroid(geom: InterfaceCoupledGeometry) -> NDArray[np.float64]:
     x = geom.membrane_mesh.geometry.x
     return np.array([x[:, 0].mean(), x[:, 1].mean()])
 
 
-def receptor_polarity(problem) -> float:  # type: ignore[no-untyped-def]
+def receptor_polarity(problem: MembraneCoupledProblem) -> float:
     field = problem.field("R")
     xc = field.function_space.tabulate_dof_coordinates()[:, 0]
     r = field.x.array
