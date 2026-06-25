@@ -100,10 +100,10 @@ dev = { features = ["dev"], solve-group = "default" }
 [tool.pixi.tasks]
 test = "pytest -m 'not integration'"
 test-integration = "pytest -m integration"
-lint = "ruff check src tests"
-format = "ruff format src tests"
-format-check = "ruff format --check src tests"
-typecheck = "mypy src tests"
+lint = "ruff check src tests examples"
+format = "ruff format src tests examples"
+format-check = "ruff format --check src tests examples"
+typecheck = "mypy src tests examples"
 check = { depends-on = ["lint", "format-check", "typecheck", "test"] }
 # Launch JupyterLab on the demo notebooks (needs the dev env: `pixi run -e dev notebooks`).
 notebooks = "jupyter lab docs/notebooks"
@@ -174,7 +174,7 @@ strict = true
 # Match requires-python (>= 3.12) and the runtime (3.14): the env's scientific deps (e.g.
 # tifffile via scikit-image) use 3.12+ `type` statements that mypy cannot parse under 3.11.
 python_version = "3.12"
-files = ["src", "tests"]
+files = ["src", "tests", "examples"]
 # Strict already enables warn_unused_ignores; keep it explicit so anyone
 # reading the config sees that `# type: ignore` comments must be load-bearing.
 warn_unused_ignores = true
