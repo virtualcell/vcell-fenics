@@ -9,7 +9,14 @@ The `formalism` package (schema / parser / validator) stays pure-Python with no
 FEniCSx dependency; this package is where DOLFINx enters.
 """
 
-from vcell_fenics.backend.ale import ALEState, StepTooLarge, run_with_remeshing, step_with_remeshing
+from vcell_fenics.backend.ale import (
+    ALEState,
+    StepTooLarge,
+    run_moving_with_remeshing,
+    run_with_remeshing,
+    step_with_remeshing,
+    stride_with_remeshing,
+)
 from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
 from vcell_fenics.backend.cahn_hilliard import (
     cahn_hilliard_free_energy,
@@ -75,6 +82,7 @@ from vcell_fenics.backend.reaction_diffusion import (
     IntegrationResult,
     integrate_discrete_problem,
     integrate_discrete_problem_moving,
+    integrate_discrete_problem_stride,
     integrate_reaction_diffusion,
 )
 from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
@@ -131,6 +139,7 @@ __all__ = [
     "enclosed_volume",
     "integrate_discrete_problem",
     "integrate_discrete_problem_moving",
+    "integrate_discrete_problem_stride",
     "integrate_interface_coupled",
     "integrate_membrane_coupled",
     "integrate_reaction_diffusion",
@@ -147,6 +156,7 @@ __all__ = [
     "register_geometry",
     "run",
     "run_cahn_hilliard",
+    "run_moving_with_remeshing",
     "run_with_remeshing",
     "solve_cahn_hilliard",
     "solve_incompressible_stokes",
@@ -165,4 +175,5 @@ __all__ = [
     "step_two_phase_fsi_with_reacting_species",
     "step_two_phase_fsi_with_species",
     "step_with_remeshing",
+    "stride_with_remeshing",
 ]

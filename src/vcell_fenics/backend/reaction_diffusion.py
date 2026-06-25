@@ -36,7 +36,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from dataclasses import replace as _dataclass_replace
 from typing import Any
 
 import numpy as np
@@ -382,8 +381,9 @@ def integrate_discrete_problem_moving(
     the reaction–diffusion *within* each stride: the win is a stiff reaction under a slow/smooth motion,
     where few strides suffice yet the kinetics need fine, error-controlled sub-stepping. The mesh-move
     magnitude per stride is set through `problem.dt`. No remeshing — a motion that tangles the mesh
-    raises `MeshQualityError` (combine with the `ale` remesh driver for large motions). Returns an
-    `IntegrationResult` whose `steps` is the total `TS` steps across all strides.
+    raises `MeshQualityError`; for a **large deformation** use `backend.ale.run_moving_with_remeshing`,
+    which remeshes between strides. Returns an `IntegrationResult` whose `steps` is the total `TS`
+    steps across all strides.
     """
 
     if problem.motion_velocity is None:
@@ -398,23 +398,56 @@ def integrate_discrete_problem_moving(
 
     h = t_final / motion_steps
     problem.dt.value = h  # the per-stride mesh-move magnitude (advance_mesh moves by dt·v)
-    state, rate, residual = _mol_residual(problem)
-    options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
-
     total_steps = 0
     for i in range(motion_steps):
         problem.advance_mesh()  # move the mesh by h·v, carrying the field (material frame)
-        stride = _dataclass_replace(options, t_final=(i + 1) * h)
-        steps, _ = _run_time_stepper(
-            state,
-            rate,
-            residual,
-            stride,
-            bcs=problem.bcs,
-            on_time=problem.set_time,
-            localize=lambda: _localize_nonfinite_term(problem),
+        total_steps += integrate_discrete_problem_stride(
+            problem,
             t_start=i * h,
+            t_final=(i + 1) * h,
+            dt_initial=dt_initial,
+            ts_type=ts_type,
+            rtol=rtol,
+            atol=atol,
+            ksp_type=ksp_type,
+            pc_type=pc_type,
+            ksp_rtol=ksp_rtol,
         )
-        total_steps += steps
+    return IntegrationResult(solution=problem.unknown, steps=total_steps, time=motion_steps * h)
+
+
+def integrate_discrete_problem_stride(
+    problem: DiscreteProblem,
+    *,
+    t_start: float,
+    t_final: float,
+    dt_initial: float | None = None,
+    ts_type: str = "bdf",
+    rtol: float = 1.0e-6,
+    atol: float = 1.0e-8,
+    ksp_type: str = "gmres",
+    pc_type: str = "ilu",
+    ksp_rtol: float = 1.0e-9,
+) -> int:
+    """Method-of-lines over **one fixed-mesh interval** `[t_start, t_final]`, returning the `TS` step
+    count. The IR's tagged terms (incl. DILUTION) build the residual, so on a moving subdomain's mesh
+    this is the ALE referential form. This primitive neither moves the mesh nor remeshes — the caller
+    owns that: `integrate_discrete_problem_moving` strides it after each `advance_mesh`; the ALE
+    remesh driver (`backend.ale.run_moving_with_remeshing`) strides it with a quality-triggered remesh
+    between strides, so it composes with remeshing for large deformations. Mutates `problem.unknown`
+    (and `previous`) in place."""
+
+    state, rate, residual = _mol_residual(problem)
+    options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
+    steps, _ = _run_time_stepper(
+        state,
+        rate,
+        residual,
+        options,
+        bcs=problem.bcs,
+        on_time=problem.set_time,
+        localize=lambda: _localize_nonfinite_term(problem),
+        t_start=t_start,
+    )
     problem.previous.x.array[:] = state.x.array
-    return IntegrationResult(solution=state, steps=total_steps, time=motion_steps * h)
+    return steps

@@ -16,6 +16,13 @@ Runnable demos that exercise the backend end-to-end. Run any of them with the de
 - **`self_organizing_chemotaxis.py`** — an earlier receptor-binding chemotaxis demo. ⚠️ Its "migration"
   uses the same membrane node-mean metric the LEGI note below shows is misleading; treat its migration
   claim as unverified pending the same CoM check.
+- **`deforming_membrane_mol_remeshing.py`** — large-deformation moving-surface PDE: a receptor density
+  `rho` on a cell membrane (surface diffusion + the mandatory dilution `rho ∇_Γ·v_Γ`) driven through a
+  big shape change (a circle elongating into a dumbbell), solved by **method-of-lines + remeshing**
+  (`run_moving_with_remeshing`). Writes `deforming_membrane_mol_remeshing.png`: the membrane snapshots
+  coloured by `rho` (top) and the mesh-quality-growth trace (bottom) — held bounded by remeshing
+  (sawtooth, resetting at each remesh) versus climbing unbounded without it. The driver is verified in
+  `tests/test_backend_ale_mol.py`.
 
 ---
 
