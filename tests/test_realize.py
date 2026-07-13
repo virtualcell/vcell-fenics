@@ -445,7 +445,8 @@ def test_2d_interior_must_be_analytic() -> None:
         realize(bad)
 
 
-def test_3d_not_implemented() -> None:
-    g = GeometryDescription(name="g", dim=3, subvolumes=(SubVolume(name="c", type="compartmental"),))
-    with pytest.raises(NotImplementedError, match="v1 supports dim 0 and dim 2"):
+def test_unsupported_dim_rejected() -> None:
+    # dim 0/2/3 are realized; a 1D geometry is not yet supported.
+    g = GeometryDescription(name="g", dim=1, subvolumes=(SubVolume(name="c", type="compartmental"),))
+    with pytest.raises(NotImplementedError, match="supports dim 0, 2, 3"):
         realize(g)

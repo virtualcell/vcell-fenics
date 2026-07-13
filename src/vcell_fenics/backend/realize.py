@@ -31,7 +31,9 @@ the formalism.
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import basix.ufl
 import numpy as np
@@ -40,7 +42,7 @@ import ufl
 from dolfinx import mesh as dmesh
 from mpi4py import MPI
 from numpy.typing import NDArray
-from skimage.measure import approximate_polygon, find_contours
+from skimage.measure import approximate_polygon, find_contours, marching_cubes
 
 from vcell_fenics.backend.geometry import (
     BoundaryGeometry,
@@ -58,9 +60,15 @@ from vcell_fenics.formalism.rvachev import lower_predicate, subvolume_implicit_f
 # follow the cap, so it sits after the other imports (E402) rather than in the sorted block above.
 pyngcore.SetNumThreads(1)
 
+from netgen.csg import CSGeometry, OrthoBrick  # noqa: E402
+from netgen.csg import Pnt as CsgPnt  # noqa: E402
 from netgen.geom2d import SplineGeometry  # noqa: E402  (must follow SetNumThreads)
+from netgen.meshing import Element2D, FaceDescriptor  # noqa: E402
+from netgen.meshing import Mesh as NetgenMesh  # noqa: E402
+from netgen.stl import STLGeometry  # noqa: E402
 
 _FACE_NAMES_2D = ("x_minus", "x_plus", "y_minus", "y_plus")
+_FACE_NAMES_3D = ("x_minus", "x_plus", "y_minus", "y_plus", "z_minus", "z_plus")
 # Mesh-tag layout for the 2D realization: one tag per declared surface class (membrane), one per box
 # face. Region (cell) tags are 1..N over the subvolumes.
 _SURFACE_TAG_BASE = 100  # membrane tags, in SurfaceClass order
@@ -108,9 +116,11 @@ def realize(
         return _realize_trivial(description, comm)
     if description.dim == 2:
         return _realize_2d(description, h=h, resolution=resolution, comm=comm)
+    if description.dim == 3:
+        return _realize_3d(description, h=h, resolution=resolution, comm=comm)
     raise NotImplementedError(
         f"realization of dim={description.dim} geometry {description.name!r} is not implemented yet "
-        "(v1 supports dim 0 and dim 2)"
+        "(supports dim 0, 2, 3)"
     )
 
 
@@ -187,7 +197,7 @@ def _realize_2d_partition(
         contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name
     )
     fields = subvolume_implicit_functions(description)  # priority-resolved; classifies each cell
-    tagging = _classify_and_tag(parent, description, fields, cell_face=cell_face, ox=ox, oy=oy, lx=lx, ly=ly)
+    tagging = _classify_and_tag(parent, description, fields, cell_face=cell_face, origin=(ox, oy), extent=(lx, ly))
     return parent, tagging
 
 
@@ -204,8 +214,20 @@ def _realize_2d(description: GeometryDescription, *, h: float, resolution: int |
         return _realize_2d_whole_box(description, h=h, comm=comm)
 
     parent, tagging = _realize_2d_partition(description, h=h, resolution=resolution, comm=comm)
-    tdim = parent.topology.dim
+    return _geometry_from_partition(description, parent, tagging, _FACE_NAMES_2D)
 
+
+def _geometry_from_partition(
+    description: GeometryDescription,
+    parent: dmesh.Mesh,
+    tagging: _Tagging,
+    face_names: tuple[str, ...],
+) -> Geometry:
+    """Assemble a backend :class:`Geometry` from a body-fitted parent mesh and its tagging — the shared
+    tail of `_realize_2d` and `_realize_3d`. A volume submesh per region, a surface submesh + boundary
+    per realized membrane, and a boundary per named box face (`face_names` orders them axis-major)."""
+
+    tdim = parent.topology.dim
     subdomains: dict[str, SubdomainGeometry] = {}
     for name, tag in tagging.region_tags.items():
         sub_mesh, *_ = dmesh.create_submesh(parent, tdim, tagging.cell_tags.find(tag))
@@ -220,7 +242,7 @@ def _realize_2d(description: GeometryDescription, *, h: float, resolution: int |
         subdomains[surface.name] = SubdomainGeometry(mesh=membrane_mesh, kind="surface")
         boundaries[surface.name] = BoundaryGeometry(subdomains=(surface.inside, surface.outside), facets=facets)
 
-    for i, face in enumerate(_FACE_NAMES_2D):
+    for i, face in enumerate(face_names):
         facets = tagging.facet_tags.find(_FACE_TAG_BASE + i)
         if facets.size:
             boundaries[face] = BoundaryGeometry(
@@ -484,16 +506,275 @@ def _containment_parents(polys: list[NDArray[np.float64]]) -> list[int]:
     return parents
 
 
+# -- dim 3: body-fitted, box-partitioned ----------------------------------------
+
+
+def _realize_3d(description: GeometryDescription, *, h: float, resolution: int | None, comm: MPI.Comm) -> Geometry:
+    subvolumes = description.subvolumes
+    if not subvolumes:
+        raise RealizationError(f"3D geometry {description.name!r} has no subvolumes to realize")
+    if len(subvolumes) == 1:
+        return _realize_3d_whole_box(description, h=h, comm=comm)
+    parent, tagging = _realize_3d_partition(description, h=h, resolution=resolution, comm=comm)
+    return _geometry_from_partition(description, parent, tagging, _FACE_NAMES_3D)
+
+
+def _realize_3d_whole_box(description: GeometryDescription, *, h: float, comm: MPI.Comm) -> Geometry:
+    """A single-subvolume 3D geometry is the bounding box itself: a structured tetrahedral box mesh, one
+    ``volume`` region, the six box faces named. The 3D analog of :func:`_realize_2d_whole_box`."""
+
+    subvolume = description.subvolumes[0]
+    ox, oy, oz = description.origin[0], description.origin[1], description.origin[2]
+    lx, ly, lz = description.extent[0], description.extent[1], description.extent[2]
+    counts = [max(1, round(length / h)) for length in (lx, ly, lz)]
+    box = dmesh.create_box(
+        comm,
+        [np.array([ox, oy, oz]), np.array([ox + lx, oy + ly, oz + lz])],
+        counts,
+        dmesh.CellType.tetrahedron,
+    )
+    fdim = box.topology.dim - 1
+    markers = (
+        ("x_minus", lambda p: np.isclose(p[0], ox)),
+        ("x_plus", lambda p: np.isclose(p[0], ox + lx)),
+        ("y_minus", lambda p: np.isclose(p[1], oy)),
+        ("y_plus", lambda p: np.isclose(p[1], oy + ly)),
+        ("z_minus", lambda p: np.isclose(p[2], oz)),
+        ("z_plus", lambda p: np.isclose(p[2], oz + lz)),
+    )
+    boundaries: dict[str, BoundaryGeometry] = {}
+    for face, marker in markers:
+        facets = dmesh.locate_entities_boundary(box, fdim, marker)
+        if facets.size:
+            boundaries[face] = BoundaryGeometry(subdomains=(subvolume.name,), facets=facets)
+    subdomains = {subvolume.name: SubdomainGeometry(mesh=box, kind="volume")}
+    return Geometry(name=description.name, subdomains=subdomains, boundaries=boundaries)
+
+
+def _realize_3d_partition(
+    description: GeometryDescription, *, h: float, resolution: int | None, comm: MPI.Comm
+) -> tuple[dmesh.Mesh, _Tagging]:
+    """Body-fit and tag a multi-subvolume 3D geometry: marching-cubes each analytic subvolume's implicit
+    surface, mesh the box partitioned by them (`_mesh_box_with_surfaces`), then classify each cell by the
+    priority-resolved fields (`_classify_and_tag`, shared with 2D). The 3D analog of
+    `_realize_2d_partition`."""
+
+    subvolumes = description.subvolumes
+    for subvolume in subvolumes[:-1]:
+        if subvolume.type != "analytic" or subvolume.expression is None:
+            raise RealizationError(
+                f"3D geometry {description.name!r} subvolume {subvolume.name!r} must be 'analytic' with an "
+                f"expression to be realized (got type {subvolume.type!r})"
+            )
+
+    ox, oy, oz = description.origin[0], description.origin[1], description.origin[2]
+    lx, ly, lz = description.extent[0], description.extent[1], description.extent[2]
+    origin, extent = (ox, oy, oz), (lx, ly, lz)
+    counts: tuple[int, int, int]
+    if resolution is None:
+        counts = (
+            min(257, max(33, round(lx / h) + 1)),
+            min(257, max(33, round(ly / h) + 1)),
+            min(257, max(33, round(lz / h) + 1)),
+        )
+    else:
+        counts = (resolution, resolution, resolution)
+
+    raw_fields: list[Expr] = []
+    for subvolume in subvolumes[:-1]:
+        assert subvolume.expression is not None  # checked above
+        raw_fields.append(lower_predicate(parse(subvolume.expression)))
+    surfaces = [
+        _march_surface(field, origin=origin, extent=extent, counts=counts, name=sv.name)
+        for field, sv in zip(raw_fields, subvolumes[:-1], strict=True)
+    ]
+    parents = _surface_containment(raw_fields, origin=origin, extent=extent, counts=counts)
+
+    parent, cell_face = _mesh_box_with_surfaces(
+        surfaces, parents, origin=origin, extent=extent, h=h, comm=comm, name=description.name
+    )
+    fields = subvolume_implicit_functions(description)
+    tagging = _classify_and_tag(parent, description, fields, cell_face=cell_face, origin=origin, extent=extent)
+    return parent, tagging
+
+
+def _march_surface(
+    field: Expr,
+    *,
+    origin: tuple[float, float, float],
+    extent: tuple[float, float, float],
+    counts: tuple[int, int, int],
+    name: str,
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """Sample ``field`` on the box grid and marching-cubes its ``φ = 0`` isosurface, returned as physical
+    (verts, triangle faces). v1 requires the surface strictly inside the box (a subvolume touching the box
+    boundary is a later slice), mirroring :func:`_march_contours`."""
+
+    ox, oy, oz = origin
+    lx, ly, lz = extent
+    nx, ny, nz = counts
+    grid = np.meshgrid(
+        np.linspace(ox, ox + lx, nx), np.linspace(oy, oy + ly, ny), np.linspace(oz, oz + lz, nz), indexing="ij"
+    )
+    phi = _eval_field(field, (grid[0], grid[1], grid[2]))
+    spacing = (lx / (nx - 1), ly / (ny - 1), lz / (nz - 1))
+    try:
+        verts, faces, _, _ = marching_cubes(phi, 0.0, spacing=spacing)
+    except (ValueError, RuntimeError) as exc:
+        raise RealizationError(f"subvolume {name!r} has no φ = 0 isosurface inside the box") from exc
+    verts = verts + np.array([ox, oy, oz])
+    on_edge = (
+        np.isclose(verts[:, 0], ox)
+        | np.isclose(verts[:, 0], ox + lx)
+        | np.isclose(verts[:, 1], oy)
+        | np.isclose(verts[:, 1], oy + ly)
+        | np.isclose(verts[:, 2], oz)
+        | np.isclose(verts[:, 2], oz + lz)
+    )
+    if bool(on_edge.any()):
+        raise NotImplementedError(
+            f"3D realization requires the boundary of {name!r} to be strictly inside the box "
+            "(a subvolume touching the box boundary is a later slice)"
+        )
+    return verts.astype(np.float64), faces.astype(np.int64)
+
+
+def _surface_containment(
+    raw_fields: list[Expr],
+    *,
+    origin: tuple[float, float, float],
+    extent: tuple[float, float, float],
+    counts: tuple[int, int, int],
+) -> list[int]:
+    """Immediate-parent subvolume index for each subvolume — the smallest enclosing one, or -1 (box).
+    Computed from the fields (not the marched geometry): subvolume ``i`` is inside ``j`` iff ``j``'s field
+    is negative at ``i``'s deepest interior grid point; the parent is the smallest such ``j``. The 3D
+    analog of :func:`_containment_parents`."""
+
+    ox, oy, oz = origin
+    lx, ly, lz = extent
+    nx, ny, nz = counts
+    grid = np.meshgrid(
+        np.linspace(ox, ox + lx, nx), np.linspace(oy, oy + ly, ny), np.linspace(oz, oz + lz, nz), indexing="ij"
+    )
+    coords = (grid[0].ravel(), grid[1].ravel(), grid[2].ravel())
+    phis = [_eval_field(f, coords) for f in raw_fields]
+    inside = [phi < 0 for phi in phis]
+    sizes = [int(m.sum()) for m in inside]
+    parents: list[int] = []
+    for i, phi_i in enumerate(phis):
+        if not bool(inside[i].any()):
+            parents.append(-1)
+            continue
+        rep = int(np.argmin(phi_i))  # deepest interior point of subvolume i
+        best, best_size = -1, np.inf
+        for j in range(len(phis)):
+            if j == i or sizes[j] < sizes[i]:
+                continue  # a smaller-or-equal subvolume cannot enclose this one
+            if bool(inside[j][rep]) and sizes[j] < best_size:
+                best, best_size = j, sizes[j]
+        parents.append(best)
+    return parents
+
+
+def _mesh_box_with_surfaces(
+    surfaces: list[tuple[NDArray[np.float64], NDArray[np.int64]]],
+    parents: list[int],
+    *,
+    origin: tuple[float, float, float],
+    extent: tuple[float, float, float],
+    h: float,
+    comm: MPI.Comm,
+    name: str,
+) -> tuple[dmesh.Mesh, dmesh.MeshTags]:
+    """Volume-mesh the box partitioned by the marched ``surfaces``, returning the body-fitted DOLFINx
+    tetrahedral mesh **and** a cell→region tag. The recipe (ADR 008 §8, the 3D analog of the 2D
+    `SplineGeometry` leftdomain/rightdomain path): the box surface is meshed by Netgen's CSG (it carries
+    the local mesh-size function that raw triangles lack); each marched surface is **re-meshed** through
+    `STLGeometry` (raw marched triangles as an interface produce slivers); the surfaces are merged into one
+    `Mesh` with a `FaceDescriptor` per surface whose ``domin``/``domout`` come from the containment forest;
+    `GenerateVolumeMesh` fills the domains and ``el.index`` is the per-region tag."""
+
+    ox, oy, oz = origin
+    lx, ly, lz = extent
+    interior_domain = [i + 2 for i in range(len(surfaces))]  # box background is domain 1
+
+    box_geo = CSGeometry()
+    box_geo.Add(OrthoBrick(CsgPnt(ox, oy, oz), CsgPnt(ox + lx, oy + ly, oz + lz)))
+    box_mesh = box_geo.GenerateMesh(maxh=h)
+
+    merged = NetgenMesh(dim=3)
+    _copy_surface(merged, box_mesh, merged.Add(FaceDescriptor(surfnr=1, domin=1, domout=0, bc=1)))
+    for i, (verts, faces) in enumerate(surfaces):
+        outside = 1 if parents[i] < 0 else interior_domain[parents[i]]
+        fd = merged.Add(FaceDescriptor(surfnr=i + 2, domin=interior_domain[i], domout=outside, bc=i + 2))
+        _copy_surface(merged, _remesh_surface(verts, faces, h), fd)
+    merged.GenerateVolumeMesh()
+
+    points = np.array([list(p.p) for p in merged.Points()], dtype=np.float64)
+    cells = np.array([[v.nr - 1 for v in el.vertices] for el in merged.Elements3D()], dtype=np.int64)
+    material = np.array([el.index for el in merged.Elements3D()], dtype=np.int32)
+    domain = ufl.Mesh(basix.ufl.element("Lagrange", "tetrahedron", 1, shape=(3,)))
+    mesh = dmesh.create_mesh(comm, cells, domain, points)
+
+    tdim = mesh.topology.dim
+    n_local = mesh.topology.index_map(tdim).size_local
+    local_cells = np.arange(n_local, dtype=np.int32)
+    cell_material = material[np.asarray(mesh.topology.original_cell_index)[:n_local]]
+    cell_face = dmesh.meshtags(mesh, tdim, local_cells, cell_material)
+    return mesh, cell_face
+
+
+def _copy_surface(merged: NetgenMesh, source: NetgenMesh, fd: int) -> None:
+    """Copy `source`'s surface triangles into `merged` under face descriptor `fd`, sharing points so the
+    merged surface stays conforming (the Netgen merge idiom)."""
+
+    pmap: dict[object, object] = {}
+    for element in source.Elements2D():
+        for vertex in element.vertices:
+            if vertex not in pmap:
+                pmap[vertex] = merged.Add(source[vertex])
+    for element in source.Elements2D():
+        merged.Add(Element2D(fd, [pmap[v] for v in element.vertices]))  # type: ignore[misc]
+
+
+def _remesh_surface(verts: NDArray[np.float64], faces: NDArray[np.int64], h: float) -> NetgenMesh:
+    """Re-mesh a marched triangle surface to a quality triangulation via Netgen's STL surface mesher
+    (using the raw marched triangles directly as a volume-mesh interface produces slivers)."""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "surface.stl"
+        _write_stl(path, verts, faces)
+        return STLGeometry(str(path)).GenerateMesh(maxh=h)
+
+
+def _write_stl(path: Path, verts: NDArray[np.float64], faces: NDArray[np.int64]) -> None:
+    """Write an ASCII STL for the triangle surface (verts, faces) with per-facet normals."""
+
+    a, b, c = verts[faces[:, 0]], verts[faces[:, 1]], verts[faces[:, 2]]
+    normals = np.cross(b - a, c - a)
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = np.divide(normals, lengths, out=np.zeros_like(normals), where=lengths > 0)
+    lines = ["solid s"]
+    for i in range(faces.shape[0]):
+        lines.append(f"facet normal {normals[i, 0]:.6e} {normals[i, 1]:.6e} {normals[i, 2]:.6e}")
+        lines.append(" outer loop")
+        for p in (a[i], b[i], c[i]):
+            lines.append(f"  vertex {p[0]:.6e} {p[1]:.6e} {p[2]:.6e}")
+        lines.append(" endloop")
+        lines.append("endfacet")
+    lines.append("endsolid s")
+    path.write_text("\n".join(lines))
+
+
 def _classify_and_tag(
     parent: dmesh.Mesh,
     description: GeometryDescription,
     fields: dict[str, Expr],
     *,
     cell_face: dmesh.MeshTags,
-    ox: float,
-    oy: float,
-    lx: float,
-    ly: float,
+    origin: tuple[float, ...],
+    extent: tuple[float, ...],
 ) -> _Tagging:
     """Tag the body-fitted mesh by the priority-resolved implicit fields. Each cell is provisionally
     assigned to the subvolume whose `φ` is negative at its midpoint (the fields partition the plane, so
@@ -509,11 +790,12 @@ def _classify_and_tag(
     tag_to_name = {tag: name for name, tag in region_tags.items()}
     tdim = parent.topology.dim
 
+    gdim = parent.geometry.dim
     cells = np.arange(parent.topology.index_map(tdim).size_local, dtype=np.int32)
     cell_mid = dmesh.compute_midpoints(parent, tdim, cells)
     per_cell = np.zeros(cells.size, dtype=np.int32)
     for name, tag in region_tags.items():
-        per_cell[_eval_field(fields[name], (cell_mid[:, 0], cell_mid[:, 1])) < 0] = tag
+        per_cell[_eval_field(fields[name], tuple(cell_mid[:, k] for k in range(gdim))) < 0] = tag
     per_cell[per_cell == 0] = region_tags[subvolumes[-1].name]  # any unclaimed cell → background
 
     # Resolve each body-fit face as a whole by the majority of its cells' votes (consistent with the
@@ -541,7 +823,7 @@ def _classify_and_tag(
     for facet in range(num_facets):
         incident = facet_to_cell.links(facet)
         if incident.size == 1:  # exterior — a box face
-            face = _classify_face(float(facet_mid[facet, 0]), float(facet_mid[facet, 1]), ox=ox, oy=oy, lx=lx, ly=ly)
+            face = _classify_face(tuple(float(facet_mid[facet, k]) for k in range(gdim)), origin=origin, extent=extent)
             if face is not None:
                 tag = _FACE_TAG_BASE + face
                 facet_index.append(facet)
@@ -572,24 +854,24 @@ def _classify_and_tag(
     )
 
 
-def _classify_face(x: float, y: float, *, ox: float, oy: float, lx: float, ly: float) -> int | None:
-    """Index into ``_FACE_NAMES_2D`` for a facet centroid on a box edge, else ``None`` (membrane)."""
+def _classify_face(point: tuple[float, ...], *, origin: tuple[float, ...], extent: tuple[float, ...]) -> int | None:
+    """Index into the box face names for a facet centroid on a box face, else ``None`` (a membrane).
+    Faces are ordered axis-major to match ``_FACE_NAMES_2D`` / ``_FACE_NAMES_3D``: ``2*axis`` is
+    ``<axis>_minus``, ``2*axis + 1`` is ``<axis>_plus`` (x, then y, then z)."""
 
-    if np.isclose(x, ox):
-        return 0  # x_minus
-    if np.isclose(x, ox + lx):
-        return 1  # x_plus
-    if np.isclose(y, oy):
-        return 2  # y_minus
-    if np.isclose(y, oy + ly):
-        return 3  # y_plus
+    for axis, (o, length, c) in enumerate(zip(origin, extent, point, strict=True)):
+        if np.isclose(c, o):
+            return 2 * axis
+        if np.isclose(c, o + length):
+            return 2 * axis + 1
     return None
 
 
-def _eval_field(expr: Expr, coords: tuple[NDArray[np.float64], NDArray[np.float64]]) -> NDArray[np.float64]:
+def _eval_field(expr: Expr, coords: tuple[NDArray[np.float64], ...]) -> NDArray[np.float64]:
     """Vectorised numeric evaluation of a (lowered, geom.x-only) implicit-function expression over a
-    coordinate grid. Handles the arithmetic / min / max / elementary-function subset an implicit
-    function contains; relational or unbound nodes (which a lowered field never has) raise."""
+    coordinate grid. `coords` is one array per spatial axis (2 in 2D, 3 in 3D); ``geom.x[i]`` reads
+    ``coords[i]``. Handles the arithmetic / min / max / elementary-function subset an implicit function
+    contains; relational or unbound nodes (which a lowered field never has) raise."""
 
     if isinstance(expr, Number):
         return np.full_like(coords[0], expr.value, dtype=np.float64)
