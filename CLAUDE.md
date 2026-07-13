@@ -28,7 +28,7 @@ Substantive intellectual content lives in `docs/`, not in this file. Consult the
 - **`docs/modeling/declarative-formalism.md`** — the math formalism (MathDescription): templates, the expression language, the data model, the VCell mapping (§2.6). The VCell import layer (`pyvcell_bridge`) implements it.
 - **`docs/modeling/geometric-formalism.md`** — the geometry formalism (GeometryDescription, the **source of truth** for spatial domains per ADR 007): VCell-style subvolumes (analytic/csg/image/compartmental) + surface classes + named faces, the realization layer (gmsh OCC body-fitted / level-set / trivial), and the increment roadmap.
 - **`docs/research/2026-05-21-fenicsx-ecosystem.md`** — May 2026 snapshot of FEniCSx ecosystem libraries (DOLFINx 0.10, CutFEMx, scifem, multiphenicsx, etc.), citations, and the Contri–Massing–Rangamani 2025 paper that is this project's scientific North Star.
-- **`docs/decisions/`** — ADR-style records: Pixi + pyproject (001), DOLFINx 0.10 pin (002), MPICH-not-OpenMPI (003), DiscreteProblem IR (004), real FEniCSx types (005), namespaced built-ins (006), geometry source of truth (007).
+- **`docs/decisions/`** — ADR-style records: Pixi + pyproject (001), DOLFINx 0.10 pin (002), MPICH-not-OpenMPI (003), DiscreteProblem IR (004), real FEniCSx types (005), namespaced built-ins (006), geometry source of truth (007), Netgen mesher / gmsh-license contingency (008).
 
 When a user asks about libraries or approaches, check the research snapshot for recency before answering — the library state is dated 2026-05-21 and may have moved.
 

@@ -73,6 +73,7 @@ scikit-image = "*"
 # pydantic backs pyvcell's VCML data model (the import source); pinned here as a conda
 # package so pyvcell's pydantic requirement resolves from conda-forge, not a PyPI wheel.
 pydantic = ">=2.10,<3"
+netgen = ">=6.2.2602,<7"
 
 [tool.pixi.feature.dev.dependencies]
 pytest = "*"
@@ -129,7 +130,7 @@ filterwarnings = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = [".pixi", "build", "dist"]
+extend-exclude = [".pixi", "build", "dist", "stubs"]
 
 [tool.ruff.lint]
 select = [
@@ -175,6 +176,9 @@ strict = true
 # tifffile via scikit-image) use 3.12+ `type` statements that mypy cannot parse under 3.11.
 python_version = "3.12"
 files = ["src", "tests", "examples"]
+# Local partial stubs for otherwise-untyped conda deps (netgen, pyngcore), scoped to the
+# subset we call. See stubs/ — the .pyi files double as documentation of the discovered API.
+mypy_path = "stubs"
 # Strict already enables warn_unused_ignores; keep it explicit so anyone
 # reading the config sees that `# type: ignore` comments must be load-bearing.
 warn_unused_ignores = true
