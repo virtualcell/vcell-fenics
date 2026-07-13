@@ -112,10 +112,10 @@ the original design, summarized so it survives:
   separately so no combined GPL artifact is distributed. This is only needed because gmsh is GPL — it
   is **not** needed for Netgen.
 
-### 8. 3D derisk — Netgen is graceful; multi-region marched-surface is the open piece
+### 8. 3D derisk — Netgen is the mesher for 2D and 3D (single- and multi-region)
 
-A 3D spike (not committed) verified the netgen-3D unknowns that made 3D look risky, and surfaced the
-one that remains:
+A 3D spike (not committed) verified the netgen-3D unknowns that made 3D look risky, including the
+multi-region case that first appeared to be a blocker:
 
 - **Netgen 3D mesher is graceful.** Analytic CSG (sphere-in-box; nested nucleus/cytosol/ecm spheres)
   meshes cleanly with the tets+region-tags → DOLFINx bridge (`el.index` realigned via
@@ -126,16 +126,28 @@ one that remains:
   produced slivers on the dumbbell (min dihedral 4.8°, 21 slivers, 3× the tets). So the "netgen may
   not be graceful in 3D" worry is retired — on this pipeline the gap runs the other way. (Fair caveat:
   gmsh's quality is likely improvable with its optimizer / tuned `classifySurfaces`.)
-- **Multi-region marched-surface is the real open piece.** `realize()`'s 3D needs the box
-  *partitioned* by the marched surface (interior + background, conforming interface) — even a single
-  cell is two regions. Netgen's high-level paths don't cover "discrete surface + multi-domain," and
-  the low-level `Mesh` assembly (`FaceDescriptor` domin/domout + `GenerateVolumeMesh`) proved
-  **fragile** in the spike (orientation-sensitive, mesh-size-init-sensitive, and segfault-prone on
-  wrong setup — got a filled single domain only with outward box normals, not yet a clean two-region
-  fill). This is genuine integration work, roughly equally hard for either backend (gmsh's
-  discrete-surface→OCC-volume also needs care). **Decision deferred:** solve the netgen low-level
-  volume-from-surface setup, or use gmsh-isolated (§7) for 3D multi-region realization specifically —
-  choose after a focused comparison. Netgen remains the mesher for 2D and for 3D single-region.
+- **Multi-region marched-surface works in Netgen — resolved.** `realize()`'s 3D needs the box
+  *partitioned* by the marched surface (interior + background, conforming interface; even a single cell
+  is two regions). The **recipe** (3D analog of the 2D `SplineGeometry` leftdomain/rightdomain path):
+  1. build the **box surface with Netgen CSG** (`OrthoBrick`) — this carries the correct orientation
+     *and* the local mesh-size function that manual triangles lack;
+  2. **re-mesh each marched implicit surface** through `STLGeometry.GenerateMesh` (marching-cubes → STL
+     → quality surface triangulation) — using the *raw* marched triangles as the interface produces
+     slivers, re-meshing gives clean tets;
+  3. merge the surfaces into one `Mesh` with a `FaceDescriptor` per surface (`domin`/`domout` from the
+     contours' containment forest — box `domin=1,domout=0`; a nested surface `domin=child,domout=parent`);
+  4. `GenerateVolumeMesh()`; `el.index` is the per-region tag, realigned to DOLFINx via
+     `topology.original_cell_index` (as in 2D).
+
+  Verified on box-plus-sphere: correct conforming region volumes (inside 4.11 vs 4.19, bg 28.66 vs
+  28.58), **min dihedral ~15.5°, zero slivers**, controllable tet count — *better* quality than gmsh's
+  two-volume approach (min dihedral 10.6°) on the same surface. The earlier "fragile" reading was two
+  fixable mistakes (hand-triangulated box → wrong orientation/no `localh`; raw marched interface →
+  slivers), not a Netgen limitation.
+
+  **Decision:** Netgen is the mesher for **2D, 3D single-region, and 3D multi-region** — in-process,
+  LGPL, no gmsh needed for 3D. gmsh stays only as the §7 contingency. (Follow-up: the multi-region 3D
+  path above is spiked, not yet productionized in `realize()`; that is the next 3D implementation task.)
 
 ## Consequences
 
