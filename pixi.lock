@@ -225,6 +225,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mumps-mpi-5.8.2-hf581c51_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ncurses-6.6-hdb14827_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/netcdf4-1.7.4-nompi_py311ha0596eb_107.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/netgen-6.2.2602-py314hcc005c2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/nlohmann_json-3.12.0-h54a6638_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/numpy-2.4.6-py314h2b28147_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/occt-7.9.3-all_hdd625ca_203.conda
@@ -318,6 +319,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/yaml-0.2.5-h280c20c_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zeromq-4.3.5-h41580af_10.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zfp-1.0.1-h909a3a2_5.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.3.2-h25fd6f3_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_2.conda
@@ -665,6 +667,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/mumps-mpi-5.8.2-h6d3bd2c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/ncurses-6.6-h1d4f5a5_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/netcdf4-1.7.4-nompi_py311h8d5b1ca_107.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/netgen-6.2.2602-py314h82a0ce2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/nlohmann_json-3.12.0-h784d473_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/numpy-2.4.6-py314hb79c6fa_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/occt-7.9.3-all_h4856ae7_203.conda
@@ -736,6 +739,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/yaml-0.2.5-h925e9cb_3.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zeromq-4.3.5-h4818236_10.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zfp-1.0.1-ha86207d_5.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.3.2-h8088a28_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-ng-2.3.3-hed4e4f5_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hbf9d68e_6.conda
       - pypi: .
@@ -969,6 +973,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mypy-2.1.0-py314h518bba1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ncurses-6.6-hdb14827_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/netcdf4-1.7.4-nompi_py311ha0596eb_107.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/netgen-6.2.2602-py314hcc005c2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/nlohmann_json-3.12.0-h54a6638_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/numpy-2.4.6-py314h2b28147_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/occt-7.9.3-all_hdd625ca_203.conda
@@ -1067,6 +1072,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/yaml-0.2.5-h280c20c_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zeromq-4.3.5-h41580af_10.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zfp-1.0.1-h909a3a2_5.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.3.2-h25fd6f3_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_2.conda
@@ -1581,6 +1587,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/mypy-1.20.2-py314hbdd0d06_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/ncurses-6.6-h1d4f5a5_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/netcdf4-1.7.4-nompi_py311h8d5b1ca_107.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/netgen-6.2.2602-py314h82a0ce2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/nlohmann_json-3.12.0-h784d473_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/numpy-2.4.6-py314hb79c6fa_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/occt-7.9.3-all_h4856ae7_203.conda
@@ -1659,6 +1666,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/yaml-0.2.5-h925e9cb_3.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zeromq-4.3.5-h4818236_10.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zfp-1.0.1-ha86207d_5.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.3.2-h8088a28_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-ng-2.3.3-hed4e4f5_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hbf9d68e_6.conda
       - pypi: .
@@ -4989,6 +4997,25 @@ packages:
   - pkg:pypi/netcdf4?source=hash-mapping
   size: 1093921
   timestamp: 1774640040842
+- conda: https://conda.anaconda.org/conda-forge/linux-64/netgen-6.2.2602-py314hcc005c2_0.conda
+  sha256: cb331d3d170a2470450e54c9715860eb206b7ea69358785fa6cf4e45c3eae3ec
+  md5: b3ee92a923bfe245442b3fbcad63a1a0
+  depends:
+  - occt
+  - python
+  - zlib
+  - numpy
+  - __glibc >=2.17,<3.0.a0
+  - libstdcxx >=14
+  - libgcc >=14
+  - libzlib >=1.3.2,<2.0a0
+  - occt >=7.9.3,<7.9.4.0a0
+  - python_abi 3.14.* *_cp314
+  license: LGPL-2.1-only
+  purls: []
+  run_exports: {}
+  size: 5107933
+  timestamp: 1780947307247
 - conda: https://conda.anaconda.org/conda-forge/linux-64/nlohmann_json-3.12.0-h54a6638_1.conda
   sha256: fd2cbd8dfc006c72f45843672664a8e4b99b2f8137654eaae8c3d46dca776f63
   md5: 16c2a0e9c4a166e53632cfca4f68d020
@@ -6621,6 +6648,20 @@ packages:
   purls: []
   size: 277694
   timestamp: 1766549572069
+- conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.3.2-h25fd6f3_2.conda
+  sha256: 245c9ee8d688e23661b95e3c6dd7272ca936fabc03d423cdb3cdee1bbcf9f2f2
+  md5: c2a01a08fc991620a74b32420e97868a
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libzlib 1.3.2 h25fd6f3_2
+  license: Zlib
+  license_family: Other
+  purls: []
+  run_exports:
+    weak:
+    - libzlib >=1.3.2,<2.0a0
+  size: 95931
+  timestamp: 1774072620848
 - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
   sha256: ea4e50c465d70236408cb0bfe0115609fd14db1adcd8bd30d8918e0291f8a75f
   md5: 2aadb0d17215603a82a2a6b0afd9a4cb
@@ -11572,6 +11613,24 @@ packages:
   - pkg:pypi/netcdf4?source=hash-mapping
   size: 996533
   timestamp: 1774640101490
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/netgen-6.2.2602-py314h82a0ce2_0.conda
+  sha256: 6a755b98ebb86cc1384354b873b707dffaa451125a680baf7f7c6090b9d209f0
+  md5: 765a6e565e714b704bd6cbcfca5de8fc
+  depends:
+  - occt
+  - python
+  - zlib
+  - numpy
+  - __osx >=11.0
+  - libcxx >=19
+  - python_abi 3.14.* *_cp314
+  - libzlib >=1.3.2,<2.0a0
+  - occt >=7.9.3,<7.9.4.0a0
+  license: LGPL-2.1-only
+  purls: []
+  run_exports: {}
+  size: 4308213
+  timestamp: 1780947357042
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/nlohmann_json-3.12.0-h784d473_1.conda
   sha256: 1945fd5b64b74ef3d57926156fb0bfe88ee637c49f3273067f7231b224f1d26d
   md5: 755cfa6c08ed7b7acbee20ccbf15a47c
@@ -12751,6 +12810,20 @@ packages:
   purls: []
   size: 204043
   timestamp: 1766549790975
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.3.2-h8088a28_2.conda
+  sha256: 8dd2ac25f0ba714263aac5832d46985648f4bfb9b305b5021d702079badc08d2
+  md5: f1c0bce276210bed45a04949cfe8dc20
+  depends:
+  - __osx >=11.0
+  - libzlib 1.3.2 h8088a28_2
+  license: Zlib
+  license_family: Other
+  purls: []
+  run_exports:
+    weak:
+    - libzlib >=1.3.2,<2.0a0
+  size: 81123
+  timestamp: 1774072974535
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-ng-2.3.3-hed4e4f5_1.conda
   sha256: a339606a6b224bb230ff3d711e801934f3b3844271df9720165e0353716580d4
   md5: d99c2a23a31b0172e90f456f580b695e
