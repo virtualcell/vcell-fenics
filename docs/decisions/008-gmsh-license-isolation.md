@@ -74,12 +74,15 @@ point/cell arrays via `create_mesh` directly.
   `vcell_fenics.core`, so gmsh-only paths never load Netgen), its test is **gmsh-free**, and — see §4
   — `realize()` should migrate off gmsh onto Netgen so a solver process uses **one** mesher.
 
-### 4. Migrate `realize()` off gmsh onto Netgen (follow-up)
+### 4. Migrate `realize()` off gmsh onto Netgen — **2D done**
 
-Initial meshing (`backend/realize.py`, the `approaches/*/geometry.py` prototypes) still uses gmsh
-today. Netgen has an OCC CSG kernel and does body-fitted 2D/3D, so this is migratable. Until it is
-migrated, keep gmsh-based realization and Netgen remeshing in **separate processes** (per §3). Once
-migrated, gmsh can be dropped from the runtime entirely.
+**2D `realize()` is migrated** (PR #108): `_mesh_box_with_contours` builds a Netgen `SplineGeometry`
+with each marched contour as a conforming internal boundary and leftdomain/rightdomain from the
+contours' containment forest, so Netgen's per-element material index is the region tag
+`_classify_and_tag` consumes. gmsh is gone from `realize.py`; the full non-integration suite (615
+tests) passes with gmsh and Netgen coexisting in one process. The `approaches/*/geometry.py`
+prototypes still use gmsh (separate, low-priority migrations). Until fully migrated, keep gmsh-based
+paths and Netgen in **separate processes** (§3).
 
 ### 5. `fix_boundary_nodes` fast path is not available from high-level Netgen
 
@@ -108,6 +111,31 @@ the original design, summarized so it survives:
   `vcell-fenics` stays independently useful with no mesher configured; the two packages ship
   separately so no combined GPL artifact is distributed. This is only needed because gmsh is GPL — it
   is **not** needed for Netgen.
+
+### 8. 3D derisk — Netgen is graceful; multi-region marched-surface is the open piece
+
+A 3D spike (not committed) verified the netgen-3D unknowns that made 3D look risky, and surfaced the
+one that remains:
+
+- **Netgen 3D mesher is graceful.** Analytic CSG (sphere-in-box; nested nucleus/cytosol/ecm spheres)
+  meshes cleanly with the tets+region-tags → DOLFINx bridge (`el.index` realigned via
+  `topology.original_cell_index`), min dihedral 12–18°, zero slivers, no hangs.
+- **Marched-surface → volume (single region) works, and beats gmsh here.** Marching-cubes →
+  triangulated STL → Netgen `STLGeometry.GenerateMesh` on a sphere and a **thin-neck dumbbell**: min
+  dihedral 20.8° / 14.6°, **zero slivers**. gmsh on the *same* STLs (out-of-box, un-optimized)
+  produced slivers on the dumbbell (min dihedral 4.8°, 21 slivers, 3× the tets). So the "netgen may
+  not be graceful in 3D" worry is retired — on this pipeline the gap runs the other way. (Fair caveat:
+  gmsh's quality is likely improvable with its optimizer / tuned `classifySurfaces`.)
+- **Multi-region marched-surface is the real open piece.** `realize()`'s 3D needs the box
+  *partitioned* by the marched surface (interior + background, conforming interface) — even a single
+  cell is two regions. Netgen's high-level paths don't cover "discrete surface + multi-domain," and
+  the low-level `Mesh` assembly (`FaceDescriptor` domin/domout + `GenerateVolumeMesh`) proved
+  **fragile** in the spike (orientation-sensitive, mesh-size-init-sensitive, and segfault-prone on
+  wrong setup — got a filled single domain only with outward box normals, not yet a clean two-region
+  fill). This is genuine integration work, roughly equally hard for either backend (gmsh's
+  discrete-surface→OCC-volume also needs care). **Decision deferred:** solve the netgen low-level
+  volume-from-surface setup, or use gmsh-isolated (§7) for 3D multi-region realization specifically —
+  choose after a focused comparison. Netgen remains the mesher for 2D and for 3D single-region.
 
 ## Consequences
 
