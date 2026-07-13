@@ -19,9 +19,8 @@ import numpy as np
 import pytest
 from dolfinx import fem
 from dolfinx import mesh as dmesh
-from numpy.typing import NDArray
-
 from mpi4py import MPI
+from numpy.typing import NDArray
 
 from vcell_fenics.core import BulkBoundaryTrace
 from vcell_fenics.core.region_remesh_netgen import mesh_region_netgen
