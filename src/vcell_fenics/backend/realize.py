@@ -18,10 +18,11 @@ the formalism.
   complement); the outer boundary is the **box faces** (``x_minus`` / ``x_plus`` / ``y_minus`` /
   ``y_plus``) and each ``SurfaceClass`` is an internal membrane. Each non-background subvolume's
   boolean predicate is lowered to a Rvachev implicit field (`formalism/rvachev.py`), sampled on a
-  grid, and its ``φ = 0`` boundary is **marched** (scikit-image) and embedded in a gmsh model that
-  fragments the box into the regions (nested shapes nest; disjoint shapes sit side by side). Each
-  cell is then assigned to the subvolume whose priority-resolved field is negative at its midpoint;
-  membrane facets between two regions are named by the ``SurfaceClass`` for that pair.
+  grid, and its ``φ = 0`` boundary is **marched** (scikit-image) and embedded as a conforming internal
+  boundary in a Netgen model that partitions the box into the regions (nested shapes nest; disjoint
+  shapes sit side by side; LGPL Netgen replaces GPL gmsh — ADR 008). Each cell is then assigned to the
+  subvolume whose priority-resolved field is negative at its midpoint; membrane facets between two
+  regions are named by the ``SurfaceClass`` for that pair.
 
 **Not yet here:** 3D, ``image`` meshing, subvolumes touching the box boundary, and the unfitted
 (level-set / cut-FEM) consumption of the same field. Unsupported descriptions raise
@@ -32,10 +33,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import gmsh
+import basix.ufl
 import numpy as np
+import pyngcore
+import ufl
 from dolfinx import mesh as dmesh
-from dolfinx.io.gmsh import model_to_mesh
 from mpi4py import MPI
 from numpy.typing import NDArray
 from skimage.measure import approximate_polygon, find_contours
@@ -50,6 +52,13 @@ from vcell_fenics.formalism.expr import BinaryOp, Expr, FunctionCall, IndexAcces
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.rvachev import lower_predicate, subvolume_implicit_functions
+
+# Netgen's default multi-threaded TaskManager busy-waits in a long-lived process (ADR 008 §3); the
+# realization meshes are small and serial, so cap the pool before the mesher loads. Its import must
+# follow the cap, so it sits after the other imports (E402) rather than in the sorted block above.
+pyngcore.SetNumThreads(1)
+
+from netgen.geom2d import SplineGeometry  # noqa: E402  (must follow SetNumThreads)
 
 _FACE_NAMES_2D = ("x_minus", "x_plus", "y_minus", "y_plus")
 # Mesh-tag layout for the 2D realization: one tag per declared surface class (membrane), one per box
@@ -381,47 +390,98 @@ def _mesh_box_with_contours(
     comm: MPI.Comm,
     name: str,
 ) -> tuple[dmesh.Mesh, dmesh.MeshTags]:
-    """Build a gmsh model of the box with every ``contours`` polyline embedded and fragment it so each
-    is a conforming internal edge, returning the body-fitted DOLFINx mesh **and** a cell→fragment-face
-    tag. Region / membrane / face tagging is done afterwards in DOLFINx (:func:`_classify_and_tag`); the
-    fragment-face tag lets that step keep each body-fit region whole (one owner per face)."""
+    """Build a Netgen model of the box with every ``contours`` polyline embedded as a conforming
+    internal boundary, returning the body-fitted DOLFINx mesh **and** a cell→region tag. Netgen assigns
+    a material index per element (``el.index``) from the leftdomain/rightdomain of the embedded curves;
+    that index is one owner per body-fit region — exactly the tag :func:`_classify_and_tag` needs to
+    keep each region whole. The containment forest of the (non-intersecting) contours supplies those
+    domains: a top-level contour separates its interior from the box background, a nested one from its
+    parent's interior (nested shapes nest, disjoint shapes sit side by side). LGPL Netgen replaces GPL
+    gmsh here (ADR 008); region / membrane / face tagging still happens afterwards in DOLFINx."""
 
-    gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 0)
-    try:
-        gmsh.model.add(name)
-        occ = gmsh.model.occ
-        tools: list[tuple[int, int]] = []
-        for contour in contours:
-            # Simplify the marched polyline (Douglas–Peucker) to a fraction of the mesh size: removes
-            # the sub-grid near-duplicate vertices OCC rejects, while staying within h of the contour.
-            verts = approximate_polygon(contour, tolerance=0.25 * h)
-            if len(verts) > 1 and np.allclose(verts[0], verts[-1]):
-                verts = verts[:-1]
-            if len(verts) < 3:
-                raise RealizationError(f"a contour of {name!r} degenerated to {len(verts)} vertices")
-            points = [occ.addPoint(float(x), float(y), 0.0, h) for x, y in verts]
-            lines = [occ.addLine(points[i], points[(i + 1) % len(points)]) for i in range(len(points))]
-            tools.append((2, occ.addPlaneSurface([occ.addCurveLoop(lines)])))
-        box = occ.addRectangle(ox, oy, 0.0, lx, ly)
-        occ.fragment([(2, box)], tools)
-        occ.synchronize()
-        # One physical group PER fragment face, so model_to_mesh returns a cell→face tag. Each face is a
-        # single body-fit region (no contour crosses it), so all of its cells share one owner — letting
-        # `_classify_and_tag` assign whole faces instead of per-cell midpoints, which would mis-tag a
-        # boundary cell that straddles the (chord-)simplified contour and bulge the region boundary.
-        for face_tag, (_, surface) in enumerate(gmsh.model.getEntities(2), start=1):
-            gmsh.model.addPhysicalGroup(2, [surface], tag=face_tag)
+    # Simplify (Douglas–Peucker, to a fraction of the mesh size) and orient each contour CCW so its
+    # interior is on the left — Netgen's ``leftdomain``. Simplification drops the sub-grid near-duplicate
+    # marching vertices while staying within h of the contour.
+    polys: list[NDArray[np.float64]] = []
+    for contour in contours:
+        verts = approximate_polygon(contour, tolerance=0.25 * h)
+        if len(verts) > 1 and np.allclose(verts[0], verts[-1]):
+            verts = verts[:-1]
+        if len(verts) < 3:
+            raise RealizationError(f"a contour of {name!r} degenerated to {len(verts)} vertices")
+        if _signed_area(verts) < 0.0:
+            verts = verts[::-1]
+        polys.append(verts)
 
-        gmsh.option.setNumber("Mesh.MeshSizeMin", h)
-        gmsh.option.setNumber("Mesh.MeshSizeMax", h)
-        gmsh.model.mesh.generate(2)
-        result = model_to_mesh(gmsh.model, comm, rank=0, gdim=2)
-        mesh, cell_face = result.mesh, result.cell_tags
-        assert cell_face is not None  # one physical group per face ⇒ model_to_mesh always returns cell tags
-    finally:
-        gmsh.finalize()
+    parents = _containment_parents(polys)
+    interior_domain = [i + 2 for i in range(len(polys))]  # the box background is domain 1
+
+    geo = SplineGeometry()
+    corners = [
+        geo.AppendPoint(ox, oy),
+        geo.AppendPoint(ox + lx, oy),
+        geo.AppendPoint(ox + lx, oy + ly),
+        geo.AppendPoint(ox, oy + ly),
+    ]
+    for i in range(4):
+        geo.Append(["line", corners[i], corners[(i + 1) % 4]], leftdomain=1, rightdomain=0)
+    for i, poly in enumerate(polys):
+        outside = 1 if parents[i] < 0 else interior_domain[parents[i]]
+        pids = [geo.AppendPoint(float(x), float(y)) for x, y in poly]
+        for j in range(len(poly)):
+            geo.Append(
+                ["line", pids[j], pids[(j + 1) % len(poly)]],
+                leftdomain=interior_domain[i],
+                rightdomain=outside,
+            )
+    ngmesh = geo.GenerateMesh(maxh=float(h))
+
+    points = np.array([list(p.p)[:2] for p in ngmesh.Points()], dtype=np.float64)
+    cells = np.array([[v.nr - 1 for v in el.vertices] for el in ngmesh.Elements2D()], dtype=np.int64)
+    material = np.array([el.index for el in ngmesh.Elements2D()], dtype=np.int32)
+    domain = ufl.Mesh(basix.ufl.element("Lagrange", "triangle", 1, shape=(2,)))
+    mesh = dmesh.create_mesh(comm, cells, domain, points)
+
+    # create_mesh may reorder cells for locality; realign the per-cell material via the input index.
+    tdim = mesh.topology.dim
+    n_local = mesh.topology.index_map(tdim).size_local
+    local_cells = np.arange(n_local, dtype=np.int32)
+    cell_material = material[np.asarray(mesh.topology.original_cell_index)[:n_local]]
+    cell_face = dmesh.meshtags(mesh, tdim, local_cells, cell_material)
     return mesh, cell_face
+
+
+def _signed_area(poly: NDArray[np.float64]) -> float:
+    """Shoelace signed area of the closed polygon `poly` (CCW positive)."""
+    x, y = poly[:, 0], poly[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def _point_in_polygon(pt: NDArray[np.float64], poly: NDArray[np.float64]) -> bool:
+    """Ray-casting parity test: is `pt` inside the closed polygon `poly`?"""
+    x, y = float(pt[0]), float(pt[1])
+    xs, ys = poly[:, 0], poly[:, 1]
+    xj, yj = np.roll(xs, -1), np.roll(ys, -1)
+    crosses = ((ys > y) != (yj > y)) & (x < (xj - xs) * (y - ys) / (yj - ys + 1e-300) + xs)
+    return bool(np.count_nonzero(crosses) % 2 == 1)
+
+
+def _containment_parents(polys: list[NDArray[np.float64]]) -> list[int]:
+    """Immediate-parent index for each polygon — the smallest-area polygon that contains it, or -1 if
+    top-level. `_march_contours` yields non-intersecting contours, so one vertex of a polygon lies
+    inside another iff the whole polygon does: a single point test per pair suffices."""
+    areas = [abs(_signed_area(p)) for p in polys]
+    parents: list[int] = []
+    for i, poly in enumerate(polys):
+        probe = poly[0]
+        best, best_area = -1, np.inf
+        for j, other in enumerate(polys):
+            if j == i or areas[j] < areas[i]:
+                continue  # a smaller-or-equal polygon cannot strictly contain this one
+            if _point_in_polygon(probe, other) and areas[j] < best_area:
+                best, best_area = j, areas[j]
+        parents.append(best)
+    return parents
 
 
 def _classify_and_tag(
