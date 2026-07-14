@@ -97,8 +97,10 @@ def test_expansion_conserves_mass_through_formalism() -> None:
 
     # The membrane doubled in length (the motion really happened)...
     assert _measure(dp) / length0 == pytest.approx(2.0, abs=2e-2)
-    # ...and mass is conserved to backward-Euler O(dt) error thanks to dilution.
-    assert abs(dp.total_mass() - mass0) / mass0 < 0.02
+    # ...and mass is conserved to solver precision: the conservative ALE time term rescales the carried
+    # ρ by the per-facet length ratio |Kⁿ|/|Kⁿ⁺¹|, so dilution lives in the changing measure exactly
+    # (no O(dt) drift — the same swept-measure guarantee the bulk gets, now on the codim-1 membrane).
+    assert abs(dp.total_mass() - mass0) / mass0 < 1e-11
 
 
 # ---------------------------------------------------------------------------

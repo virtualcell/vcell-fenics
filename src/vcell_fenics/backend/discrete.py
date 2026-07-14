@@ -110,16 +110,18 @@ class BackwardEuler:
             raise NotImplementedError("steady-state lowering is not in the v1 backend yet")
 
         trial, test, dt = problem.trial, problem.test, problem.dt
-        # On a **moving bulk** the mass term is the *conservative ALE* time term: the previous field is
-        # rescaled per cell by `|Kⁿ|/|Kⁿ⁺¹|` (`motion.volume_ratio()`) so its mass on the moved mesh equals
-        # its integral on the pre-move mesh exactly. Dilution then lives entirely in the changing measure —
-        # the explicit `ρ ∇·v` DILUTION term is dropped below — and mass is conserved to solver precision,
-        # eliminating the O(dt) geometric-conservation-law drift the same-mesh (uⁿ⁺¹−uⁿ)·w + ρ∇·v split
-        # incurs. A rigid motion gives `volume_ratio ≡ 1` and no dilution term, so this reduces to the
-        # static form; a membrane (codim-1) keeps the split (its ∇_Γ·v term is a separate, correct path).
-        mesh = problem.V.mesh
+        # On a **moving mesh that carries a dilution term** (bulk *or* membrane) the mass term is the
+        # *conservative ALE* time term: the previous field is rescaled per cell by `|Kⁿ|/|Kⁿ⁺¹|`
+        # (`motion.volume_ratio()` — cell volumes for a bulk, facet lengths/areas for a membrane) so its
+        # mass on the moved mesh equals its integral on the pre-move mesh exactly. Dilution then lives
+        # entirely in the changing measure — the explicit `ρ ∇·v` DILUTION term is dropped below — and mass
+        # is conserved to solver precision, eliminating the O(dt) geometric-conservation-law drift the
+        # same-mesh (uⁿ⁺¹−uⁿ)·w + ρ∇·v split incurs. The trigger is the DILUTION term itself (the "this
+        # field dilutes" signal): a moving problem *without* one is left advective (mass follows the
+        # measure — the classic bug; see test_omitting_dilution_doubles_mass), and a rigid motion gives
+        # `volume_ratio ≡ 1`, so either way this reduces to the plain form.
         motion = problem._motion
-        conservative = motion is not None and mesh.topology.dim == mesh.geometry.dim
+        conservative = motion is not None and TermKind.DILUTION in problem.term_kinds()
         if conservative:
             assert motion is not None  # implied by `conservative`; narrows for the type checker
             previous = motion.volume_ratio() * problem.previous
@@ -238,14 +240,7 @@ class _MeshMotion:
         # A bulk mesh (codim 0) has interior nodes to fill harmonically; a membrane
         # (codim 1) is all boundary, so dt·v moves every node directly.
         self._extension = _HarmonicExtension(space) if mesh.topology.dim == self._gdim else None
-        # Per-cell dilution rate ∇·v_mesh as a DG0 field — the divergence of the *actual* substrate
-        # velocity (the harmonic extension for a bulk), evaluated on the pre-move config each advance.
-        # The bulk dilution term reads this instead of the raw `∇·v_prescribed`: the two agree on an
-        # affine motion (the extension reproduces it) but differ in a non-affine bulk interior, where
-        # the raw divergence mis-states the volume change and breaks mass conservation.
         dg0 = fem.functionspace(mesh, ("DG", 0))
-        self._dilution_rate = fem.Function(dg0)
-        self._dilution_expr = fem.Expression(ufl.div(self._displacement / dt), dg0.element.interpolation_points)
         # Per-cell volume form (DG0 test function integrates to each cell's
         # volume); re-assembling after a move reports the deformed cell sizes.
         self._cell_volume_form = fem.form(ufl.TestFunction(dg0) * ufl.dx)
@@ -256,24 +251,19 @@ class _MeshMotion:
         # the same-mesh time-term + `ρ∇·v` split incurs. 1.0 before the first move and for a rigid motion.
         self._volume_ratio = fem.Function(dg0)
         self._volume_ratio.x.array[:] = 1.0
+        # Per-cell *GCL-consistent* dilution rate `ln(|Kⁿ⁺¹|/|Kⁿ|)/dt` (DG0), refreshed each `advance`.
+        # The strided ALE-MOL (`TS`) path applies dilution *continuously* over a stride while the mesh
+        # jumps *discretely* at its start; using this effective rate (not the instantaneous `∇·v`) makes
+        # the continuous decay `exp(−d_eff·dt) = |Kⁿ|/|Kⁿ⁺¹|` exactly cancel the discrete swept-volume
+        # jump, so mass is conserved (no O(dt) GCL drift). `→ ∇·v` as dt→0, so it is consistent. 0 before
+        # the first move. (The backward-Euler path drops the dilution term entirely — see BackwardEuler.)
+        self._effective_dilution = fem.Function(dg0)
         self._reference_ratio = self._cell_volume_ratio()
-
-    def dilution_rate(self) -> fem.Function:
-        """The per-cell `∇·v_mesh` (DG0) the dilution term `ρ ∇·v_mesh` must use on a **bulk** — the
-        divergence of the actual harmonic-extension mesh velocity, evaluated on the pre-move config
-        (so an affine motion gives exactly `∇·v_prescribed`, unchanged, while a non-affine interior
-        gets the real volume-change rate). Updated each `advance`; zero before the first move (the
-        dilution is only ever assembled after a move). A membrane keeps the raw `∇_Γ·v_prescribed`."""
-        return self._dilution_rate
 
     def advance(self) -> None:
         self._displacement.interpolate(self._expression)
         if self._extension is not None:
             self._extension.fill(self._displacement)
-        # ∇·v_mesh on the *pre-move* config — the displacement field's nodal values are the
-        # to-be-applied move, so its divergence here is the substrate velocity's divergence before the
-        # nodes shift (computing it after the move would rescale it by the cell stretch, ~1/(1+dt)).
-        self._dilution_rate.interpolate(self._dilution_expr)
         volumes_before = self._cell_volumes()
         increment = self._displacement.x.array.reshape((-1, self._gdim))[self._geom_from_dof]
         self._mesh.geometry.x[:, : self._gdim] += increment
@@ -287,6 +277,9 @@ class _MeshMotion:
         # |Kⁿ|/|Kⁿ⁺¹| per cell: the P1 local mass matrix scales linearly with cell volume, so this ratio
         # rescales the carried previous field's mass on the moved mesh back to its pre-move value exactly.
         self._volume_ratio.x.array[:] = volumes_before / volumes_after
+        # GCL-consistent continuous dilution rate for the strided TS path (see __init__): the log of the
+        # *actual* per-cell swept-volume ratio over the stride, so exp(−d_eff·dt) undoes the mesh jump.
+        self._effective_dilution.x.array[:] = np.log(volumes_after / volumes_before) / float(self._dt.value)
         ratio = v_max / v_min
         if ratio > _MAX_CELL_RATIO_GROWTH * self._reference_ratio:
             raise MeshQualityError(
@@ -308,6 +301,14 @@ class _MeshMotion:
         so its mass on the moved mesh equals its pre-move mass exactly, making dilution implicit in the
         changing measure. 1.0 before the first move and for a rigid (`∇·v = 0`) motion."""
         return self._volume_ratio
+
+    def effective_dilution_rate(self) -> fem.Function:
+        """Per-cell `ln(|Kⁿ⁺¹|/|Kⁿ|)/dt` (DG0), refreshed each `advance` — the GCL-consistent dilution
+        rate the **strided ALE-MOL (`TS`) path** uses so its continuous over-a-stride decay exactly
+        cancels the discrete mesh jump (conservation to solver precision). `→ ∇·v` as dt→0. The DILUTION
+        term (built in `assemble`) reads this; the backward-Euler path drops that term and conserves via
+        `volume_ratio` instead. 0 before the first move (dilution is only assembled after a move)."""
+        return self._effective_dilution
 
     def _cell_volumes(self) -> Any:
         """Per-cell volumes (DG0) on the current configuration — |K| for each cell."""
