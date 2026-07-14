@@ -53,6 +53,36 @@ by `t = 1`) — an expected physical difference, not solver error. `v2`'s total 
 of diffusion. (With backward Euler the difference was up to ~2 %, dominated by *our* time step — see
 the convergence study below.)
 
+## 3D interface-coupled permeability
+
+`coupled_3d_fv.py` + `compare_coupled_3d.py` — the 3D analog of the 2D permeability coupling, on the new
+Netgen 3D `realize_interface_coupled` + 3D `integrate_interface_coupled`. A spherical `cyto` (radius 0.5)
+in an `ext` background on `[-1,1]³`, two bulk species (`s_cyto` init 1, `s_ext` init 0) coupled by a
+membrane permeability flux `J = P·(s_ext − s_cyto)` (P = 0.5, D = 1). VCell's jump conditions route to the
+equal-and-opposite pair of single-sided `BCInterfaceFlux` our coupled integrator solves — geometry *and*
+physics both come from the import pipeline. FV at 32³/48³; the FEniCSx side refines `h` alongside.
+
+```bash
+../pyvcell/.venv/bin/python cross_validation/coupled_3d_fv.py
+.pixi/envs/dev/bin/python   cross_validation/compare_coupled_3d.py
+```
+
+We sample `s_cyto` inside the sphere and `s_ext` outside (skipping the membrane band) at the FV grid
+points and report L2/L∞ vs the FV-48³ reference at `t = 1` (mid-transient, the means still apart):
+
+| h | inner+outer tets | relL2(FV) | relL∞(FV) | ratio | s_cyto(FEM) | s_ext(FEM) | mass drift |
+|---|------------------|-----------|-----------|-------|-------------|------------|------------|
+| 0.100 | 24 954 | 2.76 % | 4.60 % | — | 0.1203 | 0.0595 | 4e-13 |
+| 0.067 | 56 726 | 1.74 % | 2.96 % | 1.58× | 0.1221 | 0.0600 | 1e-13 |
+| 0.050 | 136 800 | 1.07 % | 2.16 % | 1.63× | 0.1231 | 0.0605 | 2e-12 |
+
+relL2 falls **first-order** (~1.6×/step — the membrane coupling is 1st-order on each side, matching the 2D
+case), and both compartment means converge toward the FV values (`s_cyto → 0.1258`, `s_ext → 0.0609`).
+**Total substance is conserved to round-off (~1e-13) at every h** — measured against the *realized* cyto
+volume, which isolates the solver's exact conservation from the faceted-sphere geometry error (the earlier
+~3 % "drift" against the analytic `4/3πr³` was purely that geometry gap, and it shrinks as the sphere
+resolves with h).
+
 ## Membrane jump-condition sign convention
 
 `membrane_flux_sign.py` (pyvcell `[native,solver]` env) confirms the **sign** of the membrane
