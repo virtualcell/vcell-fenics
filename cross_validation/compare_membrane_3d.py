@@ -23,7 +23,7 @@ import pyvcell.vcml.models_math as mmod
 import yaml
 from compare_coupled_3d import _eval_on_grid  # sibling stage-2 script (3D grid sampler)
 
-from vcell_fenics.backend import integrate_membrane_coupled
+from vcell_fenics.backend import assemble_membrane_coupled, integrate_membrane_coupled
 from vcell_fenics.backend.realize import realize_interface_coupled
 from vcell_fenics.pyvcell_bridge import import_geometry, import_math_description, normalize_to_geometry_frame
 
@@ -31,6 +31,13 @@ _CV = Path(__file__).resolve().parent
 _REF_N = 48
 _HS = (0.1, 0.067, 0.05)
 _T = 2.0  # mid-transient — both ligands clearly depleted, receptor not yet saturated
+
+
+def _total_substance(fields: object, kmole: float) -> float:
+    """The KMOLE-reconciled conserved total: free ligand ∫s dV (µM·µm³) + bound receptor KMOLE·∫R dA
+    (membrane molecules → the same substance unit). A raw sum without KMOLE mixes units and is not
+    conserved; with it, free-ligand loss = KMOLE·(R gained) exactly."""
+    return fields.mass("s_cyto") + fields.mass("s_ext") + kmole * fields.mass("R")  # type: ignore[attr-defined]
 
 
 def main() -> int:
@@ -47,15 +54,15 @@ def main() -> int:
     math_raw = mmod.MathDescription.model_validate(yaml.safe_load((_CV / "receptor_3d_math.yaml").read_text()))
     gd0 = import_geometry(geo)
     md0 = import_math_description(math_raw, geometry=gd0.name, dim=3)
+    kmole = float(next(p.value for p in md0.parameters if p.name == "KMOLE"))  # µmol↔molecules, from the import
 
     print(f"\n=== receptor_3d membrane binding: FV↔FEniCSx refinement, t={_T} (FV {_REF_N}³ reference) ===")
     print(f"FV depleted means: s_cyto={np.nanmean(fv_cyto[in_cyto]):.4f}  s_ext={np.nanmean(fv_ext[in_ext]):.4f}")
-    # We compare the depleted ligand fields (R acts on them through binding); the receptor's own binding is
-    # shown via ``bound R``. Total-substance conservation is not reported as a raw number here: the membrane
-    # R (density, molecules·µm⁻²) and the volume ligands (µM) reconcile only through VCell's KMOLE factor —
-    # the sub-0.1% ligand agreement with FV (which conserves) is the end-to-end validation of the binding.
-    header = ("h", "relL2(FV)", "relL∞(FV)", "ratio", "s_cyto(FEM)", "s_ext(FEM)", "bound R")
-    widths = (6, 10, 10, 6, 12, 11, 10)
+    # Compare the depleted ligand fields (R acts on them through binding); ``bound R`` shows the receptor's
+    # own binding. Conservation uses the KMOLE-reconciled total (∫s dV + KMOLE·∫R dA) — a raw sum mixes the
+    # membrane (molecules·µm⁻²) and volume (µM) units and is not conserved.
+    header = ("h", "relL2(FV)", "relL∞(FV)", "ratio", "s_cyto(FEM)", "s_ext(FEM)", "bound R", "massDrift")
+    widths = (6, 10, 10, 6, 12, 11, 10, 10)
     print(" ".join(f"{c:>{w}}" for c, w in zip(header, widths, strict=True)))
 
     prev: float | None = None
@@ -65,6 +72,7 @@ def main() -> int:
             gd, inner_subdomain="cyto_dom", outer_subdomain="ext_dom", membrane_subdomain="mem_dom",
             interface="mem_dom", h=h,
         )
+        total0 = _total_substance(assemble_membrane_coupled(md, geometry, dt=0.5), kmole)  # initial total
         result = integrate_membrane_coupled(md, geometry, t_final=_T)
 
         our_cyto = _eval_on_grid(result.field("s_cyto"), geometry.inner_mesh, x, y, z)
@@ -79,9 +87,10 @@ def main() -> int:
         ) / max(float(np.nanmax(np.abs(fv_cyto[in_cyto]))), float(np.nanmax(np.abs(fv_ext[in_ext]))))
 
         ratio = "" if prev is None else f"{prev / rel_l2:.2f}x"
+        drift = abs(_total_substance(result, kmole) - total0) / total0
         print(
             f"{h:6.3f} {rel_l2:10.3%} {linf:10.3%} {ratio:>6} {np.nanmean(our_cyto[in_cyto]):12.4f} "
-            f"{np.nanmean(our_ext[in_ext]):11.4f} {result.mass('R'):10.2f}"
+            f"{np.nanmean(our_ext[in_ext]):11.4f} {result.mass('R'):10.2f} {drift:10.1e}"
         )
         prev = rel_l2
     return 0

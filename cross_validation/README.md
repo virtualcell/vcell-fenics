@@ -100,18 +100,23 @@ solved. FV at 32³/48³.
 We compare the depleted ligand fields (R acts on them through binding) vs the FV-48³ reference at `t = 2`,
 refining `h` alongside:
 
-| h | relL2(FV) | relL∞(FV) | ratio | s_cyto(FEM) | s_ext(FEM) | bound R |
-|---|-----------|-----------|-------|-------------|------------|---------|
-| 0.100 | 0.119 % | 0.560 % | — | 0.6744 | 0.9739 | 218.6 |
-| 0.067 | 0.088 % | 0.415 % | 1.35× | 0.6757 | 0.9737 | 219.9 |
-| 0.050 | 0.070 % | 0.332 % | 1.26× | 0.6765 | 0.9736 | 221.0 |
+| h | relL2(FV) | relL∞(FV) | ratio | s_cyto(FEM) | s_ext(FEM) | bound R | mass drift |
+|---|-----------|-----------|-------|-------------|------------|---------|------------|
+| 0.100 | 0.119 % | 0.560 % | — | 0.6744 | 0.9739 | 218.6 | 9e-15 |
+| 0.067 | 0.088 % | 0.415 % | 1.35× | 0.6757 | 0.9737 | 219.9 | 8e-15 |
+| 0.050 | 0.070 % | 0.332 % | 1.26× | 0.6765 | 0.9736 | 221.0 | 3e-15 |
 
 **Sub-0.1 % relL2** agreement (converging), with the depleted ligand means matching FV (`s_cyto → 0.6796`,
 `s_ext → 0.9736`) and the receptor capturing ligand (bound R grows 0 → ~220, itself converging with h). That
 tight ligand match is the end-to-end validation of the **surface PDE + binding on the 2D-in-3D membrane** —
-our R-depleted ligands match FV's to <0.1 %. (Total substance is not reported as a raw number: the membrane
-R density and volume ligands reconcile only through VCell's KMOLE unit factor, so the ligand match against
-the conservative FV is the conservation check.)
+our R-depleted ligands match FV's to <0.1 %.
+
+**Total substance is conserved once the units are reconciled.** The membrane receptor R (density,
+molecules·µm⁻²) and the volume ligands (µM) live in different units; the conserved quantity is
+`∫s_cyto dV + ∫s_ext dV + KMOLE·∫R dA`, with **KMOLE ≈ 1/602.214** (the µmol↔molecules factor, pulled from
+the imported parameters — no hard-coding). That total is flat to **round-off (~1e-14) at every h**, and the
+free-ligand loss equals `KMOLE·(bound R gained)` exactly (verified: 0.36302 = 0.36302). A raw `total_mass()`
+that sums R with the volume ligands mixes units and is *not* the conserved quantity (it read a spurious 27×).
 
 ## Membrane jump-condition sign convention
 
