@@ -244,3 +244,38 @@ maps an `app.front_velocity` (a single moving surface) to a `MotionPrescribedVel
 interior compartment — so one VCML can drive both solvers. Next: chemistry-coupled front velocities (the
 ALE backend evaluates only space/time motion today) and the *active-gel migration* model
 (`docs/modeling/active-protrusion-migration.md`).
+
+## Moving-boundary expansion + dilution (ALE ↔ FronTier FV)
+
+The translation case is rigid (`∇·v = 0`), so it leaves the mandatory `ρ ∇·v` **dilution** term inert.
+This case exercises it against a closed form: a disk (radius `R0 = 3`) carrying a uniform species `u`
+(`D = 1`, IC `u = 1`, no reaction) is **dilated** by a radial velocity `v = K·r` (`K = 0.25`, so
+`∇·v = 2K > 0`). The exact solution is `R(t) = R0 e^{Kt}`, `u(t) = e^{−2K t}` (spatially uniform), total
+substance `∫u dA = π R0²` conserved. Both solvers use the Lagrangian convention (`v = v_b`).
+
+```bash
+../pyvcell/.venv/bin/python  cross_validation/mb_expansion_fv.py   # stage 1: mbsolver reference (gitignored, regenerable)
+.pixi/envs/dev/bin/python    cross_validation/mb_expansion.py      # stage 2: fenics ALE + the comparison table
+```
+
+| t | fenics R | FV R | exact R | fenics u | FV u | exact u |
+|---|---|---|---|---|---|---|
+| 1.0 | 3.849 | 3.830 | 3.852 | 0.6073 | 0.6113 | 0.6065 |
+| 2.0 | **4.939** | **4.901** | **4.946** | **0.3688** | **0.3734** | **0.3679** |
+
+At `t = 2` the front radius is within **0.14 %** of exact for fenics (mbsolver 0.91 %, front redistribution)
+and the dilution `u` within **0.25 %** (mbsolver 1.51 %). Both solvers reproduce the dilating front and the
+`ρ ∇·v` decay of `u`; our body-fitted ALE tracks both more tightly.
+
+**The conservative ALE time term (why `∫u dA` is exact).** The naïve moving-mesh backward-Euler form —
+same-mesh time term `(uⁿ⁺¹ − uⁿ)·w` plus an explicit `ρ ∇·v` dilution term — violates the *geometric
+conservation law*: for a uniform field it gives a per-step mass ratio `(1 + K dt)² / (1 + 2K dt) ≈ 1 + K²dt²`,
+an **O(dt)** drift (here `+0.25 %` at `dt = 0.02`, halving with `dt`). The fix is to put the time term in
+**conservative** form — rescale the carried previous field per cell by the actual swept-volume ratio
+`|Kⁿ| / |Kⁿ⁺¹|` and drop the explicit dilution term, so dilution lives in the changing measure. The P1
+local mass matrix scales linearly with cell volume, so this is *exact*: `∫u dA` is conserved to solver
+precision (`0.0000 %`), independent of `dt` and of the motion. Implemented in `BackwardEuler.compose` /
+`_MeshMotion.volume_ratio` (`backend/discrete.py`); verified here and in
+`tests/test_backend_dilution.py::test_nonaffine_bulk_motion_conserves_mass_to_roundoff` (a non-affine
+motion, conserved to round-off). The membrane (codim-1) surface-dilution and the method-of-lines/`TS` paths
+still use the explicit split — the same volume-ratio technique extends to them as follow-up.
