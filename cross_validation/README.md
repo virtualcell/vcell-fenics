@@ -155,6 +155,37 @@ the imported parameters — no hard-coding). That total is flat to **round-off (
 free-ligand loss equals `KMOLE·(bound R gained)` exactly (verified: 0.36302 = 0.36302). A raw `total_mass()`
 that sums R with the volume ligands mixes units and is *not* the conserved quantity (it read a spurious 27×).
 
+## 3D reaction-advection-diffusion
+
+`advection_3d_fv.py` + `compare_3d_advection.py` — the 3D diffusion case plus a prescribed advection
+velocity `v = (0.4, 0, 0)` on the species (set on `SpeciesMapping.velocity_x` → the lowered PDE `velocity`
+slot → our `relative_advection`; `run()` solves it with no special handling). A Gaussian (σ = 0.12,
+D = 0.03) started near the `-x` wall advects across the interior; no-flux boundaries, FV mesh `32³`.
+
+```bash
+../pyvcell/.venv/bin/python cross_validation/advection_3d_fv.py
+.pixi/envs/dev/bin/python   cross_validation/compare_3d_advection.py
+```
+
+Both solvers advect the bump at exactly `v`: FV centre-of-mass `x: −0.5 → −0.3` at `t = 0.5`
+(`Δ = v_x·t = 0.2`), and FEM reaches `−0.303` at every h — the field advects at the prescribed velocity.
+h-refinement:
+
+| h | box | IC relL2(an) | IC relL∞(an) | order(L∞) | relL2(FV) | relL∞(FV) | mass drift |
+|---|-----|--------------|--------------|-----------|-----------|-----------|------------|
+| 0.100 | 20³ | 12.49 % | 17.47 % | — | 11.07 % | 17.81 % | 1.5e-3 |
+| 0.050 | 40³ | 3.56 % | 5.62 % | 1.64 | 4.47 % | 7.34 % | 2.9e-3 |
+| 0.025 | 80³ | 0.87 % | 1.34 % | 2.07 | 2.94 % | 4.54 % | 3.2e-3 |
+
+The IC error converges at **order ≈ 2** (L2 and L∞); FEM↔FV tightens to **~2.9 % L2 / ~4.5 % L∞** by 80³ —
+coarser than the pure-diffusion floor (~0.9 %), as expected since the advected bump is sharper and both
+schemes carry advection (numerical-diffusion / dispersion) error. Here **L∞ (4.5 %) meaningfully exceeds
+L2 (2.9 %)** — the error concentrates on the bump's moving edges, which L2 averages away. And unlike pure
+diffusion (mass exact), the FEM mass drifts **~0.1–0.3 %**: the solver's **advective** form `v·∇c`
+conserves mass only up to the boundary term `∫_∂Ω (v·n) c ds` (nonzero on the outflow face), small while
+the bump stays interior — the conservative form would remove it. A worthwhile note for the
+mass-conservation axis of the fvsolver comparison.
+
 ## Membrane jump-condition sign convention
 
 `membrane_flux_sign.py` (pyvcell `[native,solver]` env) confirms the **sign** of the membrane
