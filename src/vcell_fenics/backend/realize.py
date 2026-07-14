@@ -296,7 +296,10 @@ def realize_interface_coupled(
             f"geometry {description.name!r} has {[s.name for s in description.surfaces]}"
         )
 
-    parent, tagging = _realize_2d_partition(description, h=h, resolution=resolution, comm=comm)
+    if description.dim == 3:
+        parent, tagging = _realize_3d_partition(description, h=h, resolution=resolution, comm=comm)
+    else:
+        parent, tagging = _realize_2d_partition(description, h=h, resolution=resolution, comm=comm)
     tdim = parent.topology.dim
     interface_facets = tagging.facet_tags.find(tagging.surface_tags[membrane_subdomain])
     if not interface_facets.size:
