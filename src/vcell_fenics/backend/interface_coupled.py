@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import ufl
@@ -219,6 +220,44 @@ def _param_symbols(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
     return params
 
 
+class _SweptMeasures:
+    """Per-cell swept-measure tracking for the conservative ALE coupled forms, across the moving meshes.
+
+    For each named mesh it holds two DG0 fields, refreshed by `capture()` (before a move) + `update(dt)`
+    (after): `volume_ratio` `= |Kⁿ|/|Kⁿ⁺¹|` and `effective_dilution` `= ln(|Kⁿ⁺¹|/|Kⁿ|)/dt`. The P1 local
+    mass matrix scales linearly with cell volume (a bulk) or facet length/area (a membrane), so these are
+    the *exact* per-cell swept quantities — the same guarantee `backend/discrete._MeshMotion` gives the
+    single-mesh paths, here for the two bulks + the membrane at once. `volume_ratio` drives the
+    backward-Euler conservative time term (`(u − r·uⁿ)·w`); `effective_dilution` drives the strided-MOL
+    dilution so its continuous over-a-stride decay cancels the discrete mesh jump. Both are 1.0 / 0.0
+    before the first move."""
+
+    def __init__(self, meshes: dict[str, Mesh]) -> None:
+        self._forms: dict[str, fem.Form] = {}
+        self.volume_ratio: dict[str, fem.Function] = {}
+        self.effective_dilution: dict[str, fem.Function] = {}
+        self._before: dict[str, Any] = {}
+        for key, mesh in meshes.items():
+            dg0 = fem.functionspace(mesh, ("DG", 0))
+            self._forms[key] = fem.form(ufl.TestFunction(dg0) * ufl.dx)
+            ratio = fem.Function(dg0)
+            ratio.x.array[:] = 1.0
+            self.volume_ratio[key] = ratio
+            self.effective_dilution[key] = fem.Function(dg0)
+
+    def capture(self) -> None:
+        """Record each mesh's per-cell measures on the pre-move configuration."""
+        self._before = {key: fem.assemble_vector(form).array.copy() for key, form in self._forms.items()}
+
+    def update(self, dt: float) -> None:
+        """After the move, set `volume_ratio = |Kⁿ|/|Kⁿ⁺¹|` and `effective_dilution = ln(|Kⁿ⁺¹|/|Kⁿ|)/dt`."""
+        for key, form in self._forms.items():
+            after = fem.assemble_vector(form).array
+            before = self._before[key]
+            self.volume_ratio[key].x.array[:] = before / after
+            self.effective_dilution[key].x.array[:] = np.log(after / before) / dt
+
+
 class MembraneCoupledMeshMotion:
     """Advances the three-region substrate (parent + two bulk submeshes + membrane) under a **prescribed
     membrane velocity**, conservative-ALE style. The membrane moves by `dt·v`; the parent's interior
@@ -286,6 +325,10 @@ class MembraneCoupledMeshMotion:
         self._mem_expr = fem.Expression(dt * self.membrane_velocity, mem_space.element.interpolation_points)
         self._mem_perm = cKDTree(mem_space.tabulate_dof_coordinates()).query(membrane.geometry.x)[1]
         self._membrane_mesh = membrane
+        # Per-cell swept measures on the field meshes (the two bulks + the membrane), for the conservative
+        # ALE forms — refreshed each `advance` by bracketing the move.
+        self._dt_value = float(dt)
+        self._swept = _SweptMeasures({"in": geometry.inner_mesh, "out": geometry.outer_mesh, "mem": membrane})
 
     @property
     def parent_displacement(self) -> fem.Function:
@@ -293,7 +336,18 @@ class MembraneCoupledMeshMotion:
         coefficient `L ∇·v_mesh`."""
         return self._disp
 
+    def volume_ratio(self, region: str) -> fem.Function:
+        """Per-cell `|Kⁿ|/|Kⁿ⁺¹|` on the `"in"` / `"out"` bulk or `"mem"` membrane mesh (the conservative
+        backward-Euler correction), refreshed each `advance`. 1.0 before the first move."""
+        return self._swept.volume_ratio[region]
+
+    def effective_dilution(self, region: str) -> fem.Function:
+        """Per-cell GCL-consistent `ln(|Kⁿ⁺¹|/|Kⁿ|)/dt` on the `"in"`/`"out"`/`"mem"` mesh (the strided-MOL
+        dilution rate whose continuous decay cancels the discrete mesh jump), refreshed each `advance`."""
+        return self._swept.effective_dilution[region]
+
     def advance(self) -> None:
+        self._swept.capture()
         self._interface_disp.interpolate(self._interface_expr)
         self._problem.solve()
         disp = self._disp.x.array.reshape((-1, self._gdim))
@@ -303,6 +357,7 @@ class MembraneCoupledMeshMotion:
         self._membrane_mesh.geometry.x[:, : self._gdim] += self._mem_disp.x.array.reshape((-1, self._gdim))[
             self._mem_perm
         ]
+        self._swept.update(self._dt_value)
 
 
 class ForceBalanceMeshMotion:
@@ -400,6 +455,10 @@ class ForceBalanceMeshMotion:
         mem_dof_x = self.membrane_velocity.function_space.tabulate_dof_coordinates()
         self._mem_to_cyto = cyto_tree.query(mem_dof_x)[1]
         self._mem_perm = cKDTree(mem_dof_x).query(membrane.geometry.x)[1]
+        # Per-cell swept measures on the field meshes (cyto = inner, outer, membrane) for the conservative
+        # ALE forms — refreshed each `advance` by bracketing the move.
+        self._dt_value = float(dt)
+        self._swept = _SweptMeasures({"in": cyto, "out": geometry.outer_mesh, "mem": membrane})
         # Membrane (scalar P1) dofs → cyto tension dofs, for transferring a surface species onto the tension.
         mem_scalar = fem.functionspace(membrane, ("Lagrange", 1))
         self._mem_to_tension = cKDTree(self._tension_space.tabulate_dof_coordinates()).query(
@@ -447,6 +506,16 @@ class ForceBalanceMeshMotion:
         """The parent's nodal displacement this step (= `dt·v_mesh`); `∇·` of it is the bulk dilution."""
         return self._disp
 
+    def volume_ratio(self, region: str) -> fem.Function:
+        """Per-cell `|Kⁿ|/|Kⁿ⁺¹|` on the `"in"`/`"out"`/`"mem"` mesh (conservative BE correction),
+        refreshed each `advance`. 1.0 before the first move."""
+        return self._swept.volume_ratio[region]
+
+    def effective_dilution(self, region: str) -> fem.Function:
+        """Per-cell GCL-consistent `ln(|Kⁿ⁺¹|/|Kⁿ|)/dt` on the `"in"`/`"out"`/`"mem"` mesh (strided-MOL
+        dilution rate), refreshed each `advance`."""
+        return self._swept.effective_dilution[region]
+
     @property
     def tension(self) -> fem.Function:
         """The current surface-tension field (a cyto P1 scalar; only boundary values drive the flow)."""
@@ -462,6 +531,7 @@ class ForceBalanceMeshMotion:
         self._tension.x.array[self._mem_to_tension] = base + sensitivity * receptor.x.array
 
     def advance(self) -> None:
+        self._swept.capture()
         # Regularize the tension first (if enabled): smooth its boundary trace along the membrane so a
         # node-scale signaling spike cannot drive the leading-edge curvature instability. Read the current
         # boundary γ onto the membrane, filter, write it back to the coincident cyto-boundary dofs — the
@@ -504,6 +574,7 @@ class ForceBalanceMeshMotion:
         self._membrane.geometry.x[:, : self._gdim] += (
             self._dt * self.membrane_velocity.x.array.reshape((-1, self._gdim))[self._mem_perm]
         )
+        self._swept.update(self._dt_value)
 
 
 def _sum_forms(terms: list[UflExpr]) -> UflExpr:
@@ -1022,17 +1093,21 @@ def assemble_membrane_coupled(
         motion = MembraneCoupledMeshMotion(md, geometry, velocity=velocity, dt=dt)
     rhs_dilution_form = None
     if motion is not None:
-        disp = motion.parent_displacement
-        n_hat = ufl.CellNormal(geometry.membrane_mesh)
-        v_mem = motion.membrane_velocity
-        surf_div = ufl.div(v_mem) - ufl.dot(ufl.dot(ufl.grad(v_mem), n_hat), n_hat)
+        # Conservative ALE correction (replaces the old lagged `−uⁿ ∇·v` dilution forcing): the mass term's
+        # RHS `uⁿ·w` gets `+(r − 1)·uⁿ·w` added per region, making the equation `(u − r·uⁿ)·w = 0` with
+        # r = |Kⁿ|/|Kⁿ⁺¹| the exact per-cell (bulk) / per-facet (membrane) swept ratio. The carried field's
+        # mass on the moved mesh then equals its pre-move integral exactly, so dilution lives in the changing
+        # measure and each field's substance is conserved to solver precision — no O(dt) geometric-
+        # conservation-law drift, and the membrane needs no explicit surface-divergence term (the facet-area
+        # ratio *is* ∇_Γ·v_Γ). `volume_ratio` is refreshed by `motion.advance()` before the RHS assembles.
+        r_in, r_out, r_mem = motion.volume_ratio("in"), motion.volume_ratio("out"), motion.volume_ratio("mem")
         dilution_terms: list[UflExpr] = []
         for k in range(len(inner_species)):
-            dilution_terms.append(-u_in_prev[k] * ufl.div(disp) * w_in[k] * dx_in)
+            dilution_terms.append((r_in - 1.0) * u_in_prev[k] * w_in[k] * dx_in)
         for k in range(len(outer_species)):
-            dilution_terms.append(-u_out_prev[k] * ufl.div(disp) * w_out[k] * dx_out)
+            dilution_terms.append((r_out - 1.0) * u_out_prev[k] * w_out[k] * dx_out)
         for k in range(len(membrane_species)):
-            dilution_terms.append(-dt * rho_prev[k] * surf_div * w_rho[k] * dx_mem)
+            dilution_terms.append((r_mem - 1.0) * rho_prev[k] * w_rho[k] * dx_mem)
         rhs_dilution_form = fem.form(ufl.extract_blocks(_sum_forms(dilution_terms)), entity_maps=emaps)
 
     # Block-diagonal mass + diffusion (+ any affine in-bulk reaction). Static unless the membrane moves, in
@@ -1257,12 +1332,15 @@ def integrate_membrane_coupled(
         motion = MembraneCoupledMeshMotion(md, geometry, velocity=velocity, dt=interval)
     dil_in = dil_out = dil_mem = None
     if motion is not None:
-        # A pre-built motion (e.g. `ForceBalanceMeshMotion`) must be constructed with dt == the outer
-        # interval, so its `parent_displacement` is `interval·v_mesh` and `div(disp)/interval` = ∇·v_mesh.
-        dil_in = dil_out = ufl.div(motion.parent_displacement) / interval
-        n_hat = ufl.CellNormal(membrane_mesh)
-        v_mem = motion.membrane_velocity
-        dil_mem = ufl.div(v_mem) - ufl.dot(ufl.dot(ufl.grad(v_mem), n_hat), n_hat)
+        # The GCL-consistent effective dilution rate per moving mesh, `ln(|Kⁿ⁺¹|/|Kⁿ|)/interval`, from the
+        # actual per-cell (bulk) / per-facet (membrane) swept volumes. The TS integrates continuously while
+        # the mesh jumps discretely at each outer step, so using this rate (not the instantaneous ∇·v) makes
+        # the over-a-stride decay `exp(−d_eff·interval) = |Kⁿ|/|Kⁿ⁺¹|` exactly cancel the jump — each field's
+        # substance is conserved (no O(interval) split drift). The membrane facet-area ratio *is* ∫∇_Γ·v_Γ,
+        # so no explicit surface-divergence / curvature correction is needed. (Refreshed each `advance`.)
+        dil_in = motion.effective_dilution("in")
+        dil_out = motion.effective_dilution("out")
+        dil_mem = motion.effective_dilution("mem")
 
     # --- residual: local (per-mesh mass/rate + diffusion + dilution) + coupling (interface dS, implicit) -
     # MOL form: the time derivative ċ = rate (a Function the TS supplies); diffusion uses the state.
