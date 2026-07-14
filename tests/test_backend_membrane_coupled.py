@@ -37,7 +37,7 @@ from vcell_fenics.formalism.schema import (
 
 
 def _model(
-    *, kon: float = 0.5, rmax: float = 2.0, diffusion: str = "1.0", surf_diffusion: str = "0.05"
+    *, kon: float = 0.5, rmax: float = 2.0, diffusion: str = "1.0", surf_diffusion: str = "0.05", r_ic: str = "0.0"
 ) -> MathDescription:
     """A receptor on the membrane irreversibly captures ligand from both compartments. The bulk fluxes
     are the exact negation of the per-side production, so total ligand (free L_in + free L_out + bound R)
@@ -78,7 +78,7 @@ def _model(
                 subdomain="pm",
                 temporality="time_dependent",
                 terms={"diffusion": surf_diffusion, "source": "kon * (trace(L_in) + trace(L_out)) * (Rmax - R)"},
-                initial_condition="0.0",
+                initial_condition=r_ic,
             ),
         ],
         boundary_conditions=[
@@ -370,8 +370,10 @@ def test_mol_velocity_none_is_the_static_integration() -> None:
 
 def test_mol_conserves_total_ligand_under_motion() -> None:
     # The migrating-cell headline: the stiff binding integrates adaptively WHILE the cell deforms, and the
-    # implicit bulk `c ∇·v_mesh` + surface `ρ ∇_Γ·v_Γ` dilution keep total ligand conserved (round-off from
-    # the binding cancellation, O(motion-step) from the move/dilute split). Both expansion and shrinkage.
+    # GCL-consistent effective dilution rate keeps total ligand conserved. The dilution itself is now
+    # conserved to ~round-off (see test_mol_moving_coupled_dilution_conserves_without_binding); the residual
+    # O(motion-step) drift here is the *lagged interface coupling flux* across the moving membrane (a
+    # separate operator split, not the dilution). Both expansion and shrinkage.
     for velocity in ("[0.3 * geom.x[0], 0.3 * geom.x[1]]", "[-0.3 * geom.x[0], -0.3 * geom.x[1]]"):
         geom = _geom(h=0.11)
         area0 = _inner_area(geom)
@@ -383,9 +385,10 @@ def test_mol_conserves_total_ligand_under_motion() -> None:
 
 
 def test_mol_motion_splitting_error_is_first_order() -> None:
-    # The conservation error under motion is the move-vs-dilute operator split — first order in the outer
-    # motion step. Halving the interval (doubling motion_steps) halves the drift; this is the clean,
-    # predictable convergence the BE/IMEX path can't give (its two lagging errors cross zero non-monotonically).
+    # With the effective dilution rate the move/dilute split is conserved to ~round-off, so the residual
+    # conservation error under motion is the *lagged interface coupling flux* on the moving membrane —
+    # still first order in the outer motion step. Halving the interval (doubling motion_steps) halves the
+    # drift; this is the clean, predictable convergence the BE/IMEX path can't give.
     velocity = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
     model = _model()
 
@@ -411,6 +414,43 @@ def test_mol_handles_stiff_binding_under_motion() -> None:
     )
     assert result.mass("R") > 2.0  # strong stiff capture (≫ the gentle-kon ~1.1)
     assert result.total_mass() == pytest.approx(total0, rel=5e-3)
+
+
+def test_be_moving_coupled_conserves_each_field_to_roundoff() -> None:
+    # The conservative ALE correction on the backward-Euler coupled path, isolated from the binding
+    # coupling (kon=0, but R seeded so the membrane dilutes too). Each co-moving field just diffuses +
+    # dilutes on its own moving mesh, and the (u − r·uⁿ)·w time term — r = the per-cell (bulk) / per-facet
+    # (membrane) swept ratio |Kⁿ|/|Kⁿ⁺¹| — conserves each field's substance to *solver precision*, exactly
+    # and independently of dt (the term telescopes). The coupled analogue of the single-mesh bulk/membrane
+    # conservative form.
+    v = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
+    model = _model(kon=0.0, r_ic="1.0")
+    totals = []
+    for dt, nsteps in ((0.03, 10), (0.0075, 40)):
+        geom = _geom(h=0.11)
+        p = assemble_membrane_coupled(model, geom, dt=dt, velocity=v)
+        m0 = {s: p.mass(s) for s in ("L_in", "L_out", "R")}
+        tot0 = p.total_mass()
+        for _ in range(nsteps):
+            p.step()
+        for s in ("L_in", "L_out", "R"):
+            assert abs(p.mass(s) / m0[s] - 1.0) < 1e-10  # each field's substance conserved to round-off
+        totals.append(p.total_mass() / tot0 - 1.0)
+    assert abs(totals[0]) < 1e-10 and abs(totals[1] - totals[0]) < 1e-10  # exact + dt-independent
+
+
+def test_mol_moving_coupled_dilution_conserves_without_binding() -> None:
+    # The MOL coupled path's dilution in isolation (kon=0, R seeded). The strided TS can't telescope, so it
+    # uses the GCL-consistent effective rate ln(|Kⁿ⁺¹|/|Kⁿ|)/interval per mesh: the continuous over-a-stride
+    # decay exactly cancels the discrete mesh jump, conserving total substance to ~round-off (≫ tighter than
+    # the ~0.1 % lagged-coupling drift of the binding case). Confirms the dilution — not the fix's target
+    # coupling flux — is what the effective rate makes conservative.
+    v = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
+    model = _model(kon=0.0, r_ic="1.0")
+    geom = _geom(h=0.11)
+    total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
+    result = integrate_membrane_coupled(model, geom, t_final=0.3, velocity=v, motion_steps=10)
+    assert result.total_mass() == pytest.approx(total0, rel=1e-3)  # dilution conserved to ~round-off, no coupling
 
 
 def test_motion_grows_the_cell_to_the_analytic_homothety() -> None:
