@@ -80,10 +80,80 @@ identically). The box is a structured whole-box mesh — geometry exact at every
 
 The IC error converges at **order ≈ 2 in both L2 and L∞** (P1 interpolation) — L∞ matching L2 confirms no
 hidden localized error; the peak resolves at the same rate. FEM↔FV agreement tightens to **~0.9 % L2 /
-~1.7 % L∞** by 80³ (the fixed FV-32³ floor). **Mass is conserved to round-off (~1e-13) at every h**; the
-FV mass, by contrast, drifts **+4 %** over the run — a discrete-conservation / boundary-default difference
-worth a closer look. (Against the *free-space* analytic at late times the fields diverge ~24 % L∞ by
-`t = 1` — the expected **wall-reflection** artifact of the bounded no-flux domain, not solver error.)
+~1.7 % L∞** by 80³ (the fixed FV-32³ floor). **Both solvers conserve mass exactly**: our FEM to round-off
+(~1e-13 at every h), and FV likewise. (An apparent **+4 % FV "drift" was a quadrature artifact on our
+side**, not the solver. VCell's FV is cell-centered, but its output degrees of freedom live *on* the domain
+boundary with **fractional control volumes** — ½ on faces, ¼ on edges, ⅛ on corners — so integrating the
+field with a uniform `dx³` weight over-counts the boundary DOFs; as the Gaussian spreads into them the sum
+inflates, with the entire "gain" sitting in the boundary shell while the interior drops. **Trapezoidal**
+integration — precisely that fractional boundary weighting — gives **−0.000 % drift**, confirming exact FV
+conservation.) Against the *free-space* analytic at late times the fields diverge ~24 % L∞ by `t = 1` — the
+expected **wall-reflection** artifact of the bounded no-flux domain, not solver error.
+
+## 3D interface-coupled permeability
+
+`coupled_3d_fv.py` + `compare_coupled_3d.py` — the 3D analog of the 2D permeability coupling, on the new
+Netgen 3D `realize_interface_coupled` + 3D `integrate_interface_coupled`. A spherical `cyto` (radius 0.5)
+in an `ext` background on `[-1,1]³`, two bulk species (`s_cyto` init 1, `s_ext` init 0) coupled by a
+membrane permeability flux `J = P·(s_ext − s_cyto)` (P = 0.5, D = 1). VCell's jump conditions route to the
+equal-and-opposite pair of single-sided `BCInterfaceFlux` our coupled integrator solves — geometry *and*
+physics both come from the import pipeline. FV at 32³/48³; the FEniCSx side refines `h` alongside.
+
+```bash
+../pyvcell/.venv/bin/python cross_validation/coupled_3d_fv.py
+.pixi/envs/dev/bin/python   cross_validation/compare_coupled_3d.py
+```
+
+We sample `s_cyto` inside the sphere and `s_ext` outside (skipping the membrane band) at the FV grid
+points and report L2/L∞ vs the FV-48³ reference at `t = 1` (mid-transient, the means still apart):
+
+| h | inner+outer tets | relL2(FV) | relL∞(FV) | ratio | s_cyto(FEM) | s_ext(FEM) | mass drift |
+|---|------------------|-----------|-----------|-------|-------------|------------|------------|
+| 0.100 | 24 954 | 2.76 % | 4.60 % | — | 0.1203 | 0.0595 | 4e-13 |
+| 0.067 | 56 726 | 1.74 % | 2.96 % | 1.58× | 0.1221 | 0.0600 | 1e-13 |
+| 0.050 | 136 800 | 1.07 % | 2.16 % | 1.63× | 0.1231 | 0.0605 | 2e-12 |
+
+relL2 falls **first-order** (~1.6×/step — the membrane coupling is 1st-order on each side, matching the 2D
+case), and both compartment means converge toward the FV values (`s_cyto → 0.1258`, `s_ext → 0.0609`).
+**Total substance is conserved to round-off (~1e-13) at every h** — measured against the *realized* cyto
+volume, which isolates the solver's exact conservation from the faceted-sphere geometry error (the earlier
+~3 % "drift" against the analytic `4/3πr³` was purely that geometry gap, and it shrinks as the sphere
+resolves with h).
+
+## 3D membrane surface-species (receptor)
+
+`receptor_3d_fv.py` + `compare_membrane_3d.py` — a membrane **surface species** cross-validation on the 3D
+`integrate_membrane_coupled`. A spherical `cyto` in an `ext` background on `[-1,1]³`, two bulk ligands
+`s_cyto`/`s_ext` (both init 1) captured by a membrane receptor `R` (a `surface_pde_with_dilution` species)
+via two saturating binding reactions `kon·ligand·(Rmax − R)`. VCell lowers these to a membrane PDE for R
+plus the jump conditions that deplete the ligands; geometry + math are imported, realized in 3D, and
+solved. FV at 32³/48³.
+
+```bash
+../pyvcell/.venv/bin/python cross_validation/receptor_3d_fv.py
+.pixi/envs/dev/bin/python   cross_validation/compare_membrane_3d.py
+```
+
+We compare the depleted ligand fields (R acts on them through binding) vs the FV-48³ reference at `t = 2`,
+refining `h` alongside:
+
+| h | relL2(FV) | relL∞(FV) | ratio | s_cyto(FEM) | s_ext(FEM) | bound R | mass drift |
+|---|-----------|-----------|-------|-------------|------------|---------|------------|
+| 0.100 | 0.119 % | 0.560 % | — | 0.6744 | 0.9739 | 218.6 | 9e-15 |
+| 0.067 | 0.088 % | 0.415 % | 1.35× | 0.6757 | 0.9737 | 219.9 | 8e-15 |
+| 0.050 | 0.070 % | 0.332 % | 1.26× | 0.6765 | 0.9736 | 221.0 | 3e-15 |
+
+**Sub-0.1 % relL2** agreement (converging), with the depleted ligand means matching FV (`s_cyto → 0.6796`,
+`s_ext → 0.9736`) and the receptor capturing ligand (bound R grows 0 → ~220, itself converging with h). That
+tight ligand match is the end-to-end validation of the **surface PDE + binding on the 2D-in-3D membrane** —
+our R-depleted ligands match FV's to <0.1 %.
+
+**Total substance is conserved once the units are reconciled.** The membrane receptor R (density,
+molecules·µm⁻²) and the volume ligands (µM) live in different units; the conserved quantity is
+`∫s_cyto dV + ∫s_ext dV + KMOLE·∫R dA`, with **KMOLE ≈ 1/602.214** (the µmol↔molecules factor, pulled from
+the imported parameters — no hard-coding). That total is flat to **round-off (~1e-14) at every h**, and the
+free-ligand loss equals `KMOLE·(bound R gained)` exactly (verified: 0.36302 = 0.36302). A raw `total_mass()`
+that sums R with the volume ligands mixes units and is *not* the conserved quantity (it read a spurious 27×).
 
 ## 3D reaction-advection-diffusion
 

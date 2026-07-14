@@ -1,0 +1,215 @@
+name: dummy_math_description
+constants:
+- name: _F_
+  exp: '96485.3321'
+- name: _F_nmol_
+  exp: '9.64853321E-5'
+- name: _K_GHK_
+  exp: '1.0E-9'
+- name: _N_pmol_
+  exp: 6.02214179E11
+- name: _PI_
+  exp: '3.141592653589793'
+- name: _R_
+  exp: '8314.46261815'
+- name: _T_
+  exp: '300.0'
+- name: AreaPerUnitArea_mem
+  exp: '1.0'
+- name: K_millivolts_per_volt
+  exp: '1000.0'
+- name: KMOLE
+  exp: '0.001660538783162726'
+- name: netValence_bind_in
+  exp: '1.0'
+- name: netValence_bind_out
+  exp: '1.0'
+- name: R_boundaryXm
+  exp: '0.0'
+- name: R_boundaryXp
+  exp: '0.0'
+- name: R_boundaryYm
+  exp: '0.0'
+- name: R_boundaryYp
+  exp: '0.0'
+- name: R_boundaryZm
+  exp: '0.0'
+- name: R_boundaryZp
+  exp: '0.0'
+- name: R_diffusionRate
+  exp: '0.05'
+- name: R_init_molecules_um_2
+  exp: '0.0'
+- name: s_cyto_boundaryXm
+  exp: '0.0'
+- name: s_cyto_boundaryXp
+  exp: '0.0'
+- name: s_cyto_boundaryYm
+  exp: '0.0'
+- name: s_cyto_boundaryYp
+  exp: '0.0'
+- name: s_cyto_boundaryZm
+  exp: '0.0'
+- name: s_cyto_boundaryZp
+  exp: '0.0'
+- name: s_cyto_diffusionRate
+  exp: '1.0'
+- name: s_cyto_init_uM
+  exp: '1.0'
+- name: s_ext_boundaryXm
+  exp: '0.0'
+- name: s_ext_boundaryXp
+  exp: '0.0'
+- name: s_ext_boundaryYm
+  exp: '0.0'
+- name: s_ext_boundaryYp
+  exp: '0.0'
+- name: s_ext_boundaryZm
+  exp: '0.0'
+- name: s_ext_boundaryZp
+  exp: '0.0'
+- name: s_ext_diffusionRate
+  exp: '1.0'
+- name: s_ext_init_uM
+  exp: '1.0'
+- name: UnitFactor_uM_um3_molecules_neg_1
+  exp: (1.0 * pow(KMOLE,1.0))
+- name: V_mem
+  exp: '0.0'
+- name: VolumePerUnitVolume_cyto
+  exp: '1.0'
+- name: VolumePerUnitVolume_ext
+  exp: '1.0'
+functions:
+- name: J_bind_in
+  exp: (0.01 * s_cyto * (2000.0 - R))
+  domain: mem_dom
+- name: J_bind_out
+  exp: (0.01 * s_ext * (2000.0 - R))
+  domain: mem_dom
+- name: KFlux_mem_cyto
+  exp: (AreaPerUnitArea_mem / VolumePerUnitVolume_cyto)
+  domain: mem_dom
+- name: KFlux_mem_ext
+  exp: (AreaPerUnitArea_mem / VolumePerUnitVolume_ext)
+  domain: mem_dom
+- name: Size_cyto
+  exp: (VolumePerUnitVolume_cyto * vcRegionVolume('cyto_dom'))
+  domain: cyto_dom
+- name: Size_ext
+  exp: (VolumePerUnitVolume_ext * vcRegionVolume('ext_dom'))
+  domain: ext_dom
+- name: Size_mem
+  exp: (AreaPerUnitArea_mem * vcRegionArea('mem_dom'))
+  domain: mem_dom
+- name: sobj_cyto_dom1_ext_dom0_size
+  exp: vcRegionArea('mem_dom')
+  domain: mem_dom
+- name: vobj_cyto_dom1_size
+  exp: vcRegionVolume('cyto_dom')
+  domain: cyto_dom
+- name: vobj_ext_dom0_size
+  exp: vcRegionVolume('ext_dom')
+  domain: ext_dom
+variables:
+- name: R
+  var_type: MembraneVariable
+  domain: mem_dom
+- name: s_cyto
+  var_type: VolumeVariable
+  domain: cyto_dom
+- name: s_ext
+  var_type: VolumeVariable
+  domain: ext_dom
+compartment_subdomains:
+- name: cyto_dom
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Flux
+  - boundary: Zp
+    type: Flux
+  pde_equations:
+  - name: s_cyto
+    rate: '0.0'
+    diffusion: s_cyto_diffusionRate
+    initial: s_cyto_init_uM
+    solution_type: Unknown
+    boundaries:
+      xm: s_cyto_boundaryXm
+      xp: s_cyto_boundaryXp
+      ym: s_cyto_boundaryYm
+      yp: s_cyto_boundaryYp
+      zm: s_cyto_boundaryZm
+      zp: s_cyto_boundaryZp
+- name: ext_dom
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Flux
+  - boundary: Zp
+    type: Flux
+  pde_equations:
+  - name: s_ext
+    rate: '0.0'
+    diffusion: s_ext_diffusionRate
+    initial: s_ext_init_uM
+    solution_type: Unknown
+    boundaries:
+      xm: s_ext_boundaryXm
+      xp: s_ext_boundaryXp
+      ym: s_ext_boundaryYm
+      yp: s_ext_boundaryYp
+      zm: s_ext_boundaryZm
+      zp: s_ext_boundaryZp
+membrane_subdomains:
+- name: mem_dom
+  inside_compartment: cyto_dom
+  outside_compartment: ext_dom
+  boundary_types:
+  - boundary: Xm
+    type: Value
+  - boundary: Xp
+    type: Value
+  - boundary: Ym
+    type: Value
+  - boundary: Yp
+    type: Value
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  pde_equations:
+  - name: R
+    rate: (J_bind_in + J_bind_out)
+    diffusion: R_diffusionRate
+    initial: R_init_molecules_um_2
+    solution_type: Unknown
+    boundaries:
+      xm: R_boundaryXm
+      xp: R_boundaryXp
+      ym: R_boundaryYm
+      yp: R_boundaryYp
+      zm: R_boundaryZm
+      zp: R_boundaryZp
+  jump_conditions:
+  - name: s_cyto
+    in_flux: ( - 1.0 * KFlux_mem_cyto * UnitFactor_uM_um3_molecules_neg_1 * J_bind_in)
+    out_flux: '0.0'
+  - name: s_ext
+    in_flux: '0.0'
+    out_flux: ( - 1.0 * KFlux_mem_ext * UnitFactor_uM_um3_molecules_neg_1 * J_bind_out)
