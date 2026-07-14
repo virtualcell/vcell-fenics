@@ -110,12 +110,29 @@ class BackwardEuler:
             raise NotImplementedError("steady-state lowering is not in the v1 backend yet")
 
         trial, test, dt = problem.trial, problem.test, problem.dt
-        # mass: (uⁿ⁺¹ − uⁿ)·w. `inner` so a mixed/vector space (coupled species)
+        # On a **moving bulk** the mass term is the *conservative ALE* time term: the previous field is
+        # rescaled per cell by `|Kⁿ|/|Kⁿ⁺¹|` (`motion.volume_ratio()`) so its mass on the moved mesh equals
+        # its integral on the pre-move mesh exactly. Dilution then lives entirely in the changing measure —
+        # the explicit `ρ ∇·v` DILUTION term is dropped below — and mass is conserved to solver precision,
+        # eliminating the O(dt) geometric-conservation-law drift the same-mesh (uⁿ⁺¹−uⁿ)·w + ρ∇·v split
+        # incurs. A rigid motion gives `volume_ratio ≡ 1` and no dilution term, so this reduces to the
+        # static form; a membrane (codim-1) keeps the split (its ∇_Γ·v term is a separate, correct path).
+        mesh = problem.V.mesh
+        motion = problem._motion
+        conservative = motion is not None and mesh.topology.dim == mesh.geometry.dim
+        if conservative:
+            assert motion is not None  # implied by `conservative`; narrows for the type checker
+            previous = motion.volume_ratio() * problem.previous
+        else:
+            previous = problem.previous
+        # mass: (uⁿ⁺¹ − r·uⁿ)·w. `inner` so a mixed/vector space (coupled species)
         # sums its components; for a scalar space it is just the product.
-        form = ufl.inner(trial - problem.previous, test) * problem.dx
+        form = ufl.inner(trial - previous, test) * problem.dx
         for term in problem.terms:
             if term.kind is TermKind.TIME_DERIVATIVE or term.integrand is None:
                 continue
+            if conservative and term.kind is TermKind.DILUTION:
+                continue  # subsumed into the conservative time term's changing measure
             if term.kind is TermKind.SOURCE:
                 form = form - dt * term.integrand * problem.dx  # +s on the PDE's RHS ⇒ −s in the residual
             else:
@@ -232,6 +249,13 @@ class _MeshMotion:
         # Per-cell volume form (DG0 test function integrates to each cell's
         # volume); re-assembling after a move reports the deformed cell sizes.
         self._cell_volume_form = fem.form(ufl.TestFunction(dg0) * ufl.dx)
+        # Per-cell |Kⁿ|/|Kⁿ⁺¹| (old/new cell volume), refreshed each `advance`. The conservative BE mass
+        # term multiplies the carried previous field by this, so its mass integrated on the moved mesh
+        # equals its integral on the pre-move mesh exactly — dilution then lives in the changing measure
+        # (no explicit ρ∇·v term) and mass is conserved to solver precision, without the O(dt) GCL drift
+        # the same-mesh time-term + `ρ∇·v` split incurs. 1.0 before the first move and for a rigid motion.
+        self._volume_ratio = fem.Function(dg0)
+        self._volume_ratio.x.array[:] = 1.0
         self._reference_ratio = self._cell_volume_ratio()
 
     def dilution_rate(self) -> fem.Function:
@@ -250,9 +274,20 @@ class _MeshMotion:
         # to-be-applied move, so its divergence here is the substrate velocity's divergence before the
         # nodes shift (computing it after the move would rescale it by the cell stretch, ~1/(1+dt)).
         self._dilution_rate.interpolate(self._dilution_expr)
+        volumes_before = self._cell_volumes()
         increment = self._displacement.x.array.reshape((-1, self._gdim))[self._geom_from_dof]
         self._mesh.geometry.x[:, : self._gdim] += increment
-        ratio = self._cell_volume_ratio()
+        volumes_after = self._cell_volumes()
+        v_min, v_max = float(volumes_after.min()), float(volumes_after.max())
+        if not (math.isfinite(v_min) and math.isfinite(v_max)) or v_min <= 0.0:
+            raise MeshQualityError(
+                f"prescribed motion produced a non-positive or non-finite cell volume (min={v_min:.3g}); "
+                f"an element has collapsed or inverted."
+            )
+        # |Kⁿ|/|Kⁿ⁺¹| per cell: the P1 local mass matrix scales linearly with cell volume, so this ratio
+        # rescales the carried previous field's mass on the moved mesh back to its pre-move value exactly.
+        self._volume_ratio.x.array[:] = volumes_before / volumes_after
+        ratio = v_max / v_min
         if ratio > _MAX_CELL_RATIO_GROWTH * self._reference_ratio:
             raise MeshQualityError(
                 f"prescribed motion degraded the mesh: cell-volume max/min ratio {ratio:.3g} exceeds "
@@ -267,8 +302,19 @@ class _MeshMotion:
         enforces."""
         return self._cell_volume_ratio() / self._reference_ratio
 
+    def volume_ratio(self) -> fem.Function:
+        """Per-cell `|Kⁿ|/|Kⁿ⁺¹|` (old/new cell volume), refreshed each `advance`. The conservative
+        backward-Euler mass term (`BackwardEuler.compose`) multiplies the carried previous field by this
+        so its mass on the moved mesh equals its pre-move mass exactly, making dilution implicit in the
+        changing measure. 1.0 before the first move and for a rigid (`∇·v = 0`) motion."""
+        return self._volume_ratio
+
+    def _cell_volumes(self) -> Any:
+        """Per-cell volumes (DG0) on the current configuration — |K| for each cell."""
+        return fem.assemble_vector(self._cell_volume_form).array
+
     def _cell_volume_ratio(self) -> float:
-        volumes = fem.assemble_vector(self._cell_volume_form).array
+        volumes = self._cell_volumes()
         v_min, v_max = float(volumes.min()), float(volumes.max())
         if not (math.isfinite(v_min) and math.isfinite(v_max)) or v_min <= 0.0:
             raise MeshQualityError(
