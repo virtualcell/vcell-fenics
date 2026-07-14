@@ -1,0 +1,24 @@
+name: cell
+dim: 3
+extent:
+- 2.0
+- 2.0
+- 2.0
+origin:
+- -1.0
+- -1.0
+- -1.0
+subvolumes:
+- name: cyto_dom
+  handle: 0
+  subvolume_type: analytic
+  analytic_expr: ((pow((x - 0.0),2.0) + pow((y - 0.0),2.0) + pow((z - 0.0),2.0)) <
+    pow(0.5,2.0))
+- name: ext_dom
+  handle: 1
+  subvolume_type: analytic
+  analytic_expr: '1.0'
+surface_classes:
+- name: mem_dom
+  subvolume_ref_1: cyto_dom
+  subvolume_ref_2: ext_dom
