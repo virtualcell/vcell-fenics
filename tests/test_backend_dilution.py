@@ -231,7 +231,7 @@ def test_translation_transports_rigidly_with_no_spurious_dilution() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Bulk — the dilution reads the *actual* (harmonic) mesh velocity.
+# 6. Bulk — the conservative ALE time term conserves mass exactly, for any motion.
 # ---------------------------------------------------------------------------
 
 _DISTORTING_BULK = """
@@ -264,14 +264,17 @@ def _bulk_mass_drift(dt: float, *, t_final: float = 0.6) -> float:
     return abs(dp.total_mass() - mass0) / mass0
 
 
-def test_nonaffine_bulk_dilution_uses_the_harmonic_mesh_velocity() -> None:
-    # On a *bulk* the interior nodes move by the harmonic extension of the boundary velocity, not the
-    # raw prescribed velocity — so for a non-affine motion ((1 + 0.7 cos 2θ) radial here) ∇·v_mesh ≠
-    # ∇·v_prescribed in the interior. The dilution must use the actual mesh velocity: reading
-    # ∇·v_prescribed instead let mass grow ~80 % over this run (an O(1) inconsistency), while the
-    # harmonic divergence restores first-order consistency — a small drift that ~halves as dt halves.
+def test_nonaffine_bulk_motion_conserves_mass_to_roundoff() -> None:
+    # The conservative ALE time term (BackwardEuler) rescales the carried previous field per cell by the
+    # actual swept-volume ratio |Kⁿ|/|Kⁿ⁺¹|, so dilution lives in the changing measure and mass is
+    # conserved to solver precision for *any* bulk motion — including this non-affine one
+    # ((1 + 0.7 cos 2θ) radial, where the interior moves by the harmonic extension and ∇·v_mesh varies
+    # cell to cell). Because the ratio is the true volume change of the harmonically-moved cells,
+    # conservation is exact and dt-independent — no O(dt) geometric-conservation-law drift, a strictly
+    # stronger guarantee than the earlier advective (uⁿ⁺¹−uⁿ)·w + ρ∇·v form's small-but-nonzero drift.
     coarse = _bulk_mass_drift(0.02)
     fine = _bulk_mass_drift(0.01)
 
-    assert coarse < 0.05  # small — the raw-divergence dilution drifted ~0.8 here
-    assert fine < 0.6 * coarse  # ~first-order: refining the step markedly cuts the drift
+    assert coarse < 1e-11  # machine precision — not a dt-convergent drift
+    assert fine < 1e-11
+    assert abs(fine - coarse) < 1e-11  # dt-independent: refining the step does not change the (zero) drift
