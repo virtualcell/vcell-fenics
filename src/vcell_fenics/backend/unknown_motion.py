@@ -335,7 +335,7 @@ def assemble_unknown_motion(
 
     # ---- mesh motion (owned here) + the optional receptor --------------------
     motion = _MeshMotion(mesh, velocity, dt_const)
-    receptor = _build_receptor(receptor_eqs[0], md, mesh, dx, velocity, dt_const) if receptor_eqs else None
+    receptor = _build_receptor(receptor_eqs[0], md, mesh, dx, velocity, dt_const, motion) if receptor_eqs else None
     receptor_var = receptor_eqs[0].variable if receptor_eqs else None
 
     # ---- optional BGN tangential redistribution ------------------------------
@@ -363,11 +363,19 @@ def assemble_unknown_motion(
 
 
 def _build_receptor(
-    eq: TemplateEquation, md: MathDescription, mesh: Mesh, dx: ufl.Measure, velocity: fem.Function, dt: fem.Constant
+    eq: TemplateEquation,
+    md: MathDescription,
+    mesh: Mesh,
+    dx: ufl.Measure,
+    velocity: fem.Function,
+    dt: fem.Constant,
+    motion: _MeshMotion,
 ) -> DiscreteProblem:
-    """A T2 surface PDE whose dilution reads the solved velocity `Function` (so it
-    updates as the force balance re-solves). The mesh motion is owned by the
-    `UnknownMotionProblem`, so this problem carries no `_MeshMotion` of its own."""
+    """A T2 surface PDE on the moving membrane. The mesh is moved by the caller (`UnknownMotionProblem`)
+    via the shared `motion`; the receptor references that same `motion` for the **conservative** ALE time
+    term (`(ρ − r·ρⁿ)·w`, r = the per-facet swept ratio the move refreshed) but with `owns_mesh_motion=False`
+    so `step()` reads the ratio without moving again. So `∫_Γ ρ ds` is conserved to solver precision under
+    the solved expansion, not the O(dt) drift the explicit `ρ ∇_Γ·v` dilution incurred."""
 
     space = fem.functionspace(mesh, ("Lagrange", 1))
     trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
@@ -395,7 +403,9 @@ def _build_receptor(
         terms=tuple(terms),
         scheme=BackwardEuler(),
         bcs=[],
-        motion_velocity=None,  # the UnknownMotionProblem advances the mesh
+        motion=motion,  # shared with the caller's mesh move; read-only here (owns_mesh_motion=False)
+        owns_mesh_motion=False,  # the UnknownMotionProblem advances the mesh; the DILUTION term triggers
+        # the conservative time term (dropped + replaced by the swept ratio), so no double-move, no drift.
     )
     if eq.initial_condition is not None:
         problem.interpolate_initial(compile_expression(parse(eq.initial_condition), ctx))

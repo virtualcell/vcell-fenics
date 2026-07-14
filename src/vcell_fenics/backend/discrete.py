@@ -357,6 +357,11 @@ class DiscreteProblem:
     # not the raw prescribed velocity. When omitted, it is created here from `motion_velocity` (the raw
     # velocity — correct for a membrane or affine bulk; a direct-construction convenience).
     motion: _MeshMotion | None = None
+    # Whether `step()` moves the mesh (calls `motion.advance()`). Normally True. Set False when an
+    # *external* driver already advanced this same `motion` before calling `step()` — e.g. the solved-
+    # velocity `unknown_motion` path moves the membrane itself, then steps the receptor: the receptor
+    # then only *reads* the motion's `volume_ratio` for the conservative time term, without moving again.
+    owns_mesh_motion: bool = True
     # The bound time Constant `t` (compile context). A driver advances it via
     # `set_time` so a time-dependent expression — e.g. a Dirichlet g(t) — tracks it.
     time: fem.Constant | None = None
@@ -464,10 +469,11 @@ class DiscreteProblem:
         self.previous.x.array[:] = self.unknown.x.array
 
     def step(self) -> None:
-        # For a moving subdomain, advance the mesh first; field values are
-        # carried (material frame) and the mass + DILUTION terms re-assemble on
-        # the new configuration, so the dilution `div(velocity)` reflects it.
-        if self._motion is not None:
+        # For a moving subdomain, advance the mesh first; field values are carried (material frame) and
+        # the conservative mass term re-assembles on the new configuration via `motion.volume_ratio`.
+        # When `owns_mesh_motion` is False an external driver already advanced this motion (and refreshed
+        # its swept measures) — we only read them, so skip the move to avoid double-advancing.
+        if self._motion is not None and self.owns_mesh_motion:
             self._motion.advance()
         self._backward_euler_problem().solve()
         self.previous.x.array[:] = self.unknown.x.array

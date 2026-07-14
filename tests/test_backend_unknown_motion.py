@@ -96,8 +96,11 @@ def test_receptor_dilutes_under_solved_motion() -> None:
         problem.step()
 
     assert _mean_radius(problem) > 1.2 * r0  # the membrane genuinely expanded
-    # The mandatory dilution term keeps ∫_Γ ρ ds invariant under the solved expansion.
-    assert _receptor_mass(problem) == pytest.approx(mass0, rel=1e-2)
+    # The conservative ALE time term keeps ∫_Γ ρ ds invariant under the solved expansion to solver
+    # precision: the receptor shares the mesh-move's per-facet swept ratio |Kⁿ|/|Kⁿ⁺¹| (rather than the
+    # advective `ρ ∇_Γ·v` dilution, which drifted O(dt) — ~0.45 % at this dt), so it is exact and
+    # dt-independent even though the velocity, and so the motion, is *solved* each step, not prescribed.
+    assert _receptor_mass(problem) == pytest.approx(mass0, rel=1e-11)
 
 
 # --- curvature forces: n(x) / H(x) drive mean-curvature flow -------------------
