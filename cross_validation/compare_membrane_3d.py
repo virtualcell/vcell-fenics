@@ -36,7 +36,13 @@ _T = 2.0  # mid-transient — both ligands clearly depleted, receptor not yet sa
 def _total_substance(fields: object, kmole: float) -> float:
     """The KMOLE-reconciled conserved total: free ligand ∫s dV (µM·µm³) + bound receptor KMOLE·∫R dA
     (membrane molecules → the same substance unit). A raw sum without KMOLE mixes units and is not
-    conserved; with it, free-ligand loss = KMOLE·(R gained) exactly."""
+    conserved; with it, free-ligand loss = KMOLE·(R gained) exactly.
+
+    CAVEAT — fine now, not general: VCell's unit system lives in the *biological* model, not the generated
+    (unit-stripped) MathDescription, so relying on `KMOLE` (by name/value) as the membrane↔volume factor is
+    only valid for the default unit system — which is almost always the case, so it is OK for now. The
+    general, unit-safe source is the math-symbol-mapping (math symbols → biological variables with units),
+    which pyvcell does not currently persist; revisit if vcell-fenics gains optional unit-system metadata."""
     return fields.mass("s_cyto") + fields.mass("s_ext") + kmole * fields.mass("R")  # type: ignore[attr-defined]
 
 
