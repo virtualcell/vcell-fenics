@@ -83,6 +83,36 @@ volume, which isolates the solver's exact conservation from the faceted-sphere g
 ~3 % "drift" against the analytic `4/3πr³` was purely that geometry gap, and it shrinks as the sphere
 resolves with h).
 
+## 3D membrane surface-species (receptor)
+
+`receptor_3d_fv.py` + `compare_membrane_3d.py` — a membrane **surface species** cross-validation on the 3D
+`integrate_membrane_coupled`. A spherical `cyto` in an `ext` background on `[-1,1]³`, two bulk ligands
+`s_cyto`/`s_ext` (both init 1) captured by a membrane receptor `R` (a `surface_pde_with_dilution` species)
+via two saturating binding reactions `kon·ligand·(Rmax − R)`. VCell lowers these to a membrane PDE for R
+plus the jump conditions that deplete the ligands; geometry + math are imported, realized in 3D, and
+solved. FV at 32³/48³.
+
+```bash
+../pyvcell/.venv/bin/python cross_validation/receptor_3d_fv.py
+.pixi/envs/dev/bin/python   cross_validation/compare_membrane_3d.py
+```
+
+We compare the depleted ligand fields (R acts on them through binding) vs the FV-48³ reference at `t = 2`,
+refining `h` alongside:
+
+| h | relL2(FV) | relL∞(FV) | ratio | s_cyto(FEM) | s_ext(FEM) | bound R |
+|---|-----------|-----------|-------|-------------|------------|---------|
+| 0.100 | 0.119 % | 0.560 % | — | 0.6744 | 0.9739 | 218.6 |
+| 0.067 | 0.088 % | 0.415 % | 1.35× | 0.6757 | 0.9737 | 219.9 |
+| 0.050 | 0.070 % | 0.332 % | 1.26× | 0.6765 | 0.9736 | 221.0 |
+
+**Sub-0.1 % relL2** agreement (converging), with the depleted ligand means matching FV (`s_cyto → 0.6796`,
+`s_ext → 0.9736`) and the receptor capturing ligand (bound R grows 0 → ~220, itself converging with h). That
+tight ligand match is the end-to-end validation of the **surface PDE + binding on the 2D-in-3D membrane** —
+our R-depleted ligands match FV's to <0.1 %. (Total substance is not reported as a raw number: the membrane
+R density and volume ligands reconcile only through VCell's KMOLE unit factor, so the ligand match against
+the conservative FV is the conservation check.)
+
 ## Membrane jump-condition sign convention
 
 `membrane_flux_sign.py` (pyvcell `[native,solver]` env) confirms the **sign** of the membrane
