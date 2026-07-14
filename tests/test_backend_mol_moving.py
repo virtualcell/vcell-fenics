@@ -9,8 +9,11 @@ checks pin the three physical regimes against closed-form answers:
 1. **Rigid translation + diffusion** — a constant velocity preserves area, so mass is conserved
    exactly and the centroid tracks `v·T`, while the interior gradient diffuses in the moving frame.
 2. **Dilution under expansion** — `velocity = x` grows the disk (`∇·v = 2`); the uniform field must
-   dilute as `e^{−2T}` (the mandatory `ρ∇·v` term) with mass conserved, and the split error shrinks
-   as the stride count rises.
+   dilute as `e^{−2T}` (the mandatory `ρ∇·v` term). The dilution uses the GCL-consistent *effective*
+   rate `ln(|Kⁿ⁺¹|/|Kⁿ|)/dt`, so its continuous over-a-stride decay exactly cancels the discrete mesh
+   jump and total mass is conserved to solver precision (no first-order split drift). The remaining
+   first-order-in-stride error is purely geometric — the concentration `= mass / discrete-area`, since
+   the mesh tracks the expanding boundary to O(stride) — and shrinks as the stride count rises.
 3. **Stiff reaction under translation** — a stiff decay is integrated to the analytic `e^{−kT}` with
    only a handful of mesh strides (the adaptive sub-stepping absorbs the stiffness), the centroid
    still tracking `v·T`. This is the regime that motivates MOL over backward Euler here.
@@ -94,31 +97,38 @@ def test_translation_with_diffusion_conserves_mass_and_translates() -> None:
 
 def test_expansion_dilutes_the_field_as_volume_grows() -> None:
     # velocity = x ⇒ the disk expands (r → r·e^t, area → e^{2t}); a uniform field must dilute as
-    # e^{−2t} via the ρ∇·v term, conserving total mass. This is the decisive dilution check.
+    # e^{−2t} via the ρ∇·v term. The GCL-consistent effective dilution rate makes total mass conserved
+    # to solver precision (not the old first-order split drift); the concentration then carries only the
+    # geometric first-order area error (the mesh tracks the expanding boundary to O(stride)).
     t_final = 0.5
     dp = _problem("geom.x", diffusion="0.0", ic="1.0")
     m0 = dp.total_mass()
 
     integrate_discrete_problem_moving(dp, t_final=t_final, motion_steps=40)
 
-    assert dp.unknown.x.array.mean() == pytest.approx(np.exp(-2.0 * t_final), rel=2e-3)  # diluted e^{−2T}
-    assert dp.total_mass() == pytest.approx(m0, rel=1e-2)  # mass conserved (first-order split)
+    assert dp.total_mass() == pytest.approx(m0, rel=1e-4)  # mass conserved (GCL-consistent effective rate)
+    assert dp.unknown.x.array.mean() == pytest.approx(np.exp(-2.0 * t_final), rel=1e-2)  # diluted ≈ e^{−2T}
     assert _area(dp) > 2.0 * (np.pi)  # the disk genuinely grew (area ≈ π·e^{2T})
 
 
-def test_dilution_split_error_shrinks_with_more_strides() -> None:
-    # The mesh is frozen within a stride, so mass conservation is first-order in the stride length:
-    # refining motion_steps must reduce the mass drift. (The win of MOL is *within* the stride; the
-    # mesh-motion split is the controllable first-order part.)
-    def mass_drift(strides: int) -> float:
+def test_dilution_conc_error_shrinks_with_more_strides_mass_stays_conserved() -> None:
+    # With the GCL-consistent effective dilution rate, *mass* is conserved to solver precision at any
+    # stride count — the old first-order mass drift is gone. What remains first-order in the stride is
+    # the geometry: the mesh tracks the expanding boundary to O(stride), so the concentration
+    # (= conserved mass / discrete area) approaches e^{−2T} first-order. Refining strides tightens that
+    # geometric error while mass stays conserved throughout.
+    exact = float(np.exp(-2.0 * 0.5))
+
+    def conc_err_and_mass_drift(strides: int) -> tuple[float, float]:
         dp = _problem("geom.x", diffusion="0.0", ic="1.0")
         m0 = dp.total_mass()
         integrate_discrete_problem_moving(dp, t_final=0.5, motion_steps=strides)
-        return abs(dp.total_mass() - m0) / m0
+        return abs(dp.unknown.x.array.mean() - exact) / exact, abs(dp.total_mass() - m0) / m0
 
-    coarse, fine = mass_drift(10), mass_drift(40)
-    assert fine < coarse  # refining the motion split tightens conservation
-    assert coarse / fine > 2.5  # ~first-order: 4× the strides ⇒ markedly smaller drift
+    (coarse_err, coarse_md), (fine_err, fine_md) = conc_err_and_mass_drift(10), conc_err_and_mass_drift(40)
+    assert fine_err < coarse_err  # refining the motion split tightens the geometric concentration error
+    assert coarse_err / fine_err > 2.5  # ~first-order: 4× the strides ⇒ markedly smaller error
+    assert coarse_md < 1e-3 and fine_md < 1e-3  # mass conserved at both — the effective rate removed the drift
 
 
 # ---------------------------------------------------------------------------

@@ -188,13 +188,13 @@ def _build_problem(
             drift = compile_expression(parse(eq.terms["relative_advection"]), ctx)
             terms.append(Term(TermKind.ADVECTION, ufl.dot(drift, ufl.grad(u)) * w))
         if motion is not None:
-            # Auto-dilution ρ ∇·v_mesh. On a **bulk** the interior moves by the harmonic extension, not
-            # the raw prescribed velocity, so the rate is read off the actual mesh motion (DG0 field);
-            # on a **membrane** every node moves at the prescribed v, so the raw surface divergence is
-            # both correct and exactly the prior behaviour.
-            is_bulk = mesh.topology.dim == mesh.geometry.dim
-            dilution_rate = motion.dilution_rate() if is_bulk else ufl.div(velocity)
-            terms.append(Term(TermKind.DILUTION, dilution_rate * u * w))
+            # Auto-dilution ρ ∇·v_mesh, using the **GCL-consistent effective rate** `ln(|Kⁿ⁺¹|/|Kⁿ|)/dt`
+            # (the log of the actual per-cell/-facet swept-volume ratio, bulk or membrane). This term is
+            # what the strided ALE-MOL (`TS`) integrator applies continuously over each stride; the
+            # effective rate makes that decay exactly cancel the stride's discrete mesh jump, so mass is
+            # conserved (`→ ∇·v` as dt→0). The backward-Euler path drops this term and conserves via the
+            # conservative time term (`volume_ratio`) instead — see `BackwardEuler.compose`.
+            terms.append(Term(TermKind.DILUTION, motion.effective_dilution_rate() * u * w))
         if "source" in eq.terms:
             source = compile_expression(parse(eq.terms["source"]), CompileContext(mesh, {**ctx.symbols, **var_trials}))
             terms.append(Term(TermKind.SOURCE, source * w))

@@ -410,5 +410,15 @@ local mass matrix scales linearly with cell volume, so this is *exact*: `∫u dA
 precision (`0.0000 %`), independent of `dt` and of the motion. Implemented in `BackwardEuler.compose` /
 `_MeshMotion.volume_ratio` (`backend/discrete.py`); verified here and in
 `tests/test_backend_dilution.py::test_nonaffine_bulk_motion_conserves_mass_to_roundoff` (a non-affine
-motion, conserved to round-off). The membrane (codim-1) surface-dilution and the method-of-lines/`TS` paths
-still use the explicit split — the same volume-ratio technique extends to them as follow-up.
+motion, conserved to round-off).
+
+The same swept-measure idea now covers the other moving paths too. The **membrane** (codim-1) uses the
+identical conservative time term — `volume_ratio` is the per-*facet* length/area ratio there — so a
+dilating membrane conserves `∫_Γ ρ ds` to round-off. The **method-of-lines / PETSc-`TS`** path can't
+telescope the time term (it integrates continuously while the mesh jumps discretely at each stride), so
+instead its dilution term uses the **GCL-consistent effective rate** `ln(|Kⁿ⁺¹| / |Kⁿ|) / dt`: the
+continuous over-a-stride decay `exp(−d_eff·dt) = |Kⁿ| / |Kⁿ⁺¹|` exactly cancels the discrete swept-volume
+jump. That drops the strided-ALE mass drift from **O(dt)** (~2.4 % at 10 strides) to ~`1e-4` and converging,
+leaving only the geometric (concentration = mass / discrete-area) error as the first-order-in-stride term.
+(`_MeshMotion.effective_dilution_rate`; `tests/test_backend_mol_moving.py`.) Still on the explicit split:
+the multi-mesh `interface_coupled` / `fsi` coupled solvers — the same technique extends there next.
