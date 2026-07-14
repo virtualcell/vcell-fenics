@@ -80,10 +80,15 @@ identically). The box is a structured whole-box mesh — geometry exact at every
 
 The IC error converges at **order ≈ 2 in both L2 and L∞** (P1 interpolation) — L∞ matching L2 confirms no
 hidden localized error; the peak resolves at the same rate. FEM↔FV agreement tightens to **~0.9 % L2 /
-~1.7 % L∞** by 80³ (the fixed FV-32³ floor). **Mass is conserved to round-off (~1e-13) at every h**; the
-FV mass, by contrast, drifts **+4 %** over the run — a discrete-conservation / boundary-default difference
-worth a closer look. (Against the *free-space* analytic at late times the fields diverge ~24 % L∞ by
-`t = 1` — the expected **wall-reflection** artifact of the bounded no-flux domain, not solver error.)
+~1.7 % L∞** by 80³ (the fixed FV-32³ floor). **Both solvers conserve mass exactly**: our FEM to round-off
+(~1e-13 at every h), and FV likewise. (An apparent **+4 % FV "drift" was a quadrature artifact on our
+side**, not the solver. VCell's FV is cell-centered, but its output degrees of freedom live *on* the domain
+boundary with **fractional control volumes** — ½ on faces, ¼ on edges, ⅛ on corners — so integrating the
+field with a uniform `dx³` weight over-counts the boundary DOFs; as the Gaussian spreads into them the sum
+inflates, with the entire "gain" sitting in the boundary shell while the interior drops. **Trapezoidal**
+integration — precisely that fractional boundary weighting — gives **−0.000 % drift**, confirming exact FV
+conservation.) Against the *free-space* analytic at late times the fields diverge ~24 % L∞ by `t = 1` — the
+expected **wall-reflection** artifact of the bounded no-flux domain, not solver error.
 
 ## Membrane jump-condition sign convention
 
