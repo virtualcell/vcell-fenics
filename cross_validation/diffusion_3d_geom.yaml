@@ -1,0 +1,15 @@
+name: box3d
+dim: 3
+extent:
+- 2.0
+- 2.0
+- 2.0
+origin:
+- -1.0
+- -1.0
+- -1.0
+subvolumes:
+- name: domain
+  handle: 0
+  subvolume_type: analytic
+  analytic_expr: '1.0'

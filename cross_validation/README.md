@@ -53,6 +53,38 @@ by `t = 1`) — an expected physical difference, not solver error. `v2`'s total 
 of diffusion. (With backward Euler the difference was up to ~2 %, dominated by *our* time step — see
 the convergence study below.)
 
+## 3D single-species diffusion
+
+The 3D analog of the diffusion family (`diffusion_3d_fv.py` + `compare_3d.py`), the first case built on
+the Netgen 3D `realize` + dimension-generic solvers. Single species `u` on the box `[-1, 1]³`, **no-flux
+(zero-Neumann) on all six faces** (VCell `type: Flux`; our import yields `boundary_conditions: []` → the
+natural zero-Neumann — a *closed, mass-conserving* system, not a Dirichlet reference), off-centre Gaussian
+IC (σ = 0.15), `D = 0.1`, FV mesh `32³`.
+
+```bash
+../pyvcell/.venv/bin/python cross_validation/diffusion_3d_fv.py   # stage 1 (FV reference .npz)
+.pixi/envs/dev/bin/python   cross_validation/compare_3d.py        # stage 2 (h-refinement compare)
+```
+
+`compare_3d.py` **refines the FEniCSx box** `h = 0.1 → 0.05 → 0.025` (20³→40³→80³) and reports **both L2
+and L∞** (L∞ exposes localized peak error L2 averages away). The exact free-space Gaussian is only a
+*comparison reference*, used at `t = 0` where it equals the true IC (the Gaussian is ~5σ from every wall,
+so free-space ≡ no-flux there); the cross-solver check uses **FV at t = 0.5** (both bounded, both reflect
+identically). The box is a structured whole-box mesh — geometry exact at every h.
+
+| h | box | IC relL2(an) | IC relL∞(an) | order(L∞) | relL2(FV) | relL∞(FV) | mass drift |
+|---|-----|--------------|--------------|-----------|-----------|-----------|------------|
+| 0.100 | 20³ | 8.07 % | 12.49 % | — | 4.98 % | 8.33 % | 1e-13 |
+| 0.050 | 40³ | 2.17 % | 3.42 % | 1.87 | 1.71 % | 3.12 % | 6e-14 |
+| 0.025 | 80³ | 0.54 % | 0.87 % | 1.99 | 0.86 % | 1.65 % | 2e-12 |
+
+The IC error converges at **order ≈ 2 in both L2 and L∞** (P1 interpolation) — L∞ matching L2 confirms no
+hidden localized error; the peak resolves at the same rate. FEM↔FV agreement tightens to **~0.9 % L2 /
+~1.7 % L∞** by 80³ (the fixed FV-32³ floor). **Mass is conserved to round-off (~1e-13) at every h**; the
+FV mass, by contrast, drifts **+4 %** over the run — a discrete-conservation / boundary-default difference
+worth a closer look. (Against the *free-space* analytic at late times the fields diverge ~24 % L∞ by
+`t = 1` — the expected **wall-reflection** artifact of the bounded no-flux domain, not solver error.)
+
 ## Membrane jump-condition sign convention
 
 `membrane_flux_sign.py` (pyvcell `[native,solver]` env) confirms the **sign** of the membrane
