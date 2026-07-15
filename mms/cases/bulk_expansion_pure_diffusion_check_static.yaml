@@ -1,0 +1,35 @@
+name: bulk_expansion_pure_diffusion_check_static
+description: >
+  Static twin of bulk_expansion_pure_diffusion_check. Steady u* = 2 + sin(x)·cos(y) on a FIXED disk with
+  pure diffusion D = 0.1, held by the source f = −D∇²u* = 0.2·sin(x)cos(y) and Dirichlet u* on the boundary.
+  Motion OFF. Validates the manufactured forcing / u* derivation independently of any moving-mesh machinery:
+  it must converge at the P1 floor (order ≈ 2). If it does not, the forcing derivation is wrong, not the
+  solver.
+harness: bulk
+dim: 2
+geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+exact: {c: "2 + np.sin(x)*np.cos(y)"}
+t_final: 1.0
+dt: 0.05
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be]
+params: {D: 0.1}
+math: |
+  math_description:
+    geometry: disk
+    subdomains:
+      - { name: cyto, kind: volume }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "0.2*sin(geom.x[0])*cos(geom.x[1])"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "2 + sin(geom.x[0])*cos(geom.x[1])" }

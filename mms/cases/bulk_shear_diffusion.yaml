@@ -1,0 +1,36 @@
+name: bulk_shear_diffusion
+description: >
+  Steady lab-frame u* = 2 + sin(x)·cos(y) held on a disk sheared by a divergence-free, non-normal velocity
+  v = [0.3·y, 0] (∇·v = 0). For a lab-steady u* the ALE conservation-form source is f = ∇·(u* v) − D∇²u* =
+  v·∇u* + u*∇·v − D∇²u* = 0.3·y·cos(x)cos(y) + 0.2·sin(x)cos(y). u* is then the exact solution and the
+  solver must hold it to O(h²) as the mesh shears. Exercises moving-mesh advection with a non-normal,
+  incompressible velocity (no dilution: ∇·v = 0). Dirichlet u* on the moving boundary (the runner refreshes
+  it at the moved configuration each step). Static twin: bulk_shear_diffusion_static.yaml.
+harness: bulk
+dim: 2
+geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+exact: {c: "2 + np.sin(x)*np.cos(y)"}
+t_final: 1.0
+dt: 0.01
+resolutions_h: [0.1, 0.07, 0.05]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be, fenics-mol]
+params: {shear_rate: 0.3, D: 0.1}
+math: |
+  math_description:
+    geometry: disk
+    subdomains:
+      - { name: cyto, kind: volume, motion: { kind: prescribed, velocity: "[0.3*geom.x[1], 0.0]" } }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "0.3*geom.x[1]*cos(geom.x[0])*cos(geom.x[1]) + 0.2*sin(geom.x[0])*cos(geom.x[1])"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "2 + sin(geom.x[0])*cos(geom.x[1])" }

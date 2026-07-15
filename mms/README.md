@@ -74,13 +74,26 @@ position-dependent Dirichlet `u*` must be re-evaluated at the moved boundary eac
 
 ## Findings so far
 
-- **`moving_bulk_expansion_diffusion` — OPEN DEFECT.** A steady `u*` on an expanding disk is *not* held:
-  the `L∞` error does not converge in `h` (order ≈ 0.1 for both BE and MOL) and grows with deformation,
-  while the static twin converges at order ≈ 2. Root cause under investigation — two contributions found:
-  (1) a moving-mesh **Dirichlet-BC refresh** gap (`step()` moves the mesh but does not re-evaluate a
-  position-dependent Dirichlet BC at the moved boundary unless `set_time` is called — worth ~100× of the
-  error); (2) a residual `~4e-3` consistency error in the ALE transport of a spatially-varying field that
-  persists after the BC is refreshed. Conservation tests pass on this exact setup — MMS is what exposed it.
+**The moving-mesh solver is consistent — but first-order in time. Measure spatial order with dt ∝ h².**
+An MMS sweep (8 contrived motion × physics cases) first appeared to show a defect: every case with
+`∇·v ≠ 0` (expansion, contraction, anisotropic stretch) failed to hold a steady `u*` — `L∞` order ≈ 0 at
+the fixed `dt` the runner used. **On independent verification this was a measurement artifact, not a solver
+bug.** The backward-Euler + strided-motion moving scheme is **O(dt) in time** (expected), so at fixed `dt`
+the temporal floor dominates and the `h`-order collapses. The tell: even a *constant* and a *linear* `u*`
+(zero P1 interpolation error) show the same plateau, and the error halves *cleanly with dt* (ratio 2.00) —
+a temporal floor, not an `h`-inconsistency. Refining **dt ∝ h²** recovers the true spatial order: the
+expansion case then converges at **order 2.01 / 1.99**. The `∇·v = 0` cases (translation, shear) are the
+same story. So the runner now refines `dt ∝ h²` on moving/time-dependent cases (`_dt_for`), and the moving
+cases pass. *(Lesson baked into the suite: for a time-first-order scheme, an `h`-only MMS sweep measures the
+temporal floor; always refine dt with h, or the sweep manufactures phantom defects. The adversarial verify
+phase of the authoring workflow shared this blind spot — it is corrected here.)*
+
+**Real gotcha that survived: the moving Dirichlet-BC refresh.** `step()` moves the mesh but does **not**
+re-evaluate a position-dependent Dirichlet BC `g(x)` at the moved boundary unless `set_time` is called — so
+a spatially-varying Dirichlet on a moving boundary silently uses stale (initial) positions (worth ~100× of
+the error before the runner started refreshing it). The runner works around it by calling `set_time` each
+step; a cleaner fix would refresh position-dependent BCs inside `step()` after the move. Tracked as a
+follow-up. (This one is a genuine, if minor, solver gap — independent of the temporal floor above.)
 
 ## Roadmap
 

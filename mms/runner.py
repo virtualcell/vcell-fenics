@@ -16,6 +16,7 @@ The same case files are consumed by the fvsolver / mbsolver runners (`runner_fv.
 from __future__ import annotations
 
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,10 @@ import yaml
 from dolfinx import fem
 
 from vcell_fenics.backend import assemble, make_disk_geometry, make_disk_membrane_geometry
-from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem_moving
+from vcell_fenics.backend.reaction_diffusion import (
+    integrate_discrete_problem,
+    integrate_discrete_problem_moving,
+)
 from vcell_fenics.formalism import load_yaml
 
 _CASES = Path(__file__).parent / "cases"
@@ -67,14 +71,37 @@ def _as_fn(dp, values: np.ndarray):  # type: ignore[no-untyped-def]
     return f
 
 
+def _has_motion(case: dict[str, Any]) -> bool:
+    subs = yaml.safe_load(case["math"])["math_description"].get("subdomains", [])
+    return any("motion" in s for s in subs)
+
+
+def _dt_for(case: dict[str, Any], h: float) -> float:
+    """The time step at resolution `h`. A moving (ALE) or time-dependent case is FIRST-order in dt (backward
+    Euler + strided motion), so measuring the O(h²) spatial order requires refining dt WITH h — otherwise the
+    O(dt) temporal floor dominates and the h-order collapses to ~0 (a measurement artifact, not a defect).
+    `dt_rule` ("0.5*h**2") overrides; else moving cases default to dt ∝ h², static cases to a fixed `dt`."""
+    if "dt_rule" in case:
+        return float(eval(case["dt_rule"], {"__builtins__": {}}, {"h": h}))
+    time_dependent = any(re.search(r"\bt\b", expr) for expr in case["exact"].values())
+    if _has_motion(case) or time_dependent:
+        return 0.5 * h * h  # first-order in dt ⇒ refine dt with h to expose the O(h²) spatial order
+    return case.get("dt", 0.01)
+
+
 def _run_fenics(case: dict[str, Any], solver: str, h: float) -> tuple[float, float]:
     geom = _geometry(case, h)
     var = next(iter(case["exact"]))
-    dt = case.get("dt", 0.01)
+    dt = _dt_for(case, h)
     t_final = case["t_final"]
     dp = assemble(load_yaml(case["math"]), geom, dt=dt)
     if solver == "fenics-mol":
-        integrate_discrete_problem_moving(dp, t_final=t_final, motion_steps=case.get("motion_steps", 20))
+        # MOL: strided ALE on a moving subdomain, fixed-domain TS otherwise (static-mesh cases). The strided
+        # motion is O(interval), so refine the stride with h too (interval = dt) to see the spatial order.
+        if dp.motion_velocity is not None:
+            integrate_discrete_problem_moving(dp, t_final=t_final, motion_steps=max(20, round(t_final / dt)))
+        else:
+            integrate_discrete_problem(dp, t_final=t_final)
         return _error(dp, case["exact"][var], t_final)
     # fenics-be: step, refreshing time-/position-dependent Dirichlet BCs at the moved configuration each step
     t = 0.0
