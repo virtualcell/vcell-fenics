@@ -1,0 +1,41 @@
+name: box_static_diffusion
+description: >
+  Three-solver MMS on a box [0,π]². Steady u* = cos(x)·cos(y), which satisfies zero-flux (natural Neumann)
+  on all four walls, so no Dirichlet authoring is needed. The manufactured source is f = −D∇²u* =
+  2D·cos(x)cos(y); for fvsolver it is authored as a general-kinetics volume source ∅→u with net rate J = f
+  (mass-action drops a spatial/signed zeroth-order source — VCell general kinetics sets the rate directly).
+  Each solver must hold u* to O(h²). This is a genuine two-solver case: the SAME manufactured model runs
+  through vcell-fenics (fenics-be on a realized box mesh) and fvsolver (fixed grid), each checked against the
+  same exact u* — vcell-fenics order ≈ 1.7 (realized-mesh floor, matching the disk static twin), fvsolver
+  order ≈ 2.0.
+harness: bulk
+dim: 2
+geometry: {kind: box, extent: [3.14159265, 3.14159265], origin: [0.0, 0.0], volume_subdomain: cell}
+exact: {u: "np.cos(x)*np.cos(y)"}
+t_final: 1.0
+resolutions_h: [0.157, 0.0785, 0.0393]
+fv_mesh_sizes: [41, 81, 161]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be, fvsolver]
+params: {D: 0.1}
+fv:
+  ic: "cos(x)*cos(y)"
+  source_j: "0.2*cos(x)*cos(y)"
+  diffusion: 0.1
+math: |
+  math_description:
+    geometry: box
+    subdomains:
+      - { name: cell, kind: volume }
+    variables:
+      - { name: u, subdomain: cell }
+    equations:
+      - template: bulk_radv_diff
+        variable: u
+        subdomain: cell
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "0.2*cos(geom.x[0])*cos(geom.x[1])"
+        initial_condition: "cos(geom.x[0])*cos(geom.x[1])"
+

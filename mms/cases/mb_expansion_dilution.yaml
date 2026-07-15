@@ -1,0 +1,27 @@
+name: mb_expansion_dilution
+description: >
+  Moving-boundary MMS for mbsolver. A disk of radius R0 = 3 dilates under a radial front velocity v = k·r
+  (k = 0.25), carrying a spatially uniform species u (diffusion 1, no reaction). The deformation dictates
+  the closed form: R(t) = R0·e^{k t} (front) and u(t) = e^{−2k t} (dilution), with ∫u dA = π R0² conserved.
+  The runner checks the per-frame mean concentration and mean front radius against those exact solutions —
+  the moving-boundary counterpart of the fixed-grid fvsolver MMS. (Uniform u* is the tractable moving-front
+  manufactured solution; a spatially varying one needs per-node sampling this mbsolver build does not expose.)
+harness: moving_boundary
+dim: 2
+exact:
+  u_mean: "np.exp(-2*0.25*t)"
+  front_r: "3.0*np.exp(0.25*t)"
+t_final: 2.0
+expected_order_h: null
+applicable_solvers: [mbsolver]
+mb_tol: 0.02
+params: {R0: 3.0, k: 0.25, D: 1.0}
+mb:
+  R0: 3.0
+  k: 0.25
+  diffusion: 1.0
+  extent: 16.0
+  center: 8.0
+  duration: 2.0
+  out_step: 0.5
+  mesh: 41

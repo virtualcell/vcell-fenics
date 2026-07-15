@@ -1,0 +1,34 @@
+name: bulk_shear_diffusion_static
+description: >
+  Static twin of bulk_shear_diffusion. A steady manufactured solution u* = 2 + sin(x)·cos(y) on a FIXED
+  disk (motion OFF), held by the source f = −D∇²u* = 0.2·sin(x)cos(y) with Dirichlet u* on the boundary.
+  No motion, so the solver must reproduce u* to the P1 interpolation floor (order ≈ 2). If this case does
+  not converge, the manufactured forcing or the runner is wrong — not the solver.
+harness: bulk
+dim: 2
+geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+exact: {c: "2 + np.sin(x)*np.cos(y)"}
+t_final: 1.0
+dt: 0.05
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be]
+params: {D: 0.1}
+math: |
+  math_description:
+    geometry: disk
+    subdomains:
+      - { name: cyto, kind: volume }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "0.2*sin(geom.x[0])*cos(geom.x[1])"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "2 + sin(geom.x[0])*cos(geom.x[1])" }
