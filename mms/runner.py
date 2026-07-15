@@ -31,7 +31,9 @@ from vcell_fenics.backend.reaction_diffusion import (
     integrate_discrete_problem,
     integrate_discrete_problem_moving,
 )
+from vcell_fenics.backend.realize import realize
 from vcell_fenics.formalism import load_yaml
+from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume
 
 _CASES = Path(__file__).parent / "cases"
 # The namespace an exact-solution expression is evaluated in (numpy, coords x/y/z, time t).
@@ -53,6 +55,18 @@ def _geometry(case: dict[str, Any], h: float):  # type: ignore[no-untyped-def]
         )
     if g["kind"] == "disk_membrane":
         return make_disk_membrane_geometry(name, surface_subdomain=g["surface_subdomain"], radius=g["radius"], h=h)
+    if g["kind"] == "box":
+        # a plain box mesh (one analytic "1.0" subvolume = the whole bounding box); the same box fvsolver
+        # meshes, so one case runs through both. z is a unit slab for 2D (matches the FV author).
+        ext, org = g["extent"], g.get("origin", [0.0, 0.0])
+        desc = GeometryDescription(
+            name=name,
+            dim=2,
+            extent=(ext[0], ext[1], 1.0),
+            origin=(org[0], org[1], 0.0),
+            subvolumes=(SubVolume(name=g["volume_subdomain"], type="analytic", expression="1.0"),),
+        )
+        return realize(desc, h=h)
     raise NotImplementedError(f"geometry kind {g['kind']!r} not supported by the dev runner yet")
 
 

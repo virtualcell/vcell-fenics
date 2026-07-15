@@ -112,6 +112,7 @@ follow-up. (This one is a genuine, if minor, solver gap — independent of the t
 
 - Fill the matrix (solver × motion × physics) — the bulk sweep is done; extend to membrane, coupled,
   unknown-motion, and to more physics (advection, reaction, binding).
-- Wire **box** geometry into the dev runner so the fvsolver box cases also run through vcell-fenics (true
-  three-solver on one case); add a **spatially-varying** mbsolver case once per-node sampling is available.
+- Box geometry now runs through the dev runner too (`box_static_diffusion` is checked by vcell-fenics *and*
+  fvsolver against the same `u*`); add a **spatially-varying** mbsolver case once per-node sampling is
+  available, to close the loop on all three sharing one case.
 - Promote the passing cases into the `pixi run check` gate (order-regression guard).
