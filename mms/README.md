@@ -18,14 +18,27 @@ checked against every applicable solver:
 | solver | runner | env | applies to |
 |---|---|---|---|
 | vcell-fenics (BE + MOL/ALE) | `runner.py` | `.pixi/envs/dev` | static + moving |
-| pyvcell **fvsolver** (fixed-grid FV) | `runner_fv.py` *(planned)* | `../pyvcell/.venv` | static geometry |
-| pyvcell **mbsolver** (moving front) | `runner_mb.py` *(planned)* | `../pyvcell/.venv` | moving boundary |
+| pyvcell **fvsolver** (fixed-grid FV) | `runner_fv.py` | `../pyvcell/.venv` | static (box) |
+| pyvcell **mbsolver** (moving front) | `runner_mb.py` | `../pyvcell/.venv` | moving boundary |
 
-`applicable_solvers` in each case declares which apply (fvsolver is fixed-grid, so it skips moving-boundary
-cases; mbsolver is for the moving ones). The fv/mb runners author the case's math as VCML (general-kinetics
-source = the forcing — VCell authoring supports spatial/time-dependent sources), run the native solver, and
-compare to the same `u*` on that solver's own grid — the two-env pattern of the `cross-validate` skill,
-here against a *known* solution rather than solver-vs-solver.
+```bash
+.pixi/envs/dev/bin/python  mms/runner.py    mms/cases/<case>.yaml   # vcell-fenics (BE + MOL)
+../pyvcell/.venv/bin/python mms/runner_fv.py mms/cases/<case>.yaml   # fvsolver  (fixed-grid FV)
+../pyvcell/.venv/bin/python mms/runner_mb.py mms/cases/<case>.yaml   # mbsolver  (moving front)
+```
+
+`applicable_solvers` in each case declares which apply. The fv/mb runners author the case as VCML — the
+manufactured forcing is a **general-kinetics** volume source `∅ → u` with net rate `J = f` (mass-action
+*drops* a spatial/signed zeroth-order source; general kinetics sets the rate directly — verified). They run
+the native solver and compare to the same recorded `u*`:
+- **fvsolver** — fixed-grid, so its natural MMS is a **box** with zero-flux-compatible `u*` (e.g.
+  `cos(x)cos(y)` on `[0,π]²`); reads the case's `fv:` block (`ic`, `source_j`, `diffusion`) + `fv_mesh_sizes`,
+  and reports the h-order (verified: `box_static_diffusion` → order 1.98).
+- **mbsolver** — the front deformation dictates the closed form, so the manufactured solution is the
+  **radially dilating disk** (`u = u0·e^{−2k t}`, `R = R0·e^{k t}`); reads the `mb:` block and checks the
+  per-frame mean + front radius against those `exact:` forms (verified: `mb_expansion_dilution` →
+  0.9 %/1.5 %). A spatially *varying* `u*` under the moving front needs per-node sampling this build does
+  not expose — a follow-up.
 
 ## Running
 
@@ -97,7 +110,8 @@ follow-up. (This one is a genuine, if minor, solver gap — independent of the t
 
 ## Roadmap
 
-- Fill the matrix (solver × motion × physics) — diffusion, advection, reaction, dilution, binding; BE, MOL,
-  coupled, membrane, unknown-motion; translation, expansion, shrinkage, shear, non-affine.
-- The `runner_fv.py` / `runner_mb.py` two-env runners (author VCML, run native solver, compare to `u*`).
-- Promote the passing cases into the `pixi run check` gate (order-regression guard); track the open defects.
+- Fill the matrix (solver × motion × physics) — the bulk sweep is done; extend to membrane, coupled,
+  unknown-motion, and to more physics (advection, reaction, binding).
+- Wire **box** geometry into the dev runner so the fvsolver box cases also run through vcell-fenics (true
+  three-solver on one case); add a **spatially-varying** mbsolver case once per-node sampling is available.
+- Promote the passing cases into the `pixi run check` gate (order-regression guard).
