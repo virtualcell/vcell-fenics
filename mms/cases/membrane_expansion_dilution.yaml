@@ -1,0 +1,35 @@
+name: membrane_expansion_dilution
+description: >
+  Surface-PDE MMS on a MOVING membrane — the mandatory ρ ∇_Γ·v_Γ dilution against a closed form. The unit
+  circle expands radially (v = [k·x, k·y], k = 0.25); for a purely normal velocity on a curve the surface
+  divergence is v_n·κ = (kR)(1/R) = k, so a uniform density would dilute as e^{−kt}. Manufactured solution
+  ρ* = e^{−kt}(2 + cos(2θ)); with ∂_t ρ*|_mesh = −kρ*, dilution ρ*·k, and Δ_Γ ρ* = −(4/R²)e^{−kt}cos(2θ),
+  the source is f = ∂_t ρ*|_mesh + kρ* − D·Δ_Γ ρ* = 4D·e^{−kt}·cos(2θ)/R² (using geom.radius = R(t) at the
+  moved node). The closed curve has no boundary. First-order in dt (BE + strided motion + decay), so the
+  runner refines dt ∝ h² to expose the O(h²) spatial order — converges at order ≈ 2, confirming the moving
+  membrane's surface dilution + diffusion + source are consistent (the codim-1 conservative ALE form).
+harness: membrane
+dim: 2
+geometry: {kind: disk_membrane, radius: 1.0, surface_subdomain: membrane}
+exact: {rho: "np.exp(-0.25*t)*(2 + np.cos(2*np.arctan2(y, x)))"}
+t_final: 1.0
+resolutions_h: [0.2, 0.1, 0.05]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be]
+params: {D: 0.05, k: 0.25}
+math: |
+  math_description:
+    geometry: mem
+    subdomains:
+      - { name: membrane, kind: surface, motion: { kind: prescribed, velocity: "[0.25*geom.x[0], 0.25*geom.x[1]]" } }
+    variables:
+      - { name: rho, subdomain: membrane }
+    equations:
+      - template: surface_pde_with_dilution
+        variable: rho
+        subdomain: membrane
+        temporality: time_dependent
+        terms:
+          diffusion: "0.05"
+          source: "0.2*exp(-0.25*sim.t)*cos(2*geom.azimuth)/geom.radius**2"
+        initial_condition: "2 + cos(2*geom.azimuth)"

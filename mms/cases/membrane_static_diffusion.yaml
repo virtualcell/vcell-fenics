@@ -1,0 +1,34 @@
+name: membrane_static_diffusion
+description: >
+  Surface-PDE MMS on a static membrane (the unit circle, the boundary of a disk). Steady ρ* = cos(2θ)
+  (θ = azimuth), an eigenmode of the Laplace–Beltrami operator: Δ_Γ ρ* = (1/R²)∂²_θ ρ* = −(4/R²)cos(2θ)
+  on radius R = 1. The manufactured source that holds it is f = −D·Δ_Γ ρ* = D·(4/R²)·cos(2θ) = 4D·cos(2θ).
+  The closed curve has no boundary, so no BC is needed. Exercises the surface diffusion (tangential ∇_Γ) +
+  source consistency of the `surface_pde_with_dilution` template on the codim-1 mesh; converges at order ≈ 2
+  (the membrane polygon is O(h²) from the true circle, matching the discretisation order).
+harness: membrane
+dim: 2
+geometry: {kind: disk_membrane, radius: 1.0, surface_subdomain: membrane}
+exact: {rho: "np.cos(2*np.arctan2(y, x))"}
+t_final: 1.0
+dt: 0.02
+resolutions_h: [0.2, 0.1, 0.05]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be]
+params: {D: 0.05}
+math: |
+  math_description:
+    geometry: mem
+    subdomains:
+      - { name: membrane, kind: surface }
+    variables:
+      - { name: rho, subdomain: membrane }
+    equations:
+      - template: surface_pde_with_dilution
+        variable: rho
+        subdomain: membrane
+        temporality: time_dependent
+        terms:
+          diffusion: "0.05"
+          source: "0.2*cos(2*geom.azimuth)"
+        initial_condition: "cos(2*geom.azimuth)"
