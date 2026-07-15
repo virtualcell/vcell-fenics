@@ -110,8 +110,9 @@ follow-up. (This one is a genuine, if minor, solver gap — independent of the t
 
 ## Roadmap
 
-- Fill the matrix (solver × motion × physics) — the bulk sweep is done; extend to membrane, coupled,
-  unknown-motion, and to more physics (advection, reaction, binding).
+- Fill the matrix (solver × motion × physics) — the **bulk** and **membrane** sweeps are done (membrane:
+  static surface diffusion `ρ*=cos2θ` → order 2, and moving surface dilution `ρ*=e^{−kt}(2+cos2θ)` on an
+  expanding circle → order 2); extend to coupled and unknown-motion, and to more physics (reaction, binding).
 - Box geometry now runs through the dev runner too (`box_static_diffusion` is checked by vcell-fenics *and*
   fvsolver against the same `u*`); add a **spatially-varying** mbsolver case once per-node sampling is
   available, to close the loop on all three sharing one case.
