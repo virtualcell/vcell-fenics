@@ -17,10 +17,15 @@ against real membrane meshes, following the design note's verification plan:
 
 from __future__ import annotations
 
+import math
+
+import basix.ufl
 import numpy as np
 import pytest
 import ufl
 from dolfinx import fem
+from dolfinx.mesh import create_mesh
+from mpi4py import MPI
 
 from vcell_fenics.backend import make_disk_membrane_geometry
 from vcell_fenics.core import ordered_membrane_loop, remap_surface_function
@@ -29,6 +34,18 @@ from vcell_fenics.core import ordered_membrane_loop, remap_surface_function
 def _membrane_space(h: float, *, radius: float = 1.0) -> fem.FunctionSpace:
     mesh = make_disk_membrane_geometry("g", surface_subdomain="m", radius=radius, h=h).mesh_of("m")
     return fem.functionspace(mesh, ("Lagrange", 1))
+
+
+def _polygon_membrane_space(n: int, *, radius: float = 1.0) -> fem.FunctionSpace:
+    """A membrane space on the inscribed regular `n`-gon (a closed 1D loop in 2D), built directly so two
+    calls with *different* n give genuinely distinct, unaligned meshes — the production disk builder's
+    ≥128-node floor otherwise makes coarse-h membranes coincide, which would make a nearest-node copy an
+    identity (no drift)."""
+    theta = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+    points = np.column_stack([radius * np.cos(theta), radius * np.sin(theta)])
+    cells = np.array([[i, (i + 1) % n] for i in range(n)], dtype=np.int64)
+    domain = ufl.Mesh(basix.ufl.element("Lagrange", "interval", 1, shape=(2,)))
+    return fem.functionspace(create_mesh(MPI.COMM_WORLD, cells, domain, points), ("Lagrange", 1))
 
 
 def _set(V: fem.FunctionSpace, fn) -> fem.Function:  # type: ignore[no-untyped-def]
@@ -108,17 +125,11 @@ def test_mass_conserved_across_resolutions(h_old: float, h_new: float) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="The discrimination (naive nearest-node copy 'visibly drifts' mass) is weakened by accurate "
-    "geometry: the Netgen region mesher gives near-exact circles at both h, so the two membranes' perimeters "
-    "match and the naive copy of a symmetric field (1.5 + cos2θ) barely drifts (~3e-15). The load-bearing "
-    "assertion — that the conservative remap conserves mass to 1e-12 — still passes. Follow-up "
-    "(project_gmsh_isolation_followups): make the naive-vs-conservative contrast robust to mesh accuracy "
-    "(more dissimilar meshes or a less symmetric field).",
-    strict=False,
-)
 def test_nearest_node_copy_drifts_mass() -> None:
-    V_old, V_new = _membrane_space(0.4), _membrane_space(0.18)
+    # Two genuinely distinct, unaligned membranes (regular polygons at coprime node counts) — so the
+    # nearest-node copy actually redistributes mass. (Using the production disk builder here would give
+    # the SAME ≥128-node membrane at both coarse h, making the naive copy an identity with no drift.)
+    V_old, V_new = _polygon_membrane_space(24), _polygon_membrane_space(53)
     u_old = _set(V_old, lambda x: 1.5 + np.cos(2.0 * np.arctan2(x[1], x[0])))
 
     # Naive transfer: each new dof takes the value of the geometrically nearest old
