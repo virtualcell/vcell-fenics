@@ -24,6 +24,8 @@ import numpy as np
 import pytest
 import ufl
 from dolfinx import fem
+from dolfinx.mesh import compute_midpoints, create_submesh, create_unit_square, exterior_facet_indices, meshtags
+from mpi4py import MPI
 
 from vcell_fenics.backend import (
     InterfaceCoupledGeometry,
@@ -57,6 +59,68 @@ def _geometry(*, inner_radius: float = 0.5, outer_radius: float = 1.0, h: float 
         inner_radius=inner_radius,
         outer_radius=outer_radius,
         h=h,
+    )
+
+
+def _split_box_coupled_geometry(n: int) -> InterfaceCoupledGeometry:
+    """The unit square split at x = 0.5 into `cyto` (left) and `ext` (right) compartments meeting at a
+    straight `membrane`, as an `InterfaceCoupledGeometry`. Built inline as an *exact, nestable* test
+    fixture (a structured n×n mesh with an even n so x=0.5 lands on facets): the straight interface has
+    no geometric error and doubling n bisects every cell, so the meshes nest. This is the coupled
+    analogue of `_square_geometry` — for measuring the two-mesh solver's spatial order without the
+    mesh-topology noise a re-meshed disk-in-annulus at each h would inject (project_gmsh_isolation_followups)."""
+
+    parent = create_unit_square(MPI.COMM_WORLD, n, n)
+    tdim = parent.topology.dim
+    ncells = parent.topology.index_map(tdim).size_local
+    midpoints = compute_midpoints(parent, tdim, np.arange(ncells, dtype=np.int32))
+    cyto_tag, ext_tag = 1, 2
+    cell_values = np.where(midpoints[:, 0] < 0.5, cyto_tag, ext_tag).astype(np.int32)
+    cell_tags = meshtags(parent, tdim, np.arange(ncells, dtype=np.int32), cell_values)
+
+    # Membrane = interior facets straddling a cyto and an ext cell (the x=0.5 line); wall = box exterior.
+    parent.topology.create_connectivity(tdim - 1, tdim)
+    f2c = parent.topology.connectivity(tdim - 1, tdim)
+    membrane_facets = np.array(
+        [
+            f
+            for f in range(parent.topology.index_map(tdim - 1).size_local)
+            if len(cells := f2c.links(f)) == 2 and cell_values[cells[0]] != cell_values[cells[1]]
+        ],
+        dtype=np.int32,
+    )
+    wall_facets = exterior_facet_indices(parent.topology)
+    interface_tag, wall_tag = 100, 300
+    idx = np.concatenate([membrane_facets, wall_facets]).astype(np.int32)
+    val = np.concatenate(
+        [np.full(membrane_facets.size, interface_tag, np.int32), np.full(wall_facets.size, wall_tag, np.int32)]
+    )
+    order = np.argsort(idx)
+    facet_tags = meshtags(parent, tdim - 1, idx[order], val[order])
+
+    inner_mesh, inner_emap, *_ = create_submesh(parent, tdim, cell_tags.find(cyto_tag))
+    outer_mesh, outer_emap, *_ = create_submesh(parent, tdim, cell_tags.find(ext_tag))
+    membrane_mesh, membrane_emap, *_ = create_submesh(parent, tdim - 1, membrane_facets)
+    return InterfaceCoupledGeometry(
+        name="cell",
+        inner_subdomain="cyto",
+        outer_subdomain="ext",
+        membrane_subdomain="mem",
+        inner_mesh=inner_mesh,
+        outer_mesh=outer_mesh,
+        membrane_mesh=membrane_mesh,
+        inner_entity_map=inner_emap,
+        outer_entity_map=outer_emap,
+        membrane_entity_map=membrane_emap,
+        parent_mesh=parent,
+        cell_tags=cell_tags,
+        facet_tags=facet_tags,
+        inner_region_tag=cyto_tag,
+        outer_region_tag=ext_tag,
+        interface="membrane",
+        interface_tag=interface_tag,
+        outer="wall",
+        outer_tag=wall_tag,
     )
 
 
@@ -248,31 +312,26 @@ def test_mol_equilibrates_and_conserves_mass() -> None:
     assert result.total_mass() == pytest.approx(area_in, rel=2e-2)  # init mass = 1·A_in, conserved
 
 
-@pytest.mark.xfail(
-    reason="Self-convergence order on independently-remeshed (non-nested) annuli is dominated by "
-    "mesh-topology noise once the geometry error is removed (realize's 0.01·h tolerance makes the geometry "
-    "near-exact at every h), so the successive-difference ratio no longer isolates the FE spatial order. "
-    "The old ~2.58 reading was largely geometry-error convergence. Follow-up "
-    "(project_gmsh_isolation_followups): redesign as nested-refinement or fine-reference convergence, like "
-    "test_method_of_lines_spatial_convergence_is_second_order (structured box + analytic reference).",
-    strict=False,
-)
 def test_mol_transient_is_second_order_in_space() -> None:
     # A convergence study at the FEniCSx layer: the MID-TRANSIENT functional (mean u_in at t=0.3, before
     # equilibrium — sensitive to the coupling rate AND the spatial profile, not just the steady state)
-    # self-converges at the P1 rate O(h²) under mesh refinement. Successive differences shrink ~4× per
-    # halving. (The definitive cross-solver check is a joint-refinement study vs VCell's FV solver — a
-    # follow-up; this pins the spatial order without an external reference.)
+    # self-converges at the P1 rate O(h²). Refine over a NESTED sequence of structured split-box meshes
+    # (`_split_box_coupled_geometry`, n = 8/16/32) — the straight membrane meshes exactly and doubling n
+    # bisects every cell, so both compartments and the interface refine together with no mesh-topology
+    # noise. (Independently re-meshing the disk-in-annulus at each h injects that noise once the geometry
+    # is near-exact, which flattens the signal — hence the structured fixture; see
+    # project_gmsh_isolation_followups.) The definitive cross-solver check is a joint refinement vs
+    # VCell's FV solver (a follow-up); this pins the spatial order without an external reference.
     model = replace(_permeability_model(), parameters=[ParameterConstant(name="P", value=1.0)])
 
-    def functional(h: float) -> float:
-        return _inner_mean(integrate_interface_coupled(model, _geometry(h=h), t_final=0.3))
+    def functional(n: int) -> float:
+        return _inner_mean(integrate_interface_coupled(model, _split_box_coupled_geometry(n), t_final=0.3))
 
-    values = [functional(h) for h in (0.16, 0.08, 0.04)]
+    values = [functional(n) for n in (8, 16, 32)]  # doubling n halves h; the meshes nest
     diff_coarse = abs(values[0] - values[1])
     diff_fine = abs(values[1] - values[2])
     order = math.log2(diff_coarse / diff_fine)
-    assert 1.6 <= order <= 2.4, f"expected ~2nd-order spatial self-convergence, got {order:.2f} ({values})"
+    assert 1.7 <= order <= 2.3, f"expected ~2nd-order spatial self-convergence, got {order:.2f} ({values})"
 
 
 def test_in_bulk_source_and_outer_wall_dirichlet() -> None:
