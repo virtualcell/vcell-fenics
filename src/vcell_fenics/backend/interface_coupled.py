@@ -824,6 +824,7 @@ def integrate_interface_coupled(
     dx_in = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.inner_region_tag)
     dx_out = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.outer_region_tag)
     ds_int = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)(geometry.interface_tag)
+    ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
 
     params = _param_symbols(md, parent)
@@ -839,6 +840,18 @@ def integrate_interface_coupled(
     ]
     test_of = {inner_var: w_in, outer_var: w_out}
     index_of = {inner_var: 0, outer_var: 1}
+    dx_of = {inner_var: dx_in, outer_var: dx_out}
+    state_of = {inner_var: u_in_fn, outer_var: u_out_fn}
+
+    # Optional per-compartment in-bulk `source` (∂c/∂t = … + source), evaluated at the region's OWN species
+    # (affine, nonlinear, or a purely spatial manufactured forcing — the inner Newton differences it): F
+    # gains −source·w on that region. Same treatment as the BE assembler, minus its dt factor.
+    for eq in (inner_eq, outer_eq):
+        if "source" in eq.terms:
+            src_ctx = CompileContext(parent, {**ctx.symbols, eq.variable: state_of[eq.variable]})
+            residual[index_of[eq.variable]] += (
+                -compile_expression(parse(eq.terms["source"]), src_ctx) * test_of[eq.variable] * dx_of[eq.variable]
+            )
     # Both interface traces are in scope for every flux (a flux on one side may reference either bulk's
     # trace); each `BCInterfaceFlux` then deposits its flux into its OWN side's residual block only.
     coupling_symbols = {
@@ -858,6 +871,11 @@ def integrate_interface_coupled(
         coupling_ctx = CompileContext(parent, coupling_symbols)
         flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
         residual[index_of[bc.variable]] += -flux * membrane_trace(test_of[bc.variable]) * ds_int
+
+    # Optional outer-wall reservoir Dirichlet on the outer compartment, weak penalty (same as the BE
+    # assembler): F gains β(u_out − g)·w_out on the box wall.
+    for _, g_value in _reservoir_dirichlet(md, geometry, [outer_var], ctx):
+        residual[index_of[outer_var]] += _RESERVOIR_PENALTY * (u_out_fn - g_value) * w_out * ds_wall
 
     states, rates = [u_in_fn, u_out_fn], [rate_in, rate_out]
     shift = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # the TS σ

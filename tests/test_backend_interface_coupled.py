@@ -408,6 +408,66 @@ def test_be_coupled_is_second_order_against_manufactured_solution() -> None:
     assert 1.7 <= order <= 2.3, f"expected ~2nd-order MMS convergence, got {order:.2f} ({errors})"
 
 
+def test_mol_coupled_is_second_order_against_manufactured_solution() -> None:
+    # The METHOD-OF-LINES counterpart of the BE MMS above, and the parity check that keeps the two coupled
+    # solvers from silently diverging (the failure mode that hid the interface-flux over-count). Same
+    # manufactured steady solution u_in* = 2 + x², u_out* = A + x² (A = 2 + D/P) with the flux, an in-bulk
+    # source, and a wall Dirichlet all active. The MOL integrator (adaptive BDF) drives the time error to ≈0,
+    # so integrating to a steady time isolates the P1 spatial order O(h²) over the nested split-box. This also
+    # exercises the `source` and outer-wall Dirichlet that `integrate_interface_coupled` gained here (it
+    # assembles the flux as a residual, so it was always over-count-free — only these terms were missing).
+    diffusion, permeability = 1.0, 2.0
+    wall_level = 2.0 + diffusion / permeability
+
+    model = MathDescription(
+        geometry="cell",
+        subdomains=[Subdomain(name="cyto", kind="volume"), Subdomain(name="ext", kind="volume")],
+        variables=[Variable(name="u_in", subdomain="cyto"), Variable(name="u_out", subdomain="ext")],
+        parameters=[ParameterConstant(name="P", value=permeability)],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": str(diffusion), "source": str(-2.0 * diffusion)},
+                initial_condition="2 + geom.x[0]**2",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": str(diffusion), "source": str(-2.0 * diffusion)},
+                initial_condition=f"{wall_level} + geom.x[0]**2",
+            ),
+        ],
+        boundary_conditions=[
+            BCInterfaceFlux(variable="u_in", boundary="membrane", expression="P*(u_out - u_in)"),
+            BCInterfaceFlux(variable="u_out", boundary="membrane", expression="P*(u_in - u_out)"),
+            BCDirichlet(variable="u_out", boundary="wall", expression=f"{wall_level} + geom.x[0]**2"),
+        ],
+    )
+
+    def l2_error(n: int) -> float:
+        result = integrate_interface_coupled(model, _split_box_coupled_geometry(n), t_final=2.0)  # to steady
+        squared = 0.0
+        for field, offset in ((result.inner, 2.0), (result.outer, wall_level)):
+            mesh = field.function_space.mesh
+            exact = fem.Function(field.function_space)
+            exact.interpolate(
+                fem.Expression(
+                    offset + ufl.SpatialCoordinate(mesh)[0] ** 2, field.function_space.element.interpolation_points
+                )
+            )
+            squared += float(fem.assemble_scalar(fem.form((field - exact) ** 2 * ufl.dx(domain=mesh))).real)
+        return math.sqrt(squared)
+
+    errors = [l2_error(n) for n in (8, 16, 32)]
+    order = math.log2(errors[0] / errors[-1]) / 2.0
+    assert 1.7 <= order <= 2.3, f"expected ~2nd-order MMS convergence, got {order:.2f} ({errors})"
+
+
 def test_in_bulk_source_and_outer_wall_dirichlet() -> None:
     # The two new features together (a manufactured-solution-style check). On the DECOUPLED (P=0) outer
     # annulus, the steady field s* = 2 − 0.5(r−Rm)² is held by the in-bulk source f = −D∇²s* = 2 − 0.5/r
