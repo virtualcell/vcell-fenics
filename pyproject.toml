@@ -114,7 +114,7 @@ test-integration = "pytest -m integration"
 lint = "ruff check src tests examples"
 format = "ruff format src tests examples"
 format-check = "ruff format --check src tests examples"
-typecheck = "mypy src tests examples"
+typecheck = "mypy src tests examples mms scripts"
 check = { depends-on = ["lint", "format-check", "typecheck", "test"] }
 # Launch JupyterLab on the demo notebooks (needs the dev env: `pixi run -e dev notebooks`).
 notebooks = "jupyter lab docs/notebooks"
@@ -170,7 +170,8 @@ ignore = [
 "tests/**/*.py" = ["B018"]
 
 # ---------------------------------------------------------------------------
-# mypy — strict mode. Applies to src/ and tests/ alike.
+# mypy — strict mode. Applies to src/, tests/, examples/, mms/, and scripts/ alike (the dev-runner and
+# the pyvcell-env scripts are type-checked statically here even though the latter run in ../pyvcell/.venv).
 #
 # The FEniCSx scientific stack ships either no stubs or partial/buggy ones
 # (e.g. petsc4py.PETSc.ScalarType typed as a non-callable dtype, pyvista
@@ -185,10 +186,10 @@ strict = true
 # Match requires-python (>= 3.12) and the runtime (3.14): the env's scientific deps (e.g.
 # tifffile via scikit-image) use 3.12+ `type` statements that mypy cannot parse under 3.11.
 python_version = "3.12"
-files = ["src", "tests", "examples"]
+files = ["src", "tests", "examples", "mms", "scripts"]
 # Local partial stubs for otherwise-untyped conda deps (netgen, pyngcore), scoped to the
 # subset we call. See stubs/ — the .pyi files double as documentation of the discovered API.
-mypy_path = "stubs"
+mypy_path = "stubs:mms"
 # Strict already enables warn_unused_ignores; keep it explicit so anyone
 # reading the config sees that `# type: ignore` comments must be load-bearing.
 warn_unused_ignores = true

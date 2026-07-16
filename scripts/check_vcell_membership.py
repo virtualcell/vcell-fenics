@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,7 @@ def _reconstruct(data: dict[str, Any]) -> Any:
     return g.Geometry.model_validate(data)
 
 
-_UNARY_FUNCS = {
+_UNARY_FUNCS: dict[str, Callable[[float], float]] = {
     "sqrt": math.sqrt,
     "abs": abs,
     "exp": math.exp,
