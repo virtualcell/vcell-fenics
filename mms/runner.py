@@ -279,11 +279,15 @@ def _order(errs: list[float], hs: list[float]) -> float | None:
 
 def run_case(path: Path) -> dict[str, Any]:
     case = yaml.safe_load(path.read_text())
+    print(f"\n=== {case['name']} ===\n{case['description'].strip()}\n")
+    solvers = [s for s in case["applicable_solvers"] if s.startswith("fenics")]
+    if not solvers:  # e.g. an fv/mb-only case (no `resolutions_h`) — checked by its own runner, skip here
+        print("  (no vcell-fenics solver applies — checked by runner_fv.py / runner_mb.py)")
+        return {"name": case["name"], "results": {}}
     hs = case["resolutions_h"]
     expected = case["expected_order_h"]
-    print(f"\n=== {case['name']} ===\n{case['description'].strip()}\n")
     results = {}
-    for solver in [s for s in case["applicable_solvers"] if s.startswith("fenics")]:
+    for solver in solvers:
         linfs, l2s = [], []
         for h in hs:
             linf, l2 = _run_fenics(case, solver, h)

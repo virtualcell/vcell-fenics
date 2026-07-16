@@ -131,7 +131,7 @@ def main() -> int:
     print(f"Server returned {len(summaries)} BioModel summaries.")
 
     if args.diagnose:
-        ids = [s["id"] for s in summaries if s.get("id")][:3]
+        ids = [sid for s in summaries if (sid := s.get("id")) is not None][:3]
         _diagnose(host, token, ids, args.timeout)
         return 0
 
