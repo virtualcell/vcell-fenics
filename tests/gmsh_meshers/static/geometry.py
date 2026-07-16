@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import gmsh
 from dolfinx import mesh as dmesh
 from dolfinx.io.gmsh import model_to_mesh
 from mpi4py import MPI
@@ -29,6 +28,8 @@ def create_disk(
     comm: MPI.Comm = MPI.COMM_WORLD,
 ) -> StaticDisk:
     """2D disk with its outer boundary tagged ``BOUNDARY_TAG``."""
+    import gmsh  # lazy: keep gmsh (GPL) out of the default import graph — loaded only when this prototype mesher runs
+
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
     try:

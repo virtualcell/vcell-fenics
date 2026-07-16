@@ -3,9 +3,11 @@
 A MathDescription references a geometry by *name* and declares only the
 subdomain-class vocabulary it uses (§1.2.1); the concrete mesh and the
 region→class assignment live here. For the v1 backend a `Geometry` maps each
-subdomain-class name to a DOLFINx mesh and its kind. `make_disk_geometry` wraps
-the existing `approaches/static` disk; the loader is a small name registry (one
-of the strategies §3.4 sanctions).
+subdomain-class name to a DOLFINx mesh and its kind. The `make_*_geometry` helpers
+build bundled demo/test geometries gmsh-free — disks via the LGPL Netgen region
+mesher, coupled two-compartment cells via `realize_interface_coupled` (see
+LICENSING.md); the loader is a small name registry (one of the strategies §3.4
+sanctions).
 
 `cross_validate` is the part of §1.11.10 the formalism validator deferred because
 it needs a Geometry: every subdomain class the MathDescription declares must
@@ -14,21 +16,15 @@ resolve to a region of matching kind, and the referenced geometry name must matc
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
-from dolfinx.mesh import EntityMap, Mesh, MeshTags
+from dolfinx.mesh import EntityMap, Mesh, MeshTags, create_submesh, exterior_facet_indices
 from numpy.typing import NDArray
 
-from vcell_fenics.approaches.multicompartment.geometry import (
-    MEMBRANE_TAG,
-    OUTER_TAG,
-    create_cell_extracellular,
-    create_extracellular_annulus,
-)
-from vcell_fenics.approaches.static.geometry import BOUNDARY_TAG, create_disk
-from vcell_fenics.approaches.submesh.geometry import create_disk_with_membrane
 from vcell_fenics.backend._typing import UflExpr
+from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume, SurfaceClass
 from vcell_fenics.formalism.schema import MathDescription, SubdomainKind
 from vcell_fenics.formalism.validator import Diagnostic
 
@@ -112,66 +108,60 @@ def clear_geometries() -> None:
     _REGISTRY.clear()
 
 
+def _circle_disk_mesh(radius: float, h: float) -> Mesh:
+    """A 2D triangle mesh of a disk of `radius` at resolution `h`, meshed gmsh-free by handing a fine
+    circular boundary polyline to the LGPL Netgen region mesher (`mesh_region_netgen`). The boundary is
+    meshed **directly** (nodes on the circle; area πR² to ~1e-4), unlike `realize` which extracts the disk
+    as a submesh of a box partition — a direct-circle mesh matches the moving-boundary/ALE/slip solvers'
+    node layout, which those tests are calibrated to. Netgen gives a quality isotropic interior.
+
+    The circle polyline is CCW (linspace 0→2π of cos/sin) — the orientation `mesh_region_netgen` requires
+    (it meshes the region to the left of each directed segment; a CW loop would stall on the exterior)."""
+
+    from vcell_fenics.core.region_remesh_netgen import mesh_region_netgen  # lazy: loads Netgen, caps its pool
+
+    npts = max(128, math.ceil(2.0 * math.pi * radius / h))
+    theta = np.linspace(0.0, 2.0 * math.pi, npts, endpoint=False)
+    loop = np.column_stack([radius * np.cos(theta), radius * np.sin(theta)])
+    return mesh_region_netgen(loop, h)
+
+
 def make_disk_geometry(
     name: str, *, volume_subdomain: str, boundary: str | None = None, radius: float = 1.0, h: float = 0.1
 ) -> Geometry:
-    """A bundled 2D disk exposed as a single `volume` subdomain class. When
-    `boundary` is given, the disk's outer circle is registered as a labelled
-    boundary under that name, so boundary conditions can target it."""
+    """A bundled 2D disk exposed as a single `volume` subdomain class. When `boundary` is given, the
+    disk's outer circle is registered as a labelled boundary under that name, so boundary conditions can
+    target it.
 
-    disk = create_disk(radius=radius, h=h)
-    subdomains = {volume_subdomain: SubdomainGeometry(mesh=disk.mesh, kind="volume")}
+    Meshed gmsh-free via the Netgen region mesher over a circular boundary polyline (`_circle_disk_mesh`)
+    — a direct-circle disk (near-exact circle; quality interior). The boundary, when requested, is the
+    mesh's exterior facets — the circle."""
+
+    disk = _circle_disk_mesh(radius, h)
+    subdomains = {volume_subdomain: SubdomainGeometry(mesh=disk, kind="volume")}
     boundaries: dict[str, BoundaryGeometry] = {}
     if boundary is not None:
-        facets = disk.facet_tags.find(BOUNDARY_TAG)
-        boundaries[boundary] = BoundaryGeometry(subdomains=(volume_subdomain,), facets=facets)
+        tdim = disk.topology.dim
+        disk.topology.create_connectivity(tdim - 1, tdim)
+        boundaries[boundary] = BoundaryGeometry(
+            subdomains=(volume_subdomain,), facets=exterior_facet_indices(disk.topology)
+        )
     return Geometry(name=name, subdomains=subdomains, boundaries=boundaries)
 
 
-def make_cell_extracellular_geometry(
-    name: str,
-    *,
-    cytosol: str,
-    extracellular: str,
-    membrane: str,
-    interface: str,
-    outer: str,
-    inner_radius: float = 0.6,
-    outer_radius: float = 1.0,
-    h: float = 0.1,
-) -> Geometry:
-    """A concentric two-compartment cell: an inner-disk `cytosol` and outer-annulus
-    `extracellular` (both `volume`), plus the `membrane` between them as a `surface`
-    subdomain. The membrane is also registered as the internal boundary `interface`
-    (incident to both compartments); the outer circle is the external boundary
-    `outer` (incident to the extracellular space only)."""
-
-    cell = create_cell_extracellular(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
-    subdomains = {
-        cytosol: SubdomainGeometry(mesh=cell.cytosol_mesh, kind="volume"),
-        extracellular: SubdomainGeometry(mesh=cell.extracellular_mesh, kind="volume"),
-        membrane: SubdomainGeometry(mesh=cell.membrane_mesh, kind="surface"),
-    }
-    boundaries = {
-        interface: BoundaryGeometry(subdomains=(cytosol, extracellular), facets=cell.facet_tags.find(MEMBRANE_TAG)),
-        outer: BoundaryGeometry(subdomains=(extracellular,), facets=cell.facet_tags.find(OUTER_TAG)),
-    }
-    return Geometry(
-        name=name,
-        subdomains=subdomains,
-        boundaries=boundaries,
-        parent_mesh=cell.parent_mesh,
-        cell_tags=cell.cell_tags,
-        facet_tags=cell.facet_tags,
-    )
-
-
 def make_disk_membrane_geometry(name: str, *, surface_subdomain: str, radius: float = 1.0, h: float = 0.1) -> Geometry:
-    """A bundled 2D disk's boundary, exposed as a single `surface` (codim-1)
-    subdomain class — the membrane submesh."""
+    """A bundled 2D disk's boundary, exposed as a single `surface` (codim-1) subdomain class — the
+    membrane submesh.
 
-    submesh = create_disk_with_membrane(radius=radius, h=h).submesh
-    return Geometry(name=name, subdomains={surface_subdomain: SubdomainGeometry(mesh=submesh, kind="surface")})
+    Meshed gmsh-free via the Netgen region mesher: the disk is meshed over a circular boundary polyline
+    (`_circle_disk_mesh`) and its exterior facets (the near-exact circle) are extracted as the codim-1
+    membrane submesh."""
+
+    disk = _circle_disk_mesh(radius, h)
+    tdim = disk.topology.dim
+    disk.topology.create_connectivity(tdim - 1, tdim)
+    membrane, *_ = create_submesh(disk, tdim - 1, exterior_facet_indices(disk.topology))
+    return Geometry(name=name, subdomains={surface_subdomain: SubdomainGeometry(mesh=membrane, kind="surface")})
 
 
 @dataclass(frozen=True)
@@ -209,37 +199,6 @@ class CoupledGeometry:
         if subdomain == self.surface_subdomain:
             return self.surface_mesh
         raise KeyError(f"{subdomain!r} is not a subdomain of coupled geometry {self.name!r}")
-
-
-def make_extracellular_annulus_geometry(
-    name: str,
-    *,
-    extracellular: str,
-    membrane: str,
-    interface: str,
-    outer: str,
-    inner_radius: float = 0.5,
-    outer_radius: float = 1.0,
-    h: float = 0.1,
-) -> CoupledGeometry:
-    """The §1.6.6 coupled geometry: an annular `extracellular` bulk whose inner
-    boundary is the `membrane` surface subdomain (coupled at `interface`) and whose
-    outer boundary is `outer` (the reservoir)."""
-
-    annulus = create_extracellular_annulus(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
-    return CoupledGeometry(
-        name=name,
-        bulk_subdomain=extracellular,
-        surface_subdomain=membrane,
-        bulk_mesh=annulus.bulk_mesh,
-        surface_mesh=annulus.membrane_mesh,
-        entity_map=annulus.membrane_entity_map,
-        facet_tags=annulus.facet_tags,
-        interface=interface,
-        interface_tag=MEMBRANE_TAG,
-        outer=outer,
-        outer_tag=OUTER_TAG,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -340,31 +299,47 @@ def make_two_bulk_membrane_geometry(
     h: float = 0.1,
 ) -> InterfaceCoupledGeometry:
     """A concentric two-compartment cell as an `InterfaceCoupledGeometry`: an inner-disk `inner`
-    compartment and outer-annulus `outer_subdomain`, meeting at the `membrane`. `interface` labels the
-    shared membrane curve, `outer` the external (reservoir) circle. Carries the three entity maps so a
-    coupling form can reference both bulk traces at the membrane."""
+    compartment of radius `inner_radius` inside an **annular** `outer_subdomain` of outer radius
+    `outer_radius`, meeting at the `membrane`. `interface` labels the shared membrane circle; `outer`
+    labels the reservoir **wall** — the annulus's outer circle — where a coupling model may hold a
+    Dirichlet. Carries the three entity maps so a coupling form can reference both bulk traces at the
+    membrane.
 
-    cell = create_cell_extracellular(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
-    return InterfaceCoupledGeometry(
+    Realized gmsh-free via `realize_interface_coupled`'s `background_subdomain` path: a 3-region
+    body-fitted description (inner disk / annular outer / discarded background) is realized and then
+    bounded to inner + outer, so the annulus's outer circle is a true exterior reservoir wall — the same
+    disk-in-annulus geometry the old gmsh mesher produced (area π(R_out²−R_in²) for the annulus, a
+    circular `ds` wall), without gmsh."""
+
+    from vcell_fenics.backend.realize import realize_interface_coupled  # lazy: realize imports this module
+
+    # Body-fit both circles inside a box large enough that the background surrounds the annulus (so its
+    # outer circle is interior to the box and becomes the bounded parent's exterior wall). The two
+    # analytic shapes are nested disks; priority (declaration order, inner first) assigns each cell.
+    half = 1.3 * outer_radius
+    r_in2, r_out2 = inner_radius * inner_radius, outer_radius * outer_radius
+    background = "_background"
+    desc = GeometryDescription(
         name=name,
+        dim=2,
+        extent=(2.0 * half, 2.0 * half, 1.0),
+        origin=(-half, -half, 0.0),
+        subvolumes=(
+            SubVolume(name=inner, type="analytic", expression=f"geom.x[0]**2 + geom.x[1]**2 < {r_in2}"),
+            SubVolume(name=outer_subdomain, type="analytic", expression=f"geom.x[0]**2 + geom.x[1]**2 < {r_out2}"),
+            SubVolume(name=background, type="analytic", expression="1.0"),
+        ),
+        surfaces=(SurfaceClass(name=membrane, inside=inner, outside=outer_subdomain),),
+    )
+    return realize_interface_coupled(
+        desc,
         inner_subdomain=inner,
         outer_subdomain=outer_subdomain,
         membrane_subdomain=membrane,
-        inner_mesh=cell.cytosol_mesh,
-        outer_mesh=cell.extracellular_mesh,
-        membrane_mesh=cell.membrane_mesh,
-        inner_entity_map=cell.cytosol_entity_map,
-        outer_entity_map=cell.extracellular_entity_map,
-        membrane_entity_map=cell.membrane_entity_map,
-        parent_mesh=cell.parent_mesh,
-        cell_tags=cell.cell_tags,
-        facet_tags=cell.facet_tags,
-        inner_region_tag=cell.inner_region_tag,
-        outer_region_tag=cell.outer_region_tag,
         interface=interface,
-        interface_tag=MEMBRANE_TAG,
         outer=outer,
-        outer_tag=OUTER_TAG,
+        background_subdomain=background,
+        h=h,
     )
 
 

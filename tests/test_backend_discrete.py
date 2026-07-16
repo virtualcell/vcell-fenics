@@ -26,7 +26,7 @@ import ufl
 from dolfinx import fem
 from petsc4py import PETSc
 
-from vcell_fenics.approaches.static import create_disk
+from tests.gmsh_meshers.static import create_disk
 from vcell_fenics.backend import BackwardEuler, DiscreteProblem, Term, TermKind
 
 

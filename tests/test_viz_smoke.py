@@ -20,7 +20,7 @@ import pytest
 from dolfinx import fem
 from scipy.special import j0, jn_zeros
 
-from vcell_fenics.approaches.static import create_disk
+from tests.gmsh_meshers.static import create_disk
 from vcell_fenics.viz import quick_plot, write_snapshot
 
 

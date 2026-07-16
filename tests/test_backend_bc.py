@@ -23,11 +23,11 @@ import pytest
 import ufl
 from dolfinx import fem
 
+from tests.gmsh_meshers.multicompartment.geometry import make_cell_extracellular_geometry
 from vcell_fenics.backend import (
     SolverConfiguration,
     TermKind,
     assemble,
-    make_cell_extracellular_geometry,
     make_disk_geometry,
     rebuild_on_mesh,
     run,
