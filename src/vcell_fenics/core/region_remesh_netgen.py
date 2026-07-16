@@ -1,16 +1,18 @@
-"""Netgen region remesher — an LGPL, import-boundary alternative to the gmsh
-`mesh_region` (`core/region_remesh.py`).
+"""Netgen region remesher — the LGPL remesher the ALE driver uses at runtime, and an
+import-boundary alternative to the (now test-only) gmsh `mesh_region`
+(`tests/gmsh_meshers/region_remesh.py`; LICENSING.md).
 
 Both functions do the same job — step (b) of the ALE remesh routine
 (`docs/modeling/ale-remesh-driver.md`): take the current (deformed) boundary loop
 and generate a fresh good-quality bulk mesh of the region it encloses. They differ
 only in the engine and, therefore, in their **license reach** (ADR 008):
 
-- gmsh is **GPL-2.0**, so `mesh_region` can only ship in a non-GPL solver behind a
-  process/service boundary.
+- gmsh is **GPL-2.0**, so the gmsh `mesh_region` is kept out of `src/` entirely — it
+  lives under `tests/` as a reference mesher and never ships in this package.
 - Netgen (`netgen.geom2d`) is **LGPL-2.1**, the same weak-copyleft tier as DOLFINx
   itself, so this function may be imported and called **in-process** from permissive
-  code with no copyleft obligation on the caller — no isolation, no plugin.
+  code with no copyleft obligation on the caller — no isolation, no plugin. It is what
+  `backend/ale.py` calls to remesh.
 
 The mesh is handed to DOLFINx directly through `create_mesh` on Netgen's point/cell
 arrays; no `.msh` file and no ngsPETSc bridge is involved.
@@ -64,8 +66,8 @@ def mesh_region_netgen(
 ) -> Mesh:
     """Mesh the region enclosed by the closed polyline `loop` at target size `h`.
 
-    Drop-in analogue of `core.region_remesh.mesh_region` backed by LGPL Netgen
-    (ADR 008). `loop` is an ordered ``(N, 2)`` array of boundary vertices in traversal
+    Drop-in analogue of the gmsh `tests/gmsh_meshers/region_remesh.mesh_region` backed by
+    LGPL Netgen (ADR 008). `loop` is an ordered ``(N, 2)`` array of boundary vertices in traversal
     order, *without* repeating the first vertex. Returns a 2D DOLFINx triangle mesh of
     the enclosed polygon whose boundary lies on `loop`.
 
@@ -90,6 +92,15 @@ def mesh_region_netgen(
             "(it resamples the boundary at h); it needs the low-level Element1D path "
             "(deferred, ADR 008). Use the gmsh mesh_region for the interior-only fast path."
         )
+
+    # Netgen's `SplineGeometry` meshes the region to the **left** of each directed segment (default
+    # `leftdomain=1, rightdomain=0`), so the boundary must run counter-clockwise (positive signed area).
+    # A clockwise loop puts the meshed domain on the *outside* — Netgen then tries to mesh the unbounded
+    # exterior and `GenerateMesh` spins indefinitely. The ALE driver's `ordered_membrane_loop` can hand us
+    # either orientation depending on the facet ordering of the (remeshed) membrane, so normalise to CCW
+    # here. (gmsh's plane-surface mesher is orientation-agnostic; this is a Netgen-specific requirement.)
+    if _signed_area(loop) < 0.0:
+        loop = loop[::-1]
 
     geo = SplineGeometry()
     pids = [geo.AppendPoint(float(x), float(y)) for x, y in loop]

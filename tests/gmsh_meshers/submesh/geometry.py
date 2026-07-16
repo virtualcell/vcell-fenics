@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import gmsh
 import numpy as np
 from dolfinx import mesh as dmesh
 from dolfinx.io.gmsh import model_to_mesh
@@ -30,6 +29,8 @@ def create_disk_with_membrane(
     coupling without re-meshing. For surface-only prototypes the bulk is
     unused.
     """
+    import gmsh  # lazy: keep gmsh (GPL) out of the default import graph — loaded only when this prototype mesher runs
+
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
     try:

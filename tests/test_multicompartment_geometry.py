@@ -25,12 +25,13 @@ import ufl
 from dolfinx import fem
 from dolfinx import mesh as dmesh
 
-from vcell_fenics.approaches.multicompartment.geometry import (
+from tests.gmsh_meshers.multicompartment.geometry import (
     MEMBRANE_TAG,
     OUTER_TAG,
     create_cell_extracellular,
+    make_cell_extracellular_geometry,
 )
-from vcell_fenics.backend import Geometry, cross_validate, make_cell_extracellular_geometry, make_disk_geometry
+from vcell_fenics.backend import Geometry, cross_validate, make_disk_geometry
 from vcell_fenics.formalism import load_yaml
 
 _R_IN, _R_OUT = 0.6, 1.0

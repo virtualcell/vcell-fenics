@@ -73,6 +73,7 @@ _FACE_NAMES_3D = ("x_minus", "x_plus", "y_minus", "y_plus", "z_minus", "z_plus")
 # face. Region (cell) tags are 1..N over the subvolumes.
 _SURFACE_TAG_BASE = 100  # membrane tags, in SurfaceClass order
 _FACE_TAG_BASE = 200  # x_minus=200, x_plus=201, …
+_OUTER_WALL_TAG = 300  # the whole box exterior, unioned, as one reservoir "wall" (realize_interface_coupled)
 
 
 @dataclass(frozen=True)
@@ -259,6 +260,48 @@ def _geometry_from_partition(
     )
 
 
+def _restrict_to_compartments(
+    parent: dmesh.Mesh, tagging: _Tagging, inner_subdomain: str, outer_subdomain: str
+) -> tuple[dmesh.Mesh, dmesh.MeshTags, NDArray[np.int32], NDArray[np.int32], dict[str, int]]:
+    """Restrict `parent` to the inner + outer compartment cells, dropping the background region — so the
+    outer compartment's edge to the (removed) background becomes a true **exterior** boundary of the
+    result: a real `ds`-integrable reservoir wall. This reproduces the classic disk-in-annulus geometry
+    (parent = disk ∪ annulus, the annulus's outer circle the only external boundary) from the general
+    body-fitted partition, gmsh-free — the `background_subdomain` path of `realize_interface_coupled`.
+
+    Returns `(subparent, cell_tags, membrane_facets, wall_facets, region_tags)`: `cell_tags` carries the
+    inner/outer region tags on `subparent`, `membrane_facets` are the interior facets straddling the two
+    compartments (the shared membrane), `wall_facets` the subparent's exterior (the reservoir wall)."""
+
+    tdim = parent.topology.dim
+    inner_tag = tagging.region_tags[inner_subdomain]
+    outer_tag = tagging.region_tags[outer_subdomain]
+    keep = np.unique(np.concatenate([tagging.cell_tags.find(inner_tag), tagging.cell_tags.find(outer_tag)]))
+    subparent, cell_emap, *_ = dmesh.create_submesh(parent, tdim, keep.astype(np.int32))
+
+    # Transfer each subparent cell's region tag from its parent cell (no re-classification needed).
+    n_sub = subparent.topology.index_map(tdim).size_local
+    sub_cells = np.arange(n_sub, dtype=np.int32)
+    parent_cells = np.asarray(cell_emap.sub_topology_to_topology(sub_cells, False), dtype=np.intp)
+    lookup = np.zeros(parent.topology.index_map(tdim).size_local, dtype=np.int32)
+    lookup[tagging.cell_tags.indices] = tagging.cell_tags.values
+    cell_tag_of = lookup[parent_cells]
+    cell_tags = dmesh.meshtags(subparent, tdim, sub_cells, cell_tag_of)
+
+    # Membrane = interior facets straddling an inner and an outer cell; wall = the subparent's exterior.
+    subparent.topology.create_connectivity(tdim - 1, tdim)
+    f2c = subparent.topology.connectivity(tdim - 1, tdim)
+    pair = {int(inner_tag), int(outer_tag)}
+    membrane = [
+        f
+        for f in range(subparent.topology.index_map(tdim - 1).size_local)
+        if len(cells := f2c.links(f)) == 2 and {int(cell_tag_of[cells[0]]), int(cell_tag_of[cells[1]])} == pair
+    ]
+    membrane_facets = np.asarray(membrane, dtype=np.int32)
+    wall_facets = dmesh.exterior_facet_indices(subparent.topology)
+    return subparent, cell_tags, membrane_facets, wall_facets, {inner_subdomain: inner_tag, outer_subdomain: outer_tag}
+
+
 def realize_interface_coupled(
     description: GeometryDescription,
     *,
@@ -266,6 +309,8 @@ def realize_interface_coupled(
     outer_subdomain: str,
     membrane_subdomain: str,
     interface: str,
+    outer: str = "exterior",
+    background_subdomain: str | None = None,
     h: float = 0.05,
     resolution: int | None = None,
     comm: MPI.Comm = MPI.COMM_WORLD,
@@ -280,6 +325,13 @@ def realize_interface_coupled(
     `import_geometry` → `realize_interface_coupled` → `integrate_interface_coupled`, with no
     hand-built parallel mesh. `inner_subdomain` / `outer_subdomain` name the two volume compartments
     and `membrane_subdomain` the SurfaceClass between them; `interface` is the boundary label.
+
+    **The reservoir wall** (`outer`) is where a coupled model may hold a Dirichlet. By default the outer
+    compartment is box-bounded and the wall is the whole box exterior. Pass `background_subdomain` (the
+    name of a third, complement subvolume surrounding the outer compartment) to instead **bound** the
+    geometry to inner + outer: the outer compartment's outer edge (its interface to the dropped
+    background) becomes the exterior wall — a true circular reservoir edge, reproducing the classic
+    disk-in-annulus geometry gmsh-free (`_restrict_to_compartments`).
     """
 
     expected = {inner_subdomain, outer_subdomain}
@@ -288,6 +340,11 @@ def realize_interface_coupled(
         raise RealizationError(
             f"interface-coupled realization needs both compartments {sorted(expected)} among the "
             f"geometry's subvolumes {sorted(volume_names)}"
+        )
+    if background_subdomain is not None and background_subdomain not in volume_names:
+        raise RealizationError(
+            f"background_subdomain {background_subdomain!r} is not among the geometry's subvolumes "
+            f"{sorted(volume_names)}"
         )
     surface = next((s for s in description.surfaces if s.name == membrane_subdomain), None)
     if surface is None:
@@ -301,19 +358,43 @@ def realize_interface_coupled(
     else:
         parent, tagging = _realize_2d_partition(description, h=h, resolution=resolution, comm=comm)
     tdim = parent.topology.dim
-    interface_facets = tagging.facet_tags.find(tagging.surface_tags[membrane_subdomain])
+    interface_tag = tagging.surface_tags[membrane_subdomain]
+
+    if background_subdomain is not None:
+        # Bounded (annulus) parent: drop the background so the outer compartment's outer edge is a real
+        # exterior `ds` reservoir wall; membrane and cell tags are re-derived on the restricted mesh.
+        parent, cell_tags, interface_facets, wall_facets, region_tags = _restrict_to_compartments(
+            parent, tagging, inner_subdomain, outer_subdomain
+        )
+    else:
+        # Box-bounded parent: the reservoir wall is the whole box exterior (every exterior facet is a box
+        # face — the membrane is interior).
+        cell_tags = tagging.cell_tags
+        region_tags = tagging.region_tags
+        interface_facets = tagging.facet_tags.find(interface_tag)
+        parent.topology.create_connectivity(tdim - 1, tdim)
+        wall_facets = dmesh.exterior_facet_indices(parent.topology)
     if not interface_facets.size:
         raise RealizationError(f"the membrane {membrane_subdomain!r} has no realized interface facets")
 
     # Retain the entity maps (realize() discards them) — they relate each submesh to the parent so the
     # coupling form on the parent's interface dS can pull in both bulk traces.
-    inner_mesh, inner_emap, *_ = dmesh.create_submesh(
-        parent, tdim, tagging.cell_tags.find(tagging.region_tags[inner_subdomain])
-    )
-    outer_mesh, outer_emap, *_ = dmesh.create_submesh(
-        parent, tdim, tagging.cell_tags.find(tagging.region_tags[outer_subdomain])
-    )
+    inner_mesh, inner_emap, *_ = dmesh.create_submesh(parent, tdim, cell_tags.find(region_tags[inner_subdomain]))
+    outer_mesh, outer_emap, *_ = dmesh.create_submesh(parent, tdim, cell_tags.find(region_tags[outer_subdomain]))
     membrane_mesh, membrane_emap, *_ = dmesh.create_submesh(parent, tdim - 1, interface_facets)
+
+    # A single merged facet tagging: the membrane at `interface_tag` (coupling `dS`) and the reservoir
+    # wall at `_OUTER_WALL_TAG` (`ds`). The two facet sets are disjoint (interior membrane vs exterior
+    # wall), so the tags are unambiguous; `integrate_interface_coupled` reads `interface_tag`/`outer_tag`.
+    idx = np.concatenate([interface_facets, wall_facets]).astype(np.int32)
+    val = np.concatenate(
+        [
+            np.full(interface_facets.size, interface_tag, dtype=np.int32),
+            np.full(wall_facets.size, _OUTER_WALL_TAG, dtype=np.int32),
+        ]
+    )
+    order = np.argsort(idx)
+    facet_tags = dmesh.meshtags(parent, tdim - 1, idx[order], val[order])
 
     return InterfaceCoupledGeometry(
         name=description.name,
@@ -327,16 +408,14 @@ def realize_interface_coupled(
         outer_entity_map=outer_emap,
         membrane_entity_map=membrane_emap,
         parent_mesh=parent,
-        cell_tags=tagging.cell_tags,
-        facet_tags=tagging.facet_tags,
-        inner_region_tag=tagging.region_tags[inner_subdomain],
-        outer_region_tag=tagging.region_tags[outer_subdomain],
+        cell_tags=cell_tags,
+        facet_tags=facet_tags,
+        inner_region_tag=region_tags[inner_subdomain],
+        outer_region_tag=region_tags[outer_subdomain],
         interface=interface,
-        interface_tag=tagging.surface_tags[membrane_subdomain],
-        # The external boundary is the box faces (no single reservoir circle); a reservoir Dirichlet
-        # there is a follow-up, and `integrate_interface_coupled` does not use these fields.
-        outer="exterior",
-        outer_tag=-1,
+        interface_tag=interface_tag,
+        outer=outer,
+        outer_tag=_OUTER_WALL_TAG,
     )
 
 
@@ -424,12 +503,16 @@ def _mesh_box_with_contours(
     parent's interior (nested shapes nest, disjoint shapes sit side by side). LGPL Netgen replaces GPL
     gmsh here (ADR 008); region / membrane / face tagging still happens afterwards in DOLFINx."""
 
-    # Simplify (Douglas–Peucker, to a fraction of the mesh size) and orient each contour CCW so its
-    # interior is on the left — Netgen's ``leftdomain``. Simplification drops the sub-grid near-duplicate
-    # marching vertices while staying within h of the contour.
+    # Simplify (Douglas–Peucker) and orient each contour CCW so its interior is on the left — Netgen's
+    # ``leftdomain``. The tolerance bounds how far the simplified polygon may deviate from the marched
+    # contour; it is deliberately *tight* (0.01·h) because the deviation is a systematic *inward* bias
+    # (chords cut inside a convex arc), so a loose tolerance shrinks a curved region's area measurably
+    # (0.25·h cost ~2.6% on a disk) while — since Netgen resamples the boundary at h regardless — buying
+    # no reduction in mesh size. 0.01·h keeps body-fit geometry within ~0.1% of the analytic shape, the
+    # fidelity gmsh's exact-curve boundary gives, at the same node count. (See the migration notes.)
     polys: list[NDArray[np.float64]] = []
     for contour in contours:
-        verts = approximate_polygon(contour, tolerance=0.25 * h)
+        verts = approximate_polygon(contour, tolerance=0.01 * h)
         if len(verts) > 1 and np.allclose(verts[0], verts[-1]):
             verts = verts[:-1]
         if len(verts) < 3:

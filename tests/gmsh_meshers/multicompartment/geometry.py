@@ -23,10 +23,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import gmsh
 from dolfinx import mesh as dmesh
 from dolfinx.io.gmsh import model_to_mesh
 from mpi4py import MPI
+
+from vcell_fenics.backend.geometry import (
+    BoundaryGeometry,
+    CoupledGeometry,
+    Geometry,
+    SubdomainGeometry,
+)
 
 CYTOSOL_TAG = 1
 EXTRACELLULAR_TAG = 2
@@ -62,6 +68,8 @@ def create_extracellular_annulus(
 
     if not 0.0 < inner_radius < outer_radius:
         raise ValueError(f"need 0 < inner_radius < outer_radius, got {inner_radius} and {outer_radius}")
+
+    import gmsh  # lazy: keep gmsh (GPL) out of the default import graph — loaded only when this prototype mesher runs
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
@@ -146,6 +154,8 @@ def create_cell_extracellular(
     if not 0.0 < inner_radius < outer_radius:
         raise ValueError(f"need 0 < inner_radius < outer_radius, got {inner_radius} and {outer_radius}")
 
+    import gmsh  # lazy: keep gmsh (GPL) out of the default import graph — loaded only when this mesher runs
+
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
     try:
@@ -201,4 +211,83 @@ def create_cell_extracellular(
         membrane_entity_map=membrane_emap,
         inner_radius=inner_radius,
         outer_radius=outer_radius,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backend-`Geometry` builders that wrap the gmsh meshers above.
+#
+# These used to live in `vcell_fenics.backend.geometry`, but the production geometry path is now the
+# gmsh-free Netgen `realize` (see LICENSING.md). They are retained here — beside the gmsh meshers they
+# wrap — as the annular-reservoir / concentric-annulus variants the coupled tests exercise, which the
+# box-bounded `realize_interface_coupled` does not reproduce exactly (true circular outer edge, annulus
+# extracellular bulk). Test-only: nothing in `src/` imports them.
+# ---------------------------------------------------------------------------
+
+
+def make_cell_extracellular_geometry(
+    name: str,
+    *,
+    cytosol: str,
+    extracellular: str,
+    membrane: str,
+    interface: str,
+    outer: str,
+    inner_radius: float = 0.6,
+    outer_radius: float = 1.0,
+    h: float = 0.1,
+) -> Geometry:
+    """A concentric two-compartment cell: an inner-disk `cytosol` and outer-annulus `extracellular`
+    (both `volume`), plus the `membrane` between them as a `surface` subdomain. The membrane is also
+    registered as the internal boundary `interface` (incident to both compartments); the outer circle is
+    the external boundary `outer` (incident to the extracellular space only)."""
+
+    cell = create_cell_extracellular(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
+    subdomains = {
+        cytosol: SubdomainGeometry(mesh=cell.cytosol_mesh, kind="volume"),
+        extracellular: SubdomainGeometry(mesh=cell.extracellular_mesh, kind="volume"),
+        membrane: SubdomainGeometry(mesh=cell.membrane_mesh, kind="surface"),
+    }
+    boundaries = {
+        interface: BoundaryGeometry(subdomains=(cytosol, extracellular), facets=cell.facet_tags.find(MEMBRANE_TAG)),
+        outer: BoundaryGeometry(subdomains=(extracellular,), facets=cell.facet_tags.find(OUTER_TAG)),
+    }
+    return Geometry(
+        name=name,
+        subdomains=subdomains,
+        boundaries=boundaries,
+        parent_mesh=cell.parent_mesh,
+        cell_tags=cell.cell_tags,
+        facet_tags=cell.facet_tags,
+    )
+
+
+def make_extracellular_annulus_geometry(
+    name: str,
+    *,
+    extracellular: str,
+    membrane: str,
+    interface: str,
+    outer: str,
+    inner_radius: float = 0.5,
+    outer_radius: float = 1.0,
+    h: float = 0.1,
+) -> CoupledGeometry:
+    """The §1.6.6 coupled geometry: an annular `extracellular` bulk whose inner boundary is the
+    `membrane` surface subdomain (coupled at `interface`) and whose outer boundary is `outer` (the
+    reservoir)."""
+
+    annulus = create_extracellular_annulus(inner_radius=inner_radius, outer_radius=outer_radius, h=h)
+    return CoupledGeometry(
+        name=name,
+        bulk_subdomain=extracellular,
+        surface_subdomain=membrane,
+        bulk_mesh=annulus.bulk_mesh,
+        surface_mesh=annulus.membrane_mesh,
+        entity_map=annulus.membrane_entity_map,
+        facet_tags=annulus.facet_tags,
+        interface=interface,
+        interface_tag=MEMBRANE_TAG,
+        outer=outer,
+        outer_tag=OUTER_TAG,
     )

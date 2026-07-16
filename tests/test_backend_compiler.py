@@ -18,7 +18,7 @@ import ufl
 from dolfinx import fem
 from petsc4py import PETSc
 
-from vcell_fenics.approaches.static import create_disk
+from tests.gmsh_meshers.static import create_disk
 from vcell_fenics.backend import CompileContext, CompileError, compile_expression
 from vcell_fenics.formalism import parse
 

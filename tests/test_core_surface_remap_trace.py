@@ -24,7 +24,7 @@ import ufl
 from dolfinx import fem
 from dolfinx import mesh as dmesh
 
-from vcell_fenics.approaches.submesh.geometry import create_disk_with_membrane
+from tests.gmsh_meshers.submesh.geometry import create_disk_with_membrane
 from vcell_fenics.core import BulkBoundaryTrace, correct_surface_trace
 
 

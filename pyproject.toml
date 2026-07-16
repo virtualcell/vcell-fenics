@@ -53,9 +53,12 @@ petsc4py = "*"
 scifem = "*"                       # point sources, blocked Newton, real fn space
 dolfinx_mpc = "*"                  # multi-point constraints (periodic BCs, slip)
 
-# Meshing and I/O
-gmsh = "*"
-python-gmsh = "*"
+# Meshing and I/O.
+# NOTE: gmsh (GPL-2.0-or-later) is intentionally NOT a runtime dependency — it is
+# dev-only (see [tool.pixi.feature.dev.dependencies] below and LICENSING.md). The
+# production geometry path (backend/realize.py) uses Netgen (LGPL-2.1); gmsh is only
+# imported (lazily) by the approaches/* prototypes and the opt-in region_remesh
+# remesher, none of which are on the pyvcell-integration path.
 meshio = "*"
 
 # Visualization
@@ -80,6 +83,13 @@ pytest = "*"
 ipython = "*"
 ruff = "*"
 mypy = "*"
+# gmsh (GPL-2.0-or-later) lives here, NOT in runtime deps, so it never enters the
+# distributed/default environment. It is only needed to run the approaches/* prototype
+# meshers and the opt-in region_remesh remesher (tests, examples, dev work). Keeping it
+# dev-only lets vcell-fenics itself ship permissively (MIT) without a copyleft runtime
+# dependency. See LICENSING.md. Do NOT move gmsh back to [tool.pixi.dependencies].
+gmsh = "*"
+python-gmsh = "*"
 types-pyyaml = ">=6.0.12.20260518,<7"
 # For running the demo notebooks in docs/notebooks/ (`pixi run -e dev notebooks`).
 # ipykernel makes the dev env's Python the notebook kernel.

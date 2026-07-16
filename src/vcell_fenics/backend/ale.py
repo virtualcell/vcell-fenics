@@ -44,7 +44,7 @@ from vcell_fenics.backend.discrete import DiscreteProblem, MeshQualityError
 from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem_stride
 from vcell_fenics.backend.solver import SolverConfiguration
-from vcell_fenics.core import BulkBoundaryTrace, mesh_region, ordered_membrane_loop
+from vcell_fenics.core import BulkBoundaryTrace, ordered_membrane_loop
 from vcell_fenics.formalism.schema import MathDescription
 
 
@@ -204,22 +204,30 @@ def _remesh(problem: DiscreteProblem, target_h: float) -> Mesh:
 
     - **codim-0 (a moving bulk region).** The deformed boundary loop is recovered
       from the bulk mesh (`BulkBoundaryTrace.boundary_loop()`) and meshed directly:
-      `mesh_region` returns the new bulk mesh, whose boundary is that same polyline,
-      so the old and new meshes triangulate the same deformed polygon and the bulk
-      transfer in `rebuild_on_mesh` (`remap_bulk_function`) conserves to round-off.
+      `mesh_region_netgen` returns the new bulk mesh, whose boundary is that same
+      polyline, so the old and new meshes triangulate the same deformed polygon and the
+      bulk transfer in `rebuild_on_mesh` (`remap_bulk_function`) conserves to round-off.
     - **codim-1 (a moving membrane).** Order the deformed loop off the membrane mesh,
       mesh the region it encloses, and extract that region's boundary as the new
       codim-1 submesh.
+
+    The remesher is the **LGPL Netgen** `mesh_region_netgen` (ADR 008), not the GPL gmsh
+    `mesh_region` (now test-only) — so the ALE driver carries no gmsh dependency. The
+    default (boundary-resampling) path is all the driver needs; the gmsh-only
+    `fix_boundary_nodes` interior fast path is not used here. Imported lazily so merely
+    importing `backend` neither loads Netgen nor caps its thread pool.
     """
+
+    from vcell_fenics.core.region_remesh_netgen import mesh_region_netgen
 
     mesh = problem.V.mesh
     gdim = mesh.geometry.dim
     if mesh.topology.dim == gdim:
         loop = BulkBoundaryTrace(problem.V).boundary_loop()
-        return mesh_region(loop, target_h)
+        return mesh_region_netgen(loop, target_h)
     if mesh.topology.dim == gdim - 1:
         loop, _order = ordered_membrane_loop(fem.functionspace(mesh, ("Lagrange", 1)))
-        bulk = mesh_region(loop, target_h)
+        bulk = mesh_region_netgen(loop, target_h)
         tdim = bulk.topology.dim
         bulk.topology.create_connectivity(tdim - 1, tdim)
         facets = exterior_facet_indices(bulk.topology)

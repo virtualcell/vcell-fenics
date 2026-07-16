@@ -24,7 +24,8 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from vcell_fenics.backend import CoupledProblem, assemble, make_extracellular_annulus_geometry
+from tests.gmsh_meshers.multicompartment.geometry import make_extracellular_annulus_geometry
+from vcell_fenics.backend import CoupledProblem, assemble
 from vcell_fenics.formalism import load_yaml
 
 

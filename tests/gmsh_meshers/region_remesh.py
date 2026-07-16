@@ -27,7 +27,6 @@ multiple loops / holes, and MPI partitioning are deferred.
 
 from __future__ import annotations
 
-import gmsh
 import numpy as np
 from dolfinx import mesh as dmesh
 from dolfinx.io.gmsh import model_to_mesh
@@ -67,6 +66,8 @@ def mesh_region(
         raise ValueError("loop must not repeat its first point as a closing vertex")
     if abs(_signed_area(loop)) < 1e-14:
         raise ValueError("loop encloses no area (degenerate or collinear)")
+
+    import gmsh  # lazy: keep gmsh (GPL) out of the default import graph — loaded only when this opt-in remesher runs
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
