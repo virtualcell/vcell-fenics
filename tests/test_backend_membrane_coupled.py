@@ -423,6 +423,76 @@ def test_mol_membrane_coupled_surface_diffusion_is_second_order_in_space() -> No
     assert 1.7 <= order <= 2.3, f"expected ~2nd-order surface-diffusion convergence, got {order:.2f} ({errors})"
 
 
+def test_be_membrane_coupled_surface_diffusion_is_second_order_in_space() -> None:
+    # The backward-Euler counterpart of the MOL surface-diffusion spatial-order check above, so both solvers
+    # are pinned on the surface Laplacian's O(h²) accuracy (spatial parity). BE carries an O(dt) time error,
+    # so rather than chase the transient eigenmode (which would force dt ≪ h²) this uses a manufactured STEADY
+    # surface solution: R*(y) = cos(π y), held by the source D_s π² cos(π y) — which balances the diffusion and
+    # integrates to zero over [0, 1], so it is mass-consistent with the zero-flux membrane ends. BE (uncondi-
+    # tionally stable) relaxes to R*, after which the error is purely spatial and dt-independent. It is measured
+    # against the EXACT cosine at high quadrature: the straight 1D membrane is nodally exact for P1, so
+    # comparing to the P1 interpolant of cos would read ~round-off — the genuine O(h²) is the sub-nodal
+    # interpolation error, which a mis-assembled surface Laplacian (breaking nodal exactness) would inflate.
+    surf_diffusion = 0.05
+    source = f"{surf_diffusion} * {np.pi**2} * cos({np.pi} * geom.x[1])"
+
+    model = MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[
+            Variable(name="L_in", subdomain="cyto"),
+            Variable(name="L_out", subdomain="ext"),
+            Variable(name="R", subdomain="pm"),
+        ],
+        parameters=[],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="R",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": str(surf_diffusion), "source": source},
+                initial_condition="0.0",  # relaxes to the manufactured steady R* = cos(pi*y)
+            ),
+        ],
+        boundary_conditions=[],  # decoupled ⇒ bulk stays uniform; R relaxes to the steady surface profile
+    )
+
+    def surface_error(n: int) -> float:
+        problem = assemble_membrane_coupled(model, _split_box_membrane_geometry(n), dt=2.0)
+        for _ in range(50):  # unconditionally stable BE, large dt ⇒ reaches the steady state in few steps
+            problem.step()
+        field = problem.field("R")
+        mesh = field.function_space.mesh
+        y = ufl.SpatialCoordinate(mesh)[1]
+        dx = ufl.dx(domain=mesh, metadata={"quadrature_degree": 6})  # resolve the exact cosine, not its P1 interp
+        return float(np.sqrt(float(fem.assemble_scalar(fem.form((field - ufl.cos(np.pi * y)) ** 2 * dx)).real)))
+
+    errors = [surface_error(n) for n in (8, 16, 32)]
+    order = float(np.log2(errors[0] / errors[-1]) / 2.0)
+    assert 1.7 <= order <= 2.3, f"expected ~2nd-order surface-diffusion convergence, got {order:.2f} ({errors})"
+
+
 # ---------------------------------------------------------------------------
 # 6. multiple species per compartment AND on the membrane (the general case)
 # ---------------------------------------------------------------------------
