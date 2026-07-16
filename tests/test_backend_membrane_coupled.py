@@ -196,6 +196,96 @@ def test_first_order_in_time() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 5b. analytical MMS parity — both solvers vs a closed-form binding ODE
+# ---------------------------------------------------------------------------
+
+
+def _analytical_binding_model() -> MathDescription:
+    """A membrane binding reaction with a closed-form solution, for a convergence check. With NO interface
+    flux the bulk ligand never depletes — it stays at its uniform IC (L_in = L_out = 1), so trace(L) = 1 and
+    the (spatially uniform) surface receptor obeys the ODE dR/dt = kon·(L_in + L_out)·(Rmax − R) =
+    2·kon·(Rmax − R), whose exact solution is R(t) = Rmax·(1 − e^{−2·kon·t}) (R₀ = 0). Surface diffusion is
+    inert on the uniform R, so this isolates the binding coupling + time integration against a closed form."""
+    return MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[
+            Variable(name="L_in", subdomain="cyto"),
+            Variable(name="L_out", subdomain="ext"),
+            Variable(name="R", subdomain="pm"),
+        ],
+        parameters=[ParameterConstant(name="kon", value=0.5), ParameterConstant(name="Rmax", value=2.0)],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="R",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": "0.05", "source": "kon * (trace(L_in) + trace(L_out)) * (Rmax - R)"},
+                initial_condition="0.0",
+            ),
+        ],
+        boundary_conditions=[],  # no interface flux ⇒ bulk stays uniform, and R follows the closed-form ODE
+    )
+
+
+def _R_exact(t: float, *, kon: float = 0.5, rmax: float = 2.0) -> float:
+    return float(rmax * (1.0 - np.exp(-2.0 * kon * t)))
+
+
+def test_be_membrane_coupled_is_first_order_against_the_analytical_binding_ode() -> None:
+    # The IMEX (lagged-binding) backward-Euler step converges to the exact receptor ODE at O(dt¹): refining
+    # dt at fixed final time, the error vs R(T) = Rmax(1 − e^{−2·kon·t}) halves with dt. This complements the
+    # self-convergence check above by pinning the scheme to an ANALYTICAL value; R stays uniform to round-off
+    # (asserted), so it is purely the binding coupling + time discretisation, with no spatial error.
+    t_final = 1.5
+    exact = _R_exact(t_final)
+
+    def error(dt: float) -> float:
+        problem = assemble_membrane_coupled(_analytical_binding_model(), _geom(), dt=dt)
+        for _ in range(round(t_final / dt)):
+            problem.step()
+        r = problem.field("R").x.array
+        assert float(r.std()) < 1e-10  # R stays spatially uniform (no gradient to diffuse away)
+        return abs(float(r.mean()) - exact)
+
+    errors = [error(dt) for dt in (0.02, 0.01, 0.005)]
+    order = float(np.log2(errors[0] / errors[-1]) / 2.0)
+    assert 0.8 <= order <= 1.3, f"expected ~1st-order temporal convergence, got {order:.2f} ({errors})"
+
+
+def test_mol_membrane_coupled_matches_the_analytical_binding_ode() -> None:
+    # The MOL parity check: the adaptive-BDF integrator (matrix-free implicit binding) reproduces the SAME
+    # exact receptor ODE to its time tolerance — the analytical counterpart of the BE test above, so the two
+    # membrane-coupled solvers are pinned to one closed-form solution and cannot silently diverge on it.
+    t_final = 1.5
+    result = integrate_membrane_coupled(_analytical_binding_model(), _geom(), t_final=t_final)
+    r = result.field("R").x.array
+    assert float(r.std()) < 1e-10  # spatially uniform under the adaptive solve too
+    assert float(r.mean()) == pytest.approx(_R_exact(t_final), abs=2e-3)
+
+
+# ---------------------------------------------------------------------------
 # 6. multiple species per compartment AND on the membrane (the general case)
 # ---------------------------------------------------------------------------
 

@@ -166,6 +166,31 @@ def test_surface_tension_shrinks_circle() -> None:
     assert _mean_radius(problem) == pytest.approx(expected, rel=2e-3)
 
 
+def test_curvature_flow_is_first_order_in_time_against_the_exact_radius() -> None:
+    # A convergence-RATE check for the *solved-motion* path, not just a known answer at one dt: mean-curvature
+    # flow of a circle has the exact solution r(t)² = r₀² − 2σt/η, and the staggered scheme (solve force →
+    # move by dt·v) is first-order in time. Refine dt at fixed final time and membrane resolution; the error
+    # vs the exact radius must halve with dt — O(dt¹). Uses the BGN (redistribute) path so the coarser dt stay
+    # well-conditioned (the velocity-move path degrades the mesh there); it follows the same continuous flow.
+    # This is the temporal analogue of the coupled-solver MMS — feedback_convergence_testing asks new solvers
+    # to be pinned by dt-refinement against an analytical solution, which the fixed-dt sanity checks above do
+    # not do. r₀ is measured from the discrete circle so the reference matches the discrete initial condition.
+    sigma_over_eta = _SIGMA / _ETA
+    t_final = 1.0
+
+    def radius_error(dt: float) -> float:
+        problem = _curvature_problem(dt=dt, h=0.05, redistribute=True)
+        r0 = _mean_radius(problem)
+        for _ in range(round(t_final / dt)):
+            problem.step()
+        exact = np.sqrt(r0**2 - 2.0 * sigma_over_eta * t_final)
+        return float(abs(_mean_radius(problem) - exact))
+
+    errors = [radius_error(dt) for dt in (0.04, 0.02, 0.01)]  # two dt halvings at fixed T and h
+    order = float(np.log2(errors[0] / errors[-1]) / 2.0)
+    assert 0.8 <= order <= 1.3, f"expected ~1st-order temporal convergence, got {order:.2f} ({errors})"
+
+
 def test_redistribute_runs_curvature_flow_at_large_dt() -> None:
     # With redistribute=True the membrane uses the BGN scheme: it follows the same
     # `r² = r₀² − 2σt/η` flow but with tangential redistribution, so it runs cleanly at

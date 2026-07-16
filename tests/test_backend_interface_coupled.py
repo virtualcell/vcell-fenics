@@ -89,7 +89,14 @@ def _split_box_coupled_geometry(n: int) -> InterfaceCoupledGeometry:
         ],
         dtype=np.int32,
     )
-    wall_facets = exterior_facet_indices(parent.topology)
+    # The reservoir wall is where the OUTER (ext) compartment meets the box exterior — an exterior facet
+    # whose one cell is an ext cell. (Restricting to ext-adjacent, not all exterior, matters for the BE
+    # solver: it places the weak-Dirichlet penalty as a block form on the outer submesh, which cannot carry
+    # a row on a cyto-adjacent facet where the outer space has no dof.)
+    wall_facets = np.array(
+        [f for f in exterior_facet_indices(parent.topology) if cell_values[f2c.links(f)[0]] == ext_tag],
+        dtype=np.int32,
+    )
     interface_tag, wall_tag = 100, 300
     idx = np.concatenate([membrane_facets, wall_facets]).astype(np.int32)
     val = np.concatenate(
@@ -332,6 +339,133 @@ def test_mol_transient_is_second_order_in_space() -> None:
     diff_fine = abs(values[1] - values[2])
     order = math.log2(diff_coarse / diff_fine)
     assert 1.7 <= order <= 2.3, f"expected ~2nd-order spatial self-convergence, got {order:.2f} ({values})"
+
+
+def test_be_coupled_is_second_order_against_manufactured_solution() -> None:
+    # Method of manufactured solutions on the BACKWARD-EULER two-bulk solver with the interface flux ACTIVE
+    # (P > 0), an in-bulk source, and an outer-wall Dirichlet all engaged at once — the absolute-coupled-value
+    # check that the equilibration and MOL-order tests never made. u_in* = 2 + x², u_out* = A + x² with
+    # A = 2 + D/P: on both sides −D∇²u* = −2 = source, and at the straight membrane x = 0.5 the diffusive flux
+    # D·∂ₓu_in* = D exactly balances P(u_out* − u_in*) = P·(A − 2) = D, so u* is the exact steady solution.
+    # It self-converges at the P1 rate O(h²) over the NESTED split-box (n = 8/16/32).
+    #
+    # This is the test that pins the interface coupling to an analytical value. Assembling that coupling as an
+    # implicit bilinear matrix silently over-counts it in DOLFINx 0.10/0.11 (both restrictions of a submesh
+    # *argument* alias to the same cell); the solver instead assembles the flux from the state coefficients
+    # (exact) and applies the implicit Jacobian matrix-free. Without that, this test collapses to ~O(1) error.
+    diffusion, permeability = 1.0, 2.0
+    wall_level = 2.0 + diffusion / permeability  # A: the outer offset that makes u* consistent
+
+    model = MathDescription(
+        geometry="cell",
+        subdomains=[Subdomain(name="cyto", kind="volume"), Subdomain(name="ext", kind="volume")],
+        variables=[Variable(name="u_in", subdomain="cyto"), Variable(name="u_out", subdomain="ext")],
+        parameters=[ParameterConstant(name="P", value=permeability)],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": str(diffusion), "source": str(-2.0 * diffusion)},
+                initial_condition="2 + geom.x[0]**2",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": str(diffusion), "source": str(-2.0 * diffusion)},
+                initial_condition=f"{wall_level} + geom.x[0]**2",
+            ),
+        ],
+        boundary_conditions=[
+            BCInterfaceFlux(variable="u_in", boundary="membrane", expression="P*(u_out - u_in)"),
+            BCInterfaceFlux(variable="u_out", boundary="membrane", expression="P*(u_in - u_out)"),
+            BCDirichlet(variable="u_out", boundary="wall", expression=f"{wall_level} + geom.x[0]**2"),
+        ],
+    )
+
+    def l2_error(n: int) -> float:
+        geometry = _split_box_coupled_geometry(n)
+        problem = assemble_interface_coupled(model, geometry, dt=0.02)
+        for _ in range(200):  # backward-Euler to steady state (u* is the manufactured steady solution)
+            problem.step()
+        squared = 0.0
+        for field, offset in ((problem.inner, 2.0), (problem.outer, wall_level)):
+            mesh = field.function_space.mesh
+            exact = fem.Function(field.function_space)
+            exact.interpolate(
+                fem.Expression(
+                    offset + ufl.SpatialCoordinate(mesh)[0] ** 2, field.function_space.element.interpolation_points
+                )
+            )
+            squared += float(fem.assemble_scalar(fem.form((field - exact) ** 2 * ufl.dx(domain=mesh))).real)
+        return math.sqrt(squared)
+
+    errors = [l2_error(n) for n in (8, 16, 32)]  # doubling n halves h; the split-box meshes nest
+    order = math.log2(errors[0] / errors[-1]) / 2.0  # two 2× refinements
+    assert 1.7 <= order <= 2.3, f"expected ~2nd-order MMS convergence, got {order:.2f} ({errors})"
+
+
+def test_mol_coupled_is_second_order_against_manufactured_solution() -> None:
+    # The METHOD-OF-LINES counterpart of the BE MMS above, and the parity check that keeps the two coupled
+    # solvers from silently diverging (the failure mode that hid the interface-flux over-count). Same
+    # manufactured steady solution u_in* = 2 + x², u_out* = A + x² (A = 2 + D/P) with the flux, an in-bulk
+    # source, and a wall Dirichlet all active. The MOL integrator (adaptive BDF) drives the time error to ≈0,
+    # so integrating to a steady time isolates the P1 spatial order O(h²) over the nested split-box. This also
+    # exercises the `source` and outer-wall Dirichlet that `integrate_interface_coupled` gained here (it
+    # assembles the flux as a residual, so it was always over-count-free — only these terms were missing).
+    diffusion, permeability = 1.0, 2.0
+    wall_level = 2.0 + diffusion / permeability
+
+    model = MathDescription(
+        geometry="cell",
+        subdomains=[Subdomain(name="cyto", kind="volume"), Subdomain(name="ext", kind="volume")],
+        variables=[Variable(name="u_in", subdomain="cyto"), Variable(name="u_out", subdomain="ext")],
+        parameters=[ParameterConstant(name="P", value=permeability)],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": str(diffusion), "source": str(-2.0 * diffusion)},
+                initial_condition="2 + geom.x[0]**2",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": str(diffusion), "source": str(-2.0 * diffusion)},
+                initial_condition=f"{wall_level} + geom.x[0]**2",
+            ),
+        ],
+        boundary_conditions=[
+            BCInterfaceFlux(variable="u_in", boundary="membrane", expression="P*(u_out - u_in)"),
+            BCInterfaceFlux(variable="u_out", boundary="membrane", expression="P*(u_in - u_out)"),
+            BCDirichlet(variable="u_out", boundary="wall", expression=f"{wall_level} + geom.x[0]**2"),
+        ],
+    )
+
+    def l2_error(n: int) -> float:
+        result = integrate_interface_coupled(model, _split_box_coupled_geometry(n), t_final=2.0)  # to steady
+        squared = 0.0
+        for field, offset in ((result.inner, 2.0), (result.outer, wall_level)):
+            mesh = field.function_space.mesh
+            exact = fem.Function(field.function_space)
+            exact.interpolate(
+                fem.Expression(
+                    offset + ufl.SpatialCoordinate(mesh)[0] ** 2, field.function_space.element.interpolation_points
+                )
+            )
+            squared += float(fem.assemble_scalar(fem.form((field - exact) ** 2 * ufl.dx(domain=mesh))).real)
+        return math.sqrt(squared)
+
+    errors = [l2_error(n) for n in (8, 16, 32)]
+    order = math.log2(errors[0] / errors[-1]) / 2.0
+    assert 1.7 <= order <= 2.3, f"expected ~2nd-order MMS convergence, got {order:.2f} ({errors})"
 
 
 def test_in_bulk_source_and_outer_wall_dirichlet() -> None:

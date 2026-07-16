@@ -638,12 +638,11 @@ def assemble_interface_coupled(
     n_in = V_in.dofmap.index_map.size_local
     n_out = V_out.dofmap.index_map.size_local
 
-    mixed = ufl.MixedFunctionSpace(V_in, V_out)
-    u_in, u_out = ufl.TrialFunctions(mixed)
-    w_in, w_out = ufl.TestFunctions(mixed)
+    w_in, w_out = ufl.TestFunction(V_in), ufl.TestFunction(V_out)
     dx_in = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.inner_region_tag)
     dx_out = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.outer_region_tag)
     ds_int = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)(geometry.interface_tag)
+    ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
 
     params = _param_symbols(md, parent)
@@ -651,25 +650,43 @@ def assemble_interface_coupled(
     d_in = compile_expression(parse(inner_eq.terms["diffusion"]), ctx)
     d_out = compile_expression(parse(outer_eq.terms["diffusion"]), ctx)
 
-    # Backward-Euler residual over the mixed space: per-compartment mass + diffusion (region dx) plus
-    # the single-sided interface fluxes (interface dS). All integrals on the parent → one block form.
-    f = (u_in - u_in_prev) * w_in * dx_in + dt * d_in * ufl.dot(ufl.grad(u_in), ufl.grad(w_in)) * dx_in
-    f += (u_out - u_out_prev) * w_out * dx_out + dt * d_out * ufl.dot(ufl.grad(u_out), ufl.grad(w_out)) * dx_out
-
-    # Optional per-compartment in-bulk `source` (∂c/∂t = … + source): compiled with the region's OWN species
-    # bound to its trial, so a source affine in that species lands in the block matrix and a purely spatial
-    # forcing (e.g. a manufactured-solution term) lands in the RHS — the `ufl.lhs`/`rhs` split sorts it out.
-    for eq, trial, test, dx in ((inner_eq, u_in, w_in, dx_in), (outer_eq, u_out, w_out, dx_out)):
-        if "source" in eq.terms:
-            src_ctx = CompileContext(parent, {**ctx.symbols, eq.variable: trial})
-            f += -dt * compile_expression(parse(eq.terms["source"]), src_ctx) * test * dx
-
+    # Backward-Euler *residual* F(u)=0, per compartment, written with the STATE functions as coefficients
+    # (not trial functions) — this is deliberate and load-bearing. The interface-flux coupling references
+    # the bulk traces on the parent interface `dS` via `membrane_trace(u) = u('+') + u('-')`. That trick is
+    # correct only when the traced object is a *coefficient*: a Function's restriction to its non-side is a
+    # genuine zero, which selects the right side. For a bilinear (trial × test) form DOLFINx 0.10/0.11
+    # instead aliases *both* restrictions of a submesh *argument* back to the same submesh cell, so the
+    # assembled coupling matrix is over-counted (~3.4×) — a mixed codim-0/codim-1 restriction-assembly
+    # limitation, the same one `_MatrixFreeShiftedJacobian` documents for the membrane-coupled solve. So we
+    # assemble the flux from the state coefficients (exact) and never form the coupling as a matrix: the
+    # implicit BE Jacobian is applied **matrix-free** (finite-differenced residual, below), preconditioned
+    # by the assemblable — over-counted, but only-a-preconditioner — analytic Jacobian.
+    residual_of = {
+        inner_var: (u_in_fn - u_in_prev) * w_in * dx_in
+        + dt * d_in * ufl.dot(ufl.grad(u_in_fn), ufl.grad(w_in)) * dx_in,
+        outer_var: (u_out_fn - u_out_prev) * w_out * dx_out
+        + dt * d_out * ufl.dot(ufl.grad(u_out_fn), ufl.grad(w_out)) * dx_out,
+    }
     test_of = {inner_var: w_in, outer_var: w_out}
+    dx_of = {inner_var: dx_in, outer_var: dx_out}
+    state_of = {inner_var: u_in_fn, outer_var: u_out_fn}
+
+    # Optional per-compartment in-bulk `source` (∂c/∂t = … + source): evaluated at the region's OWN species
+    # (its state Function), so an affine *or* nonlinear source and a purely spatial forcing (a
+    # manufactured-solution term) are all handled uniformly by the residual — no lhs/rhs split needed.
+    for eq in (inner_eq, outer_eq):
+        if "source" in eq.terms:
+            src_ctx = CompileContext(parent, {**ctx.symbols, eq.variable: state_of[eq.variable]})
+            residual_of[eq.variable] += (
+                -dt * compile_expression(parse(eq.terms["source"]), src_ctx) * test_of[eq.variable] * dx_of[eq.variable]
+            )
+
     # Both interface traces are in scope for every flux (a flux on one side may reference either bulk's
-    # trace); each `BCInterfaceFlux` then deposits its flux into its OWN side's test function only.
+    # trace); each `BCInterfaceFlux` then deposits its flux into its OWN side's test function only. Traces
+    # are on the *state* functions, so the flux residual assembles exactly (see the note above).
     coupling_symbols = {
-        inner_var: membrane_trace(u_in),
-        outer_var: membrane_trace(u_out),
+        inner_var: membrane_trace(u_in_fn),
+        outer_var: membrane_trace(u_out_fn),
         "geom.x": ufl.SpatialCoordinate(parent),
         **params,
     }
@@ -683,44 +700,81 @@ def assemble_interface_coupled(
             continue
         coupling_ctx = CompileContext(parent, coupling_symbols)
         flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
-        f += -dt * flux * membrane_trace(test_of[bc.variable]) * ds_int  # var gains the influx
+        residual_of[bc.variable] += -dt * flux * membrane_trace(test_of[bc.variable]) * ds_int  # var gains the influx
 
     # Optional outer-wall Dirichlet on the outer compartment (only it touches the box), enforced weakly by a
     # penalty `β ∮_wall (u_out − g) w ds` — pins the solution where a pure interface-flux problem would leave
     # it up to a null-space constant. Same weak treatment as the membrane-coupled reservoir.
-    ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
     for _, g_value in _reservoir_dirichlet(md, geometry, [outer_var], ctx):
-        f += _RESERVOIR_PENALTY * (u_out - g_value) * w_out * ds_wall
+        residual_of[outer_var] += _RESERVOIR_PENALTY * (u_out_fn - g_value) * w_out * ds_wall
 
-    a_form = fem.form(ufl.extract_blocks(ufl.lhs(f)), entity_maps=emaps)
-    rhs_expr = ufl.rhs(f)
-    l_form = fem.form(ufl.extract_blocks(rhs_expr), entity_maps=emaps)
+    residual_list = [residual_of[inner_var], residual_of[outer_var]]
+    residual_form = fem.form(residual_list, entity_maps=emaps)
 
-    matrix = petsc.assemble_matrix(a_form)  # static geometry + linear coupling ⇒ assemble once
-    matrix.assemble()
-    ksp = PETSc.KSP().create(parent.comm)
-    ksp.setOperators(matrix)
-    ksp.setType("preonly")
-    ksp.getPC().setType("lu")
+    # Assemblable analytic Jacobian, ∂F/∂u — its interface-flux blocks are over-counted (see the note), so
+    # it serves only as the GMRES preconditioner; the true action comes from the matrix-free operator.
+    u_in_trial, u_out_trial = ufl.TrialFunction(V_in), ufl.TrialFunction(V_out)
+    trials, states = (u_in_trial, u_out_trial), (u_in_fn, u_out_fn)
+    jacobian_form = fem.form(
+        [[ufl.derivative(residual_list[i], states[j], trials[j]) for j in range(2)] for i in range(2)],
+        entity_maps=emaps,
+    )
 
     _interpolate_ic(u_in_fn, inner_eq, ctx)
     _interpolate_ic(u_out_fn, outer_eq, ctx)
     u_in_prev.x.array[:] = u_in_fn.x.array
     u_out_prev.x.array[:] = u_out_fn.x.array
 
-    solution = matrix.createVecRight()
+    state_vec = petsc.create_vector([V_in, V_out], kind="mpi")
 
-    def advance() -> None:
-        rhs = petsc.assemble_vector(l_form)
-        ksp.solve(rhs, solution)
-        values = solution.array_r
-        u_in_fn.x.array[:n_in] = values[:n_in]
-        u_out_fn.x.array[:n_out] = values[n_in : n_in + n_out]
+    def unpack(x: PETSc.Vec) -> None:
+        u_in_fn.x.array[:n_in] = x.array_r[:n_in]
+        u_out_fn.x.array[:n_out] = x.array_r[n_in : n_in + n_out]
         u_in_fn.x.scatter_forward()
         u_out_fn.x.scatter_forward()
+
+    def residual(state: PETSc.Vec, _rate: PETSc.Vec, out: PETSc.Vec) -> None:
+        unpack(state)
+        b = petsc.assemble_vector(residual_form, kind="mpi")
+        b.copy(out)
+        b.destroy()
+
+    mf = _MatrixFreeShiftedJacobian(residual, state_vec)  # σ=0 ⇒ its action is the plain ∂F/∂u
+    sizes = state_vec.getSizes()
+    operator = PETSc.Mat().createPython((sizes, sizes), comm=parent.comm)  # type: ignore[arg-type]
+    operator.setPythonContext(mf)
+    operator.setUp()
+    precond = petsc.assemble_matrix(jacobian_form, kind="mpi")  # static geometry ⇒ assemble once
+    precond.assemble()
+    ksp = PETSc.KSP().create(parent.comm)
+    ksp.setOperators(operator, precond)
+    ksp.setType("gmres")
+    ksp.getPC().setType("lu")  # direct factor of the (approximate) Jacobian ⇒ GMRES converges in a few its
+    ksp.setTolerances(rtol=1.0e-10, atol=1.0e-12)
+    rate_vec, resid_vec, delta = state_vec.duplicate(), state_vec.duplicate(), state_vec.duplicate()
+    rate_vec.set(0.0)
+
+    def advance() -> None:
+        # One BE step = solve F(u)=0 (linear) by matrix-free Newton: the exact ∂F/∂u action (matrix-free)
+        # with the assembled approximate Jacobian as preconditioner. Linear ⇒ converges in ~1 iteration; the
+        # loop is a guard. The convergence threshold is *relative* to the first residual (the weak-Dirichlet
+        # penalty, β≈1e6, otherwise pins the absolute residual floor near the loop's own tolerance).
+        state_vec.array[:n_in] = u_in_fn.x.array[:n_in]
+        state_vec.array[n_in : n_in + n_out] = u_out_fn.x.array[:n_out]
+        residual(state_vec, rate_vec, resid_vec)
+        # petsc4py types Vec.norm() loosely as float | tuple; with no norm_type it returns a float.
+        r0 = float(resid_vec.norm())  # type: ignore[arg-type]
+        for _ in range(10):
+            if float(resid_vec.norm()) <= 1.0e-9 * r0 + 1.0e-12:  # type: ignore[arg-type]
+                break
+            mf.set_base(state_vec, rate_vec, 0.0)
+            resid_vec.scale(-1.0)
+            ksp.solve(resid_vec, delta)
+            state_vec.axpy(1.0, delta)
+            residual(state_vec, rate_vec, resid_vec)
+        unpack(state_vec)
         u_in_prev.x.array[:] = u_in_fn.x.array
         u_out_prev.x.array[:] = u_out_fn.x.array
-        rhs.destroy()
 
     return InterfaceCoupledProblem(inner_var, outer_var, u_in_fn, u_out_fn, advance)
 
@@ -770,6 +824,7 @@ def integrate_interface_coupled(
     dx_in = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.inner_region_tag)
     dx_out = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.outer_region_tag)
     ds_int = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)(geometry.interface_tag)
+    ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
 
     params = _param_symbols(md, parent)
@@ -785,6 +840,18 @@ def integrate_interface_coupled(
     ]
     test_of = {inner_var: w_in, outer_var: w_out}
     index_of = {inner_var: 0, outer_var: 1}
+    dx_of = {inner_var: dx_in, outer_var: dx_out}
+    state_of = {inner_var: u_in_fn, outer_var: u_out_fn}
+
+    # Optional per-compartment in-bulk `source` (∂c/∂t = … + source), evaluated at the region's OWN species
+    # (affine, nonlinear, or a purely spatial manufactured forcing — the inner Newton differences it): F
+    # gains −source·w on that region. Same treatment as the BE assembler, minus its dt factor.
+    for eq in (inner_eq, outer_eq):
+        if "source" in eq.terms:
+            src_ctx = CompileContext(parent, {**ctx.symbols, eq.variable: state_of[eq.variable]})
+            residual[index_of[eq.variable]] += (
+                -compile_expression(parse(eq.terms["source"]), src_ctx) * test_of[eq.variable] * dx_of[eq.variable]
+            )
     # Both interface traces are in scope for every flux (a flux on one side may reference either bulk's
     # trace); each `BCInterfaceFlux` then deposits its flux into its OWN side's residual block only.
     coupling_symbols = {
@@ -804,6 +871,11 @@ def integrate_interface_coupled(
         coupling_ctx = CompileContext(parent, coupling_symbols)
         flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
         residual[index_of[bc.variable]] += -flux * membrane_trace(test_of[bc.variable]) * ds_int
+
+    # Optional outer-wall reservoir Dirichlet on the outer compartment, weak penalty (same as the BE
+    # assembler): F gains β(u_out − g)·w_out on the box wall.
+    for _, g_value in _reservoir_dirichlet(md, geometry, [outer_var], ctx):
+        residual[index_of[outer_var]] += _RESERVOIR_PENALTY * (u_out_fn - g_value) * w_out * ds_wall
 
     states, rates = [u_in_fn, u_out_fn], [rate_in, rate_out]
     shift = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # the TS σ
