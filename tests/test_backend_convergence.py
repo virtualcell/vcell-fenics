@@ -42,14 +42,14 @@ from __future__ import annotations
 
 import math
 
+import basix.ufl
 import numpy as np
-import pytest
 import ufl
 from dolfinx import fem
-from dolfinx.mesh import create_unit_square
+from dolfinx.mesh import create_mesh, create_unit_square
 from mpi4py import MPI
 
-from vcell_fenics.backend import SolverConfiguration, assemble, make_disk_membrane_geometry, run
+from vcell_fenics.backend import SolverConfiguration, assemble, run
 from vcell_fenics.backend.discrete import DiscreteProblem
 from vcell_fenics.backend.geometry import Geometry, SubdomainGeometry
 from vcell_fenics.formalism import MathDescription, load_yaml
@@ -86,6 +86,22 @@ def _square_geometry(name: str, *, subdomain: str, n: int) -> Geometry:
 
     mesh = create_unit_square(MPI.COMM_WORLD, n, n)
     return Geometry(name=name, subdomains={subdomain: SubdomainGeometry(mesh=mesh, kind="volume")})
+
+
+def _circle_membrane_geometry(name: str, *, subdomain: str, n: int, radius: float = 1.0) -> Geometry:
+    """A codim-1 membrane: the inscribed regular `n`-gon on the circle of `radius`, as a closed 1D
+    interval mesh embedded in 2D (`h = 2πr/n`). Built inline as an exact test fixture — a *nested*
+    refinement sequence: doubling `n` bisects every segment and snaps the midpoints onto the circle,
+    so the polygons nest and the geometry converges to the circle O(h²). Unlike re-meshing the disk at
+    each `h` (independent, non-nested meshes), this yields a clean, monotone convergence signal for the
+    surface FE order — the codim-1 analogue of the exactly-meshed `_square_geometry`."""
+
+    theta = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+    points = np.column_stack([radius * np.cos(theta), radius * np.sin(theta)])
+    cells = np.array([[i, (i + 1) % n] for i in range(n)], dtype=np.int64)
+    domain = ufl.Mesh(basix.ufl.element("Lagrange", "interval", 1, shape=(2,)))
+    mesh = create_mesh(MPI.COMM_WORLD, cells, domain, points)
+    return Geometry(name=name, subdomains={subdomain: SubdomainGeometry(mesh=mesh, kind="surface")})
 
 
 def _square_model(*, diffusion: float) -> MathDescription:
@@ -165,36 +181,32 @@ def test_bulk_spatial_convergence_is_second_order() -> None:
     assert 1.7 <= order <= 2.3, f"expected ~2nd-order spatial convergence, got slope {order:.2f} (errors {errors})"
 
 
-@pytest.mark.xfail(
-    reason="Surface eigenmode L2 error is non-monotone across independently-remeshed (non-nested) membranes: "
-    "the Netgen region mesher resamples the circle at each h, so the codim-1 node layout is not a clean "
-    "refinement and the O(h²) trend is swamped by mesh-topology noise once the geometry is near-exact (same "
-    "root cause as test_mol_transient_is_second_order_in_space). Follow-up (project_gmsh_isolation_followups): "
-    "nested-refinement / fine-reference convergence like test_method_of_lines_spatial_convergence_is_second_order.",
-    strict=False,
-)
 def test_surface_spatial_convergence_is_second_order() -> None:
-    # cos(kθ) on a circle of radius r decays as exp(-Dk²/r²·t). The polygonal mesh
-    # approximates the circle with O(h²) geometric error, matching the P1 FE rate,
-    # so the combined L2 convergence is still ~2. Exercises the codim-1 submesh.
+    # cos(kθ) on a circle of radius r decays as exp(-Dk²/r²·t). Refine over a NESTED sequence of
+    # inscribed regular polygons (n, 2n, 4n; _circle_membrane_geometry) so both the FE space and the
+    # polygonal geometry refine together with no mesh-topology noise — the codim-1 analogue of the
+    # exactly-meshed square. The geometric error is O(h²), matching the P1 FE rate, so the combined
+    # L2 convergence is ~2. Exercises the codim-1 submesh (ufl.grad is the tangential ∇_Γ). (Independent
+    # re-meshing at each h gives a non-monotone signal — that is why a production disk builder is not
+    # used here; see project_gmsh_isolation_followups.)
     D, k, r, t_final, dt = 0.1, 2, 1.0, 0.1, 1e-3
     decay = math.exp(-D * k**2 / r**2 * t_final)
     md = _surface_model(diffusion=D, k=k)
 
-    mesh_sizes = [0.2, 0.1, 0.05]
+    resolutions = [48, 96, 192]  # doubling n halves h = 2πr/n; the polygons nest
     hs, errors = [], []
-    for h in mesh_sizes:
-        geometry = make_disk_membrane_geometry("disk_membrane", surface_subdomain="membrane", radius=r, h=h)
+    for n in resolutions:
+        geometry = _circle_membrane_geometry("disk_membrane", subdomain="membrane", n=n, radius=r)
         dp = assemble(md, geometry, dt=dt)
         _run_to(dp, dt=dt, t_final=t_final)
         x = ufl.SpatialCoordinate(dp.V.mesh)
         exact = decay * ufl.cos(k * ufl.atan2(x[1], x[0]))
-        hs.append(h)
+        hs.append(2.0 * math.pi * r / n)
         errors.append(_l2_error(dp, exact))
 
     assert errors[0] > errors[1] > errors[2], f"L2 error not monotone under refinement: {errors}"
     order = _fit_order(hs, errors)
-    assert 1.5 <= order <= 2.5, f"expected ~2nd-order surface convergence, got slope {order:.2f} (errors {errors})"
+    assert 1.7 <= order <= 2.3, f"expected ~2nd-order surface convergence, got slope {order:.2f} (errors {errors})"
 
 
 def test_method_of_lines_spatial_convergence_is_second_order() -> None:
