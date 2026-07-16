@@ -14,6 +14,10 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+import ufl
+from dolfinx import fem
+from dolfinx.mesh import compute_midpoints, create_submesh, create_unit_square, exterior_facet_indices, meshtags
+from mpi4py import MPI
 
 from vcell_fenics.backend import (
     MembraneCoupledProblem,
@@ -22,7 +26,7 @@ from vcell_fenics.backend import (
     integrate_membrane_coupled,
 )
 from vcell_fenics.backend.diagnostics import NonlinearTermError
-from vcell_fenics.backend.geometry import make_two_bulk_membrane_geometry
+from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, make_two_bulk_membrane_geometry
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
     BCInterfaceFlux,
@@ -91,6 +95,70 @@ def _model(
 def _geom(h: float = 0.13):  # type: ignore[no-untyped-def]
     return make_two_bulk_membrane_geometry(
         "cell", inner="cyto", outer_subdomain="ext", membrane="pm", interface="pm", outer="wall", h=h
+    )
+
+
+def _split_box_membrane_geometry(n: int) -> InterfaceCoupledGeometry:
+    """The unit square split at x = 0.5 into `cyto` (left) / `ext` (right) meeting at a straight `pm`
+    membrane, as an `InterfaceCoupledGeometry` carrying a membrane submesh — the *nestable* structured
+    analogue of `_geom`'s disk-in-annulus (doubling n bisects every cell, so both bulk regions AND the
+    membrane refine together with no mesh-topology noise). Used for the surface-diffusion SPATIAL-order
+    check; the disk-in-annulus re-meshes independently at each h, which flattens the rate (the same reason
+    the two-bulk convergence tests use a structured fixture; see project_gmsh_isolation_followups)."""
+    parent = create_unit_square(MPI.COMM_WORLD, n, n)
+    tdim = parent.topology.dim
+    ncells = parent.topology.index_map(tdim).size_local
+    midpoints = compute_midpoints(parent, tdim, np.arange(ncells, dtype=np.int32))
+    cyto_tag, ext_tag = 1, 2
+    cell_values = np.where(midpoints[:, 0] < 0.5, cyto_tag, ext_tag).astype(np.int32)
+    cell_tags = meshtags(parent, tdim, np.arange(ncells, dtype=np.int32), cell_values)
+
+    parent.topology.create_connectivity(tdim - 1, tdim)
+    f2c = parent.topology.connectivity(tdim - 1, tdim)
+    membrane_facets = np.array(
+        [
+            f
+            for f in range(parent.topology.index_map(tdim - 1).size_local)
+            if len(cells := f2c.links(f)) == 2 and cell_values[cells[0]] != cell_values[cells[1]]
+        ],
+        dtype=np.int32,
+    )
+    # The reservoir wall is the ext-adjacent exterior (unused here — no wall BC — but the geometry needs it).
+    wall_facets = np.array(
+        [f for f in exterior_facet_indices(parent.topology) if cell_values[f2c.links(f)[0]] == ext_tag],
+        dtype=np.int32,
+    )
+    interface_tag, wall_tag = 100, 300
+    idx = np.concatenate([membrane_facets, wall_facets]).astype(np.int32)
+    val = np.concatenate(
+        [np.full(membrane_facets.size, interface_tag, np.int32), np.full(wall_facets.size, wall_tag, np.int32)]
+    )
+    order = np.argsort(idx)
+    facet_tags = meshtags(parent, tdim - 1, idx[order], val[order])
+
+    inner_mesh, inner_emap, *_ = create_submesh(parent, tdim, cell_tags.find(cyto_tag))
+    outer_mesh, outer_emap, *_ = create_submesh(parent, tdim, cell_tags.find(ext_tag))
+    membrane_mesh, membrane_emap, *_ = create_submesh(parent, tdim - 1, membrane_facets)
+    return InterfaceCoupledGeometry(
+        name="cell",
+        inner_subdomain="cyto",
+        outer_subdomain="ext",
+        membrane_subdomain="pm",
+        inner_mesh=inner_mesh,
+        outer_mesh=outer_mesh,
+        membrane_mesh=membrane_mesh,
+        inner_entity_map=inner_emap,
+        outer_entity_map=outer_emap,
+        membrane_entity_map=membrane_emap,
+        parent_mesh=parent,
+        cell_tags=cell_tags,
+        facet_tags=facet_tags,
+        inner_region_tag=cyto_tag,
+        outer_region_tag=ext_tag,
+        interface="pm",
+        interface_tag=interface_tag,
+        outer="wall",
+        outer_tag=wall_tag,
     )
 
 
@@ -283,6 +351,76 @@ def test_mol_membrane_coupled_matches_the_analytical_binding_ode() -> None:
     r = result.field("R").x.array
     assert float(r.std()) < 1e-10  # spatially uniform under the adaptive solve too
     assert float(r.mean()) == pytest.approx(_R_exact(t_final), abs=2e-3)
+
+
+def test_mol_membrane_coupled_surface_diffusion_is_second_order_in_space() -> None:
+    # The SPATIAL complement to the temporal binding-ODE parity above: there R was uniform, so the surface
+    # Laplacian ∇_Γ·(D_s ∇_Γ R) was inert; here R varies along the membrane, exercising it. A surface-diffusion
+    # eigenmode on the straight membrane, R(y, t) = cos(π y)·e^{−D_s π² t} (zero-flux ends at y = 0, 1), is the
+    # exact solution, with the bulk uniform and decoupled. Refined over the NESTED split-box with the adaptive
+    # MOL integrator (time error ≈ 0, so the spatial order is not polluted), the surface L2 error converges at
+    # the P1 rate O(h²). The disk-in-annulus re-meshes independently at each h and would flatten the rate.
+    surf_diffusion = 0.05
+    t_final = 0.5
+    decay = float(np.exp(-surf_diffusion * np.pi**2 * t_final))
+
+    model = MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[
+            Variable(name="L_in", subdomain="cyto"),
+            Variable(name="L_out", subdomain="ext"),
+            Variable(name="R", subdomain="pm"),
+        ],
+        parameters=[],
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="L_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="R",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": str(surf_diffusion)},
+                initial_condition=f"cos({np.pi} * geom.x[1])",  # eigenmode; zero-flux at the membrane ends
+            ),
+        ],
+        boundary_conditions=[],  # decoupled ⇒ bulk stays uniform, R is a pure surface-diffusion eigenmode
+    )
+
+    def surface_error(n: int) -> float:
+        # Tight time tolerance so the adaptive time error stays well below the spatial error being measured.
+        result = integrate_membrane_coupled(
+            model, _split_box_membrane_geometry(n), t_final=t_final, rtol=1e-9, atol=1e-11
+        )
+        field = result.field("R")
+        mesh = field.function_space.mesh
+        y = ufl.SpatialCoordinate(mesh)[1]
+        exact = fem.Function(field.function_space)
+        exact.interpolate(fem.Expression(ufl.cos(np.pi * y) * decay, field.function_space.element.interpolation_points))
+        return float(np.sqrt(float(fem.assemble_scalar(fem.form((field - exact) ** 2 * ufl.dx(domain=mesh))).real)))
+
+    errors = [surface_error(n) for n in (8, 16, 32)]  # nested: doubling n bisects the membrane too
+    order = float(np.log2(errors[0] / errors[-1]) / 2.0)
+    assert 1.7 <= order <= 2.3, f"expected ~2nd-order surface-diffusion convergence, got {order:.2f} ({errors})"
 
 
 # ---------------------------------------------------------------------------
