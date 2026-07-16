@@ -54,6 +54,30 @@ def test_cahn_hilliard_free_energy_decreases_monotonically(separation) -> None: 
     assert energies[-1] < energies[0]  # and it actually relaxes
 
 
+def test_convex_splitting_is_unconditionally_energy_stable() -> None:
+    # The convex-splitting default (A = well_height, Eyre) makes the free energy decrease for *any* dt.
+    # At a large dt the plain fully-implicit scheme (stabilization=0) instead lets the energy bump UP —
+    # it is only conditionally stable. Same mesh + IC, so the difference is purely the scheme.
+    mesh = dolfinx.mesh.create_unit_square(MPI.COMM_WORLD, 48, 48)
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    x = ufl.SpatialCoordinate(mesh)
+    ic = fem.Function(space)
+    ic.interpolate(
+        fem.Expression(0.5 + 0.1 * ufl.cos(6.0 * x[0]) * ufl.cos(6.0 * x[1]), space.element.interpolation_points)
+    )
+
+    dt, n_steps, eps = 1e-3, 40, 0.08  # dt deliberately large for this interface width
+    _, e_plain = solve_cahn_hilliard(mesh, initial=ic, dt=dt, n_steps=n_steps, epsilon=eps, stabilization=0.0)
+    _, e_convex = solve_cahn_hilliard(mesh, initial=ic, dt=dt, n_steps=n_steps, epsilon=eps)  # default convex split
+
+    def max_rise(e: list[float]) -> float:
+        return max(e[i + 1] - e[i] for i in range(len(e) - 1))
+
+    assert max_rise(e_plain) > 1e-3  # plain scheme: the free energy visibly increases (not energy-stable)
+    assert max_rise(e_convex) <= 1e-9  # convex splitting: monotone non-increasing at the same large dt
+    assert e_convex[-1] < e_convex[0]  # and it still relaxes (the stabilisation vanishes at equilibrium)
+
+
 def test_cahn_hilliard_separates_into_two_phases(separation) -> None:  # type: ignore[no-untyped-def]
     _, spread0, phi, _ = separation
     assert spread0 < 0.5  # started near-uniform (in the spinodal band)
