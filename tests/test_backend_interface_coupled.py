@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 
+import numpy as np
 import pytest
 import ufl
 from dolfinx import fem
@@ -34,6 +35,7 @@ from vcell_fenics.backend import (
 )
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.formalism.schema import (
+    BCDirichlet,
     BCInterfaceFlux,
     BCInterfaceValueEquality,
     MathDescription,
@@ -271,3 +273,49 @@ def test_mol_transient_is_second_order_in_space() -> None:
     diff_fine = abs(values[1] - values[2])
     order = math.log2(diff_coarse / diff_fine)
     assert 1.6 <= order <= 2.4, f"expected ~2nd-order spatial self-convergence, got {order:.2f} ({values})"
+
+
+def test_in_bulk_source_and_outer_wall_dirichlet() -> None:
+    # The two new features together (a manufactured-solution-style check). On the DECOUPLED (P=0) outer
+    # annulus, the steady field s* = 2 − 0.5(r−Rm)² is held by the in-bulk source f = −D∇²s* = 2 − 0.5/r
+    # (a spatial forcing mass-action cannot express) plus a weak outer-wall Dirichlet s*(1) = 1.875 pinning
+    # the level. The solver reproduces s* to the P1 discretisation error — verifying that a spatial `source`
+    # and an outer `BCDirichlet` are both assembled (before this, `assemble_interface_coupled` silently
+    # dropped both).
+    model = MathDescription(
+        geometry="cell",
+        subdomains=[Subdomain(name="cyto", kind="volume"), Subdomain(name="ext", kind="volume")],
+        variables=[Variable(name="u_in", subdomain="cyto"), Variable(name="u_out", subdomain="ext")],
+        parameters=[ParameterConstant(name="P", value=0.0)],  # decoupled: isolates the outer compartment
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u_in",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0"},
+                initial_condition="0.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="u_out",
+                subdomain="ext",
+                temporality="time_dependent",
+                terms={"diffusion": "1.0", "source": "2 - 0.5/geom.radius"},
+                initial_condition="2 - 0.5*(geom.radius - 0.5)**2",
+            ),
+        ],
+        boundary_conditions=[
+            BCInterfaceFlux(variable="u_in", boundary="membrane", expression="P*(u_out - u_in)"),
+            BCInterfaceFlux(variable="u_out", boundary="membrane", expression="P*(u_in - u_out)"),
+            BCDirichlet(variable="u_out", boundary="wall", expression="1.875"),
+        ],
+    )
+    geometry = _geometry(h=0.06)
+    problem = assemble_interface_coupled(model, geometry, dt=0.01)
+    for _ in range(500):
+        problem.step()
+    coords = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1)).tabulate_dof_coordinates()
+    r = np.hypot(coords[:, 0], coords[:, 1])
+    exact = 2.0 - 0.5 * (r - 0.5) ** 2
+    assert np.abs(problem.outer.x.array - exact).max() < 5e-3  # held to the P1 discretisation error

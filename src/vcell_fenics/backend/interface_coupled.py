@@ -656,6 +656,14 @@ def assemble_interface_coupled(
     f = (u_in - u_in_prev) * w_in * dx_in + dt * d_in * ufl.dot(ufl.grad(u_in), ufl.grad(w_in)) * dx_in
     f += (u_out - u_out_prev) * w_out * dx_out + dt * d_out * ufl.dot(ufl.grad(u_out), ufl.grad(w_out)) * dx_out
 
+    # Optional per-compartment in-bulk `source` (∂c/∂t = … + source): compiled with the region's OWN species
+    # bound to its trial, so a source affine in that species lands in the block matrix and a purely spatial
+    # forcing (e.g. a manufactured-solution term) lands in the RHS — the `ufl.lhs`/`rhs` split sorts it out.
+    for eq, trial, test, dx in ((inner_eq, u_in, w_in, dx_in), (outer_eq, u_out, w_out, dx_out)):
+        if "source" in eq.terms:
+            src_ctx = CompileContext(parent, {**ctx.symbols, eq.variable: trial})
+            f += -dt * compile_expression(parse(eq.terms["source"]), src_ctx) * test * dx
+
     test_of = {inner_var: w_in, outer_var: w_out}
     # Both interface traces are in scope for every flux (a flux on one side may reference either bulk's
     # trace); each `BCInterfaceFlux` then deposits its flux into its OWN side's test function only.
@@ -676,6 +684,13 @@ def assemble_interface_coupled(
         coupling_ctx = CompileContext(parent, coupling_symbols)
         flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
         f += -dt * flux * membrane_trace(test_of[bc.variable]) * ds_int  # var gains the influx
+
+    # Optional outer-wall Dirichlet on the outer compartment (only it touches the box), enforced weakly by a
+    # penalty `β ∮_wall (u_out − g) w ds` — pins the solution where a pure interface-flux problem would leave
+    # it up to a null-space constant. Same weak treatment as the membrane-coupled reservoir.
+    ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
+    for _, g_value in _reservoir_dirichlet(md, geometry, [outer_var], ctx):
+        f += _RESERVOIR_PENALTY * (u_out - g_value) * w_out * ds_wall
 
     a_form = fem.form(ufl.extract_blocks(ufl.lhs(f)), entity_maps=emaps)
     rhs_expr = ufl.rhs(f)
