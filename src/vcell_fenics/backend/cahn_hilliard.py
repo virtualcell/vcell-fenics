@@ -23,9 +23,12 @@ with Newton each step (`f'` is nonlinear). A `θ`-scheme on the chemical potenti
 discretisation. Two properties make it verifiable: the order parameter is **exactly conserved**
 (`∮` no-flux ⇒ `d/dt ∫φ = 0`), and the **free energy** `F = ∫[f(φ) + ε²/2 |∇φ|²] dx` is a
 Lyapunov functional of the continuous dynamics (Cahn–Hilliard is its gradient flow) that the
-discretisation **decreases for a sufficiently small step** — the fully-implicit treatment of
-`f'` is not unconditionally energy-stable (convex splitting would be; out of scope for a
-prototype).
+discretisation **decreases unconditionally** via **convex splitting** (Eyre): `f = f_c − f_e`
+with both parts convex (`f_c = f + (A/2)φ²`, `f_e = (A/2)φ²`, `A ≥ W = well_height`), treating
+`f_e'` explicitly. This adds a stabilisation `A·(φⁿ⁺¹ − φⁿ)` to the chemical potential that
+vanishes at steady state (so the equilibrium is unchanged) and makes the energy decrease for
+*any* step — verified in the tests, and it also tames the interfacial overshoot the plain
+fully-implicit scheme showed. Set `stabilization = 0` to recover that plain (non-stable) scheme.
 
 Verified (`tests/test_backend_cahn_hilliard.py`): from a near-uniform spinodal initial state the
 field separates toward the two wells across diffuse interfaces, `∫φ` is conserved to round-off,
@@ -84,6 +87,7 @@ def solve_cahn_hilliard(
     epsilon: float = 0.1,
     well_height: float = _DEFAULT_WELL_HEIGHT,
     theta: float = 1.0,
+    stabilization: float | None = None,
 ) -> tuple[fem.Function, list[float]]:
     """Integrate Cahn–Hilliard for `n_steps` steps of `dt`, returning the final order parameter
     `φ` and the free-energy history (one value per step, plus the initial).
@@ -91,16 +95,23 @@ def solve_cahn_hilliard(
     `initial` is a scalar P1 `Function` holding the initial `φ` (e.g. `0.5 + small noise`, in the
     spinodal band, for spinodal decomposition). `mobility` is `M`, `epsilon` is the interface
     width scale `ε` (so the gradient-energy coefficient is `ε²`), and `theta` weights the chemical
-    potential in time (`1` = backward Euler, the default — most dissipative, so the free energy
-    decreases for the widest range of steps; `0.5` = Crank–Nicolson is 2nd-order but more prone
-    to a transient energy bump). Neither is *unconditionally* energy-stable with the fully-implicit
-    `f'`, so the step must be small enough. No-flux (natural) boundary, so `φ` is conserved. Each
-    step is a Newton solve of the coupled `(φ, μ)` residual.
+    potential in time (`1` = backward Euler, the default — most dissipative; `0.5` = Crank–Nicolson
+    is 2nd-order). `stabilization` is the convex-splitting strength `A`: `None` (default) uses the
+    unconditionally energy-stable `A = well_height` (Eyre — the free energy decreases for *any* dt);
+    `0.0` recovers the plain fully-implicit scheme (energy-stable only for a small enough step). The
+    stabilisation vanishes at steady state, so the equilibrium `φ` is unchanged. No-flux (natural)
+    boundary, so `φ` is conserved. Each step is a Newton solve of the coupled `(φ, μ)` residual.
 
     A whole-history convenience over `_step_cahn_hilliard`: it consumes the per-step generator and
     records the free energy at each yielded state. For a time-lapse of the *template* (snapshots at
     chosen times, from a declarative model), use `iter_cahn_hilliard`.
     """
+
+    # Convex-splitting stabilisation strength. `None` ⇒ the energy-stable default `A = well_height` (the
+    # max concavity of `f`), which makes the scheme unconditionally gradient-stable; `0.0` recovers the
+    # plain fully-implicit scheme. See `_step_cahn_hilliard`.
+    if stabilization is None:
+        stabilization = well_height
 
     energies: list[float] = []
     phi_final = initial
@@ -113,6 +124,7 @@ def solve_cahn_hilliard(
         epsilon=epsilon,
         well_height=well_height,
         theta=theta,
+        stabilization=stabilization,
     ):
         energies.append(cahn_hilliard_free_energy(phi_final, epsilon=epsilon, well_height=well_height))
     return phi_final, energies
@@ -128,6 +140,7 @@ def _step_cahn_hilliard(
     epsilon: float,
     well_height: float,
     theta: float,
+    stabilization: float,
 ) -> Iterator[fem.Function]:
     """The Cahn–Hilliard time loop as a generator: assemble the mixed `(φ, μ)` Newton problem once,
     then yield the order parameter `φ` (a fresh collapsed `Function`) at the initial state and after
@@ -152,6 +165,12 @@ def _step_cahn_hilliard(
     residual = (phi - phi_old) * test_phi * dx + dt * mobility * ufl.dot(ufl.grad(mu_mid), ufl.grad(test_phi)) * dx
     # μ definition: μ = f'(φ) − ε²∇²φ  ⇒  ∫μ·v − ∫f'(φ)·v − ε² ∫∇φ·∇v = 0
     residual += mu * test_mu * dx - _double_well_derivative(phi, well_height) * test_mu * dx
+    # Convex-splitting stabilisation (Eyre): with `f(φ)=Wφ²(1−φ)²`, `f''` dips to `−W` at φ=0.5, so the
+    # fully-implicit `f'` is not unconditionally energy-stable. Split `f = f_c − f_e` with
+    # `f_c = f + (A/2)φ²`, `f_e = (A/2)φ²` (both convex for A ≥ W = well_height); treating `f_e'` explicitly
+    # adds the term `A·(φⁿ⁺¹ − φⁿ)` to μ. It vanishes at steady state (equilibrium unchanged) and makes the
+    # free energy decrease for *any* dt. `stabilization = 0` recovers the plain (non-stable) scheme.
+    residual -= stabilization * (phi - phi_old) * test_mu * dx
     residual -= epsilon**2 * ufl.dot(ufl.grad(phi), ufl.grad(test_mu)) * dx
 
     problem = NonlinearProblem(
@@ -280,6 +299,7 @@ def iter_cahn_hilliard(
             epsilon=setup.epsilon,
             well_height=setup.well_height,
             theta=theta,
+            stabilization=setup.well_height,  # energy-stable convex-splitting default (A = W)
         )
     ):
         if step % every == 0 or step == n_steps:
