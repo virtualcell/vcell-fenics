@@ -12,7 +12,7 @@ geometry: {kind: disk_membrane, radius: 1.0, surface_subdomain: membrane}
 exact: {rho: "np.cos(2*np.arctan2(y, x))"}
 t_final: 1.0
 dt: 0.02
-resolutions_h: [0.2, 0.1, 0.05]
+resolutions_h: [0.04, 0.02, 0.01]
 expected_order_h: 2.0
 applicable_solvers: [fenics-be]
 params: {D: 0.05}

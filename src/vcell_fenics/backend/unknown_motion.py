@@ -379,7 +379,11 @@ def _build_receptor(
 
     space = fem.functionspace(mesh, ("Lagrange", 1))
     trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
-    ctx = CompileContext(mesh, {"geom.x": ufl.SpatialCoordinate(mesh), **_const_params(md, mesh)})
+    # A mutable `sim.t` Constant (refreshed by the caller's `set_time` each step) so a time-dependent
+    # receptor `source` — e.g. a manufactured dilution forcing e^{−kt}·… — tracks the current time, matching
+    # the prescribed-motion (`assemble`) path. Stays 0 for a purely spatial source.
+    time = fem.Constant(mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
+    ctx = CompileContext(mesh, {"geom.x": ufl.SpatialCoordinate(mesh), "sim.t": time, **_const_params(md, mesh)})
 
     diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
     terms = [
@@ -400,6 +404,7 @@ def _build_receptor(
         unknown=fem.Function(space, name=eq.variable),
         previous=fem.Function(space, name=f"{eq.variable}_old"),
         dt=dt,
+        time=time,  # so `receptor.set_time(t)` refreshes a time-dependent source
         terms=tuple(terms),
         scheme=BackwardEuler(),
         bcs=[],

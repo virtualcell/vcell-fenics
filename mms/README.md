@@ -27,6 +27,22 @@ checked against every applicable solver:
 ../pyvcell/.venv/bin/python mms/runner_mb.py mms/cases/<case>.yaml   # mbsolver  (moving front)
 ```
 
+### Harnesses (`harness:` — vcell-fenics runner dispatch)
+
+Each case names the solver family it exercises; the dev runner dispatches on it:
+- **`bulk`** / **`membrane`** — a single field on a volume / surface mesh, through `assemble` (BE) and
+  `integrate_discrete_problem[_moving]` (MOL). Geometry: `disk` / `disk_membrane` / `box`.
+- **`coupled`** — two bulk compartments meeting at a membrane, single-sided interface fluxes + optional
+  outer-wall Dirichlet, through `assemble_interface_coupled` (BE) and `integrate_interface_coupled` (MOL).
+  Geometry: `split_box_two_bulk` — a **nested structured** split-box (n = round(1/h)) so the coupled spatial
+  order is not swamped by the mesh-topology noise a re-meshed disk-in-annulus injects (~0.65). The combined
+  per-compartment error vs `u*` is reported. (`coupled_two_bulk_diffusion` → order ≈ 2, BE *and* MOL — the
+  standing guard against the interface-flux over-count that had made BE silently wrong on all coupled work.)
+- **`unknown_motion`** — a receptor on a membrane whose velocity is **solved** from a weak-form force
+  balance, then moved, then diluted, through `assemble_unknown_motion` (BE). The manufactured force `η v =
+  η k x` yields `v = k x`, so the receptor obeys the same closed-form dilution as the prescribed case with
+  the velocity now solved (`unknown_motion_receptor_dilution` → order ≈ 2, dt ∝ h²).
+
 `applicable_solvers` in each case declares which apply. The fv/mb runners author the case as VCML — the
 manufactured forcing is a **general-kinetics** volume source `∅ → u` with net rate `J = f` (mass-action
 *drops* a spatial/signed zeroth-order source; general kinetics sets the rate directly — verified). They run
@@ -52,7 +68,7 @@ the native solver and compare to the same recorded `u*`:
 ```yaml
 name: ...
 description: ...            # what it exercises; note if it exposes a defect
-harness: bulk              # runner dispatch: bulk | membrane | coupled
+harness: bulk              # runner dispatch: bulk | membrane | coupled | unknown_motion
 dim: 2
 geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
 exact: {c: "2 + np.sin(x)*np.cos(y)"}   # u*(x,y,z,t) — numpy-evaluable, for the error norm
@@ -101,6 +117,13 @@ cases pass. *(Lesson baked into the suite: for a time-first-order scheme, an `h`
 temporal floor; always refine dt with h, or the sweep manufactures phantom defects. The adversarial verify
 phase of the authoring workflow shared this blind spot — it is corrected here.)*
 
+**Disk-membrane node floor — pick sub-floor `resolutions_h` for a STATIC membrane sweep.** The gmsh-free
+`make_disk_membrane_geometry` builds the circle with `npts = max(128, ceil(2πR/h))`, so every `h ≳ 2πR/128 ≈
+0.049` (R=1) yields the *same* 128-node membrane — an h-only static sweep at `[0.2, 0.1, 0.05]` then measures
+a single mesh and reports order ≈ 0 (a fixture artifact, not a solver defect; `membrane_static_diffusion` was
+tripped by it and now uses `[0.04, 0.02, 0.01]` → 158/315/629 nodes, order 1.99). Moving membrane cases are
+unaffected — they refine dt ∝ h², so the order comes from the temporal refinement regardless of the mesh.
+
 **Real gotcha that survived: the moving Dirichlet-BC refresh.** `step()` moves the mesh but does **not**
 re-evaluate a position-dependent Dirichlet BC `g(x)` at the moved boundary unless `set_time` is called — so
 a spatially-varying Dirichlet on a moving boundary silently uses stale (initial) positions (worth ~100× of
@@ -110,9 +133,10 @@ follow-up. (This one is a genuine, if minor, solver gap — independent of the t
 
 ## Roadmap
 
-- Fill the matrix (solver × motion × physics) — the **bulk** and **membrane** sweeps are done (membrane:
-  static surface diffusion `ρ*=cos2θ` → order 2, and moving surface dilution `ρ*=e^{−kt}(2+cos2θ)` on an
-  expanding circle → order 2); extend to coupled and unknown-motion, and to more physics (reaction, binding).
+- Fill the matrix (solver × motion × physics) — **bulk**, **membrane**, **coupled**, and **unknown-motion**
+  are done (membrane: static surface diffusion `ρ*=cos2θ` → order 2, moving surface dilution
+  `ρ*=e^{−kt}(2+cos2θ)` on an expanding circle → order 2; coupled two-bulk diffusion → order 2 BE *and* MOL;
+  unknown-motion solved-velocity receptor dilution → order 2); extend to more physics (reaction, binding).
 - Box geometry now runs through the dev runner too (`box_static_diffusion` is checked by vcell-fenics *and*
   fvsolver against the same `u*`); add a **spatially-varying** mbsolver case once per-node sampling is
   available, to close the loop on all three sharing one case.
