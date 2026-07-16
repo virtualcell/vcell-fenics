@@ -30,10 +30,15 @@ import runner  # noqa: E402  # the dev MMS runner (mms/runner.py), reached via t
 # integration-only. (Coupled / unknown-motion also have their own faster gate tests in tests/.)
 _FAST = {"box_static_diffusion", "static_bulk_diffusion", "membrane_static_diffusion"}
 
-# Pre-existing order regressions the suite surfaces — all on the fenics-MOL path for a moving or
-# time-dependent bulk case; the backward-Euler path holds order 2 on every one. xfail'd (not asserted) so the
-# gate stays a *regression* guard for the passing combos without codifying an already-broken one; tracked for
-# investigation (the strided-motion / time-dependent MOL order is the open question, not a change from here).
+# fenics-MOL "regressions" on the disk cases — DIAGNOSED (not a solver defect): all are `kind: disk`, whose
+# realize mesh is rebuilt independently at each h, so its P1 spatial error does NOT converge at O(h²) — it
+# floors on the mesh-topology noise (~4e-4 here). The backward-Euler runs pass only because the harness
+# refines dt ∝ h² for these time-dependent/moving cases, so BE's O(dt) *time* error is O(h²) and dominates
+# (masks) that spatial floor; the time-error-free MOL has nothing masking it and reads the floor directly.
+# Verified: BE with a tiny fixed dt (pure spatial) floors even harder (order ~0.27) on the same disks. It is
+# the same non-nestable-geometry effect as the coupled disk-in-annulus (~0.65) — the clean spatial-order
+# checks live in the pytest MMS tests on nested split-box fixtures. A future runner increment could add a
+# nestable structured bulk geometry to lift these; until then they are xfail'd (the BE order-2 check stands).
 _KNOWN_MOL_REGRESSIONS = {
     "bulk_anisotropic_stretch_diffusion",
     "bulk_shear_diffusion",
@@ -60,8 +65,9 @@ def _params() -> list[Any]:
             if solver == "fenics-mol" and path.stem in _KNOWN_MOL_REGRESSIONS:
                 marks.append(
                     pytest.mark.xfail(
-                        reason="pre-existing: MOL order < 2 on this moving/time-dependent bulk case "
-                        "(BE holds order 2) — an MMS finding under investigation",
+                        reason="disk-geometry remeshing-noise floor on the time-error-free MOL path (the "
+                        "disk is rebuilt per h, so its spatial error is not O(h²)); BE passes only because "
+                        "dt∝h² makes its time error dominate. Not a solver defect — see _KNOWN_MOL_REGRESSIONS",
                         strict=False,
                     )
                 )
