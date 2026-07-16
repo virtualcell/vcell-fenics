@@ -38,7 +38,7 @@ The interior carries reaction–diffusion–advection of cytosolic fields, membr
 |---|---|---|---|
 | **A. ALE explicit membrane** | Marked outer boundary facets of a deforming bulk mesh; ρ is a boundary trace | No first-class API; write your own harmonic-extension mesh motion. Reference: Contri-Massing-Rangamani 2025. | Single / few cells, moderate deformation |
 | **B. Separate-mesh / mixed-dimensional** | Submesh with independent surface DOFs, coupled to bulk via mixed-dim assembly | **Native and best-supported.** `create_submesh`, `EntityMap`, `MixedFunctionSpace`, `extract_blocks`, `LinearProblem(kind="block")`. | True membrane-only variables; cleanest semantics. **Start here.** |
-| **C. Phase-field / diffuse membrane** | Smooth order parameter ϕ(x, t) per cell; membrane is the implicit transition layer | No FEniCSx-native cell-migration package. Build from Cahn–Hilliard / Allen–Cahn demos. | Multi-cell migration; topology changes; division / contact |
+| **C. Phase-field / diffuse membrane** *(regularizing; ε→0 sharp-interface limit — distinct from the *resolved* diffuse-interface Cahn–Hilliard condensate model, §C)* | Smooth order parameter ϕ(x, t) per cell; membrane is the implicit transition layer | No FEniCSx-native cell-migration package. Build from Cahn–Hilliard / Allen–Cahn demos. | Multi-cell migration; topology changes; division / contact |
 | **D. Trace FEM / cut surface FEM** | Surface moves through a fixed background mesh | **CutFEMx** v0.1.0 (April 2026, MIT). Pinned to DOLFINx 0.9, source-only build. Separate Pixi feature / env. | Strong topology changes; evolving surfaces without remeshing |
 
 See `docs/research/2026-05-21-fenicsx-ecosystem.md` for full library-state details and citations.
@@ -94,9 +94,16 @@ See `docs/research/2026-05-21-fenicsx-ecosystem.md` for full library-state detai
 - Coupled bulk-surface solves may need block preconditioning (`fenicsx-pctools` if ill-conditioned).
 - The conceptual cost of carrying two related meshes coherent through time integration.
 
-### C. Phase-field / diffuse membrane
+### C. Phase-field / diffuse membrane *(regularizing — sharp-interface limit)*
 
 **Representation.** Each cell is a smooth order parameter ϕᵢ(x, t) ∈ [0, 1] on a fixed background mesh. The "membrane" is the implicit transition layer where ϕᵢ varies steeply. Membrane-localized quantities are represented either as fields concentrated near the interface or as separate variables weighted by an interfacial delta approximation.
+
+**Two senses of "phase-field" — regularizing vs resolved (read this before conflating them).** The same Cahn–Hilliard / Allen–Cahn machinery is used two epistemically distinct ways, and only one of them is *this* approach:
+
+- **Regularizing phase-field (this entry, Approach C).** The physical boundary — the cell membrane — is genuinely **sharp** (a lipid bilayer, ~nm). ϕ is introduced as a *numerical device* to represent that sharp boundary with a diffuse layer on a fixed grid, avoiding explicit front tracking. The interface width ε is an **artificial regularization length** (chosen ~ the mesh scale), the model is engineered to converge to the sharp free-boundary problem as **ε → 0** (matched-asymptotic *sharp-interface limit*, Caginalp/Fife), and results are meant to be **ε-independent**. This is why membrane mechanics here "require careful asymptotic matching to recover the sharp-interface physics in the thin-interface limit" (below) — the sharp limit is the target.
+- **Resolved diffuse-interface model (NOT this approach; see Cahn–Hilliard below).** When the boundary is *physically* diffuse — the interfacial layer of a demixing liquid, e.g. a biomolecular condensate — ϕ is a genuine thermodynamic order parameter, ε (and the interface width δ = ε/√(2W)) is a **physical material length** kept **finite**, results legitimately **depend on ε**, and there is **no sharp-interface limit to target** (taking ε → 0 would delete the phenomenon). The backend's `cahn_hilliard.py` is this: a *resolved* diffuse-interface model of condensate phase separation, not a regularization of a sharp membrane.
+
+The one-word tell is **regularized** (a diffuse layer you'd remove if you could — ε artificial, → 0) vs **resolved** (a diffuse layer you must keep and mesh-resolve — ε physical, finite). Approach C is regularized; the condensate CH is resolved. Same numerics, opposite intent.
 
 **Strengths.**
 - Robust against topology changes — cell division, fusion, contact, separation handled natively.

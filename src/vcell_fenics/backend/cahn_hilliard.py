@@ -13,6 +13,19 @@ phases — the wells of a double-well free energy, here `φ = 0` and `φ = 1` �
 interface** of width ~`ε`, where they mix. The relevant biology is liquid–liquid phase
 separation (biomolecular condensates / membraneless organelles).
 
+**This is a *resolved* diffuse-interface model, not a *regularizing* phase-field.** The same
+Cahn–Hilliard machinery serves two epistemically opposite roles (see `docs/modeling/approaches.md`
+§C). *Regularizing* use (Approach C, the phase-field cell *membrane*): the boundary is physically
+sharp and `ε` is an artificial numerical thickness taken `ε → 0` toward a matched-asymptotic
+sharp-interface limit, with results meant to be `ε`-independent. This module is the *other* use:
+the interface is **physically diffuse** (the interfacial layer of a demixing liquid), so `ε` is a
+**physical material length** kept **finite** — the equilibrium profile is `φ = ½[1 + tanh((x−c)/2δ)]`
+with a real width `δ = ε/√(2W)` (verified against the analytic tanh in the tests), there is **no
+sharp-interface limit** to target, and the mesh must **resolve** `δ` (an under-resolved interface is
+what drove the interfacial overshoot the convex splitting later tamed). One-word tell: **resolved**
+(a diffuse layer that is physical and must be meshed), not **regularized** (a diffuse layer that
+approximates a sharp one and would be removed as `ε → 0`).
+
 The PDE is 4th order,
 
     ∂φ/∂t = ∇·(M ∇μ),   μ = f'(φ) − ε² ∇²φ,   f(φ) = W φ²(1 − φ)²,
