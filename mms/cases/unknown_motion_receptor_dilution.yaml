@@ -1,0 +1,47 @@
+name: unknown_motion_receptor_dilution
+description: >
+  Unknown-(solved-)motion MMS: a receptor on a membrane whose velocity is SOLVED from a force balance, not
+  prescribed. The manufactured force η v = η k x has solution v = k x — a radial expansion at rate k = 0.25,
+  the same motion the prescribed membrane_expansion_dilution case imposes by fiat. So the membrane expands as
+  R = R₀ e^{kt} and the receptor obeys the mandatory ρ ∇_Γ·v_Γ dilution against the same closed form
+  ρ* = e^{−kt}(2 + cos 2θ), held by f = ∂_t ρ*|_mesh + kρ* − DΔ_Γ ρ* = 4D e^{−kt} cos 2θ / R². This verifies
+  the coupled chain: the weak-form force balance solves to the correct velocity, the membrane moves under it,
+  and the surface dilution + diffusion + source stay consistent — the solved-motion analogue of the
+  prescribed dilution case. First-order in dt (staggered solve→move→dilute), so the runner refines dt ∝ h² to
+  expose the O(h²) spatial order; converges at order ≈ 2. (Static twin: the prescribed-motion case is the
+  motion-off-of-the-solve reduction — same ρ*, same source, motion imposed rather than solved.)
+harness: unknown_motion
+dim: 2
+geometry: {kind: disk_membrane, radius: 1.0, surface_subdomain: membrane}
+exact: {rho: "np.exp(-0.25*t)*(2 + np.cos(2*np.arctan2(y, x)))"}
+t_final: 1.0
+resolutions_h: [0.2, 0.1, 0.05]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be]
+params: {D: 0.05, k: 0.25, eta: 1.0}
+math: |
+  math_description:
+    geometry: mem
+    subdomains:
+      - { name: membrane, kind: surface, motion: { kind: unknown, variable: v } }
+    variables:
+      - { name: v, subdomain: membrane, type: vector }
+      - { name: rho, subdomain: membrane }
+    equations:
+      - template: weak_form
+        variable: v
+        subdomain: membrane
+        temporality: steady_state
+        form: "(eta*inner(v, v_test) - inner(eta*k*geom.x, v_test)) * dx_Gamma"
+        initial_condition: "0"
+      - template: surface_pde_with_dilution
+        variable: rho
+        subdomain: membrane
+        temporality: time_dependent
+        terms:
+          diffusion: "0.05"
+          source: "0.2*exp(-0.25*sim.t)*cos(2*geom.azimuth)/geom.radius**2"
+        initial_condition: "2 + cos(2*geom.azimuth)"
+    parameters:
+      - { name: eta, value: 1.0 }
+      - { name: k, value: 0.25 }

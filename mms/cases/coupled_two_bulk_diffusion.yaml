@@ -1,0 +1,50 @@
+name: coupled_two_bulk_diffusion
+description: >
+  Two-bulk interface-coupled MMS: an inner and an outer diffusion compartment meeting at a straight
+  membrane, coupled by single-sided permeability fluxes, with an outer-wall Dirichlet. Manufactured steady
+  solution u_in* = 2 + x², u_out* = 2.5 + x² with A = 2 + D/P: on each side −D∇²u* = −2 = source, and at the
+  membrane the diffusive flux D·∂ₓu_in* = D exactly balances P(u_out* − u_in*) = P·(A−2) = D on both sides,
+  so u* is the exact steady solution. Runs on a NESTED structured split-box (doubling n bisects every cell),
+  so the interface-coupled spatial order is not swamped by the mesh-topology noise the disk-in-annulus injects
+  (~0.65). This case is the standing guard against the interface-flux OVER-COUNT correctness bug: the
+  backward-Euler assembler built the coupling as an implicit `membrane_trace` bilinear matrix, which
+  over-counts in DOLFINx 0.10/0.11 and drove inner concentration *above* outer at the membrane, collapsing
+  the order to ~0.28 (fixed to a matrix-free residual-driven solve). Both BE and MOL converge at order ≈ 2.
+harness: coupled
+dim: 2
+geometry: {kind: split_box_two_bulk, inner: cyto, outer: ext, membrane: pm, wall: wall}
+exact: {u_in: "2 + x**2", u_out: "2.5 + x**2"}
+t_final: 4.0
+dt: 0.02
+resolutions_h: [0.125, 0.0625, 0.03125]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be, fenics-mol]
+params: {D: 1.0, P: 2.0}
+math: |
+  math_description:
+    geometry: cell
+    subdomains:
+      - { name: cyto, kind: volume }
+      - { name: ext, kind: volume }
+    variables:
+      - { name: u_in, subdomain: cyto }
+      - { name: u_out, subdomain: ext }
+    parameters:
+      - { name: P, value: 2.0 }
+    equations:
+      - template: bulk_radv_diff
+        variable: u_in
+        subdomain: cyto
+        temporality: time_dependent
+        terms: { diffusion: "1.0", source: "-2.0" }
+        initial_condition: "2 + geom.x[0]**2"
+      - template: bulk_radv_diff
+        variable: u_out
+        subdomain: ext
+        temporality: time_dependent
+        terms: { diffusion: "1.0", source: "-2.0" }
+        initial_condition: "2.5 + geom.x[0]**2"
+    boundary_conditions:
+      - { kind: interface_flux, variable: u_in, boundary: pm, expression: "P*(u_out - u_in)" }
+      - { kind: interface_flux, variable: u_out, boundary: pm, expression: "P*(u_in - u_out)" }
+      - { kind: dirichlet, variable: u_out, boundary: wall, expression: "2.5 + geom.x[0]**2" }
