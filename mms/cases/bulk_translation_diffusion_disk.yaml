@@ -1,4 +1,4 @@
-name: bulk_translation_diffusion
+name: bulk_translation_diffusion_disk
 description: >
   Steady lab-frame u* = 2 + sin(x)·cos(y) held on a RIGIDLY TRANSLATING disk (v = [0.4, 0], ∇·v = 0,
   D = 0.1). For a lab-steady u* the ALE conservation-form source reduces (div v = 0, ∂_t u* = 0) to
@@ -8,12 +8,12 @@ description: >
   configuration each step). Static twin: bulk_translation_diffusion_static.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
 exact: {c: "2 + np.sin(x)*np.cos(y)"}
 t_final: 1.0
 dt: 0.01
-resolutions_h: [0.1, 0.07, 0.05]
-expected_order_h: 2.0
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 1.5
 applicable_solvers: [fenics-be, fenics-mol]
 params: {vx: 0.4, D: 0.1}
 math: |

@@ -30,21 +30,18 @@ import runner  # noqa: E402  # the dev MMS runner (mms/runner.py), reached via t
 # integration-only. (Coupled / unknown-motion also have their own faster gate tests in tests/.)
 _FAST = {"box_static_diffusion", "static_bulk_diffusion", "membrane_static_diffusion"}
 
-# fenics-MOL "regressions" on the disk cases — DIAGNOSED (not a solver defect): all are `kind: disk`, whose
-# realize mesh is rebuilt independently at each h, so its P1 spatial error does NOT converge at O(h²) — it
-# floors on the mesh-topology noise (~4e-4 here). The backward-Euler runs pass only because the harness
-# refines dt ∝ h² for these time-dependent/moving cases, so BE's O(dt) *time* error is O(h²) and dominates
-# (masks) that spatial floor; the time-error-free MOL has nothing masking it and reads the floor directly.
-# Verified: BE with a tiny fixed dt (pure spatial) floors even harder (order ~0.27) on the same disks. It is
-# the same non-nestable-geometry effect as the coupled disk-in-annulus (~0.65) — the clean spatial-order
-# checks live in the pytest MMS tests on nested split-box fixtures. A future runner increment could add a
-# nestable structured bulk geometry to lift these; until then they are xfail'd (the BE order-2 check stands).
+# The remaining fenics-MOL regression, now DIAGNOSED and GEOMETRY-INDEPENDENT: the time-dependent
+# `static_reaction` case (u* = e^{-t}·…, static mesh) floors the adaptive-BDF (MOL) error at ~2e-4 on EVERY
+# geometry — structured box (order 1.19) AND nested disk (0.51) — and *tightening* the TS tolerance makes it
+# worse. That is a genuine adaptive-TS global-time-error issue on a decaying solution, NOT the spatial
+# discretisation: the backward-Euler path holds its expected order on both geometries. xfail'd (documented)
+# for follow-up. Every OTHER bulk case now passes on both geometries at its own honest rate — the structured
+# box at O(h²), the nested (curvature-preserving) disk at the P1 curved-domain rate ~O(h^1.5) — which is why
+# each bulk physics case ships as a `_box` (expected order 2) and a `_disk` (expected order 1.5) variant.
 _KNOWN_MOL_REGRESSIONS = {
-    "bulk_anisotropic_stretch_diffusion",
-    "bulk_shear_diffusion",
-    "bulk_shrinkage_diffusion",
-    "bulk_static_reaction_timedep",
-    "bulk_translation_diffusion",
+    # only the two time-dependent (motion-off) variants carry a MOL run; their `_static` twins are BE-only.
+    "bulk_static_reaction_timedep_box",
+    "bulk_static_reaction_timedep_disk",
 }
 
 
@@ -65,9 +62,9 @@ def _params() -> list[Any]:
             if solver == "fenics-mol" and path.stem in _KNOWN_MOL_REGRESSIONS:
                 marks.append(
                     pytest.mark.xfail(
-                        reason="disk-geometry remeshing-noise floor on the time-error-free MOL path (the "
-                        "disk is rebuilt per h, so its spatial error is not O(h²)); BE passes only because "
-                        "dt∝h² makes its time error dominate. Not a solver defect — see _KNOWN_MOL_REGRESSIONS",
+                        reason="adaptive-BDF (MOL) global-time-error floor on this decaying time-dependent "
+                        "case — geometry-independent (box and nested disk both), worse with tighter tolerance; "
+                        "BE holds its order. A time-integrator finding, not spatial — see _KNOWN_MOL_REGRESSIONS",
                         strict=False,
                     )
                 )

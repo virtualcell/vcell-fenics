@@ -20,7 +20,18 @@ import math
 from dataclasses import dataclass, field
 
 import numpy as np
-from dolfinx.mesh import EntityMap, Mesh, MeshTags, create_submesh, exterior_facet_indices
+from dolfinx.mesh import (
+    EntityMap,
+    Mesh,
+    MeshTags,
+    create_rectangle,
+    create_submesh,
+    entities_to_geometry,
+    exterior_facet_indices,
+    locate_entities_boundary,
+    refine,
+)
+from mpi4py import MPI
 from numpy.typing import NDArray
 
 from vcell_fenics.backend._typing import UflExpr
@@ -138,6 +149,90 @@ def make_disk_geometry(
     mesh's exterior facets — the circle."""
 
     disk = _circle_disk_mesh(radius, h)
+    subdomains = {volume_subdomain: SubdomainGeometry(mesh=disk, kind="volume")}
+    boundaries: dict[str, BoundaryGeometry] = {}
+    if boundary is not None:
+        tdim = disk.topology.dim
+        disk.topology.create_connectivity(tdim - 1, tdim)
+        boundaries[boundary] = BoundaryGeometry(
+            subdomains=(volume_subdomain,), facets=exterior_facet_indices(disk.topology)
+        )
+    return Geometry(name=name, subdomains=subdomains, boundaries=boundaries)
+
+
+def make_structured_box_geometry(
+    name: str,
+    *,
+    volume_subdomain: str,
+    boundary: str | None = None,
+    extent: tuple[float, float] = (1.0, 1.0),
+    origin: tuple[float, float] = (0.0, 0.0),
+    h: float = 0.1,
+) -> Geometry:
+    """A 2D rectangle `[origin, origin + extent]` as a single `volume` subdomain, on a **structured**
+    triangulated grid of `round(extent / h)` cells per side. **Nestable** (halving `h` doubles the grid and
+    bisects every cell) *and* straight-boundary — so it carries **no** curved-boundary approximation error and
+    a smooth P1 solution converges at the full **O(h²)**. The rigorous spatial-order geometry: pair it with
+    `make_nested_disk_geometry` (curved, but P1-capped at ~O(h^1.5)) to separate a genuine order regression
+    from the curved-domain variational crime. When `boundary` is given, the rectangle's exterior facets are
+    registered under that name for boundary conditions."""
+
+    nx = max(1, round(extent[0] / h))
+    ny = max(1, round(extent[1] / h))
+    lower = (origin[0], origin[1])
+    upper = (origin[0] + extent[0], origin[1] + extent[1])
+    mesh = create_rectangle(MPI.COMM_WORLD, [lower, upper], [nx, ny])
+    subdomains = {volume_subdomain: SubdomainGeometry(mesh=mesh, kind="volume")}
+    boundaries: dict[str, BoundaryGeometry] = {}
+    if boundary is not None:
+        tdim = mesh.topology.dim
+        mesh.topology.create_connectivity(tdim - 1, tdim)
+        boundaries[boundary] = BoundaryGeometry(
+            subdomains=(volume_subdomain,), facets=exterior_facet_indices(mesh.topology)
+        )
+    return Geometry(name=name, subdomains=subdomains, boundaries=boundaries)
+
+
+def _snap_boundary_to_circle(mesh: Mesh, radius: float) -> None:
+    """Move every boundary geometry node radially onto the circle of `radius` (in place). After a uniform
+    `refine`, the new boundary nodes sit on the parent polygon's straight chords (radius < R); snapping them
+    out restores an O(h²)-accurate curved boundary at the finer level."""
+    boundary_vertices = locate_entities_boundary(mesh, 0, lambda x: np.full(x.shape[1], True, dtype=bool))
+    nodes = np.unique(entities_to_geometry(mesh, 0, boundary_vertices).reshape(-1))
+    coords = mesh.geometry.x
+    r = np.hypot(coords[nodes, 0], coords[nodes, 1])
+    r[r == 0.0] = 1.0  # a node exactly at the centre is never on the boundary; guard the divide
+    coords[nodes, 0] *= radius / r
+    coords[nodes, 1] *= radius / r
+
+
+def make_nested_disk_geometry(
+    name: str,
+    *,
+    volume_subdomain: str,
+    boundary: str | None = None,
+    radius: float = 1.0,
+    h: float = 0.1,
+    base_h: float = 0.1,
+) -> Geometry:
+    """A 2D disk (single `volume` subdomain) built by **uniformly refining** one fixed coarse Netgen mesh —
+    `k = round(log2(base_h / h))` red refinements — and snapping the new boundary nodes onto the circle at
+    each level. Unlike `make_disk_geometry`, whose Netgen mesh is rebuilt independently at each `h`, this is
+    **nestable** *and* keeps the **curved boundary**: refinement bisects every cell so the coarse nodes are a
+    strict subset of the fine (no mesh-topology noise), while the boundary stays O(h²) from the true circle
+    (curvature preserved — the straight-edged box loses it). That makes it the right domain for a *spatial*
+    convergence study on a curved geometry: an independently re-meshed disk floors the P1 order on remeshing
+    noise, which the time-error-free MOL path reads directly. `h` must be `base_h / 2^k` (the runner uses
+    `resolutions_h = [base_h, base_h/2, base_h/4, …]`). When `boundary` is given, the disk's exterior facets
+    (the circle) are registered under that name for boundary conditions."""
+
+    levels = max(0, round(math.log2(base_h / h)))
+    disk = _circle_disk_mesh(radius, base_h)
+    _snap_boundary_to_circle(disk, radius)
+    for _ in range(levels):
+        disk.topology.create_entities(1)  # refine bisects edges ⇒ they must exist first
+        disk = refine(disk)[0]  # edges=None ⇒ uniform (red) refinement: nested
+        _snap_boundary_to_circle(disk, radius)
     subdomains = {volume_subdomain: SubdomainGeometry(mesh=disk, kind="volume")}
     boundaries: dict[str, BoundaryGeometry] = {}
     if boundary is not None:

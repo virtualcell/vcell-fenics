@@ -1,4 +1,4 @@
-name: bulk_static_reaction_timedep_static
+name: bulk_static_reaction_timedep_static_disk
 description: >
   Static twin of bulk_static_reaction_timedep. A TIME-DEPENDENT manufactured solution
   u* = exp(-t)·(2 + sin(x)·cos(y)) on a FIXED disk (no motion), diffusion D = 0.1, held by the source
@@ -8,12 +8,12 @@ description: >
   it. Small dt so the O(dt) backward-Euler time error does not swamp the O(h²) spatial order.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
 exact: {c: "np.exp(-t)*(2 + np.sin(x)*np.cos(y))"}
 t_final: 1.0
 dt: 0.005
 resolutions_h: [0.1, 0.05, 0.025]
-expected_order_h: 2.0
+expected_order_h: 1.5
 applicable_solvers: [fenics-be]
 params: {D: 0.1}
 math: |

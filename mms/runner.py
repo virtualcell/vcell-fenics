@@ -35,6 +35,8 @@ from vcell_fenics.backend import (
     integrate_interface_coupled,
     make_disk_geometry,
     make_disk_membrane_geometry,
+    make_nested_disk_geometry,
+    make_structured_box_geometry,
 )
 from vcell_fenics.backend.geometry import InterfaceCoupledGeometry
 from vcell_fenics.backend.reaction_diffusion import (
@@ -65,6 +67,31 @@ def _geometry(case: dict[str, Any], h: float):  # type: ignore[no-untyped-def]
         )
     if g["kind"] == "disk_membrane":
         return make_disk_membrane_geometry(name, surface_subdomain=g["surface_subdomain"], radius=g["radius"], h=h)
+    if g["kind"] == "nested_disk":
+        # A NESTABLE, curvature-preserving disk (uniformly refine one coarse mesh, snap the boundary to the
+        # circle) — for a clean spatial order on a CURVED domain, where the independently re-meshed `disk`
+        # floors the P1 order on mesh-topology noise (the time-error-free MOL path reads that floor). `h` must
+        # be `base_h / 2^k`, so the case's resolutions_h are [base_h, base_h/2, base_h/4].
+        return make_nested_disk_geometry(
+            name,
+            volume_subdomain=g["volume_subdomain"],
+            boundary=g.get("boundary"),
+            radius=g.get("radius", 1.0),
+            h=h,
+            base_h=g.get("base_h", max(case["resolutions_h"])),
+        )
+    if g["kind"] == "structured_box":
+        # A NESTABLE, straight-boundary rectangle (halving h bisects every cell) — the rigorous O(h²)
+        # spatial-order domain, with no curved-boundary approximation error (paired with `nested_disk`, which
+        # is curved but P1-capped at ~O(h^1.5); the two separate a real order regression from that cap).
+        return make_structured_box_geometry(
+            name,
+            volume_subdomain=g["volume_subdomain"],
+            boundary=g.get("boundary"),
+            extent=tuple(g.get("extent", [1.0, 1.0])),
+            origin=tuple(g.get("origin", [0.0, 0.0])),
+            h=h,
+        )
     if g["kind"] == "box":
         # a plain box mesh (one analytic "1.0" subvolume = the whole bounding box); the same box fvsolver
         # meshes, so one case runs through both. z is a unit slab for 2D (matches the FV author).
