@@ -7,11 +7,16 @@ description: >
   the time-derivative + diffusion + (time-dependent) source consistency for both the backward-Euler (fenics-be)
   and MOL/TS (fenics-mol) integrators. NOTE: the manufactured forcing is verified correct (the error is exactly
   O(dt) and → 0 as dt → 0). The backward-Euler path holds its expected order (≥1.5 at the P1 curved-domain
-  rate). The MOL (adaptive-BDF) path, however, retains a residual error floor (~2e-4, order ~0.65–0.9) that —
-  unlike the structured `_box` twin — is rtol-INDEPENDENT: identical errors at rtol 1e-9 / 1e-11 / 1e-13, so it
-  is NOT the tolerance setting that `mol_rtol` fixes on the box. It is the combination of the CURVED boundary +
-  decaying time-dependent Dirichlet + the MOL DAE handling of that boundary — a narrower, still-open follow-up.
-  This variant's fenics-mol run is xfail'd (documented) in tests/test_mms_suite.py::_KNOWN_MOL_REGRESSIONS.
+  rate). The MOL (adaptive-BDF) path exposes TWO independent temporal-error floors that must BOTH be pushed
+  below the spatial error to read the spatial order — this disk case (unlike the `_box` twin) hits both:
+    (1) the CONTROLLED time error — the adaptive relative tolerance; default 1e-6 is too loose at fine h, so it
+        carries `mol_rtol: 1e-9`; and
+    (2) the BDF COLD-START — the first step runs at order 1 (backward Euler) and the adaptive controller cannot
+        see that step's truncation error, leaving an rtol-INDEPENDENT bias ≈ the startup step. The integrator's
+        default startup t_final/1e4 is small enough on the box but not on the finer curved disk, so it carries
+        `mol_dt_initial: 1e-6` (= t_final/1e6). This is NOT curved-boundary spatial error — the decaying + STATIC-
+        Dirichlet variant on the same disk converges cleanly, and BE holds order 2 on this exact mesh.
+  Measured MOL order with BOTH knobs ≈ 1.7 (the P1 curved-domain rate). The `_box` twin needs only `mol_rtol`.
 harness: bulk
 dim: 2
 geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
@@ -20,6 +25,8 @@ t_final: 1.0
 dt: 0.005
 resolutions_h: [0.1, 0.05, 0.025]
 expected_order_h: 1.5
+mol_rtol: 1.0e-9    # controlled-time-error floor (see description)
+mol_dt_initial: 1.0e-6  # BDF cold-start floor = t_final/1e6, rtol-independent (see description)
 applicable_solvers: [fenics-be, fenics-mol]
 params: {D: 0.1}
 math: |
