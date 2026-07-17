@@ -6,11 +6,12 @@ description: >
   time-dependent Dirichlet u* on the boundary (refreshed via set_time each step). No motion, so this exercises
   the time-derivative + diffusion + (time-dependent) source consistency for both the backward-Euler (fenics-be)
   and MOL/TS (fenics-mol) integrators. NOTE: the manufactured forcing is verified correct (the error is exactly
-  O(dt) and → 0 as dt → 0), but the h-refinement order reads well below 2 at any feasible dt because the
-  first-order backward-Euler time error (O(dt) ≈ 5e-3 at dt=0.005) dominates the very small O(h²) spatial error
-  of this smooth solution — a fixed-dt-h-refinement harness limitation shared by the static twin and by the
-  pre-existing bulk_expansion_timedependent_static exemplar (both order ≈ 0). This is a time-integrator floor,
-  not a solver correctness defect and not a forcing error.
+  O(dt) and → 0 as dt → 0). The backward-Euler path holds its expected order (≥1.5 at the P1 curved-domain
+  rate). The MOL (adaptive-BDF) path, however, retains a residual error floor (~2e-4, order ~0.65–0.9) that —
+  unlike the structured `_box` twin — is rtol-INDEPENDENT: identical errors at rtol 1e-9 / 1e-11 / 1e-13, so it
+  is NOT the tolerance setting that `mol_rtol` fixes on the box. It is the combination of the CURVED boundary +
+  decaying time-dependent Dirichlet + the MOL DAE handling of that boundary — a narrower, still-open follow-up.
+  This variant's fenics-mol run is xfail'd (documented) in tests/test_mms_suite.py::_KNOWN_MOL_REGRESSIONS.
 harness: bulk
 dim: 2
 geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}

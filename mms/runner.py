@@ -154,10 +154,17 @@ def _run_fenics(case: dict[str, Any], solver: str, h: float) -> tuple[float, flo
     if solver == "fenics-mol":
         # MOL: strided ALE on a moving subdomain, fixed-domain TS otherwise (static-mesh cases). The strided
         # motion is O(interval), so refine the stride with h too (interval = dt) to see the spatial order.
+        # `mol_rtol` (default the integrator's own 1e-6) lets a case tighten the adaptive-BDF relative
+        # tolerance where the default is too loose to resolve the spatial order at fine h — see the
+        # time-dependent `static_reaction_box` case, which floors at ~1.2 under 1e-6 and recovers to ~1.9
+        # under 1e-9. Tighten per-case (not globally) so the slower run is confined to cases that need it.
+        mol_rtol = float(case.get("mol_rtol", 1.0e-6))
         if dp.motion_velocity is not None:
-            integrate_discrete_problem_moving(dp, t_final=t_final, motion_steps=max(20, round(t_final / dt)))
+            integrate_discrete_problem_moving(
+                dp, t_final=t_final, motion_steps=max(20, round(t_final / dt)), rtol=mol_rtol
+            )
         else:
-            integrate_discrete_problem(dp, t_final=t_final)
+            integrate_discrete_problem(dp, t_final=t_final, rtol=mol_rtol)
         return _error(dp, case["exact"][var], t_final)
     # fenics-be: step, refreshing time-/position-dependent Dirichlet BCs at the moved configuration each step
     t = 0.0
