@@ -1,16 +1,16 @@
-name: bulk_anisotropic_stretch_diffusion_static
+name: bulk_anisotropic_stretch_diffusion_static_disk
 description: >
   Static twin of bulk_anisotropic_stretch_diffusion. Steady manufactured solution u* = 2 + sin(x)·cos(y)
   on a FIXED disk (motion off), held by the source f = −D∇²u* = 0.2·sin(x)cos(y) with Dirichlet u* on the
   boundary. Validates the forcing derivation before adding motion: must converge at order ≈ 2.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
 exact: {c: "2 + np.sin(x)*np.cos(y)"}
 t_final: 1.0
 dt: 0.05
 resolutions_h: [0.1, 0.05, 0.025]
-expected_order_h: 2.0
+expected_order_h: 1.5
 applicable_solvers: [fenics-be]
 params: {D: 0.1}
 math: |

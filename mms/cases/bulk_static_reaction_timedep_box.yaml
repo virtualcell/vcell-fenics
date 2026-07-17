@@ -1,7 +1,7 @@
-name: bulk_static_reaction_timedep
+name: bulk_static_reaction_timedep_box
 description: >
   Static-mesh validator for the reaction + time-dependence terms. A TIME-DEPENDENT manufactured solution
-  u* = exp(-t)·(2 + sin(x)·cos(y)) on a FIXED disk (no motion), diffusion D = 0.1, held by the source
+  u* = exp(-t)·(2 + sin(x)·cos(y)) on a FIXED box (no motion), diffusion D = 0.1, held by the source
   f = ∂_t u* − D∇²u* = −u* + 2D·exp(-t)·sin(x)cos(y) = −2·exp(-t) − 0.8·exp(-t)·sin(x)cos(y), with the
   time-dependent Dirichlet u* on the boundary (refreshed via set_time each step). No motion, so this exercises
   the time-derivative + diffusion + (time-dependent) source consistency for both the backward-Euler (fenics-be)
@@ -13,7 +13,7 @@ description: >
   not a solver correctness defect and not a forcing error.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: structured_box, extent: [2.0, 2.0], origin: [-1.0, -1.0], volume_subdomain: cyto, boundary: edge}
 exact: {c: "np.exp(-t)*(2 + np.sin(x)*np.cos(y))"}
 t_final: 1.0
 dt: 0.005
@@ -23,7 +23,7 @@ applicable_solvers: [fenics-be, fenics-mol]
 params: {D: 0.1}
 math: |
   math_description:
-    geometry: disk
+    geometry: box
     subdomains:
       - { name: cyto, kind: volume }
     variables:

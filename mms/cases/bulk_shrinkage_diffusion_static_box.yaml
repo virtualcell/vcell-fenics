@@ -1,12 +1,12 @@
-name: bulk_shrinkage_diffusion_static
+name: bulk_shrinkage_diffusion_static_box
 description: >
   Static twin of bulk_shrinkage_diffusion. Steady manufactured solution u* = 2 + sin(x)·cos(y) on a FIXED
-  disk (motion off), held by the source f = −D∇²u* = 2D·sin(x)cos(y) = 0.2·sin(x)cos(y) with Dirichlet u*
+  box (motion off), held by the source f = −D∇²u* = 2D·sin(x)cos(y) = 0.2·sin(x)cos(y) with Dirichlet u*
   on the boundary. No motion, so the solver must reproduce u* to the P1 interpolation floor (order ≈ 2).
   This validates the forcing derivation before the moving case (radial contraction) is trusted.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: structured_box, extent: [2.0, 2.0], origin: [-1.0, -1.0], volume_subdomain: cyto, boundary: edge}
 exact: {c: "2 + np.sin(x)*np.cos(y)"}
 t_final: 1.0
 dt: 0.05
@@ -16,7 +16,7 @@ applicable_solvers: [fenics-be]
 params: {D: 0.1}
 math: |
   math_description:
-    geometry: disk
+    geometry: box
     subdomains:
       - { name: cyto, kind: volume }
     variables:

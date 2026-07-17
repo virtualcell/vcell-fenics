@@ -1,0 +1,36 @@
+name: bulk_static_reaction_timedep_static_box
+description: >
+  Static twin of bulk_static_reaction_timedep. A TIME-DEPENDENT manufactured solution
+  u* = exp(-t)·(2 + sin(x)·cos(y)) on a FIXED box (no motion), diffusion D = 0.1, held by the source
+  f = ∂_t u* − D∇²u* = −u* + 2D·exp(-t)·sin(x)cos(y) = −2·exp(-t) − 0.8·exp(-t)·sin(x)cos(y), with the
+  time-dependent Dirichlet u* on the boundary (refreshed via set_time each step). Validates the forcing
+  derivation for the exponential-decay-in-time + diffusion combination before the reaction/time case trusts
+  it. Small dt so the O(dt) backward-Euler time error does not swamp the O(h²) spatial order.
+harness: bulk
+dim: 2
+geometry: {kind: structured_box, extent: [2.0, 2.0], origin: [-1.0, -1.0], volume_subdomain: cyto, boundary: edge}
+exact: {c: "np.exp(-t)*(2 + np.sin(x)*np.cos(y))"}
+t_final: 1.0
+dt: 0.005
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be]
+params: {D: 0.1}
+math: |
+  math_description:
+    geometry: box
+    subdomains:
+      - { name: cyto, kind: volume }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "-2*exp(-sim.t) - 0.8*exp(-sim.t)*sin(geom.x[0])*cos(geom.x[1])"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "exp(-sim.t)*(2 + sin(geom.x[0])*cos(geom.x[1]))" }

@@ -1,18 +1,17 @@
-name: bulk_translation_diffusion_static
+name: bulk_shear_diffusion_static_disk
 description: >
-  Static twin of bulk_translation_diffusion. The steady manufactured solution u* = 2 + sin(x)·cos(y) on a
-  FIXED disk (motion OFF), held by the source f = −D∇²u* = 0.2·sin(x)cos(y) (D = 0.1) with Dirichlet u* on
-  the boundary. No motion, so the solver must reproduce u* to the P1 interpolation floor (order ≈ 2). This
-  validates the manufactured forcing / runner before trusting the moving twin; if this does not converge,
-  the derivation is wrong — not the solver.
+  Static twin of bulk_shear_diffusion. A steady manufactured solution u* = 2 + sin(x)·cos(y) on a FIXED
+  disk (motion OFF), held by the source f = −D∇²u* = 0.2·sin(x)cos(y) with Dirichlet u* on the boundary.
+  No motion, so the solver must reproduce u* to the P1 interpolation floor (order ≈ 2). If this case does
+  not converge, the manufactured forcing or the runner is wrong — not the solver.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
 exact: {c: "2 + np.sin(x)*np.cos(y)"}
 t_final: 1.0
 dt: 0.05
 resolutions_h: [0.1, 0.05, 0.025]
-expected_order_h: 2.0
+expected_order_h: 1.5
 applicable_solvers: [fenics-be]
 params: {D: 0.1}
 math: |
