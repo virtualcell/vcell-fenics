@@ -1,0 +1,39 @@
+name: bulk_expansion_pure_diffusion_check_box
+description: >
+  Independent cross-check of the moving-bulk expansion forcing with a fresh derivation. Steady lab-frame
+  u* = 2 + sin(x)·cos(y) held on a RADIALLY EXPANDING box (v = [0.25·x, 0.25·y], ∇·v = 0.5) with pure
+  diffusion D = 0.1. For a lab-steady u* the ALE conservation-form source is f = ∇·(u* v) − D∇²u* =
+  v·∇u* + u*∇·v − D∇²u* = 0.25x·cos(x)cos(y) − 0.25y·sin(x)sin(y) + 1.0 + 0.7·sin(x)cos(y), so u* is the
+  exact solution and the solver must hold it as the box deforms. Dirichlet u* on the moving boundary
+  (refreshed at the moved configuration each step). On this STRAIGHT-boundary structured box the P1 spatial
+  order is a clean O(h²). The moving scheme is FIRST-order in dt, so the runner refines dt ∝ h² to expose it.
+  Steady lab-frame u* (no time decay), so the MOL/TS path needs no tolerance knobs. Disk twin:
+  bulk_expansion_pure_diffusion_check_disk; static twin: bulk_expansion_pure_diffusion_check_static_box.
+harness: bulk
+dim: 2
+geometry: {kind: structured_box, extent: [2.0, 2.0], origin: [-1.0, -1.0], volume_subdomain: cyto, boundary: edge}
+exact: {c: "2 + np.sin(x)*np.cos(y)"}
+t_final: 1.0
+dt: 0.01
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be, fenics-mol]
+params: {k: 0.25, D: 0.1}
+math: |
+  math_description:
+    geometry: box
+    subdomains:
+      - { name: cyto, kind: volume, motion: { kind: prescribed, velocity: "[0.25*geom.x[0], 0.25*geom.x[1]]" } }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "0.25*geom.x[0]*cos(geom.x[0])*cos(geom.x[1]) - 0.25*geom.x[1]*sin(geom.x[0])*sin(geom.x[1]) + 1.0 + 0.7*sin(geom.x[0])*cos(geom.x[1])"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "2 + sin(geom.x[0])*cos(geom.x[1])" }

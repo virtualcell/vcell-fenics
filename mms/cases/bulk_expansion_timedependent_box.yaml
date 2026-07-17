@@ -1,0 +1,42 @@
+name: bulk_expansion_timedependent_box
+description: >
+  Time-dependent lab-frame u* = exp(-t)·(2 + sin(x)·cos(y)) held on a RADIALLY EXPANDING box
+  (v = [0.25·x, 0.25·y], ∇·v = 0.5). For this u* on the moving (Lagrangian) mesh the ALE
+  conservation-form source is f = ∂_t u* + v·∇u* + u*·(∇·v) − D∇²u*
+  = exp(-t)·(−1 − 0.3·sin(x)cos(y) + 0.25·x·cos(x)cos(y) − 0.25·y·sin(x)sin(y)), so u* is the exact
+  solution. Exercises moving-mesh advection + dilution + diffusion + time decay together, with the
+  time-dependent Dirichlet u* refreshed at the moved boundary each step (set_time). Diffusion D = 0.1.
+  The scheme is FIRST-order in dt (BE + strided motion + the exp(-t) decay), so the runner refines dt ∝ h²
+  to expose the spatial order. On this STRAIGHT-boundary structured box the P1 spatial order is a clean
+  O(h²). The MOL/TS path is a time-error-free cross-check; being a DECAYING solution it needs `mol_rtol: 1e-9`
+  to hold the adaptive-BDF controlled time error below O(h²). Disk twin: bulk_expansion_timedependent_disk;
+  static twin: bulk_expansion_timedependent_static_box.
+harness: bulk
+dim: 2
+geometry: {kind: structured_box, extent: [2.0, 2.0], origin: [-1.0, -1.0], volume_subdomain: cyto, boundary: edge}
+exact: {c: "np.exp(-t)*(2 + np.sin(x)*np.cos(y))"}
+t_final: 1.0
+dt: 0.005
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 2.0
+mol_rtol: 1.0e-9    # controlled-time-error floor for the decaying solution (see description)
+applicable_solvers: [fenics-be, fenics-mol]
+params: {k: 0.25, D: 0.1}
+math: |
+  math_description:
+    geometry: box
+    subdomains:
+      - { name: cyto, kind: volume, motion: { kind: prescribed, velocity: "[0.25*geom.x[0], 0.25*geom.x[1]]" } }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "exp(-sim.t)*(-1 - 0.3*sin(geom.x[0])*cos(geom.x[1]) + 0.25*geom.x[0]*cos(geom.x[0])*cos(geom.x[1]) - 0.25*geom.x[1]*sin(geom.x[0])*sin(geom.x[1]))"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "exp(-sim.t)*(2 + sin(geom.x[0])*cos(geom.x[1]))" }

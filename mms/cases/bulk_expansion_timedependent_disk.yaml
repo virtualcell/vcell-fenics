@@ -1,23 +1,27 @@
-name: bulk_expansion_timedependent
+name: bulk_expansion_timedependent_disk
 description: >
-  Time-dependent lab-frame u* = exp(-t)·(2 + sin(x)·cos(y)) held on a RADIALLY EXPANDING disk
+  Time-dependent lab-frame u* = exp(-t)·(2 + sin(x)·cos(y)) held on a RADIALLY EXPANDING nested disk
   (v = [0.25·x, 0.25·y], ∇·v = 0.5). For this u* on the moving (Lagrangian) mesh the ALE
   conservation-form source is f = ∂_t u* + v·∇u* + u*·(∇·v) − D∇²u*
   = exp(-t)·(−1 − 0.3·sin(x)cos(y) + 0.25·x·cos(x)cos(y) − 0.25·y·sin(x)sin(y)), so u* is the exact
   solution. Exercises moving-mesh advection + dilution + diffusion + time decay together, with the
   time-dependent Dirichlet u* refreshed at the moved boundary each step (set_time). Diffusion D = 0.1.
   The scheme is FIRST-order in dt (BE + strided motion + the exp(-t) decay), so the runner refines dt ∝ h²
-  to expose the O(h²) spatial order; at fixed dt the O(dt) temporal floor masks it (order → 0). With
-  dt-refinement it converges at order ≈ 2 — the time-dependent counterpart of the steady expansion case, no
-  defect. (See mms/README.md on why an h-only sweep at fixed dt manufactures phantom defects here.)
+  to expose the spatial order. This is the curvature-preserving NESTED disk (P1-capped at the curved-domain
+  rate ~O(h^1.5), the honest counterpart to the O(h²) box twin). The MOL/TS path is a time-error-free
+  cross-check; being a DECAYING solution on a curved boundary it needs BOTH `mol_rtol: 1e-9` (controlled
+  time error) AND `mol_dt_initial: 1e-6` (the rtol-independent BDF cold-start). Box twin:
+  bulk_expansion_timedependent_box; static twin: bulk_expansion_timedependent_static_disk.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
 exact: {c: "np.exp(-t)*(2 + np.sin(x)*np.cos(y))"}
 t_final: 1.0
 dt: 0.005
-resolutions_h: [0.1, 0.07, 0.05]
-expected_order_h: 2.0
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 1.5
+mol_rtol: 1.0e-9    # controlled-time-error floor for the decaying solution (see description)
+mol_dt_initial: 1.0e-6  # BDF cold-start floor = t_final/1e6, rtol-independent (see description)
 applicable_solvers: [fenics-be, fenics-mol]
 params: {k: 0.25, D: 0.1}
 math: |

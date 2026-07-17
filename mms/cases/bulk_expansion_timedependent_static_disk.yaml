@@ -1,0 +1,41 @@
+name: bulk_expansion_timedependent_static_disk
+description: >
+  Static twin of bulk_expansion_timedependent_disk. Time-dependent manufactured solution
+  u* = exp(-t)·(2 + sin(x)·cos(y)) on a FIXED nested disk (motion off), held by the source
+  f = ∂_t u* − D∇²u* = exp(-t)·(−2 − 0.8·sin(x)cos(y)) with a time-dependent Dirichlet u*
+  on the boundary (refreshed each step via sim.t). Validates the forcing derivation before the
+  moving case is trusted. This is the curvature-preserving NESTED disk (P1-capped at the curved-domain rate
+  ~O(h^1.5)); small dt (0.005) keeps the O(dt) backward-Euler time error below the spatial floor. The MOL/TS
+  path is a time-error-free cross-check; being a DECAYING solution on a curved boundary it needs BOTH
+  `mol_rtol: 1e-9` (controlled time error) AND `mol_dt_initial: 1e-6` (the rtol-independent BDF cold-start) to
+  read the spatial order ~1.7. Box twin: bulk_expansion_timedependent_static_box.
+harness: bulk
+dim: 2
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
+exact: {c: "np.exp(-t)*(2 + np.sin(x)*np.cos(y))"}
+t_final: 1.0
+dt: 0.005
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 1.5
+mol_rtol: 1.0e-9    # controlled-time-error floor (see description)
+mol_dt_initial: 1.0e-6  # BDF cold-start floor = t_final/1e6, rtol-independent (see description); MOL order ~1.7
+applicable_solvers: [fenics-be, fenics-mol]
+params: {D: 0.1}
+math: |
+  math_description:
+    geometry: disk
+    subdomains:
+      - { name: cyto, kind: volume }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "exp(-sim.t)*(-2 - 0.8*sin(geom.x[0])*cos(geom.x[1]))"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "exp(-sim.t)*(2 + sin(geom.x[0])*cos(geom.x[1]))" }

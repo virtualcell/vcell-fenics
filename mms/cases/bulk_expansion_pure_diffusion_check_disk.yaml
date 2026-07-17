@@ -1,22 +1,23 @@
-name: bulk_expansion_pure_diffusion_check
+name: bulk_expansion_pure_diffusion_check_disk
 description: >
-  Independent cross-check of the moving-bulk expansion defect with a fresh forcing derivation. Steady
-  lab-frame u* = 2 + sin(x)·cos(y) held on a RADIALLY EXPANDING disk (v = [0.25·x, 0.25·y], ∇·v = 0.5) with
+  Independent cross-check of the moving-bulk expansion forcing with a fresh derivation. Steady lab-frame
+  u* = 2 + sin(x)·cos(y) held on a RADIALLY EXPANDING nested disk (v = [0.25·x, 0.25·y], ∇·v = 0.5) with
   pure diffusion D = 0.1. For a lab-steady u* the ALE conservation-form source is f = ∇·(u* v) − D∇²u* =
   v·∇u* + u*∇·v − D∇²u* = 0.25x·cos(x)cos(y) − 0.25y·sin(x)sin(y) + 1.0 + 0.7·sin(x)cos(y), so u* is the
-  exact solution and the solver must hold it to O(h²) as the disk deforms. Dirichlet u* on the moving
-  boundary (refreshed at the moved configuration each step). The static twin converges at order ≈ 1.7. The
-  moving scheme is FIRST-order in dt, so the runner refines dt ∝ h² to expose the O(h²) spatial order; with
-  that it converges at order ≈ 2 — NO defect. (An earlier fixed-dt h-sweep mistook the O(dt) temporal floor
-  for a consistency defect; corrected — see mms/README.md.)
+  exact solution and the solver must hold it as the disk deforms. Dirichlet u* on the moving boundary
+  (refreshed at the moved configuration each step). This is the curvature-preserving NESTED disk (P1-capped
+  at the curved-domain rate ~O(h^1.5), the honest counterpart to the O(h²) box twin). The moving scheme is
+  FIRST-order in dt, so the runner refines dt ∝ h² to expose the spatial order. Steady lab-frame u* (no time
+  decay), so the MOL/TS path needs no tolerance knobs. Box twin: bulk_expansion_pure_diffusion_check_box;
+  static twin: bulk_expansion_pure_diffusion_check_static_disk.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
 exact: {c: "2 + np.sin(x)*np.cos(y)"}
 t_final: 1.0
 dt: 0.01
-resolutions_h: [0.1, 0.07, 0.05]
-expected_order_h: 2.0
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 1.5
 applicable_solvers: [fenics-be, fenics-mol]
 params: {k: 0.25, D: 0.1}
 math: |
