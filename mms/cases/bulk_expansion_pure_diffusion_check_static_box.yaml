@@ -1,13 +1,15 @@
-name: bulk_expansion_pure_diffusion_check_static
+name: bulk_expansion_pure_diffusion_check_static_box
 description: >
-  Static twin of bulk_expansion_pure_diffusion_check. Steady u* = 2 + sin(x)·cos(y) on a FIXED disk with
+  Static twin of bulk_expansion_pure_diffusion_check_box. Steady u* = 2 + sin(x)·cos(y) on a FIXED box with
   pure diffusion D = 0.1, held by the source f = −D∇²u* = 0.2·sin(x)cos(y) and Dirichlet u* on the boundary.
-  Motion OFF. Validates the manufactured forcing / u* derivation independently of any moving-mesh machinery:
-  it must converge at the P1 floor (order ≈ 2). If it does not, the forcing derivation is wrong, not the
-  solver.
+  Motion OFF. Validates the manufactured forcing / u* derivation independently of any moving-mesh machinery.
+  On this STRAIGHT-boundary structured box it must converge at the P1 floor O(h²). A STEADY solution on a
+  FIXED mesh: the initial condition already equals u*, so the method-of-lines integrator would start on the
+  answer and measure nothing — fenics-mol is omitted (it is a no-op here); the backward-Euler check suffices.
+  Disk twin: bulk_expansion_pure_diffusion_check_static_disk.
 harness: bulk
 dim: 2
-geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+geometry: {kind: structured_box, extent: [2.0, 2.0], origin: [-1.0, -1.0], volume_subdomain: cyto, boundary: edge}
 exact: {c: "2 + np.sin(x)*np.cos(y)"}
 t_final: 1.0
 dt: 0.05
@@ -17,7 +19,7 @@ applicable_solvers: [fenics-be]
 params: {D: 0.1}
 math: |
   math_description:
-    geometry: disk
+    geometry: box
     subdomains:
       - { name: cyto, kind: volume }
     variables:
