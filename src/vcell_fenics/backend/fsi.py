@@ -204,6 +204,54 @@ def _phase_velocity(phase: str, v_n: fem.Function, v_s: fem.Function) -> UflExpr
     return velocity
 
 
+def _transport_co_moving_species(
+    mesh: Mesh,
+    species: fem.Function,
+    *,
+    carrier_velocity: UflExpr,
+    displacement: fem.Function,
+    dt: float,
+    diffusivity: float,
+    source: UflExpr | None = None,
+    bcs: Sequence[fem.DirichletBC] = (),
+) -> None:
+    """Advance the co-moving volume species one backward-Euler step **in place** by the ALE transport
+
+        ∂c/∂t|_mesh + (v_carrier − w)·∇c + c ∇·v_carrier = D ∇²c (+ source),
+
+    then move the mesh by `displacement` (the mesh velocity is `w = displacement/dt`). This is the
+    single implementation shared by the FSI species step and the manufactured-solution verification
+    (`tests/test_fsi_species_mms.py`) — so the MMS exercises the *real* transport operator, not a copy.
+    `source` (a UFL forcing) and `bcs` (strong Dirichlet) are the MMS hooks; the physics callers pass
+    neither — no volumetric source, and a natural no-flux boundary where `v_carrier·n = w·n`."""
+    mesh_velocity = displacement / dt  # w = dt·w / dt
+    space = species.function_space
+    c, q = ufl.TrialFunction(space), ufl.TestFunction(space)
+    dx = ufl.Measure("dx", domain=mesh)
+    relative_advection = carrier_velocity - mesh_velocity
+    a = (
+        c / dt * q
+        + diffusivity * ufl.inner(ufl.grad(c), ufl.grad(q))
+        + ufl.dot(relative_advection, ufl.grad(c)) * q  # (v_carrier − w)·∇c
+        + c * ufl.div(carrier_velocity) * q  # bulk dilution c ∇·v_carrier
+    ) * dx
+    rhs = species / dt * q * dx
+    if source is not None:
+        rhs = rhs + source * q * dx
+
+    updated = fem.Function(space)
+    LinearProblem(
+        a,
+        rhs,
+        u=updated,
+        bcs=list(bcs),
+        petsc_options_prefix=f"vcellfenics_fsispecies_{id(updated):x}_",
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+    ).solve()
+    species.x.array[:] = updated.x.array  # in place: the new step becomes next step's previous
+    _apply_displacement(mesh, displacement)
+
+
 def step_two_phase_fsi_with_species(
     mesh: Mesh,
     species: fem.Function,
@@ -252,30 +300,9 @@ def step_two_phase_fsi_with_species(
     )
     carrier_velocity = _phase_velocity(carrier, v_n, v_s)
     displacement = _harmonic_displacement(mesh, _phase_velocity(frame, v_n, v_s), dt)
-    mesh_velocity = displacement / dt  # w = dt·w / dt
-
-    space = species.function_space
-    c, q = ufl.TrialFunction(space), ufl.TestFunction(space)
-    dx = ufl.Measure("dx", domain=mesh)
-    relative_advection = carrier_velocity - mesh_velocity
-    a = (
-        c / dt * q
-        + diffusivity * ufl.inner(ufl.grad(c), ufl.grad(q))
-        + ufl.dot(relative_advection, ufl.grad(c)) * q  # (v_carrier − w)·∇c
-        + c * ufl.div(carrier_velocity) * q  # bulk dilution c ∇·v_carrier
-    ) * dx
-    rhs = species / dt * q * dx
-
-    updated = fem.Function(space)
-    LinearProblem(
-        a,
-        rhs,
-        u=updated,
-        petsc_options_prefix=f"vcellfenics_fsispecies_{id(updated):x}_",
-        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
-    ).solve()
-    species.x.array[:] = updated.x.array  # in place: the new step becomes next step's previous
-    _apply_displacement(mesh, displacement)
+    _transport_co_moving_species(
+        mesh, species, carrier_velocity=carrier_velocity, displacement=displacement, dt=dt, diffusivity=diffusivity
+    )
     return v_n, v_s, p
 
 
