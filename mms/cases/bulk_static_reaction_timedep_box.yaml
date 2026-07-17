@@ -6,11 +6,13 @@ description: >
   time-dependent Dirichlet u* on the boundary (refreshed via set_time each step). No motion, so this exercises
   the time-derivative + diffusion + (time-dependent) source consistency for both the backward-Euler (fenics-be)
   and MOL/TS (fenics-mol) integrators. NOTE: the manufactured forcing is verified correct (the error is exactly
-  O(dt) and → 0 as dt → 0), but the h-refinement order reads well below 2 at any feasible dt because the
-  first-order backward-Euler time error (O(dt) ≈ 5e-3 at dt=0.005) dominates the very small O(h²) spatial error
-  of this smooth solution — a fixed-dt-h-refinement harness limitation shared by the static twin and by the
-  pre-existing bulk_expansion_timedependent_static exemplar (both order ≈ 0). This is a time-integrator floor,
-  not a solver correctness defect and not a forcing error.
+  O(dt) and → 0 as dt → 0). The MOL (adaptive-BDF) order reads ~1.2 at the integrator's default rtol=1e-6
+  because the global time-error floor of a *decaying* solution (~5e-4) then dominates the small O(h²) spatial
+  error; tightening the relative tolerance to `mol_rtol: 1e-9` (default atol) lifts the floor below the spatial
+  error and recovers order ≈ 1.9 — hence the `mol_rtol` field below. (The curved-boundary `_disk` twin retains
+  a residual, rtol-INDEPENDENT floor from the curved boundary + decaying time-dependent Dirichlet + MOL
+  combination and stays xfail'd — see tests/test_mms_suite.py::_KNOWN_MOL_REGRESSIONS.) The backward-Euler
+  (fenics-be) path carries its own O(dt) time error at fixed dt, so its `_static` twin is BE-only.
 harness: bulk
 dim: 2
 geometry: {kind: structured_box, extent: [2.0, 2.0], origin: [-1.0, -1.0], volume_subdomain: cyto, boundary: edge}
@@ -19,6 +21,7 @@ t_final: 1.0
 dt: 0.005
 resolutions_h: [0.1, 0.05, 0.025]
 expected_order_h: 2.0
+mol_rtol: 1.0e-9  # tighten adaptive-BDF rtol so its decaying-solution time-error floor stays below O(h²) — see description
 applicable_solvers: [fenics-be, fenics-mol]
 params: {D: 0.1}
 math: |
