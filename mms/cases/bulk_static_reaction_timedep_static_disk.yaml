@@ -5,7 +5,11 @@ description: >
   f = ∂_t u* − D∇²u* = −u* + 2D·exp(-t)·sin(x)cos(y) = −2·exp(-t) − 0.8·exp(-t)·sin(x)cos(y), with the
   time-dependent Dirichlet u* on the boundary (refreshed via set_time each step). Validates the forcing
   derivation for the exponential-decay-in-time + diffusion combination before the reaction/time case trusts
-  it. Small dt so the O(dt) backward-Euler time error does not swamp the O(h²) spatial order.
+  it. Small dt so the O(dt) backward-Euler time error does not swamp the spatial order. The MOL/TS
+  (fenics-mol) path runs too, giving a time-error-free spatial-order cross-check; on this curved nested disk
+  it needs BOTH `mol_rtol: 1e-9` (controlled-time-error floor) AND `mol_dt_initial: 1e-6` (the rtol-independent
+  BDF cold-start floor) to read the spatial order ~1.7 (the P1 curved-domain rate) — see the moving twin
+  bulk_static_reaction_timedep_disk for the full two-floor diagnosis.
 harness: bulk
 dim: 2
 geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
@@ -14,7 +18,9 @@ t_final: 1.0
 dt: 0.005
 resolutions_h: [0.1, 0.05, 0.025]
 expected_order_h: 1.5
-applicable_solvers: [fenics-be]
+mol_rtol: 1.0e-9    # controlled-time-error floor (see description)
+mol_dt_initial: 1.0e-6  # BDF cold-start floor = t_final/1e6, rtol-independent (see description); MOL order ~1.7
+applicable_solvers: [fenics-be, fenics-mol]
 params: {D: 0.1}
 math: |
   math_description:
