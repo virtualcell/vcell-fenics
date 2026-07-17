@@ -154,17 +154,29 @@ def _run_fenics(case: dict[str, Any], solver: str, h: float) -> tuple[float, flo
     if solver == "fenics-mol":
         # MOL: strided ALE on a moving subdomain, fixed-domain TS otherwise (static-mesh cases). The strided
         # motion is O(interval), so refine the stride with h too (interval = dt) to see the spatial order.
-        # `mol_rtol` (default the integrator's own 1e-6) lets a case tighten the adaptive-BDF relative
-        # tolerance where the default is too loose to resolve the spatial order at fine h — see the
-        # time-dependent `static_reaction_box` case, which floors at ~1.2 under 1e-6 and recovers to ~1.9
-        # under 1e-9. Tighten per-case (not globally) so the slower run is confined to cases that need it.
+        # An MMS case measures the SPATIAL order, so both of the adaptive-BDF integrator's temporal error
+        # sources must be pushed below the spatial error at fine h. Two per-case knobs do that (defaults =
+        # the integrator's own; tighten per-case, not globally, so the slower run stays confined):
+        #   `mol_rtol` — the adaptive relative tolerance, which bounds the CONTROLLED time error. Its default
+        #     1e-6 is too loose at fine h (the `static_reaction_box` case floors at ~1.2 under 1e-6, recovers
+        #     to ~1.9 under 1e-9).
+        #   `mol_dt_initial` — the startup step. BDF cold-starts at order 1 (backward Euler) and the adaptive
+        #     controller CANNOT see that first step's truncation error (no history), so it is an rtol-INDEPENDENT
+        #     bias ≈ the startup step. The integrator's default t_final/1e4 is small enough on the box but not on
+        #     the finer curved disk, where `static_reaction_disk` floors at 0.65 until the startup is dropped to
+        #     ~t_final/1e6 (then order ~1.7). The disk needs BOTH knobs; the box needs only rtol.
         mol_rtol = float(case.get("mol_rtol", 1.0e-6))
+        mol_dt_initial = float(case["mol_dt_initial"]) if "mol_dt_initial" in case else None
         if dp.motion_velocity is not None:
             integrate_discrete_problem_moving(
-                dp, t_final=t_final, motion_steps=max(20, round(t_final / dt)), rtol=mol_rtol
+                dp,
+                t_final=t_final,
+                motion_steps=max(20, round(t_final / dt)),
+                rtol=mol_rtol,
+                dt_initial=mol_dt_initial,
             )
         else:
-            integrate_discrete_problem(dp, t_final=t_final, rtol=mol_rtol)
+            integrate_discrete_problem(dp, t_final=t_final, rtol=mol_rtol, dt_initial=mol_dt_initial)
         return _error(dp, case["exact"][var], t_final)
     # fenics-be: step, refreshing time-/position-dependent Dirichlet BCs at the moved configuration each step
     t = 0.0
