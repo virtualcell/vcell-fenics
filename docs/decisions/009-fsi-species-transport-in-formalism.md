@@ -1,8 +1,10 @@
 # ADR 009 — Fold the FSI co-moving species transport into the declarative formalism
 
 **Date:** 2026-07-17
-**Status:** Proposed. **Step A implemented** (2026-07-17, the compressible relative-advection dilution fix);
-steps B (route FSI through `assemble()`) and C (migrate the MMS to YAML) not yet done.
+**Status:** **Step A implemented** (2026-07-17, the compressible relative-advection dilution fix — a
+standalone correctness win). **Steps B and C DEFERRED** (2026-07-17) after a close look found the code-level
+unification is not worth it as sketched — see "Step B/C finding" below. Step A is the durable outcome of
+this ADR; B/C are parked, not planned.
 
 ## Context
 
@@ -72,15 +74,14 @@ existing incompressible-drift cases are unchanged (`∇·v_rel = 0`). Verified b
 (`mms/cases/bulk_compressible_advection_{box,disk}.yaml`): order 0.0 → collapse before the fix, ≈2.0 (box) /
 ≈1.8 (disk) after.
 
-**(2) Route the FSI species transport through `assemble()`.** Replace `_transport_co_moving_species`'s inline
-weak form with a formalism-driven assembly: a one-equation `bulk_radv_diff` problem with `motion = w` (frame),
-`relative_advection = v_carrier − w`, `diffusion = D`, on the FSI mesh. The reacting / nonlinear siblings map
-onto the reaction slot / weak-form escape hatch respectively. FSI then holds **one** transport implementation,
-shared with every bulk case.
+**(2) Route the FSI species transport through `assemble()`** *(DEFERRED — see the "Step B/C finding"
+below).* The intent was to replace `_transport_co_moving_species`'s inline weak form with a formalism-driven
+assembly (`motion = w`, `relative_advection = v_carrier − w`, `diffusion = D`) so FSI holds **one** transport
+implementation shared with every bulk case. On inspection this cannot be done behavior-preservingly without
+awkwardness, and the natural routing re-introduces an already-reverted conservative form — so it is parked.
 
-**(3) The species MMS becomes `mms/cases/*.yaml`.** Once (2) lands, the four `test_fsi_species_mms` variants
-are ordinary manufactured-solution cases in the persistent suite (box/disk × steady/decaying), testing the
-*shared* assembler — the duplication and the pytest-only status both go away.
+**(3) The species MMS becomes `mms/cases/*.yaml`** *(DEFERRED — depends on (2)).* Would have turned the four
+`test_fsi_species_mms` variants into persistent-suite YAML cases testing the shared assembler.
 
 ## Scope / work breakdown
 
@@ -89,13 +90,33 @@ are ordinary manufactured-solution cases in the persistent suite (box/disk × st
   0.0 → ≈2.0/1.8). Audited all existing `relative_advection` usages — every one is a divergence-free
   (constant) drift, or bypasses `assemble` (`test_backend_slip_moving` builds the term by hand) — so nothing
   regressed. This step stood alone and closed a latent correctness gap independent of FSI.
-- **B. FSI transport → `assemble()`**: refactor `_transport_co_moving_species` (and, if desired, the reacting
-  variants) onto the formalism path; keep behavior identical (the existing `test_backend_fsi.py` conservation
-  / equilibrium tests are the guard).
-- **C. Migrate the MMS**: port the four `test_fsi_species_mms` variants to `mms/cases/*.yaml`; retire the
-  pytest module. Net: −1 bespoke transport implementation, +4 persistent gate cases.
+- **B. FSI transport → `assemble()`** — **DEFERRED** (see the finding below).
+- **C. Migrate the MMS to `mms/cases/*.yaml`** — **DEFERRED** (depends on B).
 
-Steps are independent and land in order A → B → C; A is valuable even if B/C are deferred.
+## Step B/C finding — why the code-level unification is parked
+
+Confirming the multiphase API was settled (it is — the FSI feature work is a month old and stable) prompted
+a close look at B's mechanics, which surfaced a structural obstacle the sketch above missed. **FSI's inline
+transport and the formalism decompose the same equation differently:**
+
+- **FSI inline BE** uses a *plain* time term `(cⁿ⁺¹ − cⁿ)/dt` and an *instantaneous* carrier dilution
+  `c ∇·v_carrier`.
+- **The formalism's BE** (`discrete.py`), when `motion ≠ none` and a `DILUTION` term is present, uses the
+  *conservative* time term `(cⁿ⁺¹ − volume_ratio·cⁿ)/dt` and **drops** the explicit dilution.
+
+So routing FSI through the formalism's motion machinery would silently switch its BE step to the
+**swept-volume conservative form** — which is exactly the `det(I+∇disp)`-based conservative rate that the
+conservative-ALE thread **already prototyped for FSI, measured to give no improvement (its limit is spatial,
+not temporal), and reverted**. The naive B re-introduces a rejected treatment.
+
+Avoiding that means routing with `motion = None` + an *explicit* instantaneous dilution term — which forces
+FSI's clean `(v_carrier−w)·∇c + c∇·v_carrier` to split into conservation-form advection plus a separate
+`c∇·w`, uglifying FSI for a modest de-duplication, and still not touching the reacting / nonlinear siblings
+(each with its own inline transport). Verdict: **B/C's value/risk is poor and partly conflicts with a prior
+decision; parked.** Step A already captured the shared *concept* (the compressible-dilution operator, now
+verified from both directions — the bulk `compressible_advection` cases and the FSI `test_fsi_species_mms`).
+The FSI inline transport stays, guarded by its own MMS. Revisit only if a future need (e.g. the reacting
+siblings needing formalism reactions) changes the calculus.
 
 ## Non-goals
 
