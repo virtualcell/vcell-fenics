@@ -1,0 +1,39 @@
+name: bulk_compressible_advection_disk
+description: >
+  Verifies the COMPRESSIBLE relative-advection dilution (ADR 009 step A) on a FIXED nested disk. Steady
+  u* = 2 + sin(x)·cos(y), diffusion D = 0.1, and an Eulerian drift v_rel = [0.3·x, 0.1·y] carried in the
+  relative_advection slot — crucially ∇·v_rel = 0.4 ≠ 0. The conservation-form transport is
+  ∇·(u* v_rel) = v_rel·∇u* + u*·(∇·v_rel), so the manufactured source is f = ∇·(u* v_rel) − D∇²u* =
+  0.3·x·cos(x)cos(y) − 0.1·y·sin(x)sin(y) + 0.8 + 0.6·sin(x)cos(y), with Dirichlet u* on the boundary. Before
+  the fix `assemble` dropped the u*·(∇·v_rel) dilution and the order collapsed; with it u* is held to the P1
+  curved-domain floor. This is the curvature-preserving nested disk (P1-capped ~O(h^1.5)). Box twin:
+  bulk_compressible_advection_box.
+harness: bulk
+dim: 2
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
+exact: {c: "2 + np.sin(x)*np.cos(y)"}
+t_final: 1.0
+dt: 0.05
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 1.5
+applicable_solvers: [fenics-be, fenics-mol]
+params: {D: 0.1}
+math: |
+  math_description:
+    geometry: disk
+    subdomains:
+      - { name: cyto, kind: volume }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          relative_advection: "[0.3*geom.x[0], 0.1*geom.x[1]]"
+          source: "0.3*geom.x[0]*cos(geom.x[0])*cos(geom.x[1]) - 0.1*geom.x[1]*sin(geom.x[0])*sin(geom.x[1]) + 0.8 + 0.6*sin(geom.x[0])*cos(geom.x[1])"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "2 + sin(geom.x[0])*cos(geom.x[1])" }
