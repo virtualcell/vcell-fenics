@@ -186,7 +186,14 @@ def _build_problem(
             # the drift on top of the substrate motion the mesh already carries. `grad` on
             # a (sub)mesh is the surface gradient, so the same term serves bulk and surface.
             drift = compile_expression(parse(eq.terms["relative_advection"]), ctx)
-            terms.append(Term(TermKind.ADVECTION, ufl.dot(drift, ufl.grad(u)) * w))
+            # Conservation form ∇·(u·v_rel) = v_rel·∇u + u·(∇·v_rel). A divergence-free drift — the
+            # incompressible fluid case this slot was designed around — leaves just the advective v_rel·∇u; a
+            # COMPRESSIBLE drift also dilutes by u·(∇·v_rel), the volume analogue of the mandatory surface
+            # ρ∇_Γ·v_Γ. This stays in the ADVECTION term rather than a separate DILUTION term, because the
+            # backward-Euler scheme *drops* DILUTION on a moving mesh (conserving via the swept-volume time
+            # term instead); the drift's divergence is not the mesh's and must survive. On a moving mesh it
+            # rides on top of the mesh GCL dilution, so the total is ∇·v_carrier = ∇·v_mesh + ∇·v_rel (ADR 009).
+            terms.append(Term(TermKind.ADVECTION, (ufl.dot(drift, ufl.grad(u)) + ufl.div(drift) * u) * w))
         if motion is not None:
             # Auto-dilution ρ ∇·v_mesh, using the **GCL-consistent effective rate** `ln(|Kⁿ⁺¹|/|Kⁿ|)/dt`
             # (the log of the actual per-cell/-facet swept-volume ratio, bulk or membrane). This term is

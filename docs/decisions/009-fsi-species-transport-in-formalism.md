@@ -1,7 +1,8 @@
 # ADR 009 — Fold the FSI co-moving species transport into the declarative formalism
 
 **Date:** 2026-07-17
-**Status:** Proposed (not yet accepted or implemented)
+**Status:** Proposed. **Step A implemented** (2026-07-17, the compressible relative-advection dilution fix);
+steps B (route FSI through `assemble()`) and C (migrate the MMS to YAML) not yet done.
 
 ## Context
 
@@ -52,20 +53,24 @@ the dropped `∇·v_rel = −0.1` is exactly the gap between the formalism's 0.5
 
 ## Proposal
 
-**(1) Extend the formalism's dilution to the carrier's full divergence.** When a `relative_advection`
-velocity is present, also add its divergence to the dilution term, so the total dilution becomes
-`c ∇·v_carrier = c (∇·v_mesh + ∇·v_rel)`:
+**(1) Extend the relative-advection term to its conservation form** (implemented — step A landed). The
+drift's divergence must join the transport so the total dilution becomes `c ∇·v_carrier = c(∇·v_mesh +
+∇·v_rel)`. It goes into the **advection** term as `∇·(u·v_rel) = v_rel·∇u + u·(∇·v_rel)`, **not** a separate
+`DILUTION` term:
 
 ```python
-# alongside the existing GCL mesh dilution (assemble.py:~197)
-if "relative_advection" in eq.terms:
-    terms.append(Term(TermKind.ADVECTION, ufl.dot(drift, ufl.grad(u)) * w))
-    terms.append(Term(TermKind.DILUTION, ufl.div(drift) * u * w))   # ← new: ∇·v_rel dilution
+# assemble.py, the relative_advection branch (was: only ufl.dot(drift, ufl.grad(u)) * w)
+terms.append(Term(TermKind.ADVECTION, (ufl.dot(drift, ufl.grad(u)) + ufl.div(drift) * u) * w))
 ```
 
-The mesh part keeps its GCL swept-volume treatment (discrete, mass-exact); the relative part is the
-continuous `∇·v_rel`. This is a **correctness fix** for any compressible relative-advection velocity, not
-only FSI — existing incompressible-drift cases are unchanged (`∇·v_rel = 0`).
+Why not a `TermKind.DILUTION` term (the ADR's first sketch): the backward-Euler scheme **drops** `DILUTION`
+on a moving mesh (`discrete.py`), conserving via the swept-volume time term instead — but the drift's
+divergence is *not* the mesh's swept volume and must survive. Keeping it in `ADVECTION` (which BE always
+keeps) is correct on static and moving meshes alike; on a moving mesh it rides on top of the mesh's GCL
+dilution. This is a **correctness fix** for any compressible relative-advection velocity, not only FSI —
+existing incompressible-drift cases are unchanged (`∇·v_rel = 0`). Verified by a discriminating MMS
+(`mms/cases/bulk_compressible_advection_{box,disk}.yaml`): order 0.0 → collapse before the fix, ≈2.0 (box) /
+≈1.8 (disk) after.
 
 **(2) Route the FSI species transport through `assemble()`.** Replace `_transport_co_moving_species`'s inline
 weak form with a formalism-driven assembly: a one-equation `bulk_radv_diff` problem with `motion = w` (frame),
@@ -79,11 +84,11 @@ are ordinary manufactured-solution cases in the persistent suite (box/disk × st
 
 ## Scope / work breakdown
 
-- **A. Formalism dilution fix** (small, self-contained): the `∇·v_rel` dilution term in `assemble.py`; a
-  negative-control MMS proving a *compressible* `relative_advection` now dilutes correctly (a manufactured
-  case with `∇·v_rel ≠ 0` on a **static** mesh — no FSI needed). Audit existing `relative_advection` usages
-  to confirm they are divergence-free (expected) so nothing regresses. **This step stands alone** and is
-  worth doing regardless of the rest — it closes a latent correctness gap.
+- **A. Formalism dilution fix** — **DONE** (2026-07-17). The conservation-form advection in `assemble.py`
+  (`+ u·∇·v_rel`); a discriminating MMS on a static mesh (`bulk_compressible_advection_{box,disk}`, order
+  0.0 → ≈2.0/1.8). Audited all existing `relative_advection` usages — every one is a divergence-free
+  (constant) drift, or bypasses `assemble` (`test_backend_slip_moving` builds the term by hand) — so nothing
+  regressed. This step stood alone and closed a latent correctness gap independent of FSI.
 - **B. FSI transport → `assemble()`**: refactor `_transport_co_moving_species` (and, if desired, the reacting
   variants) onto the formalism path; keep behavior identical (the existing `test_backend_fsi.py` conservation
   / equilibrium tests are the guard).
