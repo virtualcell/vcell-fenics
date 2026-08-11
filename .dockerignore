@@ -1,0 +1,22 @@
+# The build context is an allowlist: this repository carries a multi-GB pixi environment, a
+# 2700-file VCML corpus, and cross-validation reference datasets, none of which belong in an
+# image. Exclude everything, then re-include exactly what docker/Dockerfile copies.
+*
+
+!pyproject.toml
+!pixi.lock
+!README.md
+!LICENSE.md
+!src
+!docker
+
+# Only the demo models from examples/ — re-include the directory first, then drop the rest of
+# it, since a pattern cannot reach inside a directory that was never un-excluded.
+!examples
+examples/*
+!examples/models
+
+# …minus the noise that lives inside those trees.
+**/__pycache__
+**/*.pyc
+**/.DS_Store
