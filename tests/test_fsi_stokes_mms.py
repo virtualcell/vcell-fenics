@@ -38,9 +38,7 @@ def _stokes_l2_errors(nx: int) -> tuple[float, float]:
     mesh = create_unit_square(MPI.COMM_WORLD, nx, nx)
     x = ufl.SpatialCoordinate(mesh)
     # Divergence-free manufactured velocity (steady Taylor–Green) + a curved pressure (not exact in P1).
-    u_star = ufl.as_vector(
-        [ufl.sin(_PI * x[0]) * ufl.cos(_PI * x[1]), -ufl.cos(_PI * x[0]) * ufl.sin(_PI * x[1])]
-    )
+    u_star = ufl.as_vector([ufl.sin(_PI * x[0]) * ufl.cos(_PI * x[1]), -ufl.cos(_PI * x[0]) * ufl.sin(_PI * x[1])])
     p_star = ufl.sin(_PI * x[0]) * ufl.sin(_PI * x[1])
     forcing = -ufl.div(2.0 * _NU * ufl.sym(ufl.grad(u_star))) + ufl.grad(p_star)
 

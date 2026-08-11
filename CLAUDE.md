@@ -62,6 +62,20 @@ pixi add --pypi <pkg>         # add a PyPI dep
 pixi update                   # upgrade within version specs
 ```
 
+**Running a model.** `vcell_fenics.cli` is the one-shot runner: a VCell `.vcml`, a VCell
+math+geom YAML pair, or a native formalism pair in — XDMF fields + `summary.json` out.
+
+```bash
+pixi run -e dev python -m vcell_fenics.cli --vcml model.vcml --out results
+pixi run -e dev python -m vcell_fenics.cli --math m_math.yaml --geometry m_geom.yaml --t-final 1.0
+docker build -f docker/Dockerfile -t vcell-fenics .     # same runner, containerised
+```
+
+It drives the two fixed-domain paths only (single mesh; two compartments across a membrane).
+ALE/moving membranes, Stokes/FSI, phase field, and bulk-coupled surface PDEs keep their own
+drivers — extend the CLI deliberately rather than routing them through it. `docker/README.md`
+is the container reference (results mount, MPI, uid, discretisation defaults).
+
 **Quality enforcement.** Ruff (lint+format) and mypy in `--strict` are required across `src/`, `tests/`, and `examples/` (the package ships a `py.typed` marker so `examples/` get its real types, not `Any`). `pixi run -e dev check` is the gate. The FEniCSx stack ships `py.typed` but with many unannotated functions, so mypy uses its **real** types (we do *not* `follow_imports = "skip"`); strict mode's `disallow_untyped_calls` is suppressed for that stack via `untyped_calls_exclude` so calls like `grad()`/`dot()` don't flood, while every other real check is kept (ADR 005). When a third-party stub is genuinely wrong (e.g. petsc4py's `PETSc.ScalarType`, some pyvista signatures), use a targeted `# type: ignore[code]` or `cast()` at that exact call site — never a blanket `Any` in our own signatures. The `backend/_typing.py` aliases (`DolfinxFunction`, `UflForm`, …) document which opaque object a field holds where the upstream type is still `Any`.
 
 To run Python directly in the env without going through `pixi shell`:
