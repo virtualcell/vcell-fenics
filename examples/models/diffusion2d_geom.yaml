@@ -1,0 +1,18 @@
+# Native geometry description (docs/modeling/geometric-formalism.md): one 2 × 2 square
+# subvolume — the whole box, no membrane. Paired with diffusion2d_math.yaml.
+#
+# Used by the CLI smoke test (tests/test_cli.py) and baked into the container image at
+# /opt/vcell-fenics/examples, where it is the "does this image work" model:
+#   docker run --rm -v "$PWD/out:/work/out" vcell-fenics \
+#       --math /opt/vcell-fenics/examples/diffusion2d_math.yaml \
+#       --geometry /opt/vcell-fenics/examples/diffusion2d_geom.yaml \
+#       --t-final 1.0 --out /work/out
+geometry_description:
+  name: square
+  dim: 2
+  extent: [2.0, 2.0, 1.0]
+  origin: [-1.0, -1.0, 0.0]
+  subvolumes:
+    - name: domain
+      type: analytic
+      expression: "1.0"
