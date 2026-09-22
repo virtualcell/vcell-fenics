@@ -36,6 +36,7 @@ to the bundle ``<--out>/<--output-prefix>.fenics/`` (ADR 010) — what a contain
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 from collections.abc import Sequence
 from itertools import pairwise
@@ -60,6 +61,7 @@ from vcell_fenics.pyvcell_bridge.overrides import OverrideError
 from vcell_fenics.pyvcell_bridge.simtask import SimulationTaskError, check_supported, read_simtask
 from vcell_fenics.runner import ModelInput, RunError, RunOptions, run_model, uniform_output_times
 from vcell_fenics.runner import log as _log
+from vcell_fenics.status import Fanout, MessagingConfig, RestWorkerEvents, StatusReporter, StdoutMarkers, isolate_stdout
 
 # Errors that mean "the model or the request is wrong", not "the code is broken": reported as a
 # one-line `error: …` with exit status 2, no traceback.
@@ -436,6 +438,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-fields", action="store_true", help="write the meshes and per-time statistics only, no field arrays"
     )
     output.add_argument("--traceback", action="store_true", help="show the full traceback on a model error")
+
+    vcell = parser.add_argument_group("VCell status reporting (ADR 011 §4)")
+    vcell.add_argument(
+        "--vc-print-status",
+        action="store_true",
+        help="write [[[progress:…%]]] / [[[data:t]]] markers to stdout (everything else goes to stderr)",
+    )
+    vcell.add_argument(
+        "--vc-send-status-config",
+        type=Path,
+        metavar="FILE",
+        help="post REST WorkerEvents to the broker described in FILE (the Langevin properties format)",
+    )
+    vcell.add_argument("-tid", type=int, help="the task id VCell's batch system appends (checked against the task)")
     return parser
 
 
@@ -454,29 +470,85 @@ def load_model(args: argparse.Namespace) -> ModelInput:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run one model, reporting status as ADR 011 §4 describes. Exit status: 0 success, 2 a model or
+    usage error, 1 a crash, 143 terminated (SIGTERM — a Slurm cancel or timeout)."""
+
     args = build_parser().parse_args(argv)
+    comm = MPI.COMM_WORLD
+    try:
+        status = _status_reporter(args, comm)
+    except (OSError, ValueError) as error:
+        _fail(f"status reporting: {error}", args.traceback)
+        return 2
+    previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
+    status.starting()
     try:
         model = load_model(args)
         _log(f"loaded {model.source} model: {model.provenance}")
+        task_id = model.provenance.get("task_id")
+        if args.tid is not None and task_id is not None and args.tid != task_id:
+            _log(f"warning: -tid {args.tid} differs from the task's TaskId {task_id}; using the document's")
         options, overrides = _resolve(model, args)
         out = args.out or model.suggested_out_dir or Path("out")
         prefix = args.output_prefix or model.suggested_prefix or "results"
         summary = run_model(
-            model, options, out, prefix=prefix, write_fields=not args.no_fields, flag_overrides=overrides
+            model,
+            options,
+            out,
+            prefix=prefix,
+            write_fields=not args.no_fields,
+            flag_overrides=overrides,
+            status=status,
         )
     except CliError as error:
-        _fail(str(error), args.traceback)
-        return 2
+        return _report_failure(status, str(error), args.traceback, code=2)
     except _USER_ERRORS as error:
-        _fail(f"{type(error).__name__}: {error}", args.traceback)
-        return 2
+        return _report_failure(status, f"{type(error).__name__}: {error}", args.traceback, code=2)
+    except _Terminated:
+        return _report_failure(status, "terminated by SIGTERM", False, code=143)
+    except Exception as error:  # a crash: report it, and never leave the other ranks waiting
+        code = _report_failure(status, f"{type(error).__name__}: {error}", True, code=1)
+        if comm.size > 1:
+            comm.Abort(code)
+        return code
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
-    if MPI.COMM_WORLD.rank == 0:
+    status.completed(options.t_final)  # only now: the bundle's manifest already says "completed"
+    if comm.rank == 0:
         final = summary["outputs"][-1]["species"]
         for name, stats in final.items():
             _log(f"t = {summary['outputs'][-1]['t']:g}  {name}: total {stats['total']:.6g}, max {stats['max']:.6g}")
         _log(f"wrote {summary['bundle']}")
     return 0
+
+
+class _Terminated(BaseException):
+    """Raised from the SIGTERM handler, so the run unwinds (the bundle is marked failed) and exits 143."""
+
+
+def _terminate(signum: int, frame: object) -> None:
+    raise _Terminated("terminated by SIGTERM")
+
+
+def _status_reporter(args: argparse.Namespace, comm: MPI.Comm) -> Fanout:
+    """The status channels the flags ask for. Markers go to a private copy of stdout and everything
+    else — on every rank, since ``mpiexec`` merges all ranks' stdout — to stderr (ADR 011 §4)."""
+
+    reporters: list[StatusReporter] = []
+    if args.vc_print_status:
+        markers = isolate_stdout()
+        if comm.rank == 0:
+            reporters.append(StdoutMarkers(markers))
+    if args.vc_send_status_config is not None and comm.rank == 0:
+        reporters.append(RestWorkerEvents(MessagingConfig.from_properties(args.vc_send_status_config)))
+    return Fanout(reporters)
+
+
+def _report_failure(status: Fanout, message: str, show_traceback: bool, *, code: int) -> int:
+    _fail(message, show_traceback)
+    status.failed(message, status.last_t, status.last_fraction)
+    return code
 
 
 def _fail(message: str, show_traceback: bool) -> None:

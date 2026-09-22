@@ -39,6 +39,7 @@ from vcell_fenics.backend.realize import realize
 from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_geometry_yaml, dump_yaml
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
 from vcell_fenics.results.schema import DomainKind
+from vcell_fenics.status import NullReporter, StatusReporter
 
 
 class RunError(Exception):
@@ -112,10 +113,12 @@ def run_model(
     prefix: str = "results",
     write_fields: bool = True,
     flag_overrides: dict[str, Any] | None = None,
+    status: StatusReporter | None = None,
 ) -> dict[str, Any]:
     """Realize, integrate, and write the bundle ``out_dir/<prefix>.fenics``. Returns the summary.
     ``flag_overrides`` records which settings an explicit flag took over from the model (manifest
-    ``solver.overrides``)."""
+    ``solver.overrides``); ``status`` hears progress during the solve and a data event per written row
+    (ADR 011 §4) — starting/completed/failed are the caller's, since they bracket more than the solve."""
 
     comm = MPI.COMM_WORLD
     bundle = out_dir / f"{prefix}.fenics"
@@ -138,6 +141,8 @@ def run_model(
         write_fields=write_fields,
     )
     recorder = BundleRecorder(writer, comm=comm)
+    reporter: StatusReporter = status if status is not None else NullReporter()
+    recorder.on_row(lambda t, row: reporter.data(t, t / options.t_final))
     coupling = _interface_coupling(model)
     run_info: dict[str, Any] = {
         "h": options.h,
@@ -148,10 +153,10 @@ def run_model(
     }
     try:
         if coupling is not None:
-            cells, steps = _run_interface_coupled(model, coupling, options, recorder)
+            cells, steps = _run_interface_coupled(model, coupling, options, recorder, reporter)
             run_info |= {"time_integration": "method_of_lines", "steps": steps}
         else:
-            cells, steps, dt_used = _run_single_mesh(model, options, recorder)
+            cells, steps, dt_used = _run_single_mesh(model, options, recorder, reporter)
             run_info |= {
                 "dt": dt_used,
                 "dt_requested": options.dt,
@@ -199,7 +204,9 @@ def _source_info(model: ModelInput) -> SourceInfo:
 # -- the single-mesh path -----------------------------------------------------------------------------
 
 
-def _run_single_mesh(model: ModelInput, options: RunOptions, recorder: BundleRecorder) -> tuple[int, int, float]:
+def _run_single_mesh(
+    model: ModelInput, options: RunOptions, recorder: BundleRecorder, status: StatusReporter
+) -> tuple[int, int, float]:
     """realize → assemble → integrate, writing a row at every output time. Returns (cells, steps, dt)."""
 
     comm = MPI.COMM_WORLD
@@ -235,11 +242,17 @@ def _run_single_mesh(model: ModelInput, options: RunOptions, recorder: BundleRec
             atol=options.atol,
             output_times=options.output_times,
             on_output=on_output,
+            on_progress=lambda t: status.progress(t / options.t_final, t),
         )
         return cells, int(result.steps), float("nan")
 
     recorder.capture(0.0, progress=0.0)
-    steps, dt_max = _step_backward_euler(problem, options, lambda t: recorder.capture(t, progress=t / options.t_final))
+    steps, dt_max = _step_backward_euler(
+        problem,
+        options,
+        lambda t: recorder.capture(t, progress=t / options.t_final),
+        on_step=lambda t: status.progress(t / options.t_final, t),
+    )
     return cells, steps, dt_max
 
 
@@ -250,7 +263,10 @@ def _channels(unknown: Any, n_species: int) -> list[Any]:
 
 
 def _step_backward_euler(
-    problem: DiscreteProblem, options: RunOptions, capture: Callable[[float], object]
+    problem: DiscreteProblem,
+    options: RunOptions,
+    capture: Callable[[float], object],
+    on_step: Callable[[float], object] | None = None,
 ) -> tuple[int, float]:
     """Step through each output interval with a dt snapped so the interval is a whole number of
     steps, capturing at its end. Returns (steps taken, largest dt used)."""
@@ -266,6 +282,8 @@ def _step_backward_euler(
             step += 1
             problem.set_time(t + k * dt)
             problem.step()
+            if on_step is not None:
+                on_step(t + k * dt)
         t, dt_max = t_out, max(dt_max, dt)
         capture(t_out)
     return step, dt_max
@@ -285,7 +303,7 @@ class Coupling:
 
 
 def _run_interface_coupled(
-    model: ModelInput, coupling: Coupling, options: RunOptions, recorder: BundleRecorder
+    model: ModelInput, coupling: Coupling, options: RunOptions, recorder: BundleRecorder, status: StatusReporter
 ) -> tuple[int, int]:
     """One species per compartment, coupled by the membrane flux; every output time recorded from
     the integrator's monitor. Returns (cells, steps)."""
@@ -334,6 +352,7 @@ def _run_interface_coupled(
         atol=options.atol,
         output_times=options.output_times,
         on_output=on_output,
+        on_progress=lambda t: status.progress(t / options.t_final, t),
     )
     return cells, int(result.steps)
 

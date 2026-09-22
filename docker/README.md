@@ -84,6 +84,17 @@ all come from the task; method of lines is the default (real VCell kinetics are 
 A task this solver would mis-solve — a moving boundary, field data, particle/stochastic math — exits 2
 with the reason.
 
+Status reporting, the way VCell listens for it (ADR 011 §4):
+
+| flag | for | what |
+| --- | --- | --- |
+| `--vc-print-status` | a local run (the VCell client) | stdout carries **only** `[[[progress:NN.N%]]]` / `[[[data:t]]]` markers; everything else goes to stderr |
+| `--vc-send-status-config=FILE` | a cluster run | REST WorkerEvents (STARTING / PROGRESS / DATA / COMPLETED / FAILURE) to the broker in `FILE` (Langevin properties format); a broker outage never fails the run |
+| `-tid N` | the batch system | accepted and checked against the task's `TaskId` |
+
+Exit status: `0` success, `2` a model or usage error, `1` a crash, `143` SIGTERM (the bundle's manifest
+is marked `failed`). COMPLETED is sent only after the bundle is finalized.
+
 The image ships a demo model, so you can check an installation with no files of your own:
 
 ```bash

@@ -140,7 +140,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | 5 | `results/` package: schema, VTU writer/strict reader, P1 gather, bundle writer, recorder, reader | ☑ | byte-identical VTU at n = 1, 2, 3 |
 | 6 | Move run logic into `runner.py`; every input kind writes the bundle (XDMF → export) | ☑ | MOL + interface-coupled now write every output time |
 | 7 | SimulationTask adapter + MathOverrides/scans + `--simtask` | ☑ | the fvsolver smoke task solves end to end in ~4 s |
-| 8 | Status protocol: stdout markers, REST WorkerEvents, exit codes, SIGTERM | ☐ | |
+| 8 | Status protocol: stdout markers, REST WorkerEvents, exit codes, SIGTERM | ☑ | checked against ports of VCell's parser and Langevin's REST client |
 | 9 | Export for ParaView (PVD / XDMF) | ☐ | |
 | 10 | Container (writable FFCx cache under Apptainer) + GitHub Actions: multi-arch image, SIF build, ORAS push | ☐ | CI runs only once pushed |
 
@@ -290,6 +290,25 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — Step 8: the status protocol (`vcell_fenics.status`).
+  - **Stdout:** `StdoutMarkers` writes `[[[progress:NN.N%]]]` / `[[[data:t]]]`. `isolate_stdout`
+    points fd 1 and `sys.stdout` at stderr on every rank, since `mpiexec` merges their stdout. This
+    matters because VCell's scanner stops for good at a stray `]]]`.
+  - **REST:** `RestWorkerEvents` sends events with the Langevin query string, TTL/persistence,
+    Basic auth, 5 s progress throttle and 2048-character sanitized messages; send failures are
+    swallowed and logged once.
+  - **CLI:** new `--vc-print-status`, `--vc-send-status-config=FILE` and `-tid N`. Events: STARTING,
+    then PROGRESS (from the integrators) and DATA (per bundle row), then COMPLETED only after the
+    bundle is finalized. Exit codes: 2 for model errors, 1 for crashes (`comm.Abort` under MPI), and
+    143 for SIGTERM, which also marks the manifest failed.
+  - **Tests:** stdout parses with a port of VCell's scanner and parser; the URLs equal the strings
+    Langevin's own test asserts; a captive `http.server` broker sees
+    STARTING…DATA…COMPLETED, or STARTING→FAILURE for a refused task; an unreachable broker still
+    exits 0; SIGTERM mid-run exits 143.
+  - **Race found by the SIGTERM test's poller:** zarr writes a placeholder `.zattrs` before the
+    manifest, so a polling reader could briefly see a bundle with no manifest. `BundleWriter.open` now
+    builds in a hidden staging directory and renames it into place, so the bundle appears complete
+    or not at all.
 - **2026-09-22** — Step 7: `--simtask`.
   - **`pyvcell_bridge/simtask.py`** reads `<SimulationTask>` by reusing pyvcell's
     `visit_MathDescription` / `visit_Geometry` on a stub `Application`. It parses the
