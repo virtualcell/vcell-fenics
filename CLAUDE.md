@@ -64,14 +64,16 @@ pixi update                   # upgrade within version specs
 ```
 
 **Running a model.** `vcell_fenics.cli` is the one-shot runner (argv + loading; the solve lives in
-`vcell_fenics.runner`): a VCell `.vcml`, a VCell math+geom YAML pair, or a native formalism pair in —
+`vcell_fenics.runner`): a VCell **SimulationTask** (`--simtask`, the document VCell hands its solvers — ADR 011),
+a VCell `.vcml`, a VCell math+geom YAML pair, or a native formalism pair in —
 a **results bundle** out, `<--out>/<--output-prefix>.fenics/` (ADR 010: a VTU mesh per domain, zarr
 fields at every output time, per-time statistics, a manifest; provenance + `summary.json` inside).
 
 ```bash
+pixi run -e dev python -m vcell_fenics.cli --simtask tests/fixtures/simtask/SimID_1585623750_0__0.simtask.xml --out /tmp/r
 pixi run -e dev python -m vcell_fenics.cli --vcml model.vcml --out results
 pixi run -e dev python -m vcell_fenics.cli --math m_math.yaml --geometry m_geom.yaml --t-final 1.0
-pixi run -e dev python -m vcell_fenics.results.reader results/results.fenics   # summarise a bundle
+pixi run -e dev python -m vcell_fenics.results results/results.fenics   # summarise a bundle
 docker build -f docker/Dockerfile -t vcell-fenics .     # same runner, containerised
 ```
 

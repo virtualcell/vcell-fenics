@@ -139,7 +139,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | 4 | Output-time hooks in the MOL and interface-coupled integrators | ☑ | `backend/output_times.py`; steps unperturbed |
 | 5 | `results/` package: schema, VTU writer/strict reader, P1 gather, bundle writer, recorder, reader | ☑ | byte-identical VTU at n = 1, 2, 3 |
 | 6 | Move run logic into `runner.py`; every input kind writes the bundle (XDMF → export) | ☑ | MOL + interface-coupled now write every output time |
-| 7 | SimulationTask adapter + MathOverrides/scans + `--simtask` | ☐ | |
+| 7 | SimulationTask adapter + MathOverrides/scans + `--simtask` | ☑ | the fvsolver smoke task solves end to end in ~4 s |
 | 8 | Status protocol: stdout markers, REST WorkerEvents, exit codes, SIGTERM | ☐ | |
 | 9 | Export for ParaView (PVD / XDMF) | ☐ | |
 | 10 | Container (writable FFCx cache under Apptainer) + GitHub Actions: multi-arch image, SIF build, ORAS push | ☐ | CI runs only once pushed |
@@ -230,7 +230,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 - **End-to-end:**
   `pixi run -e dev python -m vcell_fenics.cli --simtask tests/fixtures/simtask/SimID_1585623750_0__0.simtask.xml --out <tmp> --vc-print-status`.
   - stdout parses as VCell markers;
-  - `python -m vcell_fenics.results.reader <tmp>/SimID_1585623750_0_.fenics --require-status completed`
+  - `python -m vcell_fenics.results <tmp>/SimID_1585623750_0_.fenics --require-status completed`
     passes;
   - `mpiexec -n 2` gives the same bundle;
   - the export opens in ParaView/pyvista.
@@ -290,6 +290,26 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — Step 7: `--simtask`.
+  - **`pyvcell_bridge/simtask.py`** reads `<SimulationTask>` by reusing pyvcell's
+    `visit_MathDescription` / `visit_Geometry` on a stub `Application`. It parses the
+    `<Simulation>` itself: TimeBound, TimeStep, ErrorTolerance, the uniform / explicit / KeepEvery
+    output options, NumberProcessors, and a `FEniCSxSolverOptions` block as attributes or children.
+    `check_supported` refuses moving-boundary, field-data, steady, `StartTime ≠ 0` and
+    non-spatial tasks.
+  - **`pyvcell_bridge/overrides.py`** ports VCell's MathOverrides: list and interval (linear/log)
+    `ConstantArraySpec`, and the scan odometer (sorted names, first name slowest,
+    `jobIndex % scanCount`).
+  - **CLI precedence:** flag > FEniCSx options > task > defaults. Overridden settings are recorded
+    as `solver.overrides`. The default integrator is MOL; the bundle is named
+    `SimID_<key>_<job>_.fenics` and lands next to the task.
+  - **Fixtures:** five real VCell tasks in `tests/fixtures/simtask/`. The fvsolver smoke task solves
+    end to end in ~4 s: Ran and C totals are equal at every output, and the task identity is in the
+    manifest. The moving-boundary, non-spatial (Runge–Kutta scan) and Langevin (particle) tasks exit 2
+    with named reasons.
+  - **Fixes:** `VcellImportError` was missing from the CLI's user errors, so `--vcml` inputs had the
+    same traceback. `python -m vcell_fenics.results` is now the reader command, avoiding a runpy
+    double-import warning.
 - **2026-09-22** — Step 6: the run logic moved from `cli.py` into `vcell_fenics.runner`
   (`ModelInput`, `RunOptions`, the single-mesh and interface-coupled paths, coupling detection).
   - **Output:** every input kind writes the bundle `<out>/<prefix>.fenics/` (new `--output-prefix`);

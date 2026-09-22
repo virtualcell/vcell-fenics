@@ -1,8 +1,12 @@
 """Command-line runner: a model file in, a results bundle on disk.
 
 One entry point (``python -m vcell_fenics.cli``, or the ``vcell-fenics`` console script)
-for the two supported ways to say what to solve:
+for the supported ways to say what to solve:
 
+- **VCell solver task** — the ``SimID_<key>_<job>__<task>.simtask.xml`` document VCell hands every
+  solver (ADR 011): math, geometry, and the simulation's own settings (end time, output schedule,
+  time step, tolerances, mesh size, parameter-scan point). The bundle defaults to VCell's name for the
+  job, ``SimID_<key>_<job>_.fenics``, next to the task file.
 - **VCell** — a ``.vcml`` biomodel, or the pyvcell YAML pair a biomodel parses into
   (``*_math.yaml`` + ``*_geom.yaml``, as produced by ``scripts/parse_biomodels_to_yaml.py``).
   Both go through :mod:`~vcell_fenics.pyvcell_bridge` (doc §2.6) and
@@ -26,7 +30,7 @@ to the bundle ``<--out>/<--output-prefix>.fenics/`` (ADR 010) — what a contain
                                         when a VCell import surprises you
     provenance/summary.json             run configuration and per-species statistics
 
-``python -m vcell_fenics.results.reader`` summarises a bundle.
+``python -m vcell_fenics.results`` summarises a bundle.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +55,9 @@ from vcell_fenics.formalism import (
     load_geometry_dict,
 )
 from vcell_fenics.formalism.validator import FormalismValidationError
+from vcell_fenics.pyvcell_bridge.importer import VcellImportError
+from vcell_fenics.pyvcell_bridge.overrides import OverrideError
+from vcell_fenics.pyvcell_bridge.simtask import SimulationTaskError, check_supported, read_simtask
 from vcell_fenics.runner import ModelInput, RunError, RunOptions, run_model, uniform_output_times
 from vcell_fenics.runner import log as _log
 
@@ -60,6 +68,9 @@ _USER_ERRORS = (
     FormalismValidationError,
     RealizationError,
     RunError,
+    SimulationTaskError,
+    OverrideError,
+    VcellImportError,  # math the formalism cannot represent (stochastic/particle, …): named, not a traceback
     SolveError,
     NonlinearTermError,  # a nonlinear model under backward Euler: the message names the fix (use MOL)
     NotImplementedError,
@@ -213,6 +224,50 @@ def load_pair(math_path: Path, geometry_path: Path, *, fmt: str = "auto") -> Mod
     )
 
 
+def load_simtask(path: Path) -> ModelInput:
+    """Load a VCell SimulationTask: this job's math (its parameter-scan point applied) and geometry, and
+    the simulation's settings as the run's defaults (ADR 011 §2). Refuses what the solver would
+    mis-solve (moving boundaries, field data, steady tasks, a non-zero start time)."""
+
+    task = read_simtask(path)
+    for warning in check_supported(task):
+        _log(f"warning: {warning}")
+    gd, md = _import_vcell(task.geometry, task.math)
+    times = task.output_times()
+    options = task.fenicsx
+    if task.num_processors > 1 and MPI.COMM_WORLD.size == 1:
+        _log(f"note: the task asks for {task.num_processors} processors; launch under mpiexec to use them")
+    provenance: dict[str, Any] = {
+        "kind": "simtask",
+        "file": str(path),
+        "simulation": task.sim_name,
+        "sim_key": task.sim_key,
+        "job_index": task.job_index,
+        "task_id": task.task_id,
+        "solver": task.solver,
+        "math_overrides": task.resolved_overrides,
+        "number_processors": task.num_processors,
+    }
+    max_size = options.max_element_size if options is not None else None
+    return ModelInput(
+        geometry=gd,
+        math=md,
+        source="simtask",
+        provenance=provenance,
+        suggested_t_final=times[-1],
+        suggested_h=max_size if max_size is not None else _h_from_mesh_size(gd, task.mesh_size),
+        suggested_output_times=times,
+        suggested_dt=task.dt_default,
+        suggested_rtol=task.rel_tol,
+        suggested_atol=task.abs_tol,
+        suggested_fe_degree=options.element_degree if options is not None else None,
+        # Real VCell kinetics are routinely nonlinear, which backward Euler cannot lower (ADR 011 §2).
+        suggested_time_integration=(options.time_integration if options is not None else None) or "method_of_lines",
+        suggested_out_dir=path.resolve().parent,
+        suggested_prefix=task.job_prefix,
+    )
+
+
 def _import_vcell(vcml_geometry: Any, vcml_math: Any) -> tuple[GeometryDescription, MathDescription]:
     """VCell geometry + math → the formalism pair, in the geometry's own frame.
 
@@ -250,25 +305,49 @@ def _h_from_mesh_size(gd: GeometryDescription, mesh_size: Sequence[int] | None) 
 def resolve_options(model: ModelInput, args: argparse.Namespace) -> RunOptions:
     """Merge explicit flags over the source's own suggestions over the built-in defaults."""
 
-    t_final = args.t_final if args.t_final is not None else model.suggested_t_final
+    return _resolve(model, args)[0]
+
+
+def _resolve(model: ModelInput, args: argparse.Namespace) -> tuple[RunOptions, dict[str, Any]]:
+    """:func:`resolve_options`, plus which settings an explicit flag took over from the model
+    (recorded in the bundle manifest as ``solver.overrides``)."""
+
+    overrides: dict[str, Any] = {}
+
+    def pick(name: str, flag: Any, suggested: Any, default: Any) -> Any:
+        if flag is not None:
+            if suggested is not None and flag != suggested:
+                overrides[name] = {"flag": flag, "model": suggested}
+                _log(f"--{name.replace('_', '-')} {flag} overrides the model's {suggested}")
+            return flag
+        return suggested if suggested is not None else default
+
+    t_final = pick("t_final", args.t_final, model.suggested_t_final, None)
     if t_final is None:
         raise CliError("--t-final is required (the model carries no simulation duration)")
     if t_final <= 0.0:
         raise CliError(f"--t-final must be positive, got {t_final}")
 
-    output_dt = args.output_dt if args.output_dt is not None else model.suggested_output_dt
-    if output_dt is None or output_dt > t_final:
-        output_dt = t_final
-    if output_dt <= 0.0:
-        raise CliError(f"--output-dt must be positive, got {output_dt}")
+    # The output schedule: an explicit --t-final/--output-dt makes it uniform; otherwise the model's
+    # own schedule (a SimulationTask's, possibly non-uniform) is kept as is.
+    if model.suggested_output_times is not None and args.t_final is None and args.output_dt is None:
+        output_times = model.suggested_output_times
+    else:
+        output_dt = pick("output_dt", args.output_dt, model.suggested_output_dt, None)
+        if output_dt is None or output_dt > t_final:
+            output_dt = t_final
+        if output_dt <= 0.0:
+            raise CliError(f"--output-dt must be positive, got {output_dt}")
+        output_times = uniform_output_times(float(t_final), float(output_dt))
 
     # dt defaults to the output interval — one step per snapshot. That is a *coarse* backward-Euler
     # step for anything stiff, so it is reported in the run header and in summary.json.
-    dt = args.dt if args.dt is not None else output_dt
+    smallest_interval = min(b - a for a, b in pairwise(output_times))
+    dt = pick("dt", args.dt, model.suggested_dt, smallest_interval)
     if dt <= 0.0:
         raise CliError(f"--dt must be positive, got {dt}")
 
-    h = args.h if args.h is not None else model.suggested_h
+    h = pick("h", args.h, model.suggested_h, None)
     if h is None:
         # Scale-aware fallback: ~32 elements across the narrowest spatial axis. An absolute
         # default would be meaningless for a geometry measured in µm vs cm.
@@ -277,17 +356,24 @@ def resolve_options(model: ModelInput, args: argparse.Namespace) -> RunOptions:
     if h <= 0.0:
         raise CliError(f"--h must be positive, got {h}")
 
-    if args.time_integration not in ("backward_euler", "method_of_lines"):
-        raise CliError(f"--time-integration must be backward_euler or method_of_lines, got {args.time_integration!r}")
+    fe_degree = pick("fe_degree", args.fe_degree, model.suggested_fe_degree, 1)
+    time_integration = pick(
+        "time_integration", args.time_integration, model.suggested_time_integration, "backward_euler"
+    )
+    if time_integration not in ("backward_euler", "method_of_lines"):
+        raise CliError(f"--time-integration must be backward_euler or method_of_lines, got {time_integration!r}")
 
-    return RunOptions(
+    options = RunOptions(
         h=float(h),
         dt=float(dt),
-        t_final=float(t_final),
-        output_times=uniform_output_times(float(t_final), float(output_dt)),
-        fe_degree=int(args.fe_degree),
-        time_integration=str(args.time_integration),
+        t_final=float(output_times[-1]),
+        output_times=tuple(float(t) for t in output_times),
+        fe_degree=int(fe_degree),
+        time_integration=str(time_integration),
+        rtol=float(model.suggested_rtol) if model.suggested_rtol is not None else 1.0e-6,
+        atol=float(model.suggested_atol) if model.suggested_atol is not None else 1.0e-8,
     )
+    return options, overrides
 
 
 # ---------------------------------------------------------------------------
@@ -302,11 +388,15 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
+            "  vcell-fenics --simtask SimID_123_0__0.simtask.xml\n"
             "  vcell-fenics --vcml model.vcml --out results\n"
             "  vcell-fenics --math m_math.yaml --geometry m_geom.yaml --t-final 1.0 --out results\n"
         ),
     )
     source = parser.add_argument_group("model input")
+    source.add_argument(
+        "--simtask", type=Path, help="a VCell SimulationTask document (SimID_<key>_<job>__<task>.simtask.xml)"
+    )
     source.add_argument("--vcml", type=Path, help="a VCell biomodel (.vcml)")
     source.add_argument("--math", type=Path, help="math description YAML (native formalism or VCell/pyvcell)")
     source.add_argument("--geometry", type=Path, help="geometry description YAML, in the same formalism as --math")
@@ -324,20 +414,23 @@ def build_parser() -> argparse.ArgumentParser:
     discretisation.add_argument("--dt", type=float, help="time step (backward Euler); default: --output-dt")
     discretisation.add_argument("--t-final", type=float, help="end time")
     discretisation.add_argument("--output-dt", type=float, help="interval between written snapshots")
-    discretisation.add_argument("--fe-degree", type=int, default=1, help="Lagrange degree (default: 1)")
+    discretisation.add_argument("--fe-degree", type=int, help="Lagrange degree (default: the model's, else 1)")
     discretisation.add_argument(
         "--time-integration",
         choices=("backward_euler", "method_of_lines"),
-        default="backward_euler",
-        help="fixed-step backward Euler, or adaptive PETSc TS (BDF; required for nonlinear kinetics)",
+        help=(
+            "fixed-step backward Euler, or adaptive PETSc TS (BDF; required for nonlinear kinetics). "
+            "Default: method_of_lines for a --simtask, else backward_euler"
+        ),
     )
 
     output = parser.add_argument_group("output")
-    output.add_argument("--out", type=Path, default=Path("out"), help="results directory (default: ./out)")
+    output.add_argument(
+        "--out", type=Path, help="results directory (default: the --simtask's own directory, else ./out)"
+    )
     output.add_argument(
         "--output-prefix",
-        default="results",
-        help="the bundle is written to <--out>/<prefix>.fenics (default: results)",
+        help="the bundle is <--out>/<prefix>.fenics (default: SimID_<key>_<job>_ for a --simtask, else results)",
     )
     output.add_argument(
         "--no-fields", action="store_true", help="write the meshes and per-time statistics only, no field arrays"
@@ -347,12 +440,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_model(args: argparse.Namespace) -> ModelInput:
+    if args.simtask is not None:
+        if args.vcml is not None or args.math is not None or args.geometry is not None:
+            raise CliError("--simtask, --vcml and --math/--geometry are alternatives; pass one of them")
+        return load_simtask(args.simtask)
     if args.vcml is not None:
         if args.math is not None or args.geometry is not None:
             raise CliError("--vcml and --math/--geometry are alternatives; pass one or the other")
         return load_vcml(args.vcml, application=args.application, simulation=args.simulation)
     if args.math is None or args.geometry is None:
-        raise CliError("give a model: --vcml FILE, or --math FILE --geometry FILE")
+        raise CliError("give a model: --simtask FILE, --vcml FILE, or --math FILE --geometry FILE")
     return load_pair(args.math, args.geometry, fmt=args.format)
 
 
@@ -361,8 +458,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         model = load_model(args)
         _log(f"loaded {model.source} model: {model.provenance}")
-        options = resolve_options(model, args)
-        summary = run_model(model, options, args.out, prefix=args.output_prefix, write_fields=not args.no_fields)
+        options, overrides = _resolve(model, args)
+        out = args.out or model.suggested_out_dir or Path("out")
+        prefix = args.output_prefix or model.suggested_prefix or "results"
+        summary = run_model(
+            model, options, out, prefix=prefix, write_fields=not args.no_fields, flag_overrides=overrides
+        )
     except CliError as error:
         _fail(str(error), args.traceback)
         return 2

@@ -4,7 +4,7 @@ Follows the reader rules: the manifest's ``times`` (per segment, ``count``) says
 arrays are preallocated and unwritten rows read as NaN — and a bundle with a newer ``schema`` is
 refused. Safe to use while the run is still writing (it re-reads the manifest on :meth:`Bundle.refresh`).
 
-    python -m vcell_fenics.results.reader BUNDLE [--require-status completed] [--json]
+    python -m vcell_fenics.results BUNDLE [--require-status completed] [--json]
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ def _summary(bundle: Bundle) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m vcell_fenics.results.reader", description=__doc__)
+    parser = argparse.ArgumentParser(prog="python -m vcell_fenics.results", description=__doc__)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--require-status", choices=("running", "completed", "failed"))
     parser.add_argument("--json", action="store_true", help="print the summary as JSON")
