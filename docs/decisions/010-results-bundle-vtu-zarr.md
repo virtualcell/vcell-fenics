@@ -1,8 +1,7 @@
 # ADR 010 — Results are a VTU + zarr bundle; moving meshes extend it with segments
 
 **Date:** 2026-09-22
-**Status:** Accepted (format choice confirmed by the user). The encoding details in §3 are pending
-the step-2 spike; its results go in §6.
+**Status:** Accepted (format choice confirmed by the user); encoding validated by the step-2 spike (§6).
 **Context doc:** [`docs/integration/vcell-solver-integration.md`](../integration/vcell-solver-integration.md)
 
 ## Context
@@ -128,12 +127,45 @@ Why this over VTKHDF, the strongest standard:
 - `(1, N)` chunks mean T files per variable. That's fine for tens to hundreds of outputs; revisit
   (rows per chunk, or zarr v3 sharding) if runs emit thousands of outputs to NFS.
 
-## 6. Validated by spike
+## 6. Validated by spike (2026-09-22)
 
-*Pending — step 2 of the integration plan.* To record:
-- how zarr-python 3 spells `zarr_format=2` + zlib;
-- the stdlib decode round-trip;
-- pyvcell's zarr 2.18 reading the bundle;
-- a `VtuGridParser` port accepting the VTU;
-- `TS.interpolate` output-time accuracy;
-- MPI point-order parity.
+`scripts/spike_results_bundle.py`, run serially and under `mpiexec -n 2` / `-n 3`, with
+zarr-python 3.4.0, numcodecs 0.16.5, VTK 9.6.1 and DOLFINx 0.10.0. Every check passes.
+
+- **(a) zarr v2 from zarr-python 3.**
+  `zarr.open_group(path, mode="w", zarr_format=2)` then
+  `group.create_array(name, shape, chunks=(1, N), dtype="<f8", compressors=numcodecs.Zlib(level=1), fill_value=np.nan, order="C")`
+  writes this `.zarray`:
+  `{"compressor": {"id": "zlib", "level": 1}, "dtype": "<f8", "order": "C", "fill_value": "NaN", "filters": null, "dimension_separator": "."}`.
+  Chunk keys are `"<row>.0"`.
+- **(b) Stdlib decode.** `zlib.decompress` + `np.frombuffer("<f8")` round-trips exactly. A
+  preallocated but unwritten row has **no chunk file**, which confirms that readers must go by
+  `manifest.times`, not by array shape.
+- **(c) pyvcell's zarr 2.18.7** (`../pyvcell/.venv`) opens the group, reads values, and returns NaN
+  for the unwritten row.
+- **(d) VTU.** `vtkXMLUnstructuredGridWriter` with `SetDataModeToBinary`,
+  `SetCompressorTypeToNone`, `SetHeaderTypeToUInt32` and `SetByteOrderToLittleEndian` produces
+  files a faithful port of `VtuGridParser.parse` accepts. Each DataArray is one base64 block with a
+  UInt32 byte-count header, and there is no `compressor` attribute. Checked for triangle (5),
+  tetra (10) and line (3) cells.
+  - Line cells *parse* but VCell can't use them yet: `VtuGridParser.cellMeasures` / `locateCell`
+    have no `VTK_LINE` case. This is in the ADR 011 follow-up.
+- **(e) Output times.** PETSc TS BDF with a monitor that calls `ts.interpolate(t_k, work)` records
+  every output time.
+  - The monitor's solution Vec is locked, so it must be read with `getArray(readonly=True)`.
+  - Interpolated values carry the same error as the solver's own steps (2.89e-4 against 2.85e-4
+    when stepping exactly to each output time, for y′ = −ky to t = 2 at rtol = atol = 1e-8). The
+    monitor leaves the step sequence unchanged (691 steps with or without it).
+  - The stride fallback costs few extra steps on this problem (696), so it's a cheap fallback.
+    Interpolation stays the default because it never perturbs the step sequence.
+  - Note that the global error exceeds rtol; that's time-integration error, not interpolation error.
+- **(f) Point order.** Keying owned P1 dofs by `mesh.geometry.input_global_indices` and sorting on
+  rank 0 gives identical points and identical (canonicalized) cells in serial, n=2 and n=3. This
+  holds for a volume mesh and for a boundary-facet submesh, confirming that DOLFINx 0.10 carries
+  input indices through `create_submesh`.
+  - This holds only when the mesh *input* is not replicated across ranks. See the step-3 check
+    on `realize()`.
+
+Dependencies added: `zarr >=3.1,<4` (conda-forge; brings numcodecs) and `vtk 9.6.*` (was
+transitive via pyvista). `linux-aarch64` re-solved on the way (VTK 9.6.2 there vs 9.6.1 on the
+other platforms); `osx-arm64` and `linux-64` changes were purely additive.

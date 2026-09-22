@@ -132,7 +132,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 |---|---|---|---|
 | 0 | This tracking document | ☑ | |
 | 1 | ADR 010 (results bundle) + ADR 011 (VCell solver contract, incl. Java follow-up) | ☑ | ADR 010 §6 awaits the step-2 spike |
-| 2 | Spike: zarr v2 via zarr-python 3, VTU encoding vs `VtuGridParser`, `TS.interpolate` output hooks, MPI point-order keys | ☐ | results recorded in ADR 010 |
+| 2 | Spike: zarr v2 via zarr-python 3, VTU encoding vs `VtuGridParser`, `TS.interpolate` output hooks, MPI point-order keys | ☑ | all 13 checks pass; ADR 010 §6 |
 | 3 | MPI-correct `realize()` (confirm the suspected mesh duplication with a test first) + `NonlinearTermError` as a user error | ☐ | |
 | 4 | Output-time hooks in the MOL and interface-coupled integrators | ☐ | |
 | 5 | `results/` package: schema, VTU writer/strict reader, P1 gather, bundle writer, recorder, reader | ☐ | |
@@ -290,6 +290,17 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — Step 2: the spike (`scripts/spike_results_bundle.py`) passes all 13 checks.
+  - zarr-python 3.4 writes clean v2 arrays with a zlib compressor, which stdlib and pyvcell's
+    zarr 2.18 both read.
+  - The vtk writer's binary, uncompressed, UInt32-header VTU parses like `VtuGridParser`.
+  - `TS.interpolate` at output times is as accurate as stepping exactly to each one and leaves the
+    step sequence unchanged.
+  - `input_global_indices` keys give identical points and cells at n = 1, 2, 3, for volume and
+    submesh.
+
+  Added `zarr >=3.1,<4` and `vtk 9.6.*`; mypy learned `numcodecs` and `vtkmodules`. Because zarr
+  now ships types, `mms/runner_fv.py` needed a `cast` on pyvcell's `Group | Array` return.
 - **2026-09-22** — Step 1: ADR 010 (VTU + zarr bundle, schema 1, segments reserved) and ADR 011
   (SimulationTask contract, status protocol verified against `entrypoint.sh` and `LangevinNoVis01`'s
   `VCellMessagingRest` tests, container contract, Java follow-up) written.

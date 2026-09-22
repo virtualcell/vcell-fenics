@@ -86,6 +86,8 @@ scikit-image = "*"
 # package so pyvcell's pydantic requirement resolves from conda-forge, not a PyPI wheel.
 pydantic = ">=2.10,<3"
 netgen = ">=6.2.2602,<7"
+zarr = ">=3.1,<4"
+vtk = "9.6.*"
 
 [tool.pixi.feature.dev.dependencies]
 pytest = "*"
@@ -207,7 +209,7 @@ warn_unused_ignores = true
 # call. Exclude those packages from *that one* check while keeping every other
 # real check against their types. See ADR 005; the whole stack was previously
 # follow_imports="skip" (all Any), which also hid genuine type errors in our code.
-untyped_calls_exclude = ["ufl", "basix", "dolfinx", "pyvista", "scifem", "dolfinx_mpc", "skimage"]
+untyped_calls_exclude = ["ufl", "basix", "dolfinx", "pyvista", "scifem", "dolfinx_mpc", "skimage", "vtkmodules"]
 
 [[tool.mypy.overrides]]
 # These packages either ship no types (gmsh, meshio) or partly-wrong ones;
@@ -229,6 +231,8 @@ module = [
     "scipy.*",
     "skimage",
     "skimage.*",
+    "numcodecs",
+    "numcodecs.*",
 ]
 ignore_missing_imports = true
 
