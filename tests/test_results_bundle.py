@@ -186,6 +186,18 @@ def test_rows_become_visible_only_through_the_manifest(tmp_path: Path) -> None:
         bundle.field("cyto", "u", 2)
 
 
+def test_a_bundle_appears_complete_or_not_at_all(tmp_path: Path) -> None:
+    """open() builds in a staging directory and renames it into place: no half-made bundle is ever
+    visible, and a previous bundle at the path is replaced."""
+
+    path = tmp_path / "b.fenics"
+    _write_disk_bundle(path, [0.0, 1.0])
+    first = Bundle.open(path).manifest.updated
+    _write_disk_bundle(path, [0.0])  # a re-run replaces it
+    assert Bundle.open(path).times == (0.0,) and Bundle.open(path).manifest.updated >= first
+    assert [p.name for p in tmp_path.iterdir()] == ["b.fenics"]  # no staging directory left behind
+
+
 def test_preallocated_rows_read_as_nan(tmp_path: Path) -> None:
     geometry = realize(_disk(), h=0.3)
     path = tmp_path / "b.fenics"

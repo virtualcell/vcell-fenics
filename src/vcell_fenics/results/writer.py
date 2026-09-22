@@ -98,37 +98,46 @@ class BundleWriter:
         self._domains[domain].variables.append(name)
 
     def open(self) -> None:
-        """Create the bundle: remove any previous one at ``path``, write each domain's VTU, preallocate
-        the arrays, and publish the manifest with ``status: running`` and no times (collective)."""
+        """Create the bundle: write each domain's VTU, preallocate the arrays, and publish the manifest
+        with ``status: running`` and no times (collective).
+
+        The bundle appears **atomically**: it is built in a hidden staging directory beside ``path`` and
+        renamed into place only once its manifest is written, so a reader polling ``path`` sees either
+        no bundle or a complete one — never zarr's placeholder ``.zattrs`` without a manifest. A previous
+        bundle at ``path`` is replaced."""
 
         if self._comm.rank == 0:
             import numcodecs
             import zarr
 
-            if self.path.exists():
-                shutil.rmtree(self.path)
-            group = zarr.open_group(str(self.path), mode="w", zarr_format=2)
+            staging = self.path.parent / f".{self.path.name}.staging-{os.getpid()}"
+            if staging.exists():
+                shutil.rmtree(staging)
+            group = zarr.open_group(str(staging), mode="w", zarr_format=2)
             n_rows = len(self._planned)
+            array_paths: dict[tuple[str, str], tuple[str | None, str]] = {}
             for name, domain in self._domains.items():
-                (self.path / "mesh").mkdir(exist_ok=True)
+                (staging / "mesh").mkdir(exist_ok=True)
                 points, cells = domain.layout.points(), domain.layout.cells()
                 assert points is not None and cells is not None
-                write_vtu(self.path / "mesh" / f"{name}.vtu", points, cells, domain.layout.vtk_type)
+                write_vtu(staging / "mesh" / f"{name}.vtu", points, cells, domain.layout.vtk_type)
                 for variable in domain.variables:
-                    key = (name, variable)
-                    if self._write_fields:
-                        self._arrays[key] = _create(
-                            group, f"{name}/{variable}", (n_rows, domain.layout.n_points), ("time", "point"), numcodecs
-                        )
-                    self._stats[key] = _create(
-                        group,
-                        f"stats/{name}/{variable}",
-                        (n_rows, len(STATS_COLUMNS)),
-                        ("time", "statistic"),
-                        numcodecs,
-                    )
+                    field_path = f"{name}/{variable}" if self._write_fields else None
+                    stats_path = f"stats/{name}/{variable}"
+                    if field_path is not None:
+                        _create(group, field_path, (n_rows, domain.layout.n_points), ("time", "point"), numcodecs)
+                    _create(group, stats_path, (n_rows, len(STATS_COLUMNS)), ("time", "statistic"), numcodecs)
+                    array_paths[(name, variable)] = (field_path, stats_path)
             self._manifest = self._initial_manifest()
-            self._publish()
+            self._publish(staging)
+            if self.path.exists():
+                shutil.rmtree(self.path)
+            os.rename(staging, self.path)
+            final = zarr.open_group(str(self.path), mode="r+", zarr_format=2)
+            for key, (field_path, stats_path) in array_paths.items():
+                if field_path is not None:
+                    self._arrays[key] = final[field_path]
+                self._stats[key] = final[stats_path]
         self._comm.barrier()
 
     # -- per output time ----------------------------------------------------------------------------
@@ -249,22 +258,23 @@ class BundleWriter:
             for array in arrays.values():
                 array.resize((rows, *array.shape[1:]))
 
-    def _publish(self) -> None:
+    def _publish(self, root: Path | None = None) -> None:
         """Replace the root ``.zattrs`` atomically with the current manifest."""
 
         manifest = self._require_manifest()
+        directory = self.path if root is None else root
         document = json.dumps(manifest_to_attrs(manifest), indent=1, sort_keys=True)
-        handle, temp = tempfile.mkstemp(dir=self.path, prefix=".zattrs.", suffix=".tmp")
+        handle, temp = tempfile.mkstemp(dir=directory, prefix=".zattrs.", suffix=".tmp")
         try:
             with os.fdopen(handle, "w") as stream:
                 stream.write(document)
-            os.replace(temp, self.path / ".zattrs")
+            os.replace(temp, directory / ".zattrs")
         except BaseException:
             Path(temp).unlink(missing_ok=True)
             raise
 
 
-def _create(group: Any, path: str, shape: tuple[int, int], dims: tuple[str, str], numcodecs: Any) -> Any:
+def _create(group: Any, path: str, shape: tuple[int, int], dims: tuple[str, str], numcodecs: Any) -> None:
     array = group.create_array(
         path,
         shape=shape,
@@ -275,7 +285,6 @@ def _create(group: Any, path: str, shape: tuple[int, int], dims: tuple[str, str]
         order="C",
     )
     array.attrs["_ARRAY_DIMENSIONS"] = list(dims)  # the xarray convention, so xarray can open the bundle
-    return array
 
 
 def _check_name(name: str) -> None:
