@@ -1,0 +1,339 @@
+{
+  "$defs": {
+    "DomainInfo": {
+      "description": "One VCell domain (a CompartmentSubDomain or MembraneSubDomain) and its mesh file.",
+      "properties": {
+        "cell_type": {
+          "title": "Cell Type",
+          "type": "integer"
+        },
+        "dim": {
+          "title": "Dim",
+          "type": "integer"
+        },
+        "gdim": {
+          "title": "Gdim",
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "volume",
+            "membrane"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "mesh": {
+          "title": "Mesh",
+          "type": "string"
+        },
+        "n_cells": {
+          "title": "N Cells",
+          "type": "integer"
+        },
+        "n_points": {
+          "title": "N Points",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "dim",
+        "gdim",
+        "mesh",
+        "n_points",
+        "n_cells",
+        "cell_type"
+      ],
+      "title": "DomainInfo",
+      "type": "object"
+    },
+    "Segment": {
+      "description": "A run of output rows sharing one mesh topology. A fixed-mesh run is exactly one segment with an\nempty prefix; a remesh starts a new segment whose meshes and arrays live under ``prefix``.",
+      "properties": {
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "motion": {
+          "default": "none",
+          "enum": [
+            "none",
+            "ale"
+          ],
+          "title": "Motion",
+          "type": "string"
+        },
+        "prefix": {
+          "default": "",
+          "title": "Prefix",
+          "type": "string"
+        },
+        "t0": {
+          "title": "T0",
+          "type": "number"
+        }
+      },
+      "required": [
+        "index",
+        "t0",
+        "count"
+      ],
+      "title": "Segment",
+      "type": "object"
+    },
+    "SolverInfo": {
+      "properties": {
+        "dolfinx": {
+          "title": "Dolfinx",
+          "type": "string"
+        },
+        "mpi_ranks": {
+          "title": "Mpi Ranks",
+          "type": "integer"
+        },
+        "options": {
+          "additionalProperties": true,
+          "title": "Options",
+          "type": "object"
+        },
+        "overrides": {
+          "additionalProperties": true,
+          "title": "Overrides",
+          "type": "object"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "dolfinx",
+        "mpi_ranks"
+      ],
+      "title": "SolverInfo",
+      "type": "object"
+    },
+    "SourceInfo": {
+      "description": "Where the model came from \u2014 for a VCell run, the SimulationTask identity.",
+      "properties": {
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "job_index": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Job Index"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "sim_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sim Key"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Id"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "SourceInfo",
+      "type": "object"
+    },
+    "VariableInfo": {
+      "description": "A field on one domain: P1 point data whose columns follow the domain VTU's point order.",
+      "properties": {
+        "assoc": {
+          "const": "point",
+          "default": "point",
+          "title": "Assoc",
+          "type": "string"
+        },
+        "domain": {
+          "title": "Domain",
+          "type": "string"
+        },
+        "element": {
+          "default": "P1",
+          "title": "Element",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "stats": {
+          "title": "Stats",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "domain",
+        "path",
+        "stats"
+      ],
+      "title": "VariableInfo",
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/virtualcell/vcell-fenics/docs/results-bundle.schema.json",
+  "properties": {
+    "domains": {
+      "additionalProperties": {
+        "$ref": "#/$defs/DomainInfo"
+      },
+      "title": "Domains",
+      "type": "object"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Message"
+    },
+    "planned_times": {
+      "items": {
+        "type": "number"
+      },
+      "title": "Planned Times",
+      "type": "array"
+    },
+    "profile": {
+      "default": "fixed",
+      "enum": [
+        "fixed",
+        "segmented"
+      ],
+      "title": "Profile",
+      "type": "string"
+    },
+    "progress": {
+      "default": 0.0,
+      "title": "Progress",
+      "type": "number"
+    },
+    "schema": {
+      "title": "Schema",
+      "type": "integer"
+    },
+    "segments": {
+      "items": {
+        "$ref": "#/$defs/Segment"
+      },
+      "title": "Segments",
+      "type": "array"
+    },
+    "solver": {
+      "$ref": "#/$defs/SolverInfo"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceInfo"
+    },
+    "stats_columns": {
+      "default": [
+        "mean",
+        "total",
+        "min",
+        "max"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "title": "Stats Columns",
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "running",
+        "completed",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "times": {
+      "items": {
+        "type": "number"
+      },
+      "title": "Times",
+      "type": "array"
+    },
+    "updated": {
+      "title": "Updated",
+      "type": "string"
+    },
+    "variables": {
+      "items": {
+        "$ref": "#/$defs/VariableInfo"
+      },
+      "title": "Variables",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "status",
+    "times",
+    "planned_times",
+    "segments",
+    "domains",
+    "variables",
+    "solver",
+    "source",
+    "updated"
+  ],
+  "title": "vcell-fenics results bundle manifest (schema 1)",
+  "type": "object"
+}

@@ -1,6 +1,8 @@
 # vcell-fenics as a VCell solver — design and progress
 
-**Started:** 2026-09-22 · **Branch:** `vcell-solver-integration` (stacked on `container-runner`)
+**Started:** 2026-09-22 · **Workflow:** one small, fully-gated PR per step, stacked in order
+(`container-runner` → `vcell-solver-design` → `realize-mpi` → `mol-output-times` → `results-bundle` → …);
+work continues on the local `vcell-solver-integration` branch.
 **Status:** in progress — see [Progress](#progress). This is a living document: update the status
 table and the progress log as steps land.
 
@@ -135,7 +137,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | 2 | Spike: zarr v2 via zarr-python 3, VTU encoding vs `VtuGridParser`, `TS.interpolate` output hooks, MPI point-order keys | ☑ | all 13 checks pass; ADR 010 §6 |
 | 3 | MPI-correct `realize()` (confirm the suspected mesh duplication with a test first) + `NonlinearTermError` as a user error | ☑ | two real bugs: crash + lost partition-boundary membrane facets; `tests/test_realize_mpi.py` |
 | 4 | Output-time hooks in the MOL and interface-coupled integrators | ☑ | `backend/output_times.py`; steps unperturbed |
-| 5 | `results/` package: schema, VTU writer/strict reader, P1 gather, bundle writer, recorder, reader | ☐ | |
+| 5 | `results/` package: schema, VTU writer/strict reader, P1 gather, bundle writer, recorder, reader | ☑ | byte-identical VTU at n = 1, 2, 3 |
 | 6 | Move run logic into `runner.py`; every input kind writes the bundle (XDMF → export) | ☐ | |
 | 7 | SimulationTask adapter + MathOverrides/scans + `--simtask` | ☐ | |
 | 8 | Status protocol: stdout markers, REST WorkerEvents, exit codes, SIGTERM | ☐ | |
@@ -288,6 +290,20 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — Step 5: the `results/` package.
+  - **Schema:** a manifest dataclass plus a pydantic `TypeAdapter`; it ignores unknown keys and
+    refuses a newer schema. The published JSON Schema is `docs/results-bundle.schema.json`, kept
+    current by a test.
+  - **VTU:** written with the VTK writer and a strict `VtuGridParser` mirror to read it back.
+  - **`P1Layout`:** a canonical point and cell order, with cells sorted and positively oriented.
+  - **`BundleWriter`:** zarr v2, zlib, `(1, N)` chunks, xarray `_ARRAY_DIMENSIONS`, and an atomic
+    manifest published after each row lands.
+  - **`BundleRecorder`:** P1 interpolation and MPI-reduced statistics for any number of domains.
+  - **`Bundle` reader:** with a `--require-status` CLI.
+  - **Finding:** `tabulate_dof_coordinates` differs by an ulp between partitions (it pushes a
+    reference point through whichever cell it meets last), so point coordinates come from
+    `geometry.x` via the dof→node map. With that change, bundles written at n = 2 and 3 have
+    byte-identical VTUs and equal fields.
 - **2026-09-22** — Step 4: `backend/output_times.py` adds an `OutputMonitor`, a TS monitor that
   records each output time as it is crossed.
   - It uses `TSInterpolate`, or a plain copy when a step lands exactly on the time, into a separate
