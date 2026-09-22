@@ -4,8 +4,8 @@
 **Status:** in progress — see [Progress](#progress). This is a living document: update the status
 table and the progress log as steps land.
 
-Related records: [ADR 010 — results bundle](../decisions/010-results-bundle-vtu-zarr.md) (step 1),
-[ADR 011 — VCell solver contract](../decisions/011-vcell-solver-contract.md) (step 1),
+Related records: [ADR 010 — results bundle](../decisions/010-results-bundle-vtu-zarr.md),
+[ADR 011 — VCell solver contract](../decisions/011-vcell-solver-contract.md),
 [`docker/README.md`](../../docker/README.md) (container reference).
 
 ## Goal
@@ -131,7 +131,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | # | Step | Status | Notes / commit |
 |---|---|---|---|
 | 0 | This tracking document | ☑ | |
-| 1 | ADR 010 (results bundle) + ADR 011 (VCell solver contract, incl. Java follow-up) | ☐ | |
+| 1 | ADR 010 (results bundle) + ADR 011 (VCell solver contract, incl. Java follow-up) | ☑ | ADR 010 §6 awaits the step-2 spike |
 | 2 | Spike: zarr v2 via zarr-python 3, VTU encoding vs `VtuGridParser`, `TS.interpolate` output hooks, MPI point-order keys | ☐ | results recorded in ADR 010 |
 | 3 | MPI-correct `realize()` (confirm the suspected mesh duplication with a test first) + `NonlinearTermError` as a user error | ☐ | |
 | 4 | Output-time hooks in the MOL and interface-coupled integrators | ☐ | |
@@ -290,6 +290,9 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — Step 1: ADR 010 (VTU + zarr bundle, schema 1, segments reserved) and ADR 011
+  (SimulationTask contract, status protocol verified against `entrypoint.sh` and `LangevinNoVis01`'s
+  `VCellMessagingRest` tests, container contract, Java follow-up) written.
 - **2026-09-22** — Discovery and design done (three codebase surveys, one design pass). Decisions
   confirmed with the user: VTU + zarr for fixed meshes, segments for moving/remeshed meshes, adapter
   parsing in vcell-fenics, scope = docs + vcell-fenics side. This document created (step 0).
