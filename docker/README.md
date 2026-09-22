@@ -1,0 +1,163 @@
+# Running vcell-fenics in a container
+
+A single image that solves either kind of model — a **VCell** biomodel or a **native
+vcell-fenics** description — and writes the results into a directory you mount.
+
+```bash
+docker build -f docker/Dockerfile -t vcell-fenics .
+```
+
+The image installs the repository's own `pixi.lock` with `--locked`, so it runs the exact
+DOLFINx 0.10 / PETSc / Netgen builds the test suite runs against. It builds natively on
+x86-64 and on arm64 (Apple silicon, Graviton); both platforms are in the lock.
+
+### If the build fails part-way through the download
+
+The environment is ~700 conda packages, and a flaky or filtered egress path shows up as a
+*late* `failed to fetch <some package>` / `tcp connect error` rather than an immediate error —
+a different package each time, which is the tell that the lock is fine and the network is not.
+The build already limits itself to 8 concurrent connections and retries four times, resuming
+from the BuildKit cache mount each attempt (each retry gets meaningfully further). If it still
+fails, raise the retries and rerun — nothing already downloaded is fetched twice:
+
+```bash
+docker build -f docker/Dockerfile --build-arg PIXI_DOWNLOAD_RETRIES=10 -t vcell-fenics .
+```
+
+If *every* attempt dies that way, the fetch is not reaching the network at all. Check egress
+from a container directly:
+
+```bash
+docker run --rm alpine wget -O /dev/null https://conda.anaconda.org/conda-forge/noarch/repodata.json
+```
+
+Two causes account for nearly all of it, and both live in the VM rather than in this build:
+
+- **No working IPv6 route.** `conda.anaconda.org` publishes A *and* AAAA records
+  (`docker run --rm alpine nslookup conda.anaconda.org` shows both). A VM that resolves AAAA
+  but cannot route it hangs on each connect until it times out, so downloads die late and on a
+  different package every run. The build already prefers IPv4 via `/etc/gai.conf`; if that is
+  not enough, disable IPv6 for the VM in Docker Desktop → **Settings → Resources → Network**.
+- **A proxy or VPN the host uses but the VM does not** — Docker Desktop →
+  **Settings → Resources → Proxies**.
+
+## Run a model
+
+Mount the directory holding your model read-only, and a results directory at `/work/out`
+(the runner's default output path):
+
+```bash
+mkdir -p results
+
+# 1. A VCell biomodel. Duration, output interval and mesh size come from the .vcml's own
+#    simulation, so no other flags are needed.
+docker run --rm \
+  -v "$PWD/models:/models:ro" \
+  -v "$PWD/results:/work/out" \
+  vcell-fenics --vcml /models/my_biomodel.vcml
+
+# 2. The native formalism: a MathDescription + GeometryDescription pair.
+docker run --rm \
+  -v "$PWD/models:/models:ro" \
+  -v "$PWD/results:/work/out" \
+  vcell-fenics --math /models/my_math.yaml --geometry /models/my_geom.yaml --t-final 1.0
+
+# 3. The VCell YAML pair that `scripts/parse_biomodels_to_yaml.py` produces — same flags;
+#    the formalism is detected from the file contents.
+docker run --rm -v "$PWD/models:/models:ro" -v "$PWD/results:/work/out" \
+  vcell-fenics --math /models/biomodel_123_app_math.yaml --geometry /models/biomodel_123_app_geom.yaml
+```
+
+The image ships a demo model, so you can check an installation with no files of your own:
+
+```bash
+docker run --rm -v "$PWD/results:/work/out" vcell-fenics \
+  --math /opt/vcell-fenics/examples/diffusion2d_math.yaml \
+  --geometry /opt/vcell-fenics/examples/diffusion2d_geom.yaml \
+  --t-final 1.0
+```
+
+`docker run --rm vcell-fenics --help` lists every flag.
+
+## What lands in the results directory
+
+| file | what it is |
+| --- | --- |
+| `summary.json` | the run's configuration and, per species per output time, ∫u dx, mean, min, max |
+| `fields.xdmf` + `fields.h5` | the solution time series — open the `.xdmf` in ParaView |
+| `inner.xdmf` / `outer.xdmf` | instead of `fields.*` for a two-compartment run (two meshes, two files) |
+| `math.yaml`, `geometry.yaml` | the resolved *native* formalism that was actually solved |
+
+`math.yaml` / `geometry.yaml` are the ones to read when a VCell import behaves unexpectedly:
+they are what the `.vcml` was translated into (doc §2.6), and they can be fed straight back
+into the runner with `--math`/`--geometry` to re-run or to edit-and-re-run without VCell.
+
+## File ownership
+
+The container runs as uid 1001, so on a Linux host the results are written as that uid. To
+get files owned by you:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD/results:/work/out" vcell-fenics --vcml /models/m.vcml
+```
+
+Any uid works — the JIT cache lives in a world-writable `/opt/cache`, not in `$HOME`.
+On Docker Desktop (macOS/Windows) ownership is mapped for you and the flag is unnecessary.
+
+## Parallel runs
+
+The solver is MPI-parallel; the image ships MPICH. `mpirun` is a command, so pass it directly:
+
+```bash
+docker run --rm --shm-size=1g \
+  -v "$PWD/models:/models:ro" -v "$PWD/results:/work/out" \
+  vcell-fenics mpirun -n 4 python -m vcell_fenics.cli --vcml /models/m.vcml
+```
+
+`--shm-size=1g` matters: Docker's default 64 MB of `/dev/shm` is where MPICH puts its
+shared-memory transport, and a larger mesh will exhaust it. All reported numbers are reduced
+across ranks, so an `-n 4` run's `summary.json` matches a serial one.
+
+## Choosing the discretisation
+
+Defaults are deliberately conservative rather than accurate, and the run header prints what
+was chosen:
+
+- `--h` — element size. From a `.vcml` it defaults to the finest cell spacing of the
+  simulation's own finite-volume grid (`extent / mesh_size`); otherwise to 1/32 of the
+  narrowest spatial axis. **This is the main cost knob** — halving `h` roughly quadruples the
+  2D element count and multiplies 3D by ~8.
+- `--dt` — backward-Euler step, defaulting to the output interval. That is one step per
+  snapshot, which is coarse for anything stiff; set it explicitly for production runs.
+- `--t-final`, `--output-dt` — from the `.vcml` simulation when present, else required.
+- `--time-integration method_of_lines` — adaptive PETSc TS instead of fixed-step backward
+  Euler. It integrates nonlinear reactions directly and controls its own time error, but has
+  no output-time hook, so it writes the final state only.
+- `--fe-degree 2` — quadratic elements.
+
+## Scope
+
+The runner drives the two fixed-domain paths:
+
+- **one mesh** — any number of species coupled on a single compartment or membrane;
+- **two compartments across a membrane** — the interface-coupled solve (permeability /
+  jump-condition models), cross-validated against VCell's finite-volume solver in
+  `cross_validation/`.
+
+Moving membranes (ALE), the Stokes/FSI stack, phase field, and bulk-coupled surface PDEs have
+their own drivers and are not reachable from this CLI; they report a message naming the
+limitation rather than solving something else. Stochastic/particle models are rejected at
+import by the VCell bridge, as they are out of scope for the formalism (doc §2.6.3).
+
+## Development shell
+
+```bash
+docker run --rm -it -v "$PWD:/repo" vcell-fenics bash
+```
+
+Anything after the image name that does not start with `-` is run as a command inside the
+activated environment (`bash`, `python`, `mpirun`, …); anything starting with `-` is a flag
+for the runner. The image carries the `default` pixi environment and `src/` only — no pytest,
+ruff, mypy, or gmsh (those are the `dev` environment). Run the test suite on the host with
+`pixi run -e dev test`.

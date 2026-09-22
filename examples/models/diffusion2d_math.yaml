@@ -1,0 +1,43 @@
+# Native MathDescription (docs/modeling/declarative-formalism.md): two species on one
+# 2D compartment — an off-centre Gaussian pulse of `u` that diffuses and converts to `v`,
+# which diffuses faster and decays. Natural (no-flux) boundaries on all four box faces,
+# so ∫(u + v) dx is conserved up to the decay of `v` — which is what makes the
+# `summary.json` totals a usable smoke test of a run.
+#
+# Deliberately small: this is the CLI/container demo model, not a verification case
+# (those live in mms/ and tests/).
+math_description:
+  geometry: square
+
+  subdomains:
+    - name: domain
+      kind: volume
+
+  variables:
+    - { name: u, subdomain: domain }
+    - { name: v, subdomain: domain }
+
+  equations:
+    - template: bulk_radv_diff
+      variable: u
+      subdomain: domain
+      temporality: time_dependent
+      terms:
+        diffusion: "D_u"
+        source: "-k_conv * u"
+      initial_condition: "exp(-(pow(geom.x[0] - 0.3, 2) + pow(geom.x[1], 2)) / 0.02)"
+
+    - template: bulk_radv_diff
+      variable: v
+      subdomain: domain
+      temporality: time_dependent
+      terms:
+        diffusion: "D_v"
+        source: "k_conv * u - k_decay * v"
+      initial_condition: "0.0"
+
+  parameters:
+    - { name: D_u, value: 0.1 }
+    - { name: D_v, value: 0.3 }
+    - { name: k_conv, value: 0.5 }
+    - { name: k_decay, value: 0.2 }

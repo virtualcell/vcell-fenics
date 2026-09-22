@@ -11,6 +11,12 @@ license = { file = "LICENSE.md" }
 requires-python = ">=3.12"
 authors = [{ name = "Jim Schaff" }]
 
+# The one-shot runner: a VCell (.vcml / pyvcell YAML) or native-formalism model in, solved
+# fields out. `python -m vcell_fenics.cli` works identically and is what the container image
+# uses as its entry point (docker/Dockerfile).
+[project.scripts]
+vcell-fenics = "vcell_fenics.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/vcell_fenics"]
 
@@ -24,7 +30,10 @@ packages = ["src/vcell_fenics"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-64"]
+# linux-aarch64 is here for the container image (docker/Dockerfile): Docker Desktop on an
+# Apple-silicon host is a linux/arm64 engine, so `pixi install --locked` inside the build
+# needs that platform in the lock or every build has to run emulated under QEMU.
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
 
 [tool.pixi.pypi-dependencies]
 vcell-fenics = { path = ".", editable = true }
