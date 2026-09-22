@@ -138,7 +138,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | 3 | MPI-correct `realize()` (confirm the suspected mesh duplication with a test first) + `NonlinearTermError` as a user error | ☑ | two real bugs: crash + lost partition-boundary membrane facets; `tests/test_realize_mpi.py` |
 | 4 | Output-time hooks in the MOL and interface-coupled integrators | ☑ | `backend/output_times.py`; steps unperturbed |
 | 5 | `results/` package: schema, VTU writer/strict reader, P1 gather, bundle writer, recorder, reader | ☑ | byte-identical VTU at n = 1, 2, 3 |
-| 6 | Move run logic into `runner.py`; every input kind writes the bundle (XDMF → export) | ☐ | |
+| 6 | Move run logic into `runner.py`; every input kind writes the bundle (XDMF → export) | ☑ | MOL + interface-coupled now write every output time |
 | 7 | SimulationTask adapter + MathOverrides/scans + `--simtask` | ☐ | |
 | 8 | Status protocol: stdout markers, REST WorkerEvents, exit codes, SIGTERM | ☐ | |
 | 9 | Export for ParaView (PVD / XDMF) | ☐ | |
@@ -290,6 +290,16 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — Step 6: the run logic moved from `cli.py` into `vcell_fenics.runner`
+  (`ModelInput`, `RunOptions`, the single-mesh and interface-coupled paths, coupling detection).
+  - **Output:** every input kind writes the bundle `<out>/<prefix>.fenics/` (new `--output-prefix`);
+    the XDMF output is gone. Provenance (`math.yaml`, `geometry.yaml`, `summary.json`) is under
+    `provenance/`.
+  - **Output times:** `RunOptions.output_times` replaces `output_dt`, so explicit schedules are
+    possible. Backward Euler snaps dt per output interval.
+  - **Method of lines:** now records every output time, where it used to record only t = 0 and
+    t_final. The interface-coupled path does too, including the IC: `OutputMonitor` now emits an
+    output at `t_start` from TS's step-0 monitor call.
 - **2026-09-22** — Step 5: the `results/` package.
   - **Schema:** a manifest dataclass plus a pydantic `TypeAdapter`; it ignores unknown keys and
     refuses a newer schema. The published JSON Schema is `docs/results-bundle.schema.json`, kept

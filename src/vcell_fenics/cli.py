@@ -1,4 +1,4 @@
-"""Command-line runner: a model file in, solved fields on disk.
+"""Command-line runner: a model file in, a results bundle on disk.
 
 One entry point (``python -m vcell_fenics.cli``, or the ``vcell-fenics`` console script)
 for the two supported ways to say what to solve:
@@ -14,62 +14,44 @@ for the two supported ways to say what to solve:
 Which one a file is, is detected from its content (``--format`` overrides). The rest of the
 run is identical for both, because the VCell path *lands on* the native formalism:
 
-    (geometry, math) → realize (Netgen) → assemble → time-step → XDMF + summary.json
+    (geometry, math) → realize (Netgen) → assemble → time-step → results bundle
 
-Everything is written under ``--out`` (default ``./out``), which is what a container bind-mount
-points at:
+This module owns loading and argv; :mod:`vcell_fenics.runner` owns the solve. Everything is written
+to the bundle ``<--out>/<--output-prefix>.fenics/`` (ADR 010) — what a container bind-mount points at:
 
-    math.yaml / geometry.yaml   the resolved formalism actually solved — provenance, and the
-                                thing to diff when a VCell import surprises you
-    fields.xdmf + fields.h5     one ParaView time series, one grid per species (a two-compartment
-                                run writes inner/outer.xdmf instead — two meshes, two files)
-    summary.json                run configuration, mesh size, and per-species
-                                total / mean / min / max at every output time
+    mesh/<domain>.vtu, <domain>/<var>   the fields at every output time (VTU mesh + zarr arrays)
+    stats/<domain>/<var>                per-time mean / total / min / max
+    .zattrs                             the manifest: domains, variables, times written, status
+    provenance/math.yaml, geometry.yaml the resolved formalism actually solved — the thing to diff
+                                        when a VCell import surprises you
+    provenance/summary.json             run configuration and per-species statistics
 
-Two solver paths, chosen by the model rather than by a flag: equations on **one** subdomain go
-through ``backend.assemble`` on a single mesh (backward Euler with a full time series, or adaptive
-method-of-lines); equations on **two** compartments joined by a membrane go through
-``realize_interface_coupled`` + ``integrate_interface_coupled`` (final state only — the blocked
-adaptive integrator has no output-time hook).
-
-Out of scope here, each having its own driver: moving membranes / ALE remeshing, the Stokes and
-FSI stack, phase field, and surface PDEs coupled to a bulk (§1.6.6). Those raise a message naming
-the limitation rather than silently mis-solving.
+``python -m vcell_fenics.results.reader`` summarises a bundle.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import ufl
 import yaml
-from dolfinx import fem
-from dolfinx.io import XDMFFile
 from mpi4py import MPI
 
-from vcell_fenics.backend.assemble import assemble
 from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
-from vcell_fenics.backend.discrete import DiscreteProblem
-from vcell_fenics.backend.geometry import Geometry
-from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
-from vcell_fenics.backend.realize import RealizationError, realize
+from vcell_fenics.backend.realize import RealizationError
 from vcell_fenics.formalism import (
     FormalismLoadError,
     GeometryDescription,
     MathDescription,
-    dump_geometry_yaml,
-    dump_yaml,
     load_dict,
     load_geometry_dict,
 )
 from vcell_fenics.formalism.validator import FormalismValidationError
+from vcell_fenics.runner import ModelInput, RunError, RunOptions, run_model, uniform_output_times
+from vcell_fenics.runner import log as _log
 
 # Errors that mean "the model or the request is wrong", not "the code is broken": reported as a
 # one-line `error: …` with exit status 2, no traceback.
@@ -77,6 +59,7 @@ _USER_ERRORS = (
     FormalismLoadError,
     FormalismValidationError,
     RealizationError,
+    RunError,
     SolveError,
     NonlinearTermError,  # a nonlinear model under backward Euler: the message names the fix (use MOL)
     NotImplementedError,
@@ -93,24 +76,6 @@ class CliError(Exception):
 # ---------------------------------------------------------------------------
 # Input: VCML / VCell YAML / native formalism → (GeometryDescription, MathDescription)
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ModelInput:
-    """A loaded model plus where it came from and what the source suggests for the run.
-
-    `suggested_*` are the VCell simulation's own settings (duration, output interval, mesh
-    size) when the source carried them — used as defaults so a `.vcml` runs with no further
-    flags, and always overridable.
-    """
-
-    geometry: GeometryDescription
-    math: MathDescription
-    source: str  # "vcml" | "vcell-yaml" | "native"
-    provenance: dict[str, Any] = field(default_factory=dict)
-    suggested_t_final: float | None = None
-    suggested_output_dt: float | None = None
-    suggested_h: float | None = None
 
 
 def detect_format(document: object) -> str:
@@ -282,18 +247,6 @@ def _h_from_mesh_size(gd: GeometryDescription, mesh_size: Sequence[int] | None) 
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class RunOptions:
-    """The resolved discretisation for one run — every field already defaulted."""
-
-    h: float
-    dt: float
-    t_final: float
-    output_dt: float
-    fe_degree: int
-    time_integration: str
-
-
 def resolve_options(model: ModelInput, args: argparse.Namespace) -> RunOptions:
     """Merge explicit flags over the source's own suggestions over the built-in defaults."""
 
@@ -331,331 +284,10 @@ def resolve_options(model: ModelInput, args: argparse.Namespace) -> RunOptions:
         h=float(h),
         dt=float(dt),
         t_final=float(t_final),
-        output_dt=float(output_dt),
+        output_times=uniform_output_times(float(t_final), float(output_dt)),
         fe_degree=int(args.fe_degree),
         time_integration=str(args.time_integration),
     )
-
-
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
-
-
-class _Recorder:
-    """Writes one mesh's fields to an XDMF time series and accumulates their diagnostics.
-
-    `channels` pairs each species name with the *live* Function (or sub-view) holding its state:
-    several species coupled on one mesh are components of a single vector `unknown`, so each is
-    interpolated into its own P1 scalar Function. That gives ParaView one named grid per species,
-    and keeps XDMF writable at `--fe-degree 2` (XDMF carries P1 point data only).
-
-    Every reported number is *reduced* across ranks — the integral ∫u dx and its mesh mean, plus
-    min/max over owned dofs — so `mpirun -n N` reports the same values as a serial run.
-    """
-
-    def __init__(
-        self,
-        mesh: Any,
-        channels: Sequence[tuple[str, Any]],
-        out_dir: Path,
-        filename: str,
-        *,
-        write_fields: bool,
-    ) -> None:
-        self._comm = mesh.comm
-        self._sources = [source for _, source in channels]
-        self._names = [name for name, _ in channels]
-
-        space = fem.functionspace(mesh, ("Lagrange", 1))
-        self._fields = [fem.Function(space, name=name) for name in self._names]
-        dx = ufl.Measure("dx", domain=mesh)
-        self._integrals = [fem.form(u * dx) for u in self._fields]
-        self._volume = self._reduce(float(fem.assemble_scalar(fem.form(1.0 * dx)).real), MPI.SUM)
-        self._records: list[dict[str, Any]] = []
-
-        self._xdmf: XDMFFile | None = None
-        if write_fields:
-            self._xdmf = XDMFFile(self._comm, str(out_dir / filename), "w")
-            self._xdmf.write_mesh(mesh)
-
-    def _reduce(self, value: float, op: MPI.Op) -> float:
-        return float(self._comm.allreduce(value, op=op))
-
-    def capture(self, t: float) -> dict[str, Any]:
-        """Interpolate the current state, write it, and record its diagnostics at time `t`."""
-
-        stats: dict[str, Any] = {}
-        for name, source, out, integral in zip(self._names, self._sources, self._fields, self._integrals, strict=True):
-            out.interpolate(source)
-            if self._xdmf is not None:
-                self._xdmf.write_function(out, t)
-            owned = out.x.array[: out.function_space.dofmap.index_map.size_local]
-            total = self._reduce(float(fem.assemble_scalar(integral).real), MPI.SUM)
-            stats[name] = {
-                "total": total,
-                "mean": total / self._volume if self._volume > 0.0 else float("nan"),
-                "min": self._reduce(float(np.min(owned)) if owned.size else np.inf, MPI.MIN),
-                "max": self._reduce(float(np.max(owned)) if owned.size else -np.inf, MPI.MAX),
-            }
-        self._records.append({"t": t, "species": stats})
-        return stats
-
-    @property
-    def records(self) -> list[dict[str, Any]]:
-        return self._records
-
-    @property
-    def volume(self) -> float:
-        return self._volume
-
-    def close(self) -> None:
-        if self._xdmf is not None:
-            self._xdmf.close()
-            self._xdmf = None
-
-
-def _single_mesh_recorder(problem: DiscreteProblem, out_dir: Path, *, write_fields: bool) -> _Recorder:
-    names = problem.variable_name.split(",")
-    channels = [(name, problem.unknown if len(names) == 1 else problem.unknown.sub(k)) for k, name in enumerate(names)]
-    return _Recorder(problem.V.mesh, channels, out_dir, "fields.xdmf", write_fields=write_fields)
-
-
-# ---------------------------------------------------------------------------
-# The run
-# ---------------------------------------------------------------------------
-
-
-def run_model(model: ModelInput, options: RunOptions, out_dir: Path, *, write_fields: bool = True) -> dict[str, Any]:
-    """Realize, integrate, and write everything under `out_dir`. Returns the summary.
-
-    Two backends, chosen by the model itself: a model whose equations live on **one** subdomain
-    goes through `assemble` + backward Euler / method-of-lines on a single mesh; one spanning
-    **two** compartments joined by a membrane goes through `realize_interface_coupled` +
-    `integrate_interface_coupled` (the two-mesh blocked solve, cross-validated against VCell's
-    finite-volume solver in `cross_validation/`).
-    """
-
-    comm = MPI.COMM_WORLD
-    is_root = comm.rank == 0
-
-    if is_root:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "geometry.yaml").write_text(dump_geometry_yaml(model.geometry))
-        (out_dir / "math.yaml").write_text(dump_yaml(model.math))
-    comm.barrier()
-
-    coupling = _interface_coupling(model)
-    run_info: dict[str, Any] = {
-        "h": options.h,
-        "t_final": options.t_final,
-        "fe_degree": options.fe_degree,
-        "mpi_ranks": comm.size,
-        "backend": "interface_coupled" if coupling is not None else "single_mesh",
-    }
-    if coupling is not None:
-        recorders, cells, steps = _run_interface_coupled(model, coupling, options, out_dir, write_fields=write_fields)
-        run_info |= {"time_integration": "method_of_lines", "steps": steps}
-    else:
-        recorders, cells, steps, dt_used = _run_single_mesh(model, options, out_dir, write_fields=write_fields)
-        run_info |= {
-            "dt": dt_used,
-            "dt_requested": options.dt,
-            "output_dt": options.output_dt,
-            "time_integration": options.time_integration,
-            "steps": steps,
-        }
-
-    summary: dict[str, Any] = {
-        "source": model.provenance,
-        "geometry": {
-            "name": model.geometry.name,
-            "dim": model.geometry.dim,
-            "cells": cells,
-            "measure": sum(r.volume for r in recorders),
-        },
-        "run": run_info,
-        "species": [name for r in recorders for name in r.records[0]["species"]],
-        "outputs": _merge_records(recorders),
-    }
-    if is_root:
-        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    comm.barrier()
-    return summary
-
-
-def _run_single_mesh(
-    model: ModelInput, options: RunOptions, out_dir: Path, *, write_fields: bool
-) -> tuple[list[_Recorder], int, int, float]:
-    """The one-mesh path: realize → assemble → step, capturing every output time."""
-
-    comm = MPI.COMM_WORLD
-    _log(f"realizing geometry {model.geometry.name!r} (dim {model.geometry.dim}) at h = {options.h:g}")
-    geometry: Geometry = realize(model.geometry, h=options.h, comm=comm)
-    cells = _mesh_cell_count(geometry.mesh_of(model.math.equations[0].subdomain))
-    _log(f"assembling (fe_degree {options.fe_degree}, {cells} cells)")
-    problem = assemble(model.math, geometry, dt=options.dt, fe_degree=options.fe_degree)
-    if not isinstance(problem, DiscreteProblem):  # a CoupledGeometry cannot come out of `realize`
-        raise CliError("this model assembles to a coupled bulk-surface problem, which the CLI does not drive yet")
-
-    recorder = _single_mesh_recorder(problem, out_dir, write_fields=write_fields)
-    try:
-        recorder.capture(0.0)
-        steps, dt_used = _integrate(problem, options, recorder)
-    finally:
-        recorder.close()
-    return [recorder], cells, steps, dt_used
-
-
-def _run_interface_coupled(
-    model: ModelInput, coupling: _Coupling, options: RunOptions, out_dir: Path, *, write_fields: bool
-) -> tuple[list[_Recorder], int, int]:
-    """The two-compartment path: one species per compartment, coupled by the membrane flux.
-
-    The integrator is adaptive method-of-lines over the blocked two-mesh system and cannot be
-    interrupted at output times, so this writes the **final** state only — one XDMF per
-    compartment, since the two live on different submeshes.
-    """
-
-    from vcell_fenics.backend.interface_coupled import integrate_interface_coupled
-    from vcell_fenics.backend.realize import realize_interface_coupled
-
-    # The blocked two-mesh solve is P1 and adaptive-MOL by construction. Say so instead of
-    # accepting a flag and quietly solving something else.
-    if options.fe_degree != 1:
-        raise CliError("the two-compartment solver is P1 only; drop --fe-degree for this model")
-    if options.time_integration != "method_of_lines":
-        _log("note: the two-compartment solver is method-of-lines; --time-integration is ignored")
-
-    comm = MPI.COMM_WORLD
-    _log(
-        f"realizing interface-coupled geometry {model.geometry.name!r}: inner {coupling.inner!r}, "
-        f"outer {coupling.outer!r}, membrane {coupling.membrane!r} at h = {options.h:g}"
-    )
-    geometry = realize_interface_coupled(
-        model.geometry,
-        inner_subdomain=coupling.inner,
-        outer_subdomain=coupling.outer,
-        membrane_subdomain=coupling.membrane,
-        interface=coupling.membrane,
-        background_subdomain=coupling.background,
-        h=options.h,
-        comm=comm,
-    )
-    cells = _mesh_cell_count(geometry.inner_mesh) + _mesh_cell_count(geometry.outer_mesh)
-    _log(f"integrating to t = {options.t_final:g} (interface-coupled method of lines, {cells} cells)")
-    result = integrate_interface_coupled(model.math, geometry, t_final=options.t_final)
-
-    recorders = [
-        _Recorder(
-            geometry.inner_mesh, [(result.inner.name, result.inner)], out_dir, "inner.xdmf", write_fields=write_fields
-        ),
-        _Recorder(
-            geometry.outer_mesh, [(result.outer.name, result.outer)], out_dir, "outer.xdmf", write_fields=write_fields
-        ),
-    ]
-    try:
-        for recorder in recorders:
-            recorder.capture(options.t_final)
-    finally:
-        for recorder in recorders:
-            recorder.close()
-    return recorders, cells, int(result.steps)
-
-
-@dataclass(frozen=True)
-class _Coupling:
-    """The two compartments and the membrane between them, for the interface-coupled path."""
-
-    inner: str
-    outer: str
-    membrane: str
-    background: str | None
-
-
-def _interface_coupling(model: ModelInput) -> _Coupling | None:
-    """Detect the two-compartment shape, or return None to take the single-mesh path.
-
-    The shape is read off the *geometry*, which is the source of truth for spatial structure
-    (ADR 007): a SurfaceClass whose `inside`/`outside` are exactly the two subdomains the math's
-    equations live on. A third subvolume that carries no equation is the surrounding background,
-    which the realizer drops so the outer compartment's own edge becomes the reservoir wall.
-    """
-
-    subdomains = {eq.subdomain for eq in model.math.equations}
-    if len(subdomains) != 2:
-        return None
-    for surface in model.geometry.surfaces:
-        if {surface.inside, surface.outside} == subdomains:
-            volumes = {sv.name for sv in model.geometry.subvolumes}
-            spare = sorted(volumes - subdomains)
-            if len(spare) > 1:
-                raise CliError(
-                    f"geometry {model.geometry.name!r} has more unmodelled subvolumes than the coupled "
-                    f"solver can drop ({', '.join(spare)}); it supports two compartments plus one background"
-                )
-            return _Coupling(
-                inner=surface.inside,
-                outer=surface.outside,
-                membrane=surface.name,
-                background=spare[0] if spare else None,
-            )
-    raise CliError(
-        f"the model's equations span subdomains {sorted(subdomains)}, but geometry {model.geometry.name!r} "
-        f"declares no membrane between them (surfaces: {[s.name for s in model.geometry.surfaces] or 'none'})"
-    )
-
-
-def _merge_records(recorders: Sequence[_Recorder]) -> list[dict[str, Any]]:
-    """One record per output time, merging the per-mesh species dicts captured at that time."""
-
-    merged: dict[float, dict[str, Any]] = {}
-    for recorder in recorders:
-        for record in recorder.records:
-            merged.setdefault(float(record["t"]), {}).update(record["species"])
-    return [{"t": t, "species": merged[t]} for t in sorted(merged)]
-
-
-def _integrate(problem: DiscreteProblem, options: RunOptions, recorder: _Recorder) -> tuple[int, float]:
-    """Advance to `t_final`, capturing at each output time. Returns (steps taken, dt actually used)."""
-
-    if options.time_integration == "method_of_lines":
-        # PETSc TS picks (and adapts) its own steps to `t_final` in one shot — there is no
-        # supported way to interrupt it at output times, so this path writes t=0 and t=t_final
-        # only. Use backward Euler when a time series matters.
-        _log(f"integrating to t = {options.t_final:g} (method of lines, adaptive)")
-        result = integrate_discrete_problem(problem, t_final=options.t_final)
-        recorder.capture(options.t_final)
-        return int(result.steps), float("nan")
-
-    n_outputs = max(1, round(options.t_final / options.output_dt))
-    steps_per_output = max(1, round(options.output_dt / options.dt))
-    dt = options.t_final / (n_outputs * steps_per_output)
-    if abs(dt - options.dt) > 1e-12 * max(1.0, options.dt):
-        _log(f"dt adjusted {options.dt:g} → {dt:g} so output times land on step boundaries")
-    problem.dt.value = dt
-
-    _log(f"stepping to t = {options.t_final:g}: {n_outputs} outputs × {steps_per_output} steps of dt = {dt:g}")
-    step = 0
-    for out_index in range(n_outputs):
-        for _ in range(steps_per_output):
-            step += 1
-            problem.set_time(step * dt)
-            problem.step()
-        recorder.capture((out_index + 1) * steps_per_output * dt)
-    return step, dt
-
-
-def _mesh_cell_count(mesh: Any) -> int:
-    index_map = mesh.topology.index_map(mesh.topology.dim)
-    return int(mesh.comm.allreduce(index_map.size_local, op=MPI.SUM))
-
-
-def _log(message: str) -> None:
-    """Progress to stderr from rank 0 only — stdout stays clean for the summary."""
-
-    if MPI.COMM_WORLD.rank == 0:
-        print(f"[vcell-fenics] {message}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -666,7 +298,7 @@ def _log(message: str) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vcell-fenics",
-        description="Solve a VCell or native vcell-fenics model with FEniCSx and write the results to a directory.",
+        description="Solve a VCell or native vcell-fenics model with FEniCSx and write a results bundle (ADR 010).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
@@ -697,12 +329,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--time-integration",
         choices=("backward_euler", "method_of_lines"),
         default="backward_euler",
-        help="fixed-step backward Euler (time series) or adaptive PETSc TS (final state only)",
+        help="fixed-step backward Euler, or adaptive PETSc TS (BDF; required for nonlinear kinetics)",
     )
 
     output = parser.add_argument_group("output")
     output.add_argument("--out", type=Path, default=Path("out"), help="results directory (default: ./out)")
-    output.add_argument("--no-fields", action="store_true", help="write summary.json only, no XDMF fields")
+    output.add_argument(
+        "--output-prefix",
+        default="results",
+        help="the bundle is written to <--out>/<prefix>.fenics (default: results)",
+    )
+    output.add_argument(
+        "--no-fields", action="store_true", help="write the meshes and per-time statistics only, no field arrays"
+    )
     output.add_argument("--traceback", action="store_true", help="show the full traceback on a model error")
     return parser
 
@@ -723,7 +362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         model = load_model(args)
         _log(f"loaded {model.source} model: {model.provenance}")
         options = resolve_options(model, args)
-        summary = run_model(model, options, args.out, write_fields=not args.no_fields)
+        summary = run_model(model, options, args.out, prefix=args.output_prefix, write_fields=not args.no_fields)
     except CliError as error:
         _fail(str(error), args.traceback)
         return 2
@@ -735,7 +374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         final = summary["outputs"][-1]["species"]
         for name, stats in final.items():
             _log(f"t = {summary['outputs'][-1]['t']:g}  {name}: total {stats['total']:.6g}, max {stats['max']:.6g}")
-        _log(f"wrote {args.out}")
+        _log(f"wrote {summary['bundle']}")
     return 0
 
 

@@ -156,10 +156,11 @@ def _run_time_stepper(
     inner Newton drives them to `g`), and the Jacobian is assembled with the bcs (boundary
     rows/columns zeroed, unit diagonal). The boundary dofs then stay at `g` for the whole run.
 
-    With `on_output`, the solution at each of `output_times` (those after `t_start`) is handed to it
-    as a snapshot `Function`, recorded from a `TS` monitor by interpolation so the adaptive step
-    sequence is exactly an unmonitored run's (`backend/output_times.py`); the snapshot is reused
-    between calls. `on_progress(t)` follows every accepted step."""
+    With `on_output`, the solution at each of `output_times` in [`t_start`, `t_final`] is handed to it
+    as a snapshot `Function` (`t_start` itself being the initial state), recorded from a `TS` monitor
+    by interpolation so the adaptive step sequence is exactly an unmonitored run's
+    (`backend/output_times.py`); the snapshot is reused between calls. `on_progress(t)` follows every
+    accepted step."""
 
     space = state.function_space
     mesh = space.mesh
@@ -328,9 +329,9 @@ def integrate_discrete_problem(
     """Integrate an assembled `DiscreteProblem` (a formalism MathDescription, via
     `backend.assemble`) with the method-of-lines `TS` integrator instead of backward Euler.
 
-    `on_output(t, snapshot)` receives the solution at each of `output_times` in (0, `t_final`] — a
-    `Function` on the unknown's space, valid only for the duration of the call — without changing the
-    adaptive steps; `on_progress(t)` follows every accepted step. The t = 0 state is the caller's.
+    `on_output(t, snapshot)` receives the solution at each of `output_times` in [0, `t_final`] — a
+    `Function` on the unknown's space, valid only for the duration of the call; t = 0 is the initial
+    condition — without changing the adaptive steps; `on_progress(t)` follows every accepted step.
 
     The IR already carries the tagged spatial terms (diffusion, advection, source, …) built
     against the trial function; this reuses them — substituting `trial → unknown` so the source

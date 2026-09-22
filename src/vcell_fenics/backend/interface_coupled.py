@@ -811,7 +811,8 @@ def integrate_interface_coupled(
     nonlinear in the unknowns (the inner Newton handles it); the time error is ≈0 (adaptive).
 
     `on_output(t, inner, outer)` receives both compartments' solutions at each of `output_times` in
-    (0, `t_final`] (snapshot `Function`s valid for the call), recorded by interpolation from a `TS`
+    [0, `t_final`] (snapshot `Function`s valid for the call; t = 0 is the initial condition, which is
+    built in here), recorded by interpolation from a `TS`
     monitor so the step sequence is unchanged (`backend/output_times.py`); `on_progress(t)` follows
     every accepted step.
 
