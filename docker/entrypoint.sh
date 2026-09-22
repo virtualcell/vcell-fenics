@@ -11,8 +11,13 @@
 # environment needs. Sourcing it means the image carries no pixi binary of its own.
 set -euo pipefail
 
+# nounset off while activating: conda's activation pulls in bash-completion scripts (hwloc's among
+# them) that read unset variables such as $ZSH_VERSION, and under `set -u` the source would abort
+# the container before it runs anything.
+set +u
 # shellcheck disable=SC1091
 source /opt/activate.sh
+set -u
 
 case "${1-}" in
     # No arguments at all: show what this image does rather than failing on a missing model.
