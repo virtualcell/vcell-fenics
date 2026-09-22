@@ -39,7 +39,7 @@ follow-up is `BCInterfaceValueEquality` (the `u_inner = k·u_outer` interface co
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +59,7 @@ from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_trace
 from vcell_fenics.backend.linear_solvers import set_preconditioner
+from vcell_fenics.backend.output_times import OutputMonitor
 from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tension
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
@@ -800,11 +801,19 @@ def integrate_interface_coupled(
     atol: float = 1.0e-8,
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
+    output_times: Sequence[float] = (),
+    on_output: Callable[[float, fem.Function, fem.Function], None] | None = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> InterfaceCoupledResult:
     """Integrate an interface-coupled two-bulk system to `t_final` with the **method-of-lines**
     integrator (PETSc TS adaptive BDF) — the same strategy as the FV solver and the single-mesh
     `integrate_discrete_problem`, here over the blocked two-mesh system. The coupling flux may be
     nonlinear in the unknowns (the inner Newton handles it); the time error is ≈0 (adaptive).
+
+    `on_output(t, inner, outer)` receives both compartments' solutions at each of `output_times` in
+    (0, `t_final`] (snapshot `Function`s valid for the call), recorded by interpolation from a `TS`
+    monitor so the step sequence is unchanged (`backend/output_times.py`); `on_progress(t)` follows
+    every accepted step.
 
     The residual `F(state, rate) = M·rate + K·state − coupling` is a 2-block form over the two
     compartment spaces (all integrals on the parent: region `dx`, interface `dS`); the exact Jacobian
@@ -956,11 +965,38 @@ def integrate_interface_coupled(
     set_preconditioner(snes.getKSP(), pc_type)  # ILU → block-Jacobi/ILU(0) under MPI
     ts.setFromOptions()
 
+    monitor: OutputMonitor | None = None
+    work: PETSc.Vec | None = None
+    if on_output is not None or on_progress is not None:
+        snap_in, snap_out = fem.Function(V_in, name=inner_var), fem.Function(V_out, name=outer_var)
+        work = state_vec.duplicate()
+
+        def emit(t: float, x: PETSc.Vec) -> None:
+            snap_in.x.array[:n_in] = x.array_r[:n_in]
+            snap_out.x.array[:n_out] = x.array_r[n_in : n_in + n_out]
+            snap_in.x.scatter_forward()
+            snap_out.x.scatter_forward()
+            if on_output is not None:
+                on_output(t, snap_in, snap_out)
+
+        monitor = OutputMonitor(
+            output_times if on_output is not None else (),
+            t_start=0.0,
+            t_final=t_final,
+            work=work,
+            emit=emit,
+            progress=on_progress,
+        )
+        ts.setMonitor(monitor)
+
     ts.solve(state_vec)
     unpack(state_vec)
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
-    for obj in (ts, state_vec, jacobian_matrix):
-        obj.destroy()
+    if monitor is not None:
+        monitor.finish(ts, final_time, state_vec)
+    for obj in (ts, state_vec, jacobian_matrix, work):
+        if obj is not None:
+            obj.destroy()
     return InterfaceCoupledResult(u_in_fn, u_out_fn, steps, final_time)
 
 

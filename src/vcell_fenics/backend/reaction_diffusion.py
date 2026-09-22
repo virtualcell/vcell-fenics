@@ -50,6 +50,7 @@ from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.diagnostics import SolveError, preflight_failure_message, ts_failure_message
 from vcell_fenics.backend.discrete import DiscreteProblem, TermKind
 from vcell_fenics.backend.linear_solvers import set_preconditioner
+from vcell_fenics.backend.output_times import OutputMonitor
 
 
 @dataclass
@@ -140,6 +141,9 @@ def _run_time_stepper(
     on_time: Callable[[float], None] | None = None,
     localize: Callable[[], str | None] | None = None,
     t_start: float = 0.0,
+    output_times: Sequence[float] = (),
+    on_output: Callable[[float, fem.Function], None] | None = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> tuple[int, float]:
     """Integrate the implicit residual `F(state, rate) = 0` to `options.t_final` with PETSc `TS`,
     mutating `state` in place. `residual` is the UFL form of `F` (`rate` the time derivative `ċ`,
@@ -150,7 +154,12 @@ def _run_time_stepper(
     Strong Dirichlet `bcs` enter as algebraic constraints `x = g` on the boundary dofs: the IC
     is seeded to satisfy them, the residual's boundary rows are overwritten with `x − g` (so the
     inner Newton drives them to `g`), and the Jacobian is assembled with the bcs (boundary
-    rows/columns zeroed, unit diagonal). The boundary dofs then stay at `g` for the whole run."""
+    rows/columns zeroed, unit diagonal). The boundary dofs then stay at `g` for the whole run.
+
+    With `on_output`, the solution at each of `output_times` (those after `t_start`) is handed to it
+    as a snapshot `Function`, recorded from a `TS` monitor by interpolation so the adaptive step
+    sequence is exactly an unmonitored run's (`backend/output_times.py`); the snapshot is reused
+    between calls. `on_progress(t)` follows every accepted step."""
 
     space = state.function_space
     mesh = space.mesh
@@ -243,12 +252,33 @@ def _run_time_stepper(
         culprit = localize() if localize is not None else None  # attribute it to a term, if we can
         raise SolveError(preflight_failure_message(culprit) if culprit else preflight_failure_message())
 
+    monitor: OutputMonitor | None = None
+    if on_output is not None or on_progress is not None:
+        snapshot = fem.Function(space)
+
+        def emit(t: float, work: PETSc.Vec) -> None:
+            snapshot.x.scatter_forward()  # `work` is the snapshot's own vector; refresh its ghosts
+            if on_output is not None:
+                on_output(t, snapshot)
+
+        monitor = OutputMonitor(
+            output_times if on_output is not None else (),
+            t_start=t_start,
+            t_final=options.t_final,
+            work=snapshot.x.petsc_vec,
+            emit=emit,
+            progress=on_progress,
+        )
+        ts.setMonitor(monitor)
+
     try:
         ts.solve(state.x.petsc_vec)
     except PETSc.Error as original:  # re-express the failure in model terms (see backend/diagnostics)
         raise SolveError(ts_failure_message(ts)) from original
     state.x.scatter_forward()
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
+    if monitor is not None:
+        monitor.finish(ts, final_time, state.x.petsc_vec)
     ts.destroy()
     return steps, final_time
 
@@ -291,9 +321,16 @@ def integrate_discrete_problem(
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
     ksp_rtol: float = 1.0e-9,
+    output_times: Sequence[float] = (),
+    on_output: Callable[[float, fem.Function], None] | None = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> IntegrationResult:
     """Integrate an assembled `DiscreteProblem` (a formalism MathDescription, via
     `backend.assemble`) with the method-of-lines `TS` integrator instead of backward Euler.
+
+    `on_output(t, snapshot)` receives the solution at each of `output_times` in (0, `t_final`] — a
+    `Function` on the unknown's space, valid only for the duration of the call — without changing the
+    adaptive steps; `on_progress(t)` follows every accepted step. The t = 0 state is the caller's.
 
     The IR already carries the tagged spatial terms (diffusion, advection, source, …) built
     against the trial function; this reuses them — substituting `trial → unknown` so the source
@@ -325,6 +362,9 @@ def integrate_discrete_problem(
         bcs=problem.bcs,
         on_time=problem.set_time,
         localize=lambda: _localize_nonfinite_term(problem),  # attribute a pre-flight failure to a tagged term
+        output_times=output_times,
+        on_output=on_output,
+        on_progress=on_progress,
     )
     problem.previous.x.array[:] = state.x.array
     return IntegrationResult(solution=state, steps=steps, time=final_time)

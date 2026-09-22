@@ -134,7 +134,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | 1 | ADR 010 (results bundle) + ADR 011 (VCell solver contract, incl. Java follow-up) | ☑ | ADR 010 §6 awaits the step-2 spike |
 | 2 | Spike: zarr v2 via zarr-python 3, VTU encoding vs `VtuGridParser`, `TS.interpolate` output hooks, MPI point-order keys | ☑ | all 13 checks pass; ADR 010 §6 |
 | 3 | MPI-correct `realize()` (confirm the suspected mesh duplication with a test first) + `NonlinearTermError` as a user error | ☑ | two real bugs: crash + lost partition-boundary membrane facets; `tests/test_realize_mpi.py` |
-| 4 | Output-time hooks in the MOL and interface-coupled integrators | ☐ | |
+| 4 | Output-time hooks in the MOL and interface-coupled integrators | ☑ | `backend/output_times.py`; steps unperturbed |
 | 5 | `results/` package: schema, VTU writer/strict reader, P1 gather, bundle writer, recorder, reader | ☐ | |
 | 6 | Move run logic into `runner.py`; every input kind writes the bundle (XDMF → export) | ☐ | |
 | 7 | SimulationTask adapter + MathOverrides/scans + `--simtask` | ☐ | |
@@ -288,6 +288,15 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — Step 4: `backend/output_times.py` adds an `OutputMonitor`, a TS monitor that
+  records each output time as it is crossed.
+  - It uses `TSInterpolate`, or a plain copy when a step lands exactly on the time, into a separate
+    snapshot, so the adaptive step sequence is untouched.
+  - `integrate_discrete_problem` and `integrate_interface_coupled` take
+    `output_times` / `on_output` / `on_progress`.
+  - Tests: values match the analytic ODE at every output; the monitored run's steps and final state
+    are bitwise identical to an unmonitored run's; the interface-coupled total mass is conserved at
+    every recorded time.
 - **2026-09-22** — Step 3: the body-fitted (Netgen) realization was **broken under MPI**, worse than
   suspected.
   - **(1) Crash.** Every rank passed its own full Netgen mesh to `create_mesh`, so under
