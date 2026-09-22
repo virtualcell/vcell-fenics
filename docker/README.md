@@ -68,6 +68,22 @@ docker run --rm -v "$PWD/models:/models:ro" -v "$PWD/results:/work/out" \
   vcell-fenics --math /models/biomodel_123_app_math.yaml --geometry /models/biomodel_123_app_geom.yaml
 ```
 
+### As a VCell solver: a SimulationTask
+
+VCell hands every solver a `SimID_<key>_<job>__<task>.simtask.xml` document ([ADR 011](../docs/decisions/011-vcell-solver-contract.md)).
+Bind the user's data directory **at the same path** inside the container, so the task's own paths
+need no translation; the bundle `SimID_<key>_<job>_.fenics` lands next to the task file:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -v "$USERDIR:$USERDIR" \
+  vcell-fenics --simtask "$USERDIR/SimID_123_0__0.simtask.xml"
+```
+
+End time, output schedule, time step, error tolerances, mesh size and the job's parameter-scan point
+all come from the task; method of lines is the default (real VCell kinetics are routinely nonlinear).
+A task this solver would mis-solve — a moving boundary, field data, particle/stochastic math — exits 2
+with the reason.
+
 The image ships a demo model, so you can check an installation with no files of your own:
 
 ```bash
@@ -93,7 +109,7 @@ the format in [ADR 010](../docs/decisions/010-results-bundle-vtu-zarr.md):
 | `provenance/summary.json` | the run's configuration and per-species statistics |
 | `provenance/math.yaml`, `geometry.yaml` | the resolved *native* formalism that was actually solved |
 
-`python -m vcell_fenics.results.reader results/results.fenics` summarises a bundle (add
+`python -m vcell_fenics.results results/results.fenics` summarises a bundle (add
 `--require-status completed` to check a run finished). The bundle is readable while the run is still
 writing — rows appear in the manifest only once they are complete.
 

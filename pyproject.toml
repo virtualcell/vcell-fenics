@@ -233,6 +233,8 @@ module = [
     "skimage.*",
     "numcodecs",
     "numcodecs.*",
+    "lxml",
+    "lxml.*",
 ]
 ignore_missing_imports = true
 

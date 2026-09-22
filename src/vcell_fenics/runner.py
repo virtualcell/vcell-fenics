@@ -56,11 +56,21 @@ class ModelInput:
 
     geometry: GeometryDescription
     math: MathDescription
-    source: str  # "vcml" | "vcell-yaml" | "native"
+    source: str  # "simtask" | "vcml" | "vcell-yaml" | "native"
     provenance: dict[str, Any] = field(default_factory=dict)
     suggested_t_final: float | None = None
     suggested_output_dt: float | None = None
     suggested_h: float | None = None
+    # A VCell SimulationTask says more (ADR 011 §2): an explicit output schedule, a time step, error
+    # tolerances, the FEniCSx options block, and where VCell expects the job's results.
+    suggested_output_times: tuple[float, ...] | None = None
+    suggested_dt: float | None = None
+    suggested_rtol: float | None = None
+    suggested_atol: float | None = None
+    suggested_fe_degree: int | None = None
+    suggested_time_integration: str | None = None
+    suggested_out_dir: Path | None = None
+    suggested_prefix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,9 +105,17 @@ def uniform_output_times(t_final: float, output_dt: float) -> tuple[float, ...]:
 
 
 def run_model(
-    model: ModelInput, options: RunOptions, out_dir: Path, *, prefix: str = "results", write_fields: bool = True
+    model: ModelInput,
+    options: RunOptions,
+    out_dir: Path,
+    *,
+    prefix: str = "results",
+    write_fields: bool = True,
+    flag_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Realize, integrate, and write the bundle ``out_dir/<prefix>.fenics``. Returns the summary."""
+    """Realize, integrate, and write the bundle ``out_dir/<prefix>.fenics``. Returns the summary.
+    ``flag_overrides`` records which settings an explicit flag took over from the model (manifest
+    ``solver.overrides``)."""
 
     comm = MPI.COMM_WORLD
     bundle = out_dir / f"{prefix}.fenics"
@@ -115,6 +133,7 @@ def run_model(
             dolfinx=str(getattr(dolfinx, "__version__", "unknown")),
             mpi_ranks=comm.size,
             options=asdict(options),
+            overrides=dict(flag_overrides or {}),
         ),
         write_fields=write_fields,
     )
@@ -167,7 +186,14 @@ def run_model(
 def _source_info(model: ModelInput) -> SourceInfo:
     provenance = model.provenance
     file = provenance.get("file") or provenance.get("math_file")
-    return SourceInfo(kind=model.source, file=str(file) if file is not None else None)
+    job_index, task_id = provenance.get("job_index"), provenance.get("task_id")
+    return SourceInfo(
+        kind=model.source,
+        file=str(file) if file is not None else None,
+        sim_key=provenance.get("sim_key"),
+        job_index=int(job_index) if job_index is not None else None,
+        task_id=int(task_id) if task_id is not None else None,
+    )
 
 
 # -- the single-mesh path -----------------------------------------------------------------------------
