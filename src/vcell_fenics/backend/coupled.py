@@ -270,7 +270,12 @@ def assemble_coupled(md: MathDescription, geometry: CoupledGeometry, *, dt: floa
             matrix.zeroRows(outer_dofs, diag=1.0)
 
         rhs = petsc.assemble_vector(rhs_local)
+        # Finalise both: add ghost-entry contributions onto their owners (a no-op in serial; lost at
+        # partition-boundary dofs under MPI otherwise — `assemble_vector` does not do it).
+        rhs.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)  # type: ignore[arg-type]
         coupling_b = petsc.assemble_vector(rhs_coupling) if rhs_coupling is not None else None
+        if coupling_b is not None:
+            coupling_b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)  # type: ignore[arg-type]
         if coupling_b is not None:
             rhs.axpy(1.0, coupling_b)
         if outer_dofs is not None:

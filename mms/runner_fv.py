@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pyvcell.vcml as vc
@@ -40,6 +40,9 @@ from pyvcell.vcml.models import (
     SpeciesRefType,
 )
 from pyvcell.vcml.utils import to_vcml_str
+
+if TYPE_CHECKING:
+    import zarr
 
 _CASES = Path(__file__).parent / "cases"
 _NS = {"np": np, "sin": np.sin, "cos": np.cos, "exp": np.exp, "pi": np.pi, "sqrt": np.sqrt, "tanh": np.tanh}
@@ -82,7 +85,8 @@ def _run_fv(case: dict[str, Any], mesh: int) -> tuple[float, float]:
     biomodel = _author(case, mesh)
     result = vc.simulate(vc.load_vcml_str(to_vcml_str(biomodel)), "s")
     try:
-        zd = result.zarr_dataset
+        # pyvcell types this Group | Array; its FV writer always produces one root 5-D array.
+        zd = cast("zarr.Array[Any]", result.zarr_dataset)
         idx = {c.label: c.index for c in result.channel_data}
         x = np.asarray(zd[0, idx["x"], 0, 0, :], dtype=float)
         y = np.asarray(zd[0, idx["y"], 0, :, 0], dtype=float)
