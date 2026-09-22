@@ -141,7 +141,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | 6 | Move run logic into `runner.py`; every input kind writes the bundle (XDMF → export) | ☑ | MOL + interface-coupled now write every output time |
 | 7 | SimulationTask adapter + MathOverrides/scans + `--simtask` | ☑ | the fvsolver smoke task solves end to end in ~4 s |
 | 8 | Status protocol: stdout markers, REST WorkerEvents, exit codes, SIGTERM | ☑ | checked against ports of VCell's parser and Langevin's REST client |
-| 9 | Export for ParaView (PVD / XDMF) | ☐ | |
+| 9 | Export for ParaView (PVD / XDMF) | ☑ | `vcell-fenics-export` |
 | 10 | Container (writable FFCx cache under Apptainer) + GitHub Actions: multi-arch image, SIF build, ORAS push | ☐ | CI runs only once pushed |
 
 ### Step details
@@ -290,6 +290,15 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — PRs #147–#154 opened, stacked in order, covering the tracker through step 8.
+- **2026-09-22** — Step 9: `vcell-fenics-export BUNDLE OUT [--format pvd|xdmf]`
+  (`results/export.py`).
+  - **PVD:** a VTU per domain per step with every variable as point data, plus a `<domain>.pvd`
+    time collection. Each step is a whole mesh, so this also fits future segmented bundles.
+  - **XDMF:** a meshio `TimeSeriesWriter`, fixed profile only.
+  - **Finding:** meshio 5.3.5's `TimeSeriesWriter` opens its `.h5` relative to the *working
+    directory*, not beside the `.xdmf`. The export writes from inside the output directory, and a
+    test pins that nothing leaks out.
 - **2026-09-22** — Step 8: the status protocol (`vcell_fenics.status`).
   - **Stdout:** `StdoutMarkers` writes `[[[progress:NN.N%]]]` / `[[[data:t]]]`. `isolate_stdout`
     points fd 1 and `sys.stdout` at stderr on every rank, since `mpiexec` merges their stdout. This

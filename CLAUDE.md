@@ -74,6 +74,7 @@ pixi run -e dev python -m vcell_fenics.cli --simtask tests/fixtures/simtask/SimI
 pixi run -e dev python -m vcell_fenics.cli --vcml model.vcml --out results
 pixi run -e dev python -m vcell_fenics.cli --math m_math.yaml --geometry m_geom.yaml --t-final 1.0
 pixi run -e dev python -m vcell_fenics.results results/results.fenics   # summarise a bundle
+pixi run -e dev vcell-fenics-export results/results.fenics paraview/      # → PVD (or --format xdmf) for ParaView
 docker build -f docker/Dockerfile -t vcell-fenics .     # same runner, containerised
 ```
 

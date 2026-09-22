@@ -16,6 +16,7 @@ authors = [{ name = "Jim Schaff" }]
 # uses as its entry point (docker/Dockerfile).
 [project.scripts]
 vcell-fenics = "vcell_fenics.cli:main"
+vcell-fenics-export = "vcell_fenics.results.export:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vcell_fenics"]
