@@ -133,7 +133,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | 0 | This tracking document | ☑ | |
 | 1 | ADR 010 (results bundle) + ADR 011 (VCell solver contract, incl. Java follow-up) | ☑ | ADR 010 §6 awaits the step-2 spike |
 | 2 | Spike: zarr v2 via zarr-python 3, VTU encoding vs `VtuGridParser`, `TS.interpolate` output hooks, MPI point-order keys | ☑ | all 13 checks pass; ADR 010 §6 |
-| 3 | MPI-correct `realize()` (confirm the suspected mesh duplication with a test first) + `NonlinearTermError` as a user error | ☐ | |
+| 3 | MPI-correct `realize()` (confirm the suspected mesh duplication with a test first) + `NonlinearTermError` as a user error | ☑ | two real bugs: crash + lost partition-boundary membrane facets; `tests/test_realize_mpi.py` |
 | 4 | Output-time hooks in the MOL and interface-coupled integrators | ☐ | |
 | 5 | `results/` package: schema, VTU writer/strict reader, P1 gather, bundle writer, recorder, reader | ☐ | |
 | 6 | Move run logic into `runner.py`; every input kind writes the bundle (XDMF → export) | ☐ | |
@@ -276,8 +276,6 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 ## Risks and open questions
 
-- The MPI mesh duplication in `realize()` is suspected from reading the code; step 3's test decides
-  it.
 - `TS.interpolate` accuracy with BDF and time-dependent Dirichlet data (spike; stepping fallback).
 - zarr-python 3 writing `zarr_format=2`, and the three-platform lock (stdlib-writer fallback).
 - `(1, N)` chunks mean T files per variable on NFS; revisit if runs output thousands of times.
@@ -290,6 +288,24 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — Step 3: the body-fitted (Netgen) realization was **broken under MPI**, worse than
+  suspected.
+  - **(1) Crash.** Every rank passed its own full Netgen mesh to `create_mesh`, so under
+    `mpiexec -n 2` the partition path crashed (`IndexError` realigning material tags). The earlier
+    "`mpirun -n 3` matches serial" check had used the box example, which takes the MPI-safe
+    `create_rectangle` path.
+  - **(2) Lost membrane facets.** Membrane facets on a partition boundary were dropped: without
+    ghost cells they have one local cell and looked exterior (a 3D sphere lost 1 of 120 at n=2).
+  - **(3) Rank-local decisions.** The per-face majority vote, `face_regions`, and the
+    "membrane empty?" checks guarding the collective `create_submesh` were decided per rank.
+  - **Fix.** `_mesh_on_rank0` meshes on rank 0 only and broadcasts material tags (and Netgen errors,
+    to avoid deadlock); meshes are ghosted with `GhostMode.shared_facet`, which interior-facet (`dS`)
+    membrane terms need in parallel anyway; the votes and emptiness checks are global
+    (Allreduce / allgather).
+  - **Test.** `tests/test_realize_mpi.py` (`integration`) checks disk, sphere and nested
+    interface-coupled (box- and background-bounded) at n = 2 and 3 against serial: identical counts
+    and measures. It fails on the old code with the original `IndexError`.
+  - `NonlinearTermError` is now a clean exit-2 user error naming the fix (MOL).
 - **2026-09-22** — Step 2: the spike (`scripts/spike_results_bundle.py`) passes all 13 checks.
   - zarr-python 3.4 writes clean v2 arrays with a zlib compressor, which stdlib and pyvcell's
     zarr 2.18 both read.

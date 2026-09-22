@@ -225,3 +225,21 @@ def test_unknown_model_file_is_a_clean_error(capsys: pytest.CaptureFixture[str])
 def test_missing_model_is_a_clean_error(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 2
     assert "give a model" in capsys.readouterr().err
+
+
+def test_nonlinear_model_under_backward_euler_is_a_clean_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Real VCell kinetics are routinely nonlinear, which backward Euler cannot lower. That is a model /
+    option mismatch the user can fix (switch to method of lines), so it exits 2 with the named fix —
+    not a traceback."""
+
+    document = yaml.safe_load(_MATH.read_text())
+    document["math_description"]["equations"][0]["terms"]["source"] = "-k_conv * u * u"
+    math = tmp_path / "nonlinear_math.yaml"
+    math.write_text(yaml.safe_dump(document))
+    argv = ["--math", str(math), "--geometry", str(_GEOM), "--t-final", "0.1", "--h", "0.5"]
+    assert main([*argv, "--time-integration", "backward_euler", "--out", str(tmp_path / "out")]) == 2
+    err = capsys.readouterr().err
+    assert "NonlinearTermError" in err
+    assert "method-of-lines" in err

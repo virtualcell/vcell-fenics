@@ -32,6 +32,7 @@ the formalism.
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -234,10 +235,13 @@ def _geometry_from_partition(
         sub_mesh, *_ = dmesh.create_submesh(parent, tdim, tagging.cell_tags.find(tag))
         subdomains[name] = SubdomainGeometry(mesh=sub_mesh, kind="volume")
 
+    # Emptiness is decided globally: create_submesh is collective, and a rank that happens to own none of a
+    # membrane's facets must still build it (and name the same boundaries) alongside the others.
+    comm = parent.comm
     boundaries: dict[str, BoundaryGeometry] = {}
     for surface in description.surfaces:
         facets = tagging.facet_tags.find(tagging.surface_tags[surface.name])
-        if not facets.size:
+        if not comm.allreduce(facets.size, op=MPI.SUM):
             continue  # the declared membrane has no realized interface (e.g. regions don't meet)
         membrane_mesh, *_ = dmesh.create_submesh(parent, tdim - 1, facets)
         subdomains[surface.name] = SubdomainGeometry(mesh=membrane_mesh, kind="surface")
@@ -245,7 +249,7 @@ def _geometry_from_partition(
 
     for i, face in enumerate(face_names):
         facets = tagging.facet_tags.find(_FACE_TAG_BASE + i)
-        if facets.size:
+        if comm.allreduce(facets.size, op=MPI.SUM):
             boundaries[face] = BoundaryGeometry(
                 subdomains=tagging.face_regions.get(_FACE_TAG_BASE + i, ()), facets=facets
             )
@@ -279,11 +283,13 @@ def _restrict_to_compartments(
     keep = np.unique(np.concatenate([tagging.cell_tags.find(inner_tag), tagging.cell_tags.find(outer_tag)]))
     subparent, cell_emap, *_ = dmesh.create_submesh(parent, tdim, keep.astype(np.int32))
 
-    # Transfer each subparent cell's region tag from its parent cell (no re-classification needed).
-    n_sub = subparent.topology.index_map(tdim).size_local
-    sub_cells = np.arange(n_sub, dtype=np.int32)
+    # Transfer each subparent cell's region tag from its parent cell (no re-classification needed) — ghost
+    # cells included, so a membrane facet on a partition boundary still sees both of its cells.
+    sub_map = subparent.topology.index_map(tdim)
+    sub_cells = np.arange(sub_map.size_local + sub_map.num_ghosts, dtype=np.int32)
     parent_cells = np.asarray(cell_emap.sub_topology_to_topology(sub_cells, False), dtype=np.intp)
-    lookup = np.zeros(parent.topology.index_map(tdim).size_local, dtype=np.int32)
+    parent_map = parent.topology.index_map(tdim)
+    lookup = np.zeros(parent_map.size_local + parent_map.num_ghosts, dtype=np.int32)
     lookup[tagging.cell_tags.indices] = tagging.cell_tags.values
     cell_tag_of = lookup[parent_cells]
     cell_tags = dmesh.meshtags(subparent, tdim, sub_cells, cell_tag_of)
@@ -374,7 +380,7 @@ def realize_interface_coupled(
         interface_facets = tagging.facet_tags.find(interface_tag)
         parent.topology.create_connectivity(tdim - 1, tdim)
         wall_facets = dmesh.exterior_facet_indices(parent.topology)
-    if not interface_facets.size:
+    if not comm.allreduce(interface_facets.size, op=MPI.SUM):  # global: every rank raises, or none does
         raise RealizationError(f"the membrane {membrane_subdomain!r} has no realized interface facets")
 
     # Retain the entity maps (realize() discards them) — they relate each submesh to the parent so the
@@ -483,6 +489,56 @@ def _march_contours(
     return out
 
 
+_NetgenArrays = tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.int32]]
+
+
+def _mesh_on_rank0(
+    comm: MPI.Comm, build: Callable[[], _NetgenArrays], *, cell: str, gdim: int
+) -> tuple[dmesh.Mesh, dmesh.MeshTags]:
+    """Run the serial Netgen ``build`` on rank 0 only and distribute its mesh through DOLFINx, returning
+    the mesh and its cell→material tag.
+
+    ``create_mesh`` reads each rank's ``cells``/``points`` as that rank's *share* of one global input, so
+    every rank handing over the full Netgen mesh builds overlapping copies and indexes ``material`` out
+    of range (the partition path crashed under ``mpiexec -n 2`` before this). Rank 0 alone supplies the
+    input; the others pass empty arrays. ``original_cell_index`` then indexes rank 0's arrays, so the
+    per-cell material is broadcast for every rank to realign its local cells. A failure inside ``build``
+    is broadcast and re-raised on every rank rather than leaving the others blocked in a collective.
+    """
+
+    nverts = {"triangle": 3, "tetrahedron": 4}[cell]
+    points = np.empty((0, gdim), dtype=np.float64)
+    cells = np.empty((0, nverts), dtype=np.int64)
+    shared: NDArray[np.int32] | BaseException | None = None
+    if comm.rank == 0:
+        try:
+            points, cells, shared = build()
+        except Exception as exc:  # re-raised on every rank below
+            shared = exc
+    shared = comm.bcast(shared, root=0)
+    if isinstance(shared, BaseException):
+        raise shared
+    assert shared is not None
+    material = shared
+
+    domain = ufl.Mesh(basix.ufl.element("Lagrange", cell, 1, shape=(gdim,)))
+    # Ghost across shared facets: a membrane is an *interior* facet set, so in parallel both cells
+    # beside a partition-boundary membrane facet must be local — for tagging it here and for the `dS`
+    # interface integrals the coupled solvers assemble on it (serial runs have no ghosts either way).
+    partitioner = dmesh.create_cell_partitioner(dmesh.GhostMode.shared_facet)
+    mesh = dmesh.create_mesh(comm, cells, domain, points, partitioner=partitioner)
+
+    # create_mesh may reorder cells for locality; realign the per-cell material via the input index —
+    # for ghost cells too, so a neighbour across the partition boundary carries its region.
+    tdim = mesh.topology.dim
+    cell_map = mesh.topology.index_map(tdim)
+    n_all = cell_map.size_local + cell_map.num_ghosts
+    all_cells = np.arange(n_all, dtype=np.int32)
+    cell_material = material[np.asarray(mesh.topology.original_cell_index)[:n_all]]
+    cell_face = dmesh.meshtags(mesh, tdim, all_cells, cell_material)
+    return mesh, cell_face
+
+
 def _mesh_box_with_contours(
     contours: list[NDArray[np.float64]],
     *,
@@ -494,8 +550,30 @@ def _mesh_box_with_contours(
     comm: MPI.Comm,
     name: str,
 ) -> tuple[dmesh.Mesh, dmesh.MeshTags]:
+    """The body-fitted DOLFINx mesh of the box with every ``contours`` polyline as a conforming internal
+    boundary, **and** its cell→region tag — :func:`_netgen_box_with_contours` meshed on rank 0 and
+    distributed by :func:`_mesh_on_rank0`."""
+
+    return _mesh_on_rank0(
+        comm,
+        lambda: _netgen_box_with_contours(contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, name=name),
+        cell="triangle",
+        gdim=2,
+    )
+
+
+def _netgen_box_with_contours(
+    contours: list[NDArray[np.float64]],
+    *,
+    ox: float,
+    oy: float,
+    lx: float,
+    ly: float,
+    h: float,
+    name: str,
+) -> _NetgenArrays:
     """Build a Netgen model of the box with every ``contours`` polyline embedded as a conforming
-    internal boundary, returning the body-fitted DOLFINx mesh **and** a cell→region tag. Netgen assigns
+    internal boundary, returning its points, cells and per-cell material index (serial). Netgen assigns
     a material index per element (``el.index``) from the leftdomain/rightdomain of the embedded curves;
     that index is one owner per body-fit region — exactly the tag :func:`_classify_and_tag` needs to
     keep each region whole. The containment forest of the (non-intersecting) contours supplies those
@@ -547,16 +625,7 @@ def _mesh_box_with_contours(
     points = np.array([list(p.p)[:2] for p in ngmesh.Points()], dtype=np.float64)
     cells = np.array([[v.nr - 1 for v in el.vertices] for el in ngmesh.Elements2D()], dtype=np.int64)
     material = np.array([el.index for el in ngmesh.Elements2D()], dtype=np.int32)
-    domain = ufl.Mesh(basix.ufl.element("Lagrange", "triangle", 1, shape=(2,)))
-    mesh = dmesh.create_mesh(comm, cells, domain, points)
-
-    # create_mesh may reorder cells for locality; realign the per-cell material via the input index.
-    tdim = mesh.topology.dim
-    n_local = mesh.topology.index_map(tdim).size_local
-    local_cells = np.arange(n_local, dtype=np.int32)
-    cell_material = material[np.asarray(mesh.topology.original_cell_index)[:n_local]]
-    cell_face = dmesh.meshtags(mesh, tdim, local_cells, cell_material)
-    return mesh, cell_face
+    return points, cells, material
 
 
 def _signed_area(poly: NDArray[np.float64]) -> float:
@@ -773,8 +842,29 @@ def _mesh_box_with_surfaces(
     comm: MPI.Comm,
     name: str,
 ) -> tuple[dmesh.Mesh, dmesh.MeshTags]:
-    """Volume-mesh the box partitioned by the marched ``surfaces``, returning the body-fitted DOLFINx
-    tetrahedral mesh **and** a cell→region tag. The recipe (ADR 008 §8, the 3D analog of the 2D
+    """The body-fitted DOLFINx tetrahedral mesh of the box partitioned by the marched ``surfaces``,
+    **and** its cell→region tag — :func:`_netgen_box_with_surfaces` meshed on rank 0 and distributed by
+    :func:`_mesh_on_rank0`."""
+
+    return _mesh_on_rank0(
+        comm,
+        lambda: _netgen_box_with_surfaces(surfaces, parents, origin=origin, extent=extent, h=h, name=name),
+        cell="tetrahedron",
+        gdim=3,
+    )
+
+
+def _netgen_box_with_surfaces(
+    surfaces: list[tuple[NDArray[np.float64], NDArray[np.int64]]],
+    parents: list[int],
+    *,
+    origin: tuple[float, float, float],
+    extent: tuple[float, float, float],
+    h: float,
+    name: str,
+) -> _NetgenArrays:
+    """Volume-mesh the box partitioned by the marched ``surfaces`` (serial), returning its points,
+    tetrahedra and per-cell region index. The recipe (ADR 008 §8, the 3D analog of the 2D
     `SplineGeometry` leftdomain/rightdomain path): the box surface is meshed by Netgen's CSG (it carries
     the local mesh-size function that raw triangles lack); each marched surface is **re-meshed** through
     `STLGeometry` (raw marched triangles as an interface produce slivers); the surfaces are merged into one
@@ -800,15 +890,7 @@ def _mesh_box_with_surfaces(
     points = np.array([list(p.p) for p in merged.Points()], dtype=np.float64)
     cells = np.array([[v.nr - 1 for v in el.vertices] for el in merged.Elements3D()], dtype=np.int64)
     material = np.array([el.index for el in merged.Elements3D()], dtype=np.int32)
-    domain = ufl.Mesh(basix.ufl.element("Lagrange", "tetrahedron", 1, shape=(3,)))
-    mesh = dmesh.create_mesh(comm, cells, domain, points)
-
-    tdim = mesh.topology.dim
-    n_local = mesh.topology.index_map(tdim).size_local
-    local_cells = np.arange(n_local, dtype=np.int32)
-    cell_material = material[np.asarray(mesh.topology.original_cell_index)[:n_local]]
-    cell_face = dmesh.meshtags(mesh, tdim, local_cells, cell_material)
-    return mesh, cell_face
+    return points, cells, material
 
 
 def _copy_surface(merged: NetgenMesh, source: NetgenMesh, fd: int) -> None:
@@ -875,9 +957,13 @@ def _classify_and_tag(
     region_tags = {sv.name: i + 1 for i, sv in enumerate(subvolumes)}
     tag_to_name = {tag: name for name, tag in region_tags.items()}
     tdim = parent.topology.dim
+    comm = parent.comm
 
+    # Owned and ghost cells alike: a ghost's region is needed to classify the partition-boundary facets.
     gdim = parent.geometry.dim
-    cells = np.arange(parent.topology.index_map(tdim).size_local, dtype=np.int32)
+    cell_map = parent.topology.index_map(tdim)
+    n_owned = cell_map.size_local
+    cells = np.arange(n_owned + cell_map.num_ghosts, dtype=np.int32)
     cell_mid = dmesh.compute_midpoints(parent, tdim, cells)
     per_cell = np.zeros(cells.size, dtype=np.int32)
     for name, tag in region_tags.items():
@@ -885,13 +971,16 @@ def _classify_and_tag(
     per_cell[per_cell == 0] = region_tags[subvolumes[-1].name]  # any unclaimed cell → background
 
     # Resolve each body-fit face as a whole by the majority of its cells' votes (consistent with the
-    # conforming boundary, vs a per-cell midpoint test that frays it).
-    cell_values = per_cell.copy()
-    face_of_cell = np.zeros(cells.size, dtype=cell_face.values.dtype)
+    # conforming boundary, vs a per-cell midpoint test that frays it). The vote is global — owned cells
+    # counted once across ranks — so a face split by the partition resolves the same way everywhere; ties
+    # go to the lowest tag, as `np.bincount(...).argmax()` did serially.
+    face_of_cell = np.zeros(cells.size, dtype=np.int64)
     face_of_cell[cell_face.indices] = cell_face.values
-    for face_id in np.unique(face_of_cell):
-        in_face = face_of_cell == face_id
-        cell_values[in_face] = np.bincount(per_cell[in_face]).argmax()
+    n_faces = comm.allreduce(int(face_of_cell.max(initial=0)) + 1, op=MPI.MAX)
+    votes = np.zeros((n_faces, len(subvolumes) + 1), dtype=np.int64)
+    np.add.at(votes, (face_of_cell[:n_owned], per_cell[:n_owned]), 1)
+    comm.Allreduce(MPI.IN_PLACE, votes, op=MPI.SUM)
+    cell_values = votes.argmax(axis=1).astype(np.int32)[face_of_cell]
     cell_tags = dmesh.meshtags(parent, tdim, cells, cell_values)
 
     surface_tags = {sc.name: _SURFACE_TAG_BASE + i for i, sc in enumerate(description.surfaces)}
@@ -931,12 +1020,17 @@ def _classify_and_tag(
         np.asarray(facet_index, dtype=np.int32)[order],
         np.asarray(facet_value, dtype=np.int32)[order],
     )
+    # Which regions touch each box face is a property of the whole mesh, not of one rank's share.
+    merged: dict[int, set[str]] = {}
+    for part in comm.allgather(face_regions):
+        for tag, names in part.items():
+            merged.setdefault(tag, set()).update(names)
     return _Tagging(
         cell_tags=cell_tags,
         facet_tags=facet_tags,
         region_tags=region_tags,
         surface_tags=surface_tags,
-        face_regions={tag: tuple(sorted(names)) for tag, names in face_regions.items()},
+        face_regions={tag: tuple(sorted(names)) for tag, names in merged.items()},
     )
 
 
