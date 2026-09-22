@@ -11,6 +11,7 @@ else, so a test that round-trips through it proves VCell can read the file (ADR 
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
@@ -43,8 +44,16 @@ class VtuGrid:
     cell_types: NDArray[np.int64]  # (M,)
 
 
-def write_vtu(path: Path, points: NDArray[np.float64], cells: NDArray[np.int64], vtk_type: int) -> None:
-    """Write a single-cell-type unstructured grid. ``points`` may be (N, 1–3); it is padded to 3D."""
+def write_vtu(
+    path: Path,
+    points: NDArray[np.float64],
+    cells: NDArray[np.int64],
+    vtk_type: int,
+    point_data: Mapping[str, NDArray[np.float64]] | None = None,
+) -> None:
+    """Write a single-cell-type unstructured grid. ``points`` may be (N, 1–3); it is padded to 3D.
+    ``point_data`` (name → (N,) values) is attached as PointData — bundle meshes carry none (their
+    fields live in zarr); the ParaView export does."""
 
     from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
     from vtkmodules.vtkCommonCore import vtkPoints
@@ -65,6 +74,12 @@ def write_vtu(path: Path, points: NDArray[np.float64], cells: NDArray[np.int64],
     grid = vtkUnstructuredGrid()
     grid.SetPoints(vtk_points)
     grid.SetCells(vtk_type, cell_array)
+    for name, values in (point_data or {}).items():
+        if values.shape != (points.shape[0],):
+            raise ValueError(f"point data {name!r} has shape {values.shape}, expected ({points.shape[0]},)")
+        array = numpy_to_vtk(np.ascontiguousarray(values, dtype=np.float64), deep=True)
+        array.SetName(name)
+        grid.GetPointData().AddArray(array)
 
     writer = vtkXMLUnstructuredGridWriter()
     writer.SetFileName(str(path))

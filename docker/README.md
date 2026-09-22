@@ -124,6 +124,15 @@ the format in [ADR 010](../docs/decisions/010-results-bundle-vtu-zarr.md):
 `--require-status completed` to check a run finished). The bundle is readable while the run is still
 writing — rows appear in the manifest only once they are complete.
 
+ParaView cannot join the VTU meshes to the zarr fields itself; export the bundle first:
+
+```bash
+docker run --rm -v "$PWD/results:/work/out" vcell-fenics \
+  vcell-fenics-export /work/out/results.fenics /work/out/paraview        # add --format xdmf for XDMF3
+```
+
+— one `<domain>.pvd` time series (a VTU per step, every variable as point data) per domain.
+
 `provenance/math.yaml` / `geometry.yaml` are the ones to read when a VCell import behaves unexpectedly:
 they are what the `.vcml` was translated into (doc §2.6), and they can be fed straight back
 into the runner with `--math`/`--geometry` to re-run or to edit-and-re-run without VCell.
