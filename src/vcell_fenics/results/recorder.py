@@ -114,6 +114,12 @@ class BundleRecorder:
 
         return self._records
 
+    @property
+    def domains(self) -> list[str]:
+        """The registered domain names, in order."""
+
+        return [d.name for d in self._domains]
+
     def measure(self, domain: str) -> float:
         return next(d.measure for d in self._domains if d.name == domain)
 

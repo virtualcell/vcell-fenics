@@ -91,6 +91,27 @@ def test_recording_does_not_perturb_the_integration() -> None:
     assert np.array_equal(monitored.unknown.x.array, plain.unknown.x.array)
 
 
+def test_the_initial_state_is_recorded_when_asked_for() -> None:
+    """TS calls its monitors once before the first step, so an output time of t_start records the
+    initial condition — the interface-coupled integrator builds its IC internally, so its caller has
+    no other way to write the t = 0 row."""
+
+    recorded: list[float] = []
+    integrate_discrete_problem(
+        _decay_problem(), t_final=1.0, output_times=[0.0, 0.5, 1.0], on_output=lambda t, s: recorded.append(t)
+    )
+    assert recorded == [0.0, 0.5, 1.0]
+
+    initial: list[float] = []
+
+    def first_u(t: float, snapshot: fem.Function) -> None:
+        if t == 0.0:
+            initial.extend(snapshot.sub(0).collapse().x.array)
+
+    integrate_discrete_problem(_decay_problem(), t_final=1.0, output_times=[0.0], on_output=first_u)
+    assert np.allclose(initial, 1.0)  # the uniform initial condition, untouched by any step
+
+
 def test_output_times_outside_the_interval_are_rejected() -> None:
     with pytest.raises(ValueError, match="beyond t_final"):
         integrate_discrete_problem(_decay_problem(), t_final=1.0, output_times=[0.5, 1.5], on_output=lambda t, s: None)
@@ -144,7 +165,7 @@ def test_interface_coupled_records_every_time_and_conserves_mass_at_each() -> No
         outer_radius=1.0,
         h=0.12,
     )
-    times = [0.2 * k for k in range(1, 6)]
+    times = [0.2 * k for k in range(0, 6)]  # including t = 0: the IC is built inside the integrator
     masses: list[tuple[float, float, float]] = []
 
     def on_output(t: float, inner: fem.Function, outer: fem.Function) -> None:

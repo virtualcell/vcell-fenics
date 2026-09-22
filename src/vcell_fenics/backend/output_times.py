@@ -24,7 +24,8 @@ class OutputMonitor:
     after every accepted step. Install with ``ts.setMonitor(monitor)``; call :meth:`finish` after
     ``ts.solve`` so an output time on the final step is never missed.
 
-    Output times at or before ``t_start`` are skipped — the caller records the initial state itself.
+    An output time equal to ``t_start`` is the initial state: ``TS`` calls its monitors once before
+    the first step (step 0, ``t = t_start``), and that call records it. Earlier times are skipped.
     Times are matched with a tolerance of ``1e-9`` of the interval, so a planned time computed as
     ``k·Δt`` still matches ``t_final`` despite round-off.
     """
@@ -46,7 +47,7 @@ class OutputMonitor:
         late = [t for t in output_times if t > t_final + self._tol]
         if late:
             raise ValueError(f"output times {late} lie beyond t_final={t_final}")
-        self._pending = sorted({float(t) for t in output_times if t > t_start + self._tol})
+        self._pending = sorted({float(t) for t in output_times if t >= t_start - self._tol})
         self._work = work
         self._emit = emit
         self._progress = progress

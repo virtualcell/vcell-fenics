@@ -15,10 +15,12 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
 from vcell_fenics.cli import CliError, build_parser, detect_format, load_pair, main, resolve_options
+from vcell_fenics.results import Bundle
 
 _ROOT = Path(__file__).resolve().parent.parent
 _MATH = _ROOT / "examples" / "models" / "diffusion2d_math.yaml"
@@ -87,14 +89,16 @@ def test_options_default_from_the_vcell_simulation() -> None:
 
     model = load_vcml(_CV / "minimal_diffusion_2d_v1.vcml")
     options = resolve_options(model, _args())
-    assert (options.t_final, options.output_dt) == (1.0, 0.1)
+    assert options.t_final == 1.0
+    assert options.output_times == pytest.approx([0.1 * k for k in range(11)])
     assert options.h == pytest.approx(2.0 / 128.0)  # extent 2.0 over the FV grid's 128 cells
 
 
 def test_explicit_flags_beat_the_model() -> None:
     model = load_pair(_MATH, _GEOM)
     options = resolve_options(model, _args(t_final=2.0, output_dt=0.5, dt=0.25, h=0.2))
-    assert (options.t_final, options.output_dt, options.dt, options.h) == (2.0, 0.5, 0.25, 0.2)
+    assert (options.t_final, options.dt, options.h) == (2.0, 0.25, 0.2)
+    assert options.output_times == (0.0, 0.5, 1.0, 1.5, 2.0)
 
 
 def test_h_defaults_to_the_narrowest_axis_when_nothing_says() -> None:
@@ -126,12 +130,19 @@ def test_run_writes_the_result_tree(tmp_path: Path) -> None:
         ]
     )
     assert status == 0
-    # The full tree a mounted results directory is expected to receive: the resolved formalism
-    # (provenance), the fields, and the machine-readable summary.
-    for name in ("math.yaml", "geometry.yaml", "fields.xdmf", "fields.h5", "summary.json"):
-        assert (out / name).is_file(), name
+    # One self-contained bundle per run (ADR 010): the mesh, the fields at every output time, their
+    # statistics, the manifest — and the resolved formalism + summary as provenance.
+    bundle_dir = out / "results.fenics"
+    for name in ("mesh/domain.vtu", "domain/u", "domain/v", "provenance/math.yaml", "provenance/summary.json"):
+        assert (bundle_dir / name).exists(), name
 
-    summary = json.loads((out / "summary.json").read_text())
+    bundle = Bundle.open(bundle_dir)
+    assert bundle.status == "completed"
+    assert bundle.times == pytest.approx((0.0, 0.1, 0.2))
+    assert [(v.domain, v.name) for v in bundle.manifest.variables] == [("domain", "u"), ("domain", "v")]
+    assert bundle.series("domain", "u").shape == (3, bundle.manifest.domains["domain"].n_points)
+
+    summary = json.loads((bundle_dir / "provenance" / "summary.json").read_text())
     assert summary["species"] == ["u", "v"]
     assert summary["run"]["backend"] == "single_mesh"
     assert summary["run"]["steps"] == 4
@@ -144,6 +155,23 @@ def test_run_writes_the_result_tree(tmp_path: Path) -> None:
     assert last["u"]["total"] == pytest.approx(first["u"]["total"] * 0.9048, rel=0.05)
     assert first["v"]["total"] == 0.0
     assert last["v"]["total"] > 0.0
+    # The bundle's statistics are the same numbers.
+    assert bundle.stats("domain", "u")[-1][1] == pytest.approx(last["u"]["total"])
+
+
+def test_method_of_lines_writes_every_output_time(tmp_path: Path) -> None:
+    """The adaptive integrator used to record t = 0 and t_final only; VCell needs every output time."""
+
+    out = tmp_path / "results"
+    argv = ["--math", str(_MATH), "--geometry", str(_GEOM), "--t-final", "0.4", "--output-dt", "0.1"]
+    status = main([*argv, "--h", "0.25", "--time-integration", "method_of_lines", "--out", str(out)])
+    assert status == 0
+    bundle = Bundle.open(out / "results.fenics")
+    assert bundle.times == pytest.approx((0.0, 0.1, 0.2, 0.3, 0.4))
+    totals = bundle.stats("domain", "u")[:, 1]
+    # u decays at k_conv = 0.5 (diffusion conserves it behind no-flux walls): the adaptive run
+    # tracks e^{-k t} at every output, not just the last.
+    assert totals == pytest.approx(totals[0] * np.exp(-0.5 * np.array(bundle.times)), rel=1e-4)
 
 
 def test_run_writes_the_resolved_formalism_for_a_vcell_model(tmp_path: Path) -> None:
@@ -168,14 +196,17 @@ def test_run_writes_the_resolved_formalism_for_a_vcell_model(tmp_path: Path) -> 
         ]
     )
     assert status == 0
-    assert not (out / "fields.xdmf").exists()  # --no-fields
+    bundle_dir = out / "results.fenics"
+    assert (bundle_dir / "mesh").is_dir() and (bundle_dir / "stats").is_dir()
+    assert not any((bundle_dir / domain).exists() for domain in Bundle.open(bundle_dir).manifest.domains)  # --no-fields
 
-    model = load_pair(out / "math.yaml", out / "geometry.yaml")
+    provenance = bundle_dir / "provenance"
+    model = load_pair(provenance / "math.yaml", provenance / "geometry.yaml")
     assert model.source == "native"
     assert model.geometry.name == "square"
     assert [v.name for v in model.math.variables] == ["u"]
 
-    summary = json.loads((out / "summary.json").read_text())
+    summary = json.loads((provenance / "summary.json").read_text())
     assert summary["source"]["biomodel"] == "MinimalDiffusion2D"
     assert summary["source"]["application"] == "diffusion2D"
     # Pure diffusion behind no-flux walls: the total is conserved.
@@ -195,6 +226,8 @@ def test_run_couples_two_compartments_across_a_membrane(tmp_path: Path) -> None:
             str(_CV / "coupled_perm_geom.yaml"),
             "--t-final",
             "0.2",
+            "--output-dt",
+            "0.05",
             "--h",
             "0.12",
             "--out",
@@ -202,9 +235,11 @@ def test_run_couples_two_compartments_across_a_membrane(tmp_path: Path) -> None:
         ]
     )
     assert status == 0
-    assert (out / "inner.xdmf").is_file() and (out / "outer.xdmf").is_file()
+    bundle = Bundle.open(out / "results.fenics")
+    assert set(bundle.manifest.domains) == {"cyto_dom", "ext_dom"}  # the VCell compartment names
+    assert bundle.times == pytest.approx((0.0, 0.05, 0.1, 0.15, 0.2))  # every output, incl. the IC
 
-    summary = json.loads((out / "summary.json").read_text())
+    summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
     assert summary["run"]["backend"] == "interface_coupled"
     assert sorted(summary["species"]) == ["s_cyto", "s_ext"]
     species = summary["outputs"][-1]["species"]

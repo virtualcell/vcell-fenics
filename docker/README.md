@@ -81,14 +81,23 @@ docker run --rm -v "$PWD/results:/work/out" vcell-fenics \
 
 ## What lands in the results directory
 
-| file | what it is |
-| --- | --- |
-| `summary.json` | the run's configuration and, per species per output time, ∫u dx, mean, min, max |
-| `fields.xdmf` + `fields.h5` | the solution time series — open the `.xdmf` in ParaView |
-| `inner.xdmf` / `outer.xdmf` | instead of `fields.*` for a two-compartment run (two meshes, two files) |
-| `math.yaml`, `geometry.yaml` | the resolved *native* formalism that was actually solved |
+One **results bundle** per run, `<results dir>/results.fenics/` (`--output-prefix` renames it) —
+the format in [ADR 010](../docs/decisions/010-results-bundle-vtu-zarr.md):
 
-`math.yaml` / `geometry.yaml` are the ones to read when a VCell import behaves unexpectedly:
+| path | what it is |
+| --- | --- |
+| `mesh/<domain>.vtu` | each VCell domain's mesh (a compartment or a membrane), written once |
+| `<domain>/<variable>` | a zarr array, one row per output time, columns in the VTU's point order |
+| `stats/<domain>/<variable>` | per output time: mean, ∫u dx, min, max (reduced across MPI ranks) |
+| `.zattrs` | the manifest: domains, variables, the output times written so far, run status |
+| `provenance/summary.json` | the run's configuration and per-species statistics |
+| `provenance/math.yaml`, `geometry.yaml` | the resolved *native* formalism that was actually solved |
+
+`python -m vcell_fenics.results.reader results/results.fenics` summarises a bundle (add
+`--require-status completed` to check a run finished). The bundle is readable while the run is still
+writing — rows appear in the manifest only once they are complete.
+
+`provenance/math.yaml` / `geometry.yaml` are the ones to read when a VCell import behaves unexpectedly:
 they are what the `.vcml` was translated into (doc §2.6), and they can be fed straight back
 into the runner with `--math`/`--geometry` to re-run or to edit-and-re-run without VCell.
 
@@ -117,7 +126,8 @@ docker run --rm --shm-size=1g \
 
 `--shm-size=1g` matters: Docker's default 64 MB of `/dev/shm` is where MPICH puts its
 shared-memory transport, and a larger mesh will exhaust it. All reported numbers are reduced
-across ranks, so an `-n 4` run's `summary.json` matches a serial one.
+across ranks, and the bundle is written in a rank-count-independent order, so an `-n 4` run's
+bundle matches a serial one.
 
 ## Choosing the discretisation
 

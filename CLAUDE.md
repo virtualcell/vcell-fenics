@@ -63,12 +63,15 @@ pixi add --pypi <pkg>         # add a PyPI dep
 pixi update                   # upgrade within version specs
 ```
 
-**Running a model.** `vcell_fenics.cli` is the one-shot runner: a VCell `.vcml`, a VCell
-math+geom YAML pair, or a native formalism pair in — XDMF fields + `summary.json` out.
+**Running a model.** `vcell_fenics.cli` is the one-shot runner (argv + loading; the solve lives in
+`vcell_fenics.runner`): a VCell `.vcml`, a VCell math+geom YAML pair, or a native formalism pair in —
+a **results bundle** out, `<--out>/<--output-prefix>.fenics/` (ADR 010: a VTU mesh per domain, zarr
+fields at every output time, per-time statistics, a manifest; provenance + `summary.json` inside).
 
 ```bash
 pixi run -e dev python -m vcell_fenics.cli --vcml model.vcml --out results
 pixi run -e dev python -m vcell_fenics.cli --math m_math.yaml --geometry m_geom.yaml --t-final 1.0
+pixi run -e dev python -m vcell_fenics.results.reader results/results.fenics   # summarise a bundle
 docker build -f docker/Dockerfile -t vcell-fenics .     # same runner, containerised
 ```
 
