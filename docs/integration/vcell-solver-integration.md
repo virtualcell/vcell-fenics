@@ -1,8 +1,8 @@
 # vcell-fenics as a VCell solver — design and progress
 
-**Started:** 2026-09-22 · **Workflow:** one small, fully-gated PR per step, stacked in order
-(`container-runner` → `vcell-solver-design` → `realize-mpi` → `mol-output-times` → `results-bundle` → …);
-work continues on the local `vcell-solver-integration` branch.
+**Started:** 2026-09-22 · **Status:** steps 0–10 **merged to `main`** (PRs #147–#156, in order) and
+the solver image is published. The VCell Java side (below) is the remaining work, as its own plan in
+`../vcell`.
 **Status:** in progress — see [Progress](#progress). This is a living document: update the status
 table and the progress log as steps land.
 
@@ -290,6 +290,19 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — **Merged.** PRs #147–#156 are on `main` (merge commits, in order); the gate passes
+  there (725) and the whole `test-integration` suite passed on the stack (71, 3h34m). The push to
+  `main` published `ghcr.io/virtualcell/vcell-fenics:{sha-d7bacaf,latest}` and
+  `oras://ghcr.io/virtualcell/vcell-fenics_singularity:{sha-d7bacaf,latest}` — the pair VCell's
+  cluster consumes (image for desktop Docker runs, SIF pre-pulled for Slurm).
+  - **Merge-order trap, for the next stack:** deleting a merged PR's branch *closes* any PR stacked
+    on it (#148 and #150 closed that way, and #149 then merged into its own base instead of `main`).
+    Retarget the next PR to `main` **before** deleting a base branch, or merge without
+    `--delete-branch` and clean up at the end. Recovered by restoring the two base branches,
+    reopening both PRs and retargeting; every commit landed and `main` matches the verified stack
+    top exactly.
+  - **Still open:** set the repository variable `ARM64_RUNNER` if the organization's plan provides
+    hosted arm64 runners for this private repo, so Apple-silicon desktops get a native image.
 - **2026-09-22** — CI on #156 is green. The image builds, and a real VCell SimulationTask solves in
   Docker with markers-only stdout. The MPI (n=2) bundle matches serial. The Apptainer SIF runs under
   `--containall`, and a P2 run compiles fresh kernels into the redirected writable cache.
