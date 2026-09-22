@@ -443,7 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
     vcell.add_argument(
         "--vc-print-status",
         action="store_true",
-        help="write [[[progress:…%]]] / [[[data:t]]] markers to stdout (everything else goes to stderr)",
+        help="write [[[progress:…%%]]] / [[[data:t]]] markers to stdout (everything else goes to stderr)",
     )
     vcell.add_argument(
         "--vc-send-status-config",

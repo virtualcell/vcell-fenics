@@ -278,3 +278,13 @@ def test_nonlinear_model_under_backward_euler_is_a_clean_error(
     err = capsys.readouterr().err
     assert "NonlinearTermError" in err
     assert "method-of-lines" in err
+
+
+def test_help_renders(capsys: pytest.CaptureFixture[str]) -> None:
+    """argparse %-formats help strings: a bare '%' (as in the [[[progress:…%]]] marker) crashes --help."""
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "--simtask" in out and "[[[progress:…%]]]" in out
