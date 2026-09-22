@@ -55,7 +55,7 @@ from dolfinx.io import XDMFFile
 from mpi4py import MPI
 
 from vcell_fenics.backend.assemble import assemble
-from vcell_fenics.backend.diagnostics import SolveError
+from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
 from vcell_fenics.backend.discrete import DiscreteProblem
 from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
@@ -78,6 +78,7 @@ _USER_ERRORS = (
     FormalismValidationError,
     RealizationError,
     SolveError,
+    NonlinearTermError,  # a nonlinear model under backward Euler: the message names the fix (use MOL)
     NotImplementedError,
     ValueError,
     KeyError,
