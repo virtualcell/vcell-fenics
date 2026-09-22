@@ -142,7 +142,7 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 | 7 | SimulationTask adapter + MathOverrides/scans + `--simtask` | ☑ | the fvsolver smoke task solves end to end in ~4 s |
 | 8 | Status protocol: stdout markers, REST WorkerEvents, exit codes, SIGTERM | ☑ | checked against ports of VCell's parser and Langevin's REST client |
 | 9 | Export for ParaView (PVD / XDMF) | ☑ | `vcell-fenics-export` |
-| 10 | Container (writable FFCx cache under Apptainer) + GitHub Actions: multi-arch image, SIF build, ORAS push | ☐ | CI runs only once pushed |
+| 10 | Container (writable FFCx cache under Apptainer) + GitHub Actions: multi-arch image, SIF build, ORAS push | ☑ | CI green on #156: image, Docker + MPI + SIF smoke |
 
 ### Step details
 
@@ -290,6 +290,38 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-22** — CI on #156 is green. The image builds, and a real VCell SimulationTask solves in
+  Docker with markers-only stdout. The MPI (n=2) bundle matches serial. The Apptainer SIF runs under
+  `--containall`, and a P2 run compiles fresh kernels into the redirected writable cache.
+  - Getting there found four latent bugs, none reachable before, since the image had never built
+    and nothing had been *solved* under MPI:
+    - **#147:** the entrypoint's `set -u` aborted conda's activation (`ZSH_VERSION: unbound
+      variable`). Fixed in #147, the stack restacked.
+    - **#149:** method of lines used ILU, which PETSc can't run in parallel; it's now block
+      Jacobi/ILU(0) on more than one rank.
+    - **#149:** the coupled solvers never finalised assembled vectors (no reverse ghost scatter).
+    - **#149:** the coupled MOL integrators never refreshed the ghosts of ċ.
+  - Together the last two leaked ~9% of mass at n=2. Now n=2 and n=3 match serial to 8 digits;
+    `tests/test_mpi_solve.py` pins it.
+- **2026-09-22** — Step 10: the container and its CI.
+  - **Entry point:** when `$XDG_CACHE_HOME` is read-only (a SIF under Apptainer), it moves FFCx to a
+    writable per-uid cache seeded from the pre-warmed one (`$VCELL_FENICS_CACHE` overrides).
+    Tested locally without Docker via `VCELL_FENICS_ACTIVATE`.
+  - **Dockerfile:** ships the SimulationTask fixtures and warms up on the VCell path, checking the
+    markers and running the reader and export.
+  - **`.github/workflows/container.yml`:**
+    - amd64 always; arm64 opt-in via the repository variable `ARM64_RUNNER`, because the repo is
+      private;
+    - smoke tests: the VCell task with markers only on stdout, the bundle reader, and MPI n=2
+      against serial;
+    - an Apptainer SIF from the Docker image, smoke-tested under `--containall`, including a P2 run
+      that compiles forms the image never pre-warmed;
+    - publishing to `ghcr.io/virtualcell/vcell-fenics:<tag>` and
+      `oras://ghcr.io/virtualcell/vcell-fenics_singularity:<tag>` on main/tags only.
+  - **Findings:**
+    - The entry-point test found a real bug in #154: argparse %-formats help strings, so
+      `--help` crashed on the `%` in the markers' help. Fixed on #154 (c3d1fa3), #155 rebased.
+    - `actionlint` caught `! grep` under `set -e` in the workflow, which would never have failed.
 - **2026-09-22** — PRs #147–#154 opened, stacked in order, covering the tracker through step 8.
 - **2026-09-22** — Step 9: `vcell-fenics-export BUNDLE OUT [--format pvd|xdmf]`
   (`results/export.py`).
