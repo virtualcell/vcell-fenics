@@ -49,6 +49,7 @@ from petsc4py import PETSc
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.diagnostics import SolveError, preflight_failure_message, ts_failure_message
 from vcell_fenics.backend.discrete import DiscreteProblem, TermKind
+from vcell_fenics.backend.linear_solvers import set_preconditioner
 
 
 @dataclass
@@ -221,7 +222,7 @@ def _run_time_stepper(
     ksp = snes.getKSP()
     ksp.setType(options.ksp_type)
     ksp.setTolerances(rtol=options.ksp_rtol)
-    ksp.getPC().setType(options.pc_type)
+    set_preconditioner(ksp, options.pc_type)  # ILU → block-Jacobi/ILU(0) under MPI (backend/linear_solvers.py)
     ts.setFromOptions()
 
     if on_time is not None:

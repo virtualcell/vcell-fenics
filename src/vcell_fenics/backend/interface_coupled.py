@@ -58,6 +58,7 @@ from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
 from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_trace
+from vcell_fenics.backend.linear_solvers import set_preconditioner
 from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tension
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
@@ -112,6 +113,16 @@ class InterfaceCoupledResult:
 
     def total_mass(self) -> float:
         return _total_mass(self.inner, self.outer)
+
+
+def _accumulate_ghosts(vector: PETSc.Vec) -> PETSc.Vec:
+    """Finalise an assembled vector: add the contributions assembled into ghost entries onto their
+    owning ranks. ``petsc.assemble_vector`` leaves this to the caller ("the returned vector is not
+    finalised"); without it every contribution at a partition-boundary dof is lost under MPI — the
+    coupled solvers leaked ~10% of their mass at n=2 before this. A no-op in serial (no ghosts)."""
+
+    vector.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)  # type: ignore[arg-type]
+    return vector
 
 
 def _total_mass(inner: fem.Function, outer: fem.Function) -> float:
@@ -735,7 +746,7 @@ def assemble_interface_coupled(
 
     def residual(state: PETSc.Vec, _rate: PETSc.Vec, out: PETSc.Vec) -> None:
         unpack(state)
-        b = petsc.assemble_vector(residual_form, kind="mpi")
+        b = _accumulate_ghosts(petsc.assemble_vector(residual_form, kind="mpi"))
         b.copy(out)
         b.destroy()
 
@@ -899,7 +910,11 @@ def integrate_interface_coupled(
         unpack(x)
         rate_in.x.array[:n_in] = x_dot.array_r[:n_in]
         rate_out.x.array[:n_out] = x_dot.array_r[n_in : n_in + n_out]
-        b = petsc.assemble_vector(residual_form, kind="mpi")
+        # The owned part alone is not enough: cells on a partition boundary read ghost dofs of ċ in the
+        # mass term, and stale ghosts there leaked mass under MPI (as `unpack` refreshes the state's).
+        rate_in.x.scatter_forward()
+        rate_out.x.scatter_forward()
+        b = _accumulate_ghosts(petsc.assemble_vector(residual_form, kind="mpi"))
         b.copy(result)
         b.destroy()
 
@@ -938,7 +953,7 @@ def integrate_interface_coupled(
     # MOL uses and as VCell's CVODE uses SPGMR+ILU. A *direct* sparse LU (`ksp_type="preonly"`,
     # `pc_type="lu"`) is robust for small problems but its 2D fill-in does not scale to large meshes.
     snes.getKSP().setType(ksp_type)
-    snes.getKSP().getPC().setType(pc_type)
+    set_preconditioner(snes.getKSP(), pc_type)  # ILU → block-Jacobi/ILU(0) under MPI
     ts.setFromOptions()
 
     ts.solve(state_vec)
@@ -1246,12 +1261,12 @@ def assemble_membrane_coupled(
             ksp.setOperators(fresh)
             matrix_cell[0].destroy()
             matrix_cell[0] = fresh
-        rhs = petsc.assemble_vector(rhs_local_form)
-        coupling_b = petsc.assemble_vector(rhs_coupling_form)  # the lagged binding forcing
+        rhs = _accumulate_ghosts(petsc.assemble_vector(rhs_local_form))
+        coupling_b = _accumulate_ghosts(petsc.assemble_vector(rhs_coupling_form))  # the lagged binding forcing
         rhs.axpy(1.0, coupling_b)
         coupling_b.destroy()
         if rhs_dilution_form is not None:
-            dilution_b = petsc.assemble_vector(rhs_dilution_form)  # the lagged ALE dilution forcing
+            dilution_b = _accumulate_ghosts(petsc.assemble_vector(rhs_dilution_form))  # the lagged ALE dilution forcing
             rhs.axpy(1.0, dilution_b)
             dilution_b.destroy()
         ksp.solve(rhs, solution)
@@ -1543,8 +1558,10 @@ def integrate_membrane_coupled(
         rate_in.x.array[:n_in] = rate.array_r[:n_in]
         rate_out.x.array[:n_out] = rate.array_r[n_in : n_in + n_out]
         rate_mem.x.array[:n_mem] = rate.array_r[n_in + n_out : n_in + n_out + n_mem]
-        b = petsc.assemble_vector(f_local_form, kind="mpi")
-        coupling_b = petsc.assemble_vector(f_coup_form, kind="mpi")
+        for fn in (rate_in, rate_out, rate_mem):  # ghost dofs of ċ too — see integrate_interface_coupled
+            fn.x.scatter_forward()
+        b = _accumulate_ghosts(petsc.assemble_vector(f_local_form, kind="mpi"))
+        coupling_b = _accumulate_ghosts(petsc.assemble_vector(f_coup_form, kind="mpi"))
         b.axpy(1.0, coupling_b)
         b.copy(out)
         b.destroy()
@@ -1605,7 +1622,7 @@ def integrate_membrane_coupled(
         snes = ts.getSNES()
         snes.setUseEW(False)
         snes.getKSP().setType(ksp_type)
-        snes.getKSP().getPC().setType(pc_type)
+        set_preconditioner(snes.getKSP(), pc_type)  # ILU → block-Jacobi/ILU(0) under MPI
         ts.setFromOptions()
         return ts
 
