@@ -165,6 +165,23 @@ shared-memory transport, and a larger mesh will exhaust it. All reported numbers
 across ranks, and the bundle is written in a rank-count-independent order, so an `-n 4` run's
 bundle matches a serial one.
 
+## On the cluster: the Apptainer SIF
+
+CI (`.github/workflows/container.yml`) publishes, on `main` and release tags, the multi-arch image
+`ghcr.io/virtualcell/vcell-fenics:<tag>` and its SIF `oras://ghcr.io/virtualcell/vcell-fenics_singularity:<tag>`
+— VCell's convention for solver images (`../vcell/docs/apptainer-image-build.md`), so the FluxCD
+pre-pull and `SlurmProxy` treat it like the other four. VCell runs it as
+
+```bash
+singularity run --containall --bind … $sif vcell-fenics --simtask /simdata/<user>/SimID_…simtask.xml \
+    --vc-send-status-config=/simdata/<user>/SimID_…_.fenicsMessagingConfig -tid 0
+```
+
+A SIF is read-only, so the pre-warmed FFCx cache in `/opt/cache` cannot take new kernels; the entry
+point notices and uses a writable per-user cache seeded from it — `$VCELL_FENICS_CACHE` if set (point it
+at shared storage to keep compiled kernels across jobs), else `$TMPDIR/vcell-fenics-cache-<uid>`.
+CI checks exactly this: the SIF runs under `--containall` and compiles a form the image never pre-warmed.
+
 ## Choosing the discretisation
 
 Defaults are deliberately conservative rather than accurate, and the run header prints what

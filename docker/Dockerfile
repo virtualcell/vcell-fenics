@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 #
-# vcell-fenics runner image: a VCell (.vcml / pyvcell YAML) or native-formalism model in,
-# solved fields out into a mounted directory. Build from the repository root:
+# vcell-fenics runner image: a VCell SimulationTask / .vcml / pyvcell YAML or native-formalism model
+# in, a results bundle out into a mounted directory (ADR 010/011). Also the source of the Apptainer
+# SIF VCell's cluster runs (.github/workflows/container.yml). Build from the repository root:
 #
 #     docker build -f docker/Dockerfile -t vcell-fenics .
 #
@@ -79,6 +80,8 @@ COPY --from=build /app/src /app/src
 COPY --from=build /app/pyproject.toml /app/pyproject.toml
 COPY docker/entrypoint.sh /usr/local/bin/vcell-fenics-entrypoint
 COPY examples/models /opt/vcell-fenics/examples
+# Real VCell SimulationTask documents: the fvsolver smoke task is the image's VCell-path self-test.
+COPY tests/fixtures/simtask /opt/vcell-fenics/examples/simtask
 
 # FFCx/DOLFINx JIT-compile every form on first use and cache the generated kernels under
 # $XDG_CACHE_HOME/fenics. In a container that directory must (a) exist outside $HOME, since the
@@ -90,19 +93,32 @@ ENV XDG_CACHE_HOME=/opt/cache \
     # One thread per rank: DOLFINx/PETSc parallelism is MPI, and letting OpenMP also fan out
     # oversubscribes the cores and slows a `mpirun -n N` run down.
     OMP_NUM_THREADS=1 \
-    # HDF5 file locking fails on many bind-mounted volumes (macOS/Windows shares, NFS); the
-    # XDMF writer would abort on `fields.h5` at the first output.
+    # HDF5 file locking fails on many bind-mounted volumes (macOS/Windows shares, NFS); keep it
+    # off for anything that still writes HDF5 (the XDMF export, h5py-based tools).
     HDF5_USE_FILE_LOCKING=FALSE \
     MPLBACKEND=Agg \
     PYTHONDONTWRITEBYTECODE=1
 
-# Warm the JIT cache and smoke-test the image in one step: if the demo model does not solve,
-# the build fails here rather than in the user's first `docker run`.
+# Warm the JIT cache and smoke-test the image in one step: if either path does not solve, the
+# build fails here rather than in the user's first `docker run`.
+#   1. the native demo model (backward Euler);
+#   2. the VCell path — a real SimulationTask, method of lines, with VCell's stdout status markers
+#      (stdout must carry markers only; the check below fails on anything else) — and the bundle
+#      reader and export on its result.
 RUN mkdir -p /opt/cache \
  && /usr/local/bin/vcell-fenics-entrypoint \
       --math /opt/vcell-fenics/examples/diffusion2d_math.yaml \
       --geometry /opt/vcell-fenics/examples/diffusion2d_geom.yaml \
       --t-final 0.1 --dt 0.05 --h 0.4 --out /tmp/warmup \
+ && /usr/local/bin/vcell-fenics-entrypoint vcell-fenics \
+      --simtask /opt/vcell-fenics/examples/simtask/SimID_1585623750_0__0.simtask.xml \
+      --out /tmp/warmup --vc-print-status > /tmp/warmup/markers.txt \
+ && grep -q '\[\[\[progress:100.0%\]\]\]' /tmp/warmup/markers.txt \
+ && ! grep -v '^\[\[\[.*\]\]\]$' /tmp/warmup/markers.txt \
+ && /usr/local/bin/vcell-fenics-entrypoint python -m vcell_fenics.results \
+      /tmp/warmup/SimID_1585623750_0_.fenics --require-status completed \
+ && /usr/local/bin/vcell-fenics-entrypoint vcell-fenics-export \
+      /tmp/warmup/SimID_1585623750_0_.fenics /tmp/warmup/paraview \
  && rm -rf /tmp/warmup \
  && chmod -R a+rwX /opt/cache
 
