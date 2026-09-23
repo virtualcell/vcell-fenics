@@ -51,6 +51,9 @@ class LabelGrid:
     labels: Labels
     origin: tuple[float, ...]
     spacing: tuple[float, ...]
+    # the smoothed indicator of each subvolume on this lattice (``None`` for one absent from the image),
+    # when the grid came from smoothing: continuous, so the boundary between a and b is I_a = I_b
+    indicators: tuple[NDArray[np.float32] | None, ...] | None = None
 
     @property
     def dim(self) -> int:
@@ -130,14 +133,16 @@ def smoothed_label_grid(raw: LabelGrid, *, extent: tuple[float, ...], h: float, 
     present = np.unique(raw.labels)
     best = np.full(counts, -np.inf, dtype=np.float32)
     labels = np.zeros(counts, dtype=np.int32)
+    indicators: list[NDArray[np.float32] | None] = [None] * (int(raw.labels.max()) + 1)
     for value in present:
         indicator = ndimage.gaussian_filter((raw.labels == value).astype(np.float32), sigma_pixels, mode="nearest")
-        sampled = ndimage.map_coordinates(indicator, pixel_coords, order=1, mode="nearest")
+        sampled = ndimage.map_coordinates(indicator, pixel_coords, order=1, mode="nearest").astype(np.float32)
+        indicators[int(value)] = sampled
         wins = sampled > best
         best[wins] = sampled[wins]
         labels[wins] = value
     labels = drop_fragments(labels, {int(v): int(ndimage.label(raw.labels == v)[1]) for v in present})
-    return LabelGrid(labels=repair_pinches(labels), origin=raw.origin, spacing=spacing)
+    return LabelGrid(labels=repair_pinches(labels), origin=raw.origin, spacing=spacing, indicators=tuple(indicators))
 
 
 def drop_fragments(labels: Labels, pieces: dict[int, int]) -> Labels:
