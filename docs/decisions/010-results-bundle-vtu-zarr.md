@@ -109,6 +109,18 @@ Why this over VTKHDF, the strongest standard:
   entries with `prefix: "seg0001/"`, each with its own `<prefix>mesh/<domain>.vtu` and
   `<prefix><domain>/<var>`. `motion: "ale"` means `<prefix><domain>/_coords` exists with shape
   `(T_seg, N, 3)`. A reader that follows *segment → prefix → row* handles both profiles the same way.
+  **Implemented 2026-09-22 (moving boundaries, tracker M2).** The decisions this left open:
+  - **Any moving run is `profile: "segmented"`**, even with one segment. Its segments have
+    `motion: "ale"`. A fixed-mesh reader must not treat the VTU's points as every row's positions.
+  - **Everything a segment owns lives under its prefix:** meshes, fields, statistics
+    (`<prefix>stats/<domain>/<var>`) and `_coords`. Arrays are indexed by the row **within** the
+    segment. Global row `r` is found by walking the segments' `count`s.
+  - **A moving segment's VTU holds its first row's points;** `_coords[row]` holds each row's.
+  - **A remesh starts a segment whose `t0` is the first time written on the new mesh.** Until that
+    row lands, `t0` holds the next planned time, because JSON has no NaN.
+  - **`domains[*].n_points` / `n_cells` describe segment 0.** A later segment's sizes come from its
+    own VTU and arrays.
+  - **Reserved names:** `_coords` and `seg\d{4}` cannot name a domain or a variable.
 - **Reader rules:**
   - Refuse a `schema` newer than you know.
   - Ignore unknown keys.

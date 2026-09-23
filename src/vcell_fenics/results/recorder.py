@@ -8,6 +8,11 @@ but for any number of domains at once, written through a :class:`~vcell_fenics.r
 A domain registers its channels with a default *source* per channel (the live solver state); a capture
 may pass other sources instead — the method-of-lines integrators hand over interpolated snapshots at
 each output time rather than the live unknown.
+
+A **moving** domain (``moving=True``, ALE) has its measure re-assembled at every capture, since the
+domain changes size as it moves, and the writer records its point coordinates per row. After a remesh,
+:meth:`BundleRecorder.start_segment` moves a domain's output onto the new mesh and opens a new bundle
+segment.
 """
 
 from __future__ import annotations
@@ -34,6 +39,9 @@ class _DomainChannels:
     fields: list[fem.Function]
     integrals: list[fem.Form]
     measure: float
+    space: fem.FunctionSpace
+    measure_form: fem.Form
+    moving: bool = False
 
 
 class BundleRecorder:
@@ -46,26 +54,47 @@ class BundleRecorder:
         self._records: list[dict[str, Any]] = []
         self._on_row: list[Callable[[float, int], None]] = []
 
-    def add_domain(self, name: str, kind: DomainKind, mesh: Mesh, channels: Sequence[tuple[str, Any]]) -> None:
-        """Register a domain and its ``(variable name, default source)`` channels (collective)."""
+    def add_domain(
+        self, name: str, kind: DomainKind, mesh: Mesh, channels: Sequence[tuple[str, Any]], *, moving: bool = False
+    ) -> None:
+        """Register a domain and its ``(variable name, default source)`` channels (collective). ``moving``:
+        an ALE domain whose mesh moves in place (see the module docstring)."""
 
         space = fem.functionspace(mesh, ("Lagrange", 1))
-        self._writer.add_domain(name, kind, space)
-        fields = [fem.Function(space, name=variable) for variable, _ in channels]
-        dx = ufl.Measure("dx", domain=mesh)
-        measure = self._reduce(float(fem.assemble_scalar(fem.form(1.0 * dx)).real), MPI.SUM)
+        self._writer.add_domain(name, kind, space, moving=moving)
         for variable, _ in channels:
             self._writer.add_variable(name, variable)
-        self._domains.append(
-            _DomainChannels(
-                name=name,
-                names=[variable for variable, _ in channels],
-                sources=[source for _, source in channels],
-                fields=fields,
-                integrals=[fem.form(u * dx) for u in fields],
-                measure=measure,
-            )
+        self._domains.append(self._channels(name, space, [v for v, _ in channels], [s for _, s in channels], moving))
+
+    def _channels(
+        self, name: str, space: fem.FunctionSpace, names: list[str], sources: list[Any], moving: bool
+    ) -> _DomainChannels:
+        mesh = space.mesh
+        fields = [fem.Function(space, name=variable) for variable in names]
+        dx = ufl.Measure("dx", domain=mesh)
+        measure_form = fem.form(1.0 * dx)
+        return _DomainChannels(
+            name=name,
+            names=names,
+            sources=sources,
+            fields=fields,
+            integrals=[fem.form(u * dx) for u in fields],
+            measure=self._reduce(float(fem.assemble_scalar(measure_form).real), MPI.SUM),
+            space=space,
+            measure_form=measure_form,
+            moving=moving,
         )
+
+    def start_segment(self, remeshed: Mapping[str, tuple[Mesh, Sequence[Any]]]) -> int:
+        """After a remesh (collective): move each named domain's output onto its new mesh, with new default
+        sources, and start a new bundle segment. Returns the segment index."""
+
+        for index, domain in enumerate(self._domains):
+            if domain.name in remeshed:
+                mesh, sources = remeshed[domain.name]
+                space = fem.functionspace(mesh, ("Lagrange", 1))
+                self._domains[index] = self._channels(domain.name, space, domain.names, list(sources), domain.moving)
+        return self._writer.new_segment({domain.name: domain.space for domain in self._domains})
 
     def on_row(self, callback: Callable[[float, int], None]) -> None:
         """Call ``callback(t, row)`` after each row is written (e.g. to report a VCell DATA event)."""
@@ -86,6 +115,8 @@ class BundleRecorder:
         stats: dict[tuple[str, str], Stats] = {}
         summary: dict[str, Any] = {}
         for domain in self._domains:
+            if domain.moving:  # the domain's size changes as its mesh moves
+                domain.measure = self._reduce(float(fem.assemble_scalar(domain.measure_form).real), MPI.SUM)
             live = sources.get(domain.name, domain.sources) if sources is not None else domain.sources
             if len(live) != len(domain.fields):
                 raise ValueError(f"domain {domain.name!r} expects {len(domain.fields)} sources, got {len(live)}")

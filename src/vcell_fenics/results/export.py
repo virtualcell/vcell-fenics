@@ -22,7 +22,7 @@ from typing import Literal
 from xml.sax.saxutils import quoteattr
 
 from vcell_fenics.results.reader import Bundle
-from vcell_fenics.results.vtu import VTK_LINE, VTK_TETRA, VTK_TRIANGLE, write_vtu
+from vcell_fenics.results.vtu import VTK_LINE, VTK_TETRA, VTK_TRIANGLE, VtuGrid, write_vtu
 
 ExportFormat = Literal["pvd", "xdmf"]
 _MESHIO_CELL = {VTK_LINE: "line", VTK_TRIANGLE: "triangle", VTK_TETRA: "tetra"}
@@ -46,7 +46,6 @@ def export_bundle(bundle: Bundle | str | Path, out_dir: Path, *, fmt: ExportForm
 def _export_domain(bundle: Bundle, domain: str, out_dir: Path, fmt: ExportFormat) -> Path:
     grid = bundle.mesh(domain)
     variables = [v.name for v in bundle.manifest.variables if v.domain == domain]
-    series = {name: bundle.series(domain, name) for name in variables}
     times = bundle.times
     gdim = bundle.manifest.domains[domain].gdim
     vtk_type = int(grid.cell_types[0]) if grid.cell_types.size else VTK_TRIANGLE
@@ -59,6 +58,7 @@ def _export_domain(bundle: Bundle, domain: str, out_dir: Path, fmt: ExportFormat
         # directory*, not beside the .xdmf (meshio 5.3.5) — so write from inside out_dir.
         with contextlib.chdir(out_dir), meshio.xdmf.TimeSeriesWriter(target.name) as writer:
             writer.write_points_cells(grid.points[:, :gdim], [(_MESHIO_CELL[vtk_type], grid.cells)])
+            series = {name: bundle.series(domain, name) for name in variables}
             for row, t in enumerate(times):
                 writer.write_data(t, point_data={name: values[row] for name, values in series.items()})
         return target
@@ -66,9 +66,16 @@ def _export_domain(bundle: Bundle, domain: str, out_dir: Path, fmt: ExportFormat
     steps = out_dir / domain
     steps.mkdir(exist_ok=True)
     entries: list[str] = []
+    meshes: dict[int, VtuGrid] = {}
     for row, t in enumerate(times):
+        # a remesh gives each segment its own mesh; an ALE segment moves its points row by row
+        segment = bundle.segment_of(row)[0]
+        mesh = meshes.setdefault(segment.index, bundle.mesh(domain, row))
+        points = bundle.coords(domain, row)[:, : mesh.points.shape[1]] if segment.motion == "ale" else mesh.points
+        cell_type = int(mesh.cell_types[0]) if mesh.cell_types.size else vtk_type
+        values = {name: bundle.field(domain, name, row) for name in variables}
         step = steps / f"{domain}_{row:05d}.vtu"
-        write_vtu(step, grid.points, grid.cells, vtk_type, {name: values[row] for name, values in series.items()})
+        write_vtu(step, points, mesh.cells, cell_type, values)
         entries.append(
             f'    <DataSet timestep={quoteattr(repr(float(t)))} part="0" file={quoteattr(f"{domain}/{step.name}")}/>'
         )

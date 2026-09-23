@@ -26,6 +26,7 @@ class P1Layout:
 
     def __init__(self, space: fem.FunctionSpace) -> None:
         mesh = space.mesh
+        self._mesh = mesh
         self._comm = mesh.comm
         tdim = mesh.topology.dim
         if tdim not in _VTK_SIMPLEX or mesh.topology.cell_name() not in ("interval", "triangle", "tetrahedron"):
@@ -46,6 +47,7 @@ class P1Layout:
         if (node_of_dof < 0).any():
             raise RuntimeError("a P1 dof is not attached to any cell's geometry node")
         key = input_index[node_of_dof]
+        self._owned_nodes = node_of_dof[: self._n_owned]
 
         # The node's own coordinates, not `tabulate_dof_coordinates` — that pushes a reference point
         # through whichever cell it meets last, which differs with the partition by an ulp.
@@ -88,6 +90,18 @@ class P1Layout:
         """(n_cells, tdim + 1) canonical point indices — rank 0 only."""
 
         return self._cells
+
+    def gather_coords(self) -> NDArray[np.float64] | None:
+        """The mesh's *current* point coordinates, (n_points, 3), in canonical order on rank 0 — for a
+        moving (ALE) domain, whose geometry moves in place under the same topology and point order."""
+
+        coords = np.ascontiguousarray(np.asarray(self._mesh.geometry.x)[self._owned_nodes, :], dtype=np.float64)
+        parts = self._comm.gather(coords, root=0)
+        if parts is None:
+            return None
+        assert self._order is not None
+        gathered: NDArray[np.float64] = np.concatenate(parts)[self._order]
+        return gathered
 
     def gather(self, owned: NDArray[np.float64]) -> NDArray[np.float64] | None:
         """Collect this rank's owned dof values into canonical order on rank 0."""
