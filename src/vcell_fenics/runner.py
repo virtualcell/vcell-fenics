@@ -412,6 +412,15 @@ def _run_interface_coupled(
     # a flag and quietly solving something else.
     if options.fe_degree != 1:
         raise RunError("the two-compartment solver is P1 only; drop --fe-degree for this model")
+    species: dict[str, list[str]] = {coupling.inner: [], coupling.outer: []}
+    for eq in model.math.equations:
+        species.setdefault(eq.subdomain, []).append(eq.variable)
+    crowded = {name: found for name, found in species.items() if len(found) != 1}
+    if crowded:
+        raise RunError(
+            "the two-compartment solver couples one species per compartment; "
+            + ", ".join(f"{name!r} has {len(found)} ({', '.join(found)})" for name, found in crowded.items())
+        )
     if options.time_integration != "method_of_lines":
         log("note: the two-compartment solver is method-of-lines; --time-integration is ignored")
 

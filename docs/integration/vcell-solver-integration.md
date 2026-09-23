@@ -312,6 +312,21 @@ aren't solved on the initial shape.
 | M4 | **Cross-validation vs mbsolver.** The fixture simtask (translation); an expansion forcing remeshes; a species-dependent velocity. README and tracker; a new image. | ✅ #163. `cross_validation/mb_swept*.py`: the real fixture through the CLI vs mbsolver. Translation agrees to 0.41 % → 0.22 % under refinement (carried control 14 %); deforming fronts converge toward ours as mbsolver refines (our front is within 0.02 of exact); the remeshing case separates the conventions 5× (mbsolver limited to mesh 31 there). | Image `sha-bfdf853` (multi-arch, plus SIF).
 | M5 | **VCell.** `Feature_Moving` on FEniCSx; refusals mirrored as issues; `FenicsBundle` reads `_coords`; the viewer serves per-row geometry; default image bump. | ✅ virtualcell/vcell#2093 (merged 2026-09-23): tests on two real moving bundles (translation; a remesh across two segments). Default image `sha-bfdf853`; vcell-fluxcd #56 pinned to match (for the user to merge). Browser check: the viewer re-fetches each row's moved mesh while scrubbing, and shows the remeshed shape. |
 
+## Image geometries (I1–I6)
+
+VCell image-based geometries (segmented 2D/3D label images, 16 % of the corpus), realized **body-fitted
+and smoothed**, any topology — nested regions, regions cut by the image edge, junctions where three
+subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.md).
+
+| Step | Scope | Status |
+|---|---|---|
+| I1 | **Voxels** in `GeometryImage.compressed_content` (VCell's hex-zlib, vertex-centred lattice); import, IO, validation; the image3d simtask fixture. | ✅ #168 |
+| I2 | **Label field** (`backend/labels.py`): analytic overlay, per-axis Gaussian smoothing, ≈ h resampling, speck + pinch clean-up, topology report. | ✅ #169 |
+| I3 | **Conforming boundaries** (`backend/label_surfaces.py`): SurfaceNets with box-face sentinels, orientation, constrained Taubin, projection onto the smooth interfaces. | ✅ #170 |
+| I4 | **Realize** (`_realize_image_partition`): 2D SplineGeometry, 3D direct Netgen surface; vectorized facet tagging; the interface-coupled wall fix; warnings logged. | ◐ #172 |
+| I5 | **End to end + cross-validation**: a PDE model on VCell's tutorial image through the CLI; `cross_validation/image_nuclear*.py` vs fvsolver (filling curve 1.7 %, field 0.8 % relL2 at h = 1 µm); robust pinch repair and a boundary-smoothing fallback; the image in the container warm-up; the two-compartment solver refuses several species per compartment clearly. | ◐ |
+| I6 | **VCell**: lift the image refusal in `FenicsSolver.unsupportedReasons` (keep refusing images in moving-boundary apps); bump the default image and the vcell-fluxcd pin. | ☐ |
+
 ## Risks and open questions
 
 - `TS.interpolate` accuracy with BDF and time-dependent Dirichlet data (spike; stepping fallback).

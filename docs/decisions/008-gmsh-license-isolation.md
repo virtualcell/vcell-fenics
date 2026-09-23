@@ -179,3 +179,12 @@ This ADR originally decided to isolate GPL gmsh behind a `Mesher` port and a pro
 with a permissive `VtkMesher` for 2D and gmsh-only for 3D. The Netgen spike (`cf74409`) showed an
 LGPL mesher covers 2D **and** 3D in-process with no isolation, so the decision was rewritten around
 Netgen and the isolation design demoted to the §7 contingency.
+
+## Amendment (2026-09-23) — image geometries mesh from their own labelled surfaces
+
+For image geometries the §8 recipe (a CSG box, each marched surface re-meshed through `STLGeometry`, merged
+under `FaceDescriptor`s) is replaced by a direct route: the conforming multi-label SurfaceNets triangles
+*are* the surface mesh, loaded in bulk under one `FaceDescriptor` per region pair, and `GenerateVolumeMesh`
+fills the domains ([ADR 012](012-image-geometry-realization.md)). Re-meshing each surface separately would
+break conformity along junction curves, where three regions meet. Still Netgen, still serial on rank 0, still
+gmsh-free.

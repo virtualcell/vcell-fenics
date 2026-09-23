@@ -82,6 +82,7 @@ COPY docker/entrypoint.sh /usr/local/bin/vcell-fenics-entrypoint
 COPY examples/models /opt/vcell-fenics/examples
 # Real VCell SimulationTask documents: the fvsolver smoke task is the image's VCell-path self-test.
 COPY tests/fixtures/simtask /opt/vcell-fenics/examples/simtask
+COPY tests/fixtures/image /opt/vcell-fenics/examples/image
 
 # FFCx/DOLFINx JIT-compile every form on first use and cache the generated kernels under
 # $XDG_CACHE_HOME/fenics. In a container that directory must (a) exist outside $HOME, since the
@@ -110,6 +111,8 @@ ENV XDG_CACHE_HOME=/opt/cache \
 #   4. a real moving-boundary BioModel (the cleavage furrow) run long enough to remesh, so the
 #      conservative remap runs against this image's own NumPy (NumPy 2.5 removed 2D np.cross, which
 #      broke every remesh here while the osx-arm64 lock still had 2.4) — it must open a second segment.
+#   5. a model on a real segmented 3D image (VCell's tutorial geometry: label field, SurfaceNets, a
+#      Netgen volume mesh from the conforming surfaces) solved by the two-compartment coupled solver.
 RUN mkdir -p /opt/cache \
  && /usr/local/bin/vcell-fenics-entrypoint \
       --math /opt/vcell-fenics/examples/diffusion2d_math.yaml \
@@ -136,6 +139,12 @@ RUN mkdir -p /opt/cache \
       --simtask /opt/vcell-fenics/examples/simtask/furrow_SimID_1486629996_0__0.simtask.xml \
       --out /tmp/warmup --h 0.3 --t-final 3 \
  && test -d /tmp/warmup/SimID_1486629996_0_.fenics/seg0001 \
+ && /usr/local/bin/vcell-fenics-entrypoint vcell-fenics \
+      --math /opt/vcell-fenics/examples/image/nuclear_math.yaml \
+      --geometry /opt/vcell-fenics/examples/image/tutorial_geom.yaml \
+      --t-final 0.25 --output-dt 0.25 --h 2.5 --out /tmp/warmup/image \
+ && /usr/local/bin/vcell-fenics-entrypoint python -m vcell_fenics.results \
+      /tmp/warmup/image/results.fenics --require-status completed \
  && rm -rf /tmp/warmup \
  && chmod -R a+rwX /opt/cache
 

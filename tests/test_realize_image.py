@@ -217,3 +217,24 @@ def test_the_vcell_image_fixture_at_1um() -> None:
         assert _measure(realized, name) == pytest.approx(vcell, rel=0.03), name
     for name, vcell in (("cytosol_ec_membrane", 4738.64), ("Nucleus_cytosol_membrane", 1406.77)):
         assert _measure(realized, name) == pytest.approx(vcell, rel=0.06), name
+
+
+def test_an_overlapping_smoothed_boundary_falls_back_to_less_smoothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Netgen may reject a smoothed boundary where a thin region's surfaces come within a cell of each other;
+    # the realizer retries with less smoothing (SurfaceNets' own boundary cannot overlap) and says so
+    import vcell_fenics.backend.realize as realize_module
+
+    real = realize_module._netgen_from_curves
+    calls: list[int] = []
+
+    def reject_first(boundary: object, h: float) -> object:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RealizationError("Netgen could not triangulate the image geometry's curves")
+        return real(boundary, h)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(realize_module, "_netgen_from_curves", reject_first)
+    with pytest.warns(ImageGeometryWarning, match="meshed with the Taubin-smoothed"):
+        geometry = realize(two_cells_2d(), h=0.03)
+    assert len(calls) == 2
+    assert sum(_measure(geometry, name) for name in ("ec", "a", "b", "c")) == pytest.approx(4.0, abs=1e-9)

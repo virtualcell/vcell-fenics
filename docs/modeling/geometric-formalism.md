@@ -43,7 +43,7 @@ A subvolume is a named volume region. Its membership is defined by one of four *
 | `compartmental` | nothing — the whole (non-spatial) domain | a trivial well-mixed cell (§3.2) |
 | `analytic` | `expression` — a **boolean predicate** over `geom.x` (the region where it is *true*), e.g. `geom.x[0]**2 + geom.x[1]**2 < 1` | gmsh OCC if it is a primitive/CSG shape, else a level-set via the Rvachev lowering (§3.2, §3.5) |
 | `csg` | a constructive-solid-geometry tree of primitives + booleans | gmsh OCC (§3.2) |
-| `image` | `pixel_value` — the voxels of `image` carrying that class value | segmentation → mesh (deferred, §3.2) |
+| `image` | `pixel_value` — the voxels of `image` carrying that class value | smoothed label field → conforming mesh (§3.2, ADR 012) |
 
 Fields: `name`, `type`, and the type-specific payload (`expression` for analytic, a `csg` tree for
 csg, `pixel_value` for image). The `analytic` expression is in the §1.8 expression language of the
@@ -149,9 +149,14 @@ for multi-compartment domains. For unfitted approaches it is a background mesh p
   D, CutFEMx — unfitted) *or* reinitialise it to a signed distance and **mesh it body-fitted**
   (marching + remesh). The implicit function is an approach-independent **pre-mesh intermediate**,
   not a commitment to unfitted methods.
-- **`image`** → segmentation → conforming mesh (marching-cubes / a meshing tool / libvcell).
-  **Deferred** (16% of the corpus, the heaviest pipeline); the `image` subvolume type still imports
-  losslessly so no data is dropped before it can be meshed.
+- **`image`** → a **smoothed label field** on an ≈ h lattice (`backend/labels.py`: per-subvolume
+  Gaussian-smoothed indicators, argmax, speck and pinch clean-up), its **conforming multi-label
+  boundaries** (`backend/label_surfaces.py`: VTK SurfaceNets with one sentinel label per box face,
+  constrained smoothing, projection onto the smooth interfaces), and a **Netgen** mesh with those
+  boundaries embedded — any topology: nested regions, regions cut by the box, junctions where three
+  subvolumes meet. The voxels travel in `GeometryImage.compressed_content` (VCell's hex-zlib encoding;
+  the lattice is vertex-centred). Analytic subvolumes mixed in are rasterized over the image, the
+  earliest winning. See [ADR 012](../decisions/012-image-geometry-realization.md).
 
 **Rvachev lowering (predicate → implicit function).** A VCell `analytic` subvolume is a boolean
 predicate; the realization first lowers it to an implicit function `φ` whose **sign** encodes
@@ -281,7 +286,7 @@ Survey of the 5615 parsed corpus geometries (`scripts/`, the geometry analogue o
   well-mixed-ODE half of the corpus.
 - **analytic, spatial — the dominant spatial type** (4139 subvolume occurrences). The primitive/CSG
   subset realizes body-fitted via gmsh OCC now; arbitrary analytic awaits the level-set/cut-FEM path.
-- **image — 16%** (926 geometries). Imports losslessly; meshing deferred.
+- **image — 16%** (926 geometries). Imports losslessly (voxels included); realized body-fitted (ADR 012).
 - **topology is simple** — 1–2 subvolumes in 86% of geometries, 0–1 membranes in 89%. The common
   realization targets are: a single region (no membrane), and one cell inside extracellular space
   with one membrane — both already prototyped by `make_disk_geometry` /
@@ -305,11 +310,12 @@ analytic (level-set) → image (mesh).** This realizes the majority of importabl
    faces from step 2, lifting the import layer's `reject_not_implemented` bucket (44.7%).
 4. **Interface (jump-condition) BCs** — `SurfaceClass` + `JumpCondition` → single-sided `interface_flux`
    (a pair, one per side), the cross-membrane coupling.
-5. **Later** — arbitrary-analytic → level-set realization (cut/trace FEM); `image` → mesh.
+5. **`image` → conforming mesh — Done** (ADR 012: label field → SurfaceNets boundaries → Netgen, 2D and 3D,
+   any topology; cross-validated against fvsolver on VCell's tutorial image).
+6. **Later** — arbitrary-analytic → level-set realization (cut/trace FEM).
 
 ## 7. Non-goals (for now)
 
-- **Image → conforming mesh** (deferred; the `image` type still imports).
 - **A full CSG-tree authoring surface** beyond what gmsh OCC and VCell's csg trees need.
 - **1D geometries** as a first-class realization (39 in the corpus; revisit if a real model needs
   one).
