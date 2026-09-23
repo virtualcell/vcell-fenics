@@ -270,3 +270,98 @@ def test_writer_rejects_an_incomplete_row(tmp_path: Path) -> None:
     writer.open()
     with pytest.raises(ValueError, match="every registered"):
         writer.write(0.0, {("d", "a"): np.zeros(9)}, {("d", "a"): (0.0, 0.0, 0.0, 0.0)})
+
+
+# -- moving meshes: ALE coordinates per row, a new segment per remesh (ADR 010 §2–3) ------------------
+
+
+def _write_moving_bundle(path: Path, times: list[float], *, remesh_after: int | None = None) -> None:
+    """A disk that translates by (t, 0) and dilates by (1 + t) between rows, carrying the field
+    u = x + 2y evaluated on the *moved* mesh — so a row's values must pair with that row's coordinates.
+    With ``remesh_after``, the domain is re-meshed (a finer disk, a different point count) after that row."""
+
+    geometry = realize(_disk(), h=0.2)
+    mesh = geometry.mesh_of("cyto")
+    base: NDArray[np.float64] = np.array(mesh.geometry.x, dtype=np.float64, copy=True)
+    writer = BundleWriter(path, comm=MPI.COMM_WORLD, planned_times=times, source=_SOURCE, solver=_SOLVER)
+    recorder = BundleRecorder(writer, comm=MPI.COMM_WORLD)
+    recorder.add_domain("cyto", "volume", mesh, [("u", _u)], moving=True)
+    recorder.open()
+    for row, t in enumerate(times):
+        mesh.geometry.x[:, :2] = base[:, :2] * (1.0 + t) + np.array([t, 0.0])
+        recorder.capture(t)
+        if remesh_after is not None and row == remesh_after:
+            finer = realize(_disk(), h=0.12).mesh_of("cyto")
+            base = np.array(finer.geometry.x, dtype=np.float64, copy=True)
+            mesh = finer
+            recorder.start_segment({"cyto": (mesh, [_u])})
+    writer.finalize("completed")
+
+
+def test_a_moving_domain_records_its_coordinates_every_row(tmp_path: Path) -> None:
+    path = tmp_path / "moving.fenics"
+    times = [0.0, 0.25, 0.5]
+    _write_moving_bundle(path, times)
+    bundle = Bundle.open(path)
+    assert bundle.manifest.profile == "segmented"
+    (segment,) = bundle.manifest.segments
+    assert (segment.motion, segment.prefix, segment.count) == ("ale", "", 3)
+    reference = bundle.coords("cyto", 0)
+    for row, t in enumerate(times):
+        coords = bundle.coords("cyto", row)
+        # the recorded points are the moved ones, and the field's columns belong to them
+        assert np.allclose(coords[:, :2], (reference[:, :2]) * (1.0 + t) + [t, 0.0], atol=1e-12)
+        assert np.allclose(bundle.field("cyto", "u", row), coords[:, 0] + 2.0 * coords[:, 1], atol=1e-12)
+    # the measure follows the dilation: mean = total / |domain(t)|, and |domain| grows as (1 + t)^2
+    area0 = bundle.stats("cyto", "u")[0, 1] / bundle.stats("cyto", "u")[0, 0]
+    stats = bundle.stats("cyto", "u")
+    for row, t in enumerate(times):
+        assert stats[row, 1] / stats[row, 0] == pytest.approx(area0 * (1.0 + t) ** 2, rel=1e-10)
+
+
+def test_a_remesh_starts_a_segment_with_its_own_mesh(tmp_path: Path) -> None:
+    path = tmp_path / "remeshed.fenics"
+    times = [0.0, 0.25, 0.5, 0.75]
+    _write_moving_bundle(path, times, remesh_after=1)
+    bundle = Bundle.open(path)
+    first, second = bundle.manifest.segments
+    assert (first.count, second.count) == (2, 2)
+    assert (second.prefix, second.motion, second.t0) == ("seg0001/", "ale", 0.5)
+    assert (path / "seg0001" / "mesh" / "cyto.vtu").is_file()
+    n0 = bundle.mesh("cyto", 0).points.shape[0]
+    n1 = bundle.mesh("cyto", 2).points.shape[0]
+    assert n1 > n0  # the finer remesh
+    for row in range(len(times)):
+        coords = bundle.coords("cyto", row)
+        values = bundle.field("cyto", "u", row)
+        assert values.shape[0] == coords.shape[0] == (n0 if row < 2 else n1)
+        assert np.allclose(values, coords[:, 0] + 2.0 * coords[:, 1], atol=1e-12)
+    assert bundle.stats("cyto", "u").shape == (4, 4)
+    with pytest.raises(ValueError, match="remeshed"):
+        bundle.series("cyto", "u")
+
+
+def test_pvd_export_follows_the_moving_mesh(tmp_path: Path) -> None:
+    from vcell_fenics.results.export import export_bundle
+
+    path = tmp_path / "remeshed.fenics"
+    _write_moving_bundle(path, [0.0, 0.25, 0.5, 0.75], remesh_after=1)
+    (pvd,) = export_bundle(path, tmp_path / "paraview")
+    assert pvd.name == "cyto.pvd"
+    bundle = Bundle.open(path)
+    for row in range(4):
+        step = read_vtu_strict(tmp_path / "paraview" / "cyto" / f"cyto_{row:05d}.vtu")
+        assert np.allclose(step.points, bundle.coords("cyto", row), atol=1e-12)
+    with pytest.raises(ValueError, match="XDMF"):
+        export_bundle(path, tmp_path / "xdmf", fmt="xdmf")
+
+
+def test_reserved_bundle_names(tmp_path: Path) -> None:
+    writer = BundleWriter(
+        tmp_path / "b.fenics", comm=MPI.COMM_WORLD, planned_times=[0.0], source=_SOURCE, solver=_SOLVER
+    )
+    mesh = create_unit_square(MPI.COMM_WORLD, 2, 2)
+    writer.add_domain("cyto", "volume", fem.functionspace(mesh, ("Lagrange", 1)))
+    for bad in ("_coords", "seg0001"):
+        with pytest.raises(ValueError, match="cannot name"):
+            writer.add_variable("cyto", bad)
