@@ -238,3 +238,20 @@ def test_an_overlapping_smoothed_boundary_falls_back_to_less_smoothing(monkeypat
         geometry = realize(two_cells_2d(), h=0.03)
     assert len(calls) == 2
     assert sum(_measure(geometry, name) for name in ("ec", "a", "b", "c")) == pytest.approx(4.0, abs=1e-9)
+
+
+def test_the_3d_mesher_returns_arrays_it_owns() -> None:
+    # Netgen's Coordinates() / NumPy() are views into buffers freed with the Netgen mesh when the builder
+    # returns; handing a view to create_mesh segfaulted on linux-aarch64 (a VCell Quick Run at h = 0.72 µm)
+    from vcell_fenics.backend.label_surfaces import extract_boundary
+    from vcell_fenics.backend.labels import label_geometry
+    from vcell_fenics.backend.realize import _netgen_from_surfaces
+
+    grid = label_geometry(cells_3d(21), h=0.2).grid
+    points, cells, material = _netgen_from_surfaces(extract_boundary(grid, extent=(2.0, 2.0, 2.0)), 0.2)
+    for array in (points, cells, material):
+        assert (
+            array.flags.owndata
+            or array.base is None
+            or (isinstance(array.base, np.ndarray) and array.base.flags.owndata)
+        )
