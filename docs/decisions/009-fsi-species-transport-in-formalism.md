@@ -53,6 +53,16 @@ carrier (FSI's network phase, or any `∇·v_rel ≠ 0` drift) it is a **latent 
 FSI. (Concretely, the FSI MMS uses `v_carrier = [0.3x, 0.1y]` (∇· = 0.4) and `w = [0.25x, 0.25y]` (∇· = 0.5):
 the dropped `∇·v_rel = −0.1` is exactly the gap between the formalism's 0.5 and the correct 0.4.)
 
+**Addendum (2026-09-23, moving boundaries M3).** The `carrier ≠ frame` case now has a formalism
+spelling of its own: the T1 `advection` slot is the species' **lab-frame** carrier velocity `c`, and the
+backend transports it relative to the mesh (`c − w`, with `w` the mesh's actual velocity — the moving
+displacement over dt, the harmonic extension inside a bulk), integrated by parts so the boundary carries
+zero *total* flux. It was needed for VCell moving-boundary math: VCell's solver is Eulerian (a fixed grid
+and a moving front, no mesh velocity), so its species' velocities are lab-frame, and the solution must not
+depend on the ALE mesh velocity — verified by a rotating-mesh test that converges to the static-mesh
+solution (`tests/test_backend_lab_frame_advection.py`). `relative_advection` keeps its meaning (drift
+relative to the substrate); FSI's inline transport (Steps B/C, deferred) is unchanged.
+
 ## Proposal
 
 **(1) Extend the relative-advection term to its conservation form** (implemented — step A landed). The

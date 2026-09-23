@@ -1,0 +1,131 @@
+"""VCell moving-boundary simulations through the solver path (tracker "Moving boundaries", M3).
+
+The real moving-boundary SimulationTask ``SimID_274641196``: a disk ``cell`` (radius 3, centre (5, 5))
+inside an empty ``ec``, three diffusing species in the cell, and a front velocity
+``(sin t, cos t)`` read from the membrane's ``<Velocity>``. The mesh translates rigidly with the front;
+the species have no velocity of their own, so — VCell's semantics — they stay in the lab frame and the
+front sweeps them: in the cell's frame they drift backwards and pile against the trailing membrane,
+while the zero-total-flux front keeps every species' mass exactly.
+Variants of the same document (small text edits) exercise a constant front component, remeshing
+under a strongly deforming front, and a species-dependent front.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from vcell_fenics.cli import main
+from vcell_fenics.results import Bundle
+
+_MB = Path(__file__).resolve().parent / "fixtures" / "simtask" / "SimID_274641196_0__0.simtask.xml"
+_BUNDLE = "SimID_274641196_0_.fenics"
+_SPECIES = ("C_cyt", "Ran_cyt", "RanC_cyt")
+_VX = '<Function Name="sproc_0.velocityX" Domain="cell_ec_membrane">sin(t)</Function>'
+_VY = '<Function Name="sproc_0.velocityY" Domain="cell_ec_membrane">cos(t)</Function>'
+
+
+def _run(tmp_path: Path, *args: str, vx: str | None = None, vy: str | None = None) -> Bundle:
+    text = _MB.read_text()
+    if vx is not None:
+        text = text.replace(_VX, _VX.replace(">sin(t)<", f">{vx}<"))
+    if vy is not None:
+        text = text.replace(_VY, _VY.replace(">cos(t)<", f">{vy}<"))
+    task = tmp_path / _MB.name
+    task.write_text(text)
+    assert main(["--simtask", str(task), "--out", str(tmp_path), *args]) == 0
+    return Bundle.open(tmp_path / _BUNDLE)
+
+
+def _shift(bundle: Bundle) -> np.ndarray:
+    first, last = bundle.coords("cell", 0), bundle.coords("cell", len(bundle.times) - 1)
+    return np.asarray(last[:, :2].mean(axis=0) - first[:, :2].mean(axis=0))
+
+
+def _assert_mass_conserved(bundle: Bundle) -> None:
+    for species in _SPECIES:
+        totals = bundle.stats("cell", species)[:, 1]
+        assert np.allclose(totals, totals[0], rtol=1e-12), (species, totals)
+
+
+def test_the_cell_translates_with_its_front_and_keeps_its_mass(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    bundle = _run(tmp_path, "--vc-print-status")
+    manifest = bundle.manifest
+    assert manifest.status == "completed"
+    assert manifest.profile == "segmented"
+    (segment,) = manifest.segments
+    assert (segment.motion, segment.count) == ("ale", 11)
+    assert manifest.solver.options["time_integration"] == "backward_euler"
+
+    # a rigid translation: every point moves by the same vector …
+    first, last = bundle.coords("cell", 0), bundle.coords("cell", 10)
+    shift = _shift(bundle)
+    assert np.abs((last[:, :2] - first[:, :2]) - shift).max() < 1e-12
+    # … which is backward Euler's quadrature of the front velocity, evaluated at each step's end time
+    # (a time-frozen velocity would give (0, 1)); it converges to (1 − cos 1, sin 1) as dt → 0
+    dt = 0.1
+    expected = dt * np.array([sum(math.sin(dt * k) for k in range(1, 11)), sum(math.cos(dt * k) for k in range(1, 11))])
+    assert np.allclose(shift, expected, atol=1e-12)
+    _assert_mass_conserved(bundle)
+
+    # stdout carries status markers only (VCell's scanner), one data marker per row; the CLI writes them
+    # to a duplicate of file descriptor 1, so capture at that level
+    out = capfd.readouterr().out.split()
+    assert out
+    assert all(line.startswith("[[[") and line.endswith("]]]") for line in out)
+    assert sum(line.startswith("[[[data:") for line in out) == 11
+
+    # swept, not carried: Ran_cyt (initially = y) piles against the trailing membrane — the front moves
+    # up and to the right, so by t = 1 the field decreases along the motion (a carried field would still
+    # rise with y, flattened only by diffusion)
+    coords, ran = bundle.coords("cell", 10), bundle.field("cell", "Ran_cyt", 10)
+    motion = np.array([math.sin(1.0), math.cos(1.0)])
+    gradient = np.linalg.lstsq(
+        np.column_stack([coords[:, :2] - coords[:, :2].mean(axis=0), np.ones(len(ran))]), ran, rcond=None
+    )[0][:2]
+    assert gradient @ motion < 0.0, gradient
+
+    summary = json.loads((tmp_path / _BUNDLE / "provenance" / "summary.json").read_text())
+    assert summary["run"]["backend"] == "ale"
+    assert summary["source"]["moving_boundary"]["velocity_dependence"] == "prescribed"
+
+
+@pytest.mark.integration
+def test_the_translation_converges_to_the_exact_displacement(tmp_path: Path) -> None:
+    shift = _shift(_run(tmp_path, "--dt", "0.005"))
+    assert np.allclose(shift, [1.0 - math.cos(1.0), math.sin(1.0)], atol=5e-3)
+
+
+def test_a_constant_front_component(tmp_path: Path) -> None:
+    # regression: a constant component (velocityY = 0) reached through two functions used to name a
+    # parameter the imported model never defined
+    bundle = _run(tmp_path, vx="0.5", vy="0.0")
+    assert np.allclose(_shift(bundle), [0.5, 0.0], atol=1e-12)
+    _assert_mass_conserved(bundle)
+
+
+def test_a_deforming_front_remeshes_and_keeps_its_mass(tmp_path: Path) -> None:
+    # v = (0.5 (x − 5)², 0) stretches the cell's right side and squeezes its left: the moving mesh degrades
+    # and is replaced (a new bundle segment per remesh), the species carried over conservatively
+    bundle = _run(tmp_path, vx="(0.5 * ((x - 5.0) ^ 2))", vy="0.0")
+    segments = bundle.manifest.segments
+    assert len(segments) >= 2
+    assert [s.prefix for s in segments[1:]] == [f"seg{k:04d}/" for k in range(1, len(segments))]
+    assert sum(s.count for s in segments) == len(bundle.times) == 11
+    _assert_mass_conserved(bundle)
+    for row in range(len(bundle.times)):
+        assert bundle.coords("cell", row).shape[0] == bundle.field("cell", "C_cyt", row).shape[0]
+
+
+def test_a_species_dependent_front(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # the front's speed follows a species (evaluated one step behind): the run completes and conserves
+    bundle = _run(tmp_path, vx="(0.01 * C_cyt)", vy="0.0")
+    assert "previous step" in capsys.readouterr().err
+    assert _shift(bundle)[0] > 0.0  # C_cyt = x > 0 everywhere in the cell, so the front moves right
+    _assert_mass_conserved(bundle)

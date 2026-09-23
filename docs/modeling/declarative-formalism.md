@@ -306,11 +306,17 @@ For `temporality = steady_state`, the `∂_t u` term is omitted.
 |---|---|---|---|
 | `diffusion` | scalar or symmetric tensor on Ω | no | D (omit ⇒ 0, pure reaction or advection) |
 | `relative_advection` | vector field on Ω | no | **w**, the species' drift relative to the substrate. Default 0. |
+| `advection` | vector field on Ω | no | **c**, the species' **lab-frame** (Eulerian) velocity, independent of how the mesh moves. The backend transports it relative to the moving mesh, **c − v_mesh**, so the solution does not depend on the mesh velocity (only on the domain's motion). Integrated by parts, its natural boundary condition is zero *total* flux, `(−D∇u + (c − v_mesh)u)·n = 0`: at a moving front (`v_mesh·n = v_b·n`) the Rankine–Hugoniot condition. Exclusive with `relative_advection`. Single-mesh backend path only. |
 | `source` | scalar expression | no | s. May depend on u, `geom.x`, `sim.t`, parameters, traces of variables on other subdomains (§1.8). |
 
 The substrate velocity **v_Ω** is not a slot — it comes from `subdomain.motion` (§1.10). When the bulk is static (no motion), the `∇ · (u v_Ω)` term vanishes; when it is moving, the compression contribution `u ∇ · v_Ω` is included automatically and cannot be forgotten. The Eulerian-vs-Lagrangian distinction is therefore a modelling choice expressed entirely through `subdomain.motion`:
 
 - **Eulerian fluid setup** ⇒ `bulk.motion = none`, fluid velocity goes into each species' `relative_advection`.
+- **VCell moving boundary (Eulerian species, moving domain)** ⇒ `bulk.motion` = the front's velocity (the
+  frame: the domain moves), each species' own VCell velocity goes into `advection` — zero when the model
+  gives none, so the front *sweeps* the species rather than carrying them. `advection = v_front` recovers
+  the Lagrangian carry. (VCell's moving-boundary solver is purely kinematic — a fixed grid and an embedded
+  moving front — so the mesh velocity must not appear in the physics; `advection` is what makes it not.)
 - **Lagrangian setup** ⇒ `bulk.motion = v_fluid`, `relative_advection` defaults to zero.
 
 At least one of `diffusion` or `source` must be present for the equation to be non-trivial.

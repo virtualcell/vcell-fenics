@@ -203,7 +203,6 @@ def test_fenicsx_options_block(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "fixture,match",
     [
-        ("SimID_274641196_0__0.simtask.xml", "moving-boundary"),
         ("SimID_274631114_0__0.simtask.xml", "non-spatial"),
     ],
 )
@@ -296,7 +295,6 @@ def test_the_bundle_lands_next_to_the_task_by_default(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "fixture,message",
     [
-        ("SimID_274641196_0__0.simtask.xml", "moving-boundary"),
         ("SimID_274631114_0__0.simtask.xml", "non-spatial"),
         ("SimID_274672135_0__0.simtask.xml", "particle"),  # Langevin: the bridge refuses particle math
     ],
@@ -340,7 +338,7 @@ def test_the_front_velocity_is_read_from_the_membrane() -> None:
 
 def test_the_front_moves_the_interior_compartment() -> None:
     # threaded to the importer, the front becomes a prescribed motion of the volume it encloses (v = v_b)
-    from vcell_fenics.formalism.schema import MotionPrescribedVelocity
+    from vcell_fenics.formalism.schema import MotionPrescribedVelocity, TemplateEquation
     from vcell_fenics.pyvcell_bridge import import_math_description
 
     task = read_simtask(_MB)
@@ -348,6 +346,11 @@ def test_the_front_moves_the_interior_compartment() -> None:
     motion = {s.name: s.motion for s in math.subdomains}
     assert motion["cell"] == MotionPrescribedVelocity(velocity="[((sin(sim.t))), ((cos(sim.t)))]")
     assert motion["ec"].kind == "none"
+    # the front moves the frame only: the species keep VCell's lab-frame velocity (none), so each takes
+    # an explicit zero lab-frame advection rather than riding with the cell
+    for equation in math.equations:
+        assert isinstance(equation, TemplateEquation)
+        assert equation.terms.get("advection") == "[0.0, 0.0]" and "relative_advection" not in equation.terms
 
 
 def test_a_species_dependent_front_is_species_coupled(tmp_path: Path) -> None:
@@ -363,12 +366,13 @@ def test_a_species_dependent_front_is_species_coupled(tmp_path: Path) -> None:
         )
     )
     assert front_velocity_dependence(task) == "species-coupled"
+    assert any("previous step" in w for w in check_supported(task))
 
 
-def test_a_supported_moving_task_is_still_refused_until_the_runner_moves_meshes() -> None:
-    # everything the moving path needs is present; the runner's moving path is the next step
-    with pytest.raises(SimulationTaskError, match=r"moving-boundary.*does not run moving-boundary simulations yet"):
-        check_supported(read_simtask(_MB))
+def test_a_supported_moving_task_is_accepted() -> None:
+    # a prescribed front: nothing to warn about beyond the solver name
+    warnings = check_supported(read_simtask(_MB))
+    assert not any("front velocity" in w for w in warnings), warnings
 
 
 def test_a_moving_task_without_a_front_velocity_is_refused(tmp_path: Path) -> None:

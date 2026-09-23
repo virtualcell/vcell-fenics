@@ -50,6 +50,8 @@ compartments raise :class:`NotImplementedError` pointing at the follow-up.
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -72,7 +74,7 @@ from vcell_fenics.formalism.schema import (
     Variable,
 )
 from vcell_fenics.pyvcell_bridge.expression import translate_expression
-from vcell_fenics.pyvcell_bridge.inlining import _IDENT_RE, FunctionResolution, resolve_functions
+from vcell_fenics.pyvcell_bridge.inlining import _IDENT_RE, FunctionResolution, referenced_names, resolve_functions
 
 if TYPE_CHECKING:
     from pyvcell.vcml.models_app import FrontVelocity
@@ -136,9 +138,13 @@ def import_model(
     ``front_velocity`` is the application's moving-boundary front kinematics (``app.front_velocity``
     — *not* part of the lowered ``MathDescription``, so the caller threads it in). It moves a
     geometry *surface* class; we attach it as a prescribed-velocity motion (§1.10) on the volume
-    subdomain that surface encloses (its membrane's ``inside_compartment``): the cell carries its
-    cytoplasm, the Lagrangian ``v = v_b`` convention the moving-boundary FV solver uses (the bulk
-    rides the moving mesh, with no-flux on the front). See ``cross_validation/mb_translation.py``."""
+    subdomain that surface encloses (its membrane's ``inside_compartment``). That motion is only the
+    **frame**: VCell's moving-boundary solver is Eulerian — a fixed grid, a moving front, and each
+    species' own lab-frame velocity (its PDE ``<Velocity>``, zero when absent). So the moving
+    compartment's species take that velocity as the lab-frame ``advection`` slot, transported relative
+    to the moving mesh with zero total flux at the front (the Rankine–Hugoniot condition); a species
+    whose velocity equals the front's rides with the cell, and one with none is swept by the front.
+    See ``cross_validation/mb_translation.py`` and ``mb_swept.py``."""
 
     variable_names = _collect_variable_names(vcml)
     resolution = resolve_functions(list(vcml.functions), variable_names)
@@ -162,9 +168,12 @@ def import_model(
         _reject_stochastic(compartment)
         motion = motion_by_compartment.get(compartment.name, MotionNone())
         subdomains.append(Subdomain(name=compartment.name, kind="volume", motion=motion))
+        first = len(equations)
         _translate_subdomain_equations(
             compartment, "volume", variables, equations, boundary_conditions, resolution, dim, bulk_species
         )
+        if compartment.name in motion_by_compartment:
+            equations[first:] = [_lab_frame(eq, dim) for eq in equations[first:]]
 
     for membrane in vcml.membrane_subdomains:
         _reject_stochastic(membrane)
@@ -193,6 +202,19 @@ def import_model(
         boundary_conditions=boundary_conditions,
     )
     return ImportResult(math=math, observables=tuple(observables))
+
+
+def _lab_frame(equation: Equation, dim: int | None) -> Equation:
+    """A species of a moving compartment: its VCell velocity is lab-frame (Eulerian), so it becomes the
+    ``advection`` slot — an explicit zero when VCell gives none (the species is swept by the front, not
+    carried with the cell, which is what the formalism's default would do)."""
+
+    if not isinstance(equation, TemplateEquation) or equation.template != "bulk_radv_diff":
+        return equation
+    terms = dict(equation.terms)
+    velocity = terms.pop("relative_advection", None)
+    terms["advection"] = velocity if velocity is not None else "[" + ", ".join(["0.0"] * (dim or 2)) + "]"
+    return dataclasses.replace(equation, terms=terms)
 
 
 def _is_zero_neumann(bc: BoundaryCondition, numeric: dict[str, float]) -> bool:
@@ -341,8 +363,29 @@ def _front_motion(
     components = [front_velocity.velocity_x, front_velocity.velocity_y]
     if dim == 3:
         components.append(front_velocity.velocity_z)
-    rendered = [translate_expression(res.inline(str(c)) or "") for c in components]
+    rendered = [translate_expression(_inline_every_function(str(c), vcml)) for c in components]
     return {interior: MotionPrescribedVelocity(velocity="[" + ", ".join(rendered) + "]")}
+
+
+def _body_or_name(match: re.Match[str], names: frozenset[str], bodies: dict[str, str]) -> str:
+    name = match.group(1)
+    return f"({bodies[name]})" if name in names else name
+
+
+def _inline_every_function(expr: str, vcml: VcmlMathDescription) -> str:
+    """``expr`` with *every* MathFunction name replaced by its body, recursively — constant ones too.
+
+    Equations keep constant functions as parameters (emitted when an equation reaches them), but a
+    front velocity is not an equation, so a constant component (``velocityY = 0``, reached through
+    ``sobj_…_velY`` → ``sproc_….velocityY``) would otherwise name a parameter the model never defines."""
+
+    bodies = {f.name: (f.exp or "0") for f in vcml.functions}
+    for _ in range(len(bodies) + 1):  # each pass removes one level; more passes than functions = a cycle
+        names = referenced_names(expr) & bodies.keys()
+        if not names:
+            return expr
+        expr = _IDENT_RE.sub(functools.partial(_body_or_name, names=frozenset(names), bodies=bodies), expr)
+    raise VcellImportError(f"cyclic MathFunction references in the front velocity {expr!r}")
 
 
 def _velocity_vector(velocity: Velocity | None, res: FunctionResolution) -> str | None:

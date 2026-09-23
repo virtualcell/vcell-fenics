@@ -194,6 +194,16 @@ def _build_problem(
             # term instead); the drift's divergence is not the mesh's and must survive. On a moving mesh it
             # rides on top of the mesh GCL dilution, so the total is ∇·v_carrier = ∇·v_mesh + ∇·v_rel (ADR 009).
             terms.append(Term(TermKind.ADVECTION, (ufl.dot(drift, ufl.grad(u)) + ufl.div(drift) * u) * w))
+        if "advection" in eq.terms:
+            # A lab-frame (Eulerian) carrier velocity c — VCell's species velocity: the physics has no mesh
+            # velocity in it, so the transport is relative to whatever the mesh does, c − w (w = 0 on a static
+            # mesh), and the solution does not depend on w. Integrated by parts, −∫ u (c − w)·∇q, so the
+            # natural boundary condition is zero *total* flux (−D∇u + (c − w)u)·n = 0 — at a moving front
+            # (w·n = v_b·n) exactly the Rankine–Hugoniot condition VCell's moving-boundary solver imposes —
+            # and mass is conserved exactly (q = 1 kills the term; the swept volume is in the time term).
+            carrier = compile_expression(parse(eq.terms["advection"]), ctx)
+            frame_relative = carrier - motion.velocity() if motion is not None else carrier
+            terms.append(Term(TermKind.ADVECTION, -u * ufl.dot(frame_relative, ufl.grad(w))))
         if motion is not None:
             # Auto-dilution ρ ∇·v_mesh, using the **GCL-consistent effective rate** `ln(|Kⁿ⁺¹|/|Kⁿ|)/dt`
             # (the log of the actual per-cell/-facet swept-volume ratio, bulk or membrane). This term is
@@ -446,10 +456,16 @@ def _resolve_equations(md: MathDescription) -> list[TemplateEquation]:
             raise NotImplementedError(f"backend v1 supports templates {sorted(_SUPPORTED_TEMPLATES)}, not {template!r}")
         if eq.temporality != "time_dependent":
             raise NotImplementedError("backend v1 supports 'time_dependent' equations only")
-        unsupported = sorted(set(eq.terms) - {"diffusion", "source", "relative_advection"})
+        unsupported = sorted(set(eq.terms) - {"diffusion", "source", "relative_advection", "advection"})
         if unsupported:
             raise NotImplementedError(
-                f"backend supports the 'diffusion', 'source', and 'relative_advection' slots; got {unsupported}"
+                f"backend supports the 'diffusion', 'source', 'relative_advection' and 'advection' slots; "
+                f"got {unsupported}"
+            )
+        if "advection" in eq.terms and "relative_advection" in eq.terms:
+            raise ValueError(
+                f"equation for {eq.variable!r} sets both 'advection' (lab-frame) and 'relative_advection' "
+                "(relative to the substrate); give one"
             )
         equations.append(eq)
     subdomains = {eq.subdomain for eq in equations}

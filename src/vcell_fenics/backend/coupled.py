@@ -180,6 +180,8 @@ def assemble_coupled(md: MathDescription, geometry: CoupledGeometry, *, dt: floa
     # ---- local residual (per-mesh mass + diffusion) --------------------------
     bulk_ctx = CompileContext(bulk_mesh, {"geom.x": ufl.SpatialCoordinate(bulk_mesh), **_const_params(md, bulk_mesh)})
     surf_ctx = CompileContext(surf_mesh, {"geom.x": ufl.SpatialCoordinate(surf_mesh), **_const_params(md, surf_mesh)})
+    if any("advection" in eq.terms for eq in md.equations if hasattr(eq, "terms")):
+        raise NotImplementedError("the lab-frame 'advection' slot is supported on the single-mesh path only")
     d_l = compile_expression(parse(bulk_eq.terms["diffusion"]), bulk_ctx)
     f_local = ufl.inner(u_l - ligand_prev, w_l) * dx + dt * d_l * ufl.inner(ufl.grad(u_l), ufl.grad(w_l)) * dx
     f_local += ufl.inner(u_r - surface_prev, w_r) * dx_s

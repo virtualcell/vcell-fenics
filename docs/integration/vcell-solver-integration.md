@@ -306,9 +306,9 @@ aren't solved on the initial shape.
 
 | Step | What | State |
 |---|---|---|
-| M1 | **Bridge.** Read `MathDescription/MembraneSubDomain/<Velocity>` (pyvcell drops it) into a `FrontVelocity` for `importer._front_motion` (prescribed motion on the inside compartment, v = v_b). Specific refusals: no velocity, 3D, more than one moving membrane, variables on the membrane or exterior, Dirichlet on the moving interior. Classify the velocity as prescribed or species-coupled. Fix `inlining._IDENT_RE`: `findall("sin(t)") → ['si','t']`. | ◐ in review. The velocity is read, classified and threaded to the importer; the specific refusals are in place. A supported moving task is still refused ("not yet run") until M3. |
-| M2 | **Bundle** (ADR 010 §2–3, schema 1). Per-row `_coords` `(T_seg, N, 3)` for an ALE domain, `profile: segmented`, and a new `seg000N/` segment per remesh. The recorder re-assembles the measure per row. Reader: segments and coords. PVD export with moving points and per-segment meshes. ADR amendment. | ◐ in review. The writer, recorder, reader and PVD export handle ALE coordinates and remesh segments; ADR 010 is amended. |
-| M3 | **Runner.** A `_run_moving` branch (backend `ale`, forced to backward Euler because MOL moving has no output hooks). It uses `ale.step_with_remeshing` with `set_time` before each step and again after each remesh (the drivers never advanced `sim.t`, and `rebuild_on_mesh` resets it). A new recorder segment per remesh. Mesh-quality failures become user errors. | ☐ |
+| M1 | **Bridge.** Read `MathDescription/MembraneSubDomain/<Velocity>` (pyvcell drops it) into a `FrontVelocity` for `importer._front_motion` (prescribed motion on the inside compartment, v = v_b). Specific refusals: no velocity, 3D, more than one moving membrane, variables on the membrane or exterior, Dirichlet on the moving interior. Classify the velocity as prescribed or species-coupled. Fix `inlining._IDENT_RE`: `findall("sin(t)") → ['si','t']`. | ✅ #160 |
+| M2 | **Bundle** (ADR 010 §2–3, schema 1). Per-row `_coords` `(T_seg, N, 3)` for an ALE domain, `profile: segmented`, and a new `seg000N/` segment per remesh. The recorder re-assembles the measure per row. Reader: segments and coords. PVD export with moving points and per-segment meshes. ADR amendment. | ✅ #161 |
+| M3 | **Runner.** A `_run_moving` branch (backend `ale`, forced to backward Euler because MOL moving has no output hooks). It uses `ale.step_with_remeshing` with `set_time` before each step and again after each remesh (the drivers never advanced `sim.t`, and `rebuild_on_mesh` resets it). A new recorder segment per remesh. Mesh-quality failures become user errors. | ◐ in review. **Lab-frame species (VCell semantics):** VCell's moving-boundary solver is Eulerian, so a species' VCell velocity (zero when absent) is its lab-frame `advection`, transported relative to the mesh (`c − w`) with zero total flux at the front (Rankine–Hugoniot); the front moves only the frame. So the fixture's species are *swept* (they pile against the trailing membrane), not carried. Verified: w-independence on a rotating mesh (converges to the static solution; carried stays 72 % off), the travelling exponential `exp(−V·ξ/D)`, carry recovered when velocity = front, mass to 1e-12. Backward Euler through `ale.step_with_remeshing` (now time-aware), a new segment per remesh. |
 | M4 | **Cross-validation vs mbsolver.** The fixture simtask (translation); an expansion forcing remeshes; a species-dependent velocity. README and tracker; a new image. | ☐ |
 | M5 | **VCell.** `Feature_Moving` on FEniCSx; refusals mirrored as issues; `FenicsBundle` reads `_coords`; the viewer serves per-row geometry; default image bump. | ☐ |
 
@@ -321,6 +321,10 @@ aren't solved on the initial shape.
 - No real simtask exercises the interface-coupled or membrane paths; they're covered through the
   YAML-pair input and writer unit tests.
 - Local Docker builds on the development Mac fail on IPv6 egress; CI is the reliable build path.
+- **Flaky test (pre-existing):** `tests/test_backend_output_times.py::test_recording_does_not_perturb_the_integration`
+  fails intermittently (about 1 in 6 on `main`), only inside a pytest session after the file's first test: two
+  plain runs are bitwise identical, and so are a monitored and a plain run in a fresh process, so state leaks
+  between tests (most likely PETSc's global options). Not a solver defect; worth isolating.
 
 ## Progress
 

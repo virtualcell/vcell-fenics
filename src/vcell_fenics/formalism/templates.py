@@ -65,6 +65,12 @@ _RAD_SLOTS: tuple[SlotSpec, ...] = (
     SlotSpec(name="relative_advection", types=_VECTOR, required=False),
     SlotSpec(name="source", types=_SCALAR, required=False),
 )
+# T1 alone also takes a lab-frame (Eulerian) carrier velocity, `advection`: the species' own velocity in
+# the fixed frame, independent of how the mesh moves — VCell's semantics. The backend transports it
+# relative to the mesh (c − w) in conservation form with zero total flux at the boundary; on a static
+# mesh (w = 0) it is plain advection. Exclusive with `relative_advection`, which is drift relative to the
+# substrate (the Lagrangian default: a species on a moving subdomain rides with it).
+_BULK_SLOTS: tuple[SlotSpec, ...] = (*_RAD_SLOTS, SlotSpec(name="advection", types=_VECTOR, required=False))
 
 
 REGISTRY: dict[str, TemplateSpec] = {
@@ -73,7 +79,7 @@ REGISTRY: dict[str, TemplateSpec] = {
         governed_types=_SCALAR,
         subdomain_kinds=frozenset({"volume"}),
         temporalities=_BOTH_TEMPORALITIES,
-        slots=_RAD_SLOTS,
+        slots=_BULK_SLOTS,
         require_any_of=("diffusion", "source"),
     ),
     "surface_pde_with_dilution": TemplateSpec(  # T2

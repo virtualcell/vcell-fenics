@@ -278,8 +278,9 @@ def check_supported(task: SimulationTask) -> list[str]:
     """Refuse what this solver would otherwise mis-solve (ADR 011 §1). Returns non-fatal warnings."""
 
     name = task.path.name
+    warnings: list[str] = []
     if task.moving_boundary or task.front_velocities:
-        _check_moving_boundary(task)
+        warnings.extend(_check_moving_boundary(task))
     if task.field_data:
         raise SimulationTaskError(f"{name}: field data (FieldFunctionIdentifierSpec) is not supported yet")
     if task.task_type.lower() != "unsteady":
@@ -290,7 +291,6 @@ def check_supported(task: SimulationTask) -> list[str]:
         raise SimulationTaskError(f"{name}: EndTime={task.end_time} must be positive")
     if task.mesh_size is None:
         raise SimulationTaskError(f"{name}: no MeshSpecification — a non-spatial simulation, not a PDE task")
-    warnings: list[str] = []
     if task.solver != FENICSX_SOLVER_NAME:
         warnings.append(
             f"the task names solver {task.solver!r}, not {FENICSX_SOLVER_NAME!r}; solving it with FEniCSx anyway"
@@ -300,11 +300,11 @@ def check_supported(task: SimulationTask) -> list[str]:
     return warnings
 
 
-def _check_moving_boundary(task: SimulationTask) -> None:
+def _check_moving_boundary(task: SimulationTask) -> list[str]:
     """What the FEniCSx moving-boundary path solves (the first pass, vcell-fenics tracker "Moving
     boundaries"): a 2D geometry, one moving membrane with a front <Velocity>, and species only in the
     volume it encloses (the interior rides the mesh, ``v = v_b``). Everything else is refused, each with
-    its own reason, rather than solved on the initial shape."""
+    its own reason, rather than solved on the initial shape. Returns non-fatal notes."""
 
     name = task.path.name
     prefix = f"{name}: a moving-boundary simulation (Solver={task.solver!r})"
@@ -333,11 +333,12 @@ def _check_moving_boundary(task: SimulationTask) -> None:
                 f"{prefix} has species in {compartment.name!r}, outside the moving front; the FEniCSx "
                 f"moving-boundary path solves species inside it ({membrane.inside_compartment!r}) only"
             )
-    # Supported so far; the runner's moving path (vcell-fenics tracker M3) is not wired yet.
-    raise SimulationTaskError(
-        f"{prefix}: the FEniCSx solver reads its front ({front_velocity_dependence(task)} velocity) but does not "
-        "run moving-boundary simulations yet, and would otherwise solve it on the initial shape"
-    )
+    if front_velocity_dependence(task) == "species-coupled":
+        return [
+            f"the front velocity of {membrane.name!r} depends on the species; it is evaluated with the "
+            "species of the previous step (an explicit, first-order coupling)"
+        ]
+    return []
 
 
 def _visit_math_and_geometry(math_element: Any, geometry_element: Any) -> tuple[Any, Any]:

@@ -288,6 +288,13 @@ class _MeshMotion:
                 f"but does not remesh; reduce the step, the motion magnitude, or use a better-behaved velocity."
             )
 
+    def velocity(self) -> UflExpr:
+        """The mesh (frame) velocity of the step just taken — the moved node displacement over dt: the
+        prescribed motion on the boundary, its harmonic extension inside a bulk. Zero before the first
+        move. An Eulerian (lab-frame) species is transported relative to it (the ``advection`` slot)."""
+
+        return self._displacement / self._dt
+
     def current_growth(self) -> float:
         """The cell-size (max/min volume) ratio relative to the fresh reference
         mesh: 1.0 when undistorted, rising as motion deforms the mesh. The ALE
