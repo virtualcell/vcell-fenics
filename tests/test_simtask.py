@@ -306,3 +306,114 @@ def test_unsupported_tasks_exit_2_with_the_reason(
 ) -> None:
     assert main(["--simtask", str(_FIXTURES / fixture), "--out", str(tmp_path)]) == 2
     assert message in capsys.readouterr().err
+
+
+# -- moving boundaries: the front velocity and what the moving path accepts ---------------------------------
+
+_MB = _FIXTURES / "SimID_274641196_0__0.simtask.xml"
+
+
+def _mb_variant(tmp_path: Path, *replacements: tuple[str, str]) -> Path:
+    """The real moving-boundary fixture with textual edits (each must apply exactly once)."""
+
+    text = _MB.read_text()
+    for old, new in replacements:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    path = tmp_path / _MB.name
+    path.write_text(text)
+    return path
+
+
+def test_the_front_velocity_is_read_from_the_membrane() -> None:
+    # pyvcell drops MembraneSubDomain/<Velocity>; the adapter reads it from the raw XML
+    from vcell_fenics.pyvcell_bridge.simtask import front_velocity_dependence
+
+    task = read_simtask(_MB)
+    assert task.moving_boundary
+    (front,) = task.front_velocities
+    assert front.surface_name == "cell_ec_membrane"
+    assert (front.velocity_x, front.velocity_y) == ("sobj_cell1_ec0_velX", "sobj_cell1_ec0_velY")
+    # sobj_cell1_ec0_velX -> sproc_0.velocityX -> sin(t): time only
+    assert front_velocity_dependence(task) == "prescribed"
+
+
+def test_the_front_moves_the_interior_compartment() -> None:
+    # threaded to the importer, the front becomes a prescribed motion of the volume it encloses (v = v_b)
+    from vcell_fenics.formalism.schema import MotionPrescribedVelocity
+    from vcell_fenics.pyvcell_bridge import import_math_description
+
+    task = read_simtask(_MB)
+    math = import_math_description(task.math, geometry="g", dim=2, front_velocity=task.front_velocities[0])
+    motion = {s.name: s.motion for s in math.subdomains}
+    assert motion["cell"] == MotionPrescribedVelocity(velocity="[((sin(sim.t))), ((cos(sim.t)))]")
+    assert motion["ec"].kind == "none"
+
+
+def test_a_species_dependent_front_is_species_coupled(tmp_path: Path) -> None:
+    from vcell_fenics.pyvcell_bridge.simtask import front_velocity_dependence
+
+    task = read_simtask(
+        _mb_variant(
+            tmp_path,
+            (
+                '<Function Name="sproc_0.velocityX" Domain="cell_ec_membrane">sin(t)</Function>',
+                '<Function Name="sproc_0.velocityX" Domain="cell_ec_membrane">(0.1 * C_cyt)</Function>',
+            ),
+        )
+    )
+    assert front_velocity_dependence(task) == "species-coupled"
+
+
+def test_a_supported_moving_task_is_still_refused_until_the_runner_moves_meshes() -> None:
+    # everything the moving path needs is present; the runner's moving path is the next step
+    with pytest.raises(SimulationTaskError, match=r"moving-boundary.*does not run moving-boundary simulations yet"):
+        check_supported(read_simtask(_MB))
+
+
+def test_a_moving_task_without_a_front_velocity_is_refused(tmp_path: Path) -> None:
+    task = read_simtask(
+        _mb_variant(
+            tmp_path,
+            (
+                """      <Velocity>
+        <X>sobj_cell1_ec0_velX</X>
+        <Y>sobj_cell1_ec0_velY</Y>
+      </Velocity>
+""",
+                "",
+            ),
+        )
+    )
+    assert task.moving_boundary and not task.front_velocities
+    with pytest.raises(SimulationTaskError, match="has no membrane <Velocity>"):
+        check_supported(task)
+
+
+def test_species_on_the_moving_membrane_are_refused(tmp_path: Path) -> None:
+    task = read_simtask(
+        _mb_variant(
+            tmp_path,
+            (
+                '    <Function Name="s2" Domain="cell_ec_membrane">s2_init_molecules_um_2</Function>\n',
+                '    <MembraneVariable Name="s2" Domain="cell_ec_membrane" />\n',
+            ),
+            (
+                '    <MembraneSubDomain Name="cell_ec_membrane" InsideCompartment="cell" OutsideCompartment="ec">\n',
+                '    <MembraneSubDomain Name="cell_ec_membrane" InsideCompartment="cell" OutsideCompartment="ec">\n'
+                '      <OdeEquation Name="s2" SolutionType="Unknown">'
+                "<Rate>0.0</Rate><Initial>0.0</Initial></OdeEquation>\n",
+            ),
+        )
+    )
+    with pytest.raises(SimulationTaskError, match="species on the moving membrane"):
+        check_supported(task)
+
+
+def test_value_identifiers_do_not_match_inside_call_names() -> None:
+    # regression: the identifier regex backtracked into call names (`sin(t)` yielded `si`)
+    from vcell_fenics.pyvcell_bridge.inlining import referenced_names
+
+    assert referenced_names("sin(t)") == {"t"}
+    assert referenced_names("s * sin(s) + exp(x)") == {"s", "x"}
+    assert referenced_names("sproc_0.velocityX + a.b") == {"sproc_0.velocityX", "a.b"}
