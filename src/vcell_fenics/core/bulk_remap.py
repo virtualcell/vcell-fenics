@@ -45,6 +45,13 @@ _EPS = 1e-12
 _MIDPOINTS: Floats = np.array([[0.5, 0.5, 0.0], [0.0, 0.5, 0.5], [0.5, 0.0, 0.5]])
 
 
+def _cross2(u: Floats, v: Floats) -> float:
+    """The z-component of the 2D cross product u × v (twice the signed triangle area). NumPy 2.5
+    removed ``np.cross`` for 2-vectors, which this module had used on every remesh."""
+
+    return float(u[0] * v[1] - u[1] * v[0])
+
+
 def supermesh_project_2d(old_verts: Floats, old_tris: Ints, c_old: Floats, new_verts: Floats, new_tris: Ints) -> Floats:
     """Conservatively project a P1 field from one 2D triangulation to another.
 
@@ -72,7 +79,7 @@ def _new_mass_matrix(verts: Floats, tris: Ints) -> Any:
     rows, cols, vals = [], [], []
     for tri in tris:
         a, b, c = verts[tri]
-        area = 0.5 * abs(float(np.cross(b - a, c - a)))
+        area = 0.5 * abs(_cross2(b - a, c - a))
         block = local * (area / 12.0)
         for i in range(3):
             for j in range(3):
@@ -104,7 +111,7 @@ def _mixed_mass_matrix(old_verts: Floats, old_tris: Ints, new_verts: Floats, new
             if len(polygon) < 3:
                 continue
             for tri in _fan(polygon):
-                area = 0.5 * abs(float(np.cross(tri[1] - tri[0], tri[2] - tri[0])))
+                area = 0.5 * abs(_cross2(tri[1] - tri[0], tri[2] - tri[0]))
                 if area < _EPS:
                     continue
                 for bary in _MIDPOINTS:
@@ -123,7 +130,7 @@ def _mixed_mass_matrix(old_verts: Floats, old_tris: Ints, new_verts: Floats, new
 def _ccw(tri: Floats) -> Floats:
     """Triangle vertices reordered counter-clockwise (so the clip half-planes point
     inward for the Sutherland–Hodgman inside test)."""
-    return tri[::-1] if float(np.cross(tri[1] - tri[0], tri[2] - tri[0])) < 0.0 else tri
+    return tri[::-1] if _cross2(tri[1] - tri[0], tri[2] - tri[0]) < 0.0 else tri
 
 
 def _clip_triangle(subject: Floats, clip: Floats) -> list[Floats]:
@@ -138,9 +145,9 @@ def _clip_triangle(subject: Floats, clip: Floats) -> list[Floats]:
         if not current:
             break
         prev = current[-1]
-        prev_in = float(np.cross(edge, prev - a)) >= -_EPS
+        prev_in = _cross2(edge, prev - a) >= -_EPS
         for point in current:
-            point_in = float(np.cross(edge, point - a)) >= -_EPS
+            point_in = _cross2(edge, point - a) >= -_EPS
             if point_in:
                 if not prev_in:
                     output.append(_line_intersect(a, b, prev, point))
@@ -155,7 +162,7 @@ def _line_intersect(a: Floats, b: Floats, s: Floats, e: Floats) -> Floats:
     """Intersection of the infinite line a→b with the segment s→e (which is known to
     cross it, from the Sutherland–Hodgman caller)."""
     edge, seg = b - a, e - s
-    t = float(np.cross(edge, s - a)) / -float(np.cross(edge, seg))
+    t = _cross2(edge, s - a) / -_cross2(edge, seg)
     return s + t * seg
 
 

@@ -47,7 +47,7 @@ def _mass(verts: Floats, tris: np.ndarray, c: Floats) -> float:
     total = 0.0
     for tri in tris:
         a, b, cc = verts[tri]
-        area = 0.5 * abs(float(np.cross(b - a, cc - a)))
+        area = 0.5 * abs(float((b - a)[0] * (cc - a)[1] - (b - a)[1] * (cc - a)[0]))
         total += area * float(np.mean(c[tri]))
     return total
 

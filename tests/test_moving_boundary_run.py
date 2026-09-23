@@ -137,11 +137,13 @@ def test_a_species_dependent_front(tmp_path: Path, capsys: pytest.CaptureFixture
 
 
 def test_the_cleavage_furrow_pinches_the_cell_and_keeps_its_mass(tmp_path: Path) -> None:
-    # coarse and short: the full model (h ≈ 0.1, 30 s) takes ~10 minutes and remeshes 8 times
-    assert main(["--simtask", str(_FURROW), "--out", str(tmp_path), "--h", "0.5", "--t-final", "2.0"]) == 0
+    # coarse and short, but past the first remesh (t = 2 at h = 0.3), so the conservative remap runs: the
+    # full model (h ≈ 0.1, 30 s) takes ~10 minutes and remeshes 8 times
+    assert main(["--simtask", str(_FURROW), "--out", str(tmp_path), "--h", "0.3", "--t-final", "3.0"]) == 0
     bundle = Bundle.open(tmp_path / "SimID_1486629996_0_.fenics")
     assert bundle.manifest.status == "completed"
-    assert all(s.motion == "ale" for s in bundle.manifest.segments)
+    segments = bundle.manifest.segments
+    assert len(segments) >= 2 and all(s.motion == "ale" for s in segments)
     stats = bundle.stats("Cyt", "Dex")
     totals, area = stats[:, 1], stats[:, 1] / stats[:, 0]
     assert np.allclose(totals, totals[0], rtol=1e-12)

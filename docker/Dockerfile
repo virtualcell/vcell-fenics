@@ -107,6 +107,9 @@ ENV XDG_CACHE_HOME=/opt/cache \
 #      reader and export on its result.
 #   3. a VCell moving-boundary SimulationTask (the ALE path: a moving mesh, backward Euler, a
 #      segmented bundle) — which also caches the moving problem's forms.
+#   4. a real moving-boundary BioModel (the cleavage furrow) run long enough to remesh, so the
+#      conservative remap runs against this image's own NumPy (NumPy 2.5 removed 2D np.cross, which
+#      broke every remesh here while the osx-arm64 lock still had 2.4) — it must open a second segment.
 RUN mkdir -p /opt/cache \
  && /usr/local/bin/vcell-fenics-entrypoint \
       --math /opt/vcell-fenics/examples/diffusion2d_math.yaml \
@@ -129,6 +132,10 @@ RUN mkdir -p /opt/cache \
       /tmp/warmup/SimID_274641196_0_.fenics --require-status completed \
  && /usr/local/bin/vcell-fenics-entrypoint vcell-fenics-export \
       /tmp/warmup/SimID_274641196_0_.fenics /tmp/warmup/paraview-mb \
+ && /usr/local/bin/vcell-fenics-entrypoint vcell-fenics \
+      --simtask /opt/vcell-fenics/examples/simtask/furrow_SimID_1486629996_0__0.simtask.xml \
+      --out /tmp/warmup --h 0.3 --t-final 3 \
+ && test -d /tmp/warmup/SimID_1486629996_0_.fenics/seg0001 \
  && rm -rf /tmp/warmup \
  && chmod -R a+rwX /opt/cache
 
