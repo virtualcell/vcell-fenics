@@ -129,3 +129,10 @@ VCell's geometry.** The concrete mesh is a *derived realization*, not the SOT.
   spec + schema + carriers + a faithful VCell importer, validated against the corpus, with the
   backend-specific realization kept separate.
 - Roadmap and the full formalism design live in `docs/modeling/geometric-formalism.md`.
+
+## Amendment (2026-09-23) — the image carries its voxels
+
+The `image` type no longer carries metadata only: `GeometryImage.compressed_content` holds VCell's own
+voxel encoding (hex of a zlib stream of uint8, x-fastest), so an image geometry imports losslessly *and*
+realizes — see [ADR 012](012-image-geometry-realization.md). The parsed corpus YAMLs still strip the blob
+(they stay metadata-only); a model imported from VCML, a SimulationTask or a lowered YAML dump keeps it.

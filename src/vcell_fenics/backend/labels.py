@@ -184,38 +184,62 @@ def find_pinches(labels: Labels) -> NDArray[np.bool_]:
     return mask
 
 
-def repair_pinches(labels: Labels, *, max_passes: int = 20) -> Labels:
-    """``labels`` with every pinch removed: the far cell of each pinched pair takes the label of a
-    face neighbour of a different subvolume (deterministic, repeated until no pinch is left).
-    Raises :class:`RealizationError` if pinches persist after ``max_passes``."""
+def repair_pinches(labels: Labels, *, max_passes: int = 50) -> Labels:
+    """``labels`` with every pinch removed. Each pinched cell is reassigned to whichever label present
+    around it leaves the fewest pinches in its neighbourhood (ties: the most common neighbour) — a greedy
+    local choice, so a configuration cannot flip back and forth (a fixed "take a face neighbour's label"
+    rule 2-cycled on a thin cytosol). One cell per neighbourhood per pass: both diagonals of a
+    checkerboard square are pinches, and flipping both at once would just invert it. Raises
+    :class:`RealizationError` if pinches persist after ``max_passes``."""
 
     out = labels.copy()
     for _ in range(max_passes):
         mask = find_pinches(out)
         if not mask.any():
             return out
-        # reassign each pinched cell to the most common *other* label among its face neighbours — but
-        # only one cell per neighbourhood per pass: both diagonals of a checkerboard square are
-        # pinches, and flipping both at once would just invert it (the next pass re-detects)
         touched = np.zeros(out.shape, dtype=bool)
         for index in zip(*np.nonzero(mask), strict=True):
-            around = tuple(slice(max(0, i - 1), i + 2) for i in index)
-            if touched[around].any():
+            near = tuple(slice(max(0, i - 1), i + 2) for i in index)
+            if touched[near].any():
                 continue
             touched[index] = True
-            own = out[index]
-            neighbours = [
-                int(out[tuple(np.add(index, step))])
-                for step in _face_steps(out.ndim)
-                if all(0 <= index[k] + step[k] < out.shape[k] for k in range(out.ndim))
-            ]
-            others = [n for n in neighbours if n != own]
-            if others:
-                values, counts = np.unique(others, return_counts=True)
-                out[index] = int(values[np.argmax(counts)])
+            cell, value = _best_move(out, index)
+            out[cell] = value
     if find_pinches(out).any():
         raise RealizationError(f"could not repair diagonal pinches in the label field after {max_passes} passes")
     return out
+
+
+def _best_move(labels: Labels, index: tuple[int, ...]) -> tuple[tuple[int, ...], int]:
+    """The single relabelling near the pinched cell at ``index`` — of the cell itself or of one of its
+    neighbours, to a label present around it — that leaves the fewest pinches in the window around it
+    (every 2-wide block any such cell belongs to lies inside). Ties prefer changing the pinched cell
+    itself, then the most common label. Searching the neighbours too matters: a pinch can be one no
+    relabelling of its own cell removes."""
+
+    dim = labels.ndim
+    window = tuple(slice(max(0, i - 3), i + 4) for i in index)
+    start = tuple(w.start for w in window)
+    around = labels[tuple(slice(max(0, i - 1), i + 2) for i in index)]
+    values, counts = np.unique(around, return_counts=True)
+    common = dict(zip(values.tolist(), counts.tolist(), strict=True))
+    best: tuple[tuple[int, ...], int] = (index, int(labels[index]))
+    best_key: tuple[float, int, int] = (np.inf, 1, 0)
+    for offset in np.ndindex(*(3,) * dim):
+        cell = tuple(index[k] + offset[k] - 1 for k in range(dim))
+        if any(c < 0 or c >= labels.shape[k] for k, c in enumerate(cell)):
+            continue
+        own = int(labels[cell])
+        local = tuple(c - s for c, s in zip(cell, start, strict=True))
+        for value in common:
+            if value == own:
+                continue
+            trial = labels[window].copy()
+            trial[local] = value
+            key = (float(find_pinches(trial).sum()), 0 if cell == index else 1, -common[value])
+            if key < best_key:
+                best, best_key = (cell, value), key
+    return best
 
 
 def _axis_pairs(dim: int) -> list[tuple[int, int]]:

@@ -92,6 +92,16 @@ _OUTER_WALL_TAG = 300  # the whole box exterior, unioned, as one reservoir "wall
 _MAX_IMAGE_TETS = 4_000_000
 
 
+# The boundary smoothing an image geometry is meshed with, finest first: (Taubin passes, project onto the
+# smooth interfaces, what to call it). Netgen may reject a smoothed boundary as overlapping where a thin
+# region's surfaces come within a cell of each other; the last level (SurfaceNets' own) never overlaps.
+_SURFACE_LEVELS: tuple[tuple[int, bool, str], ...] = (
+    (10, True, "smoothed"),
+    (10, False, "Taubin-smoothed (unprojected)"),
+    (0, False, "unsmoothed (voxel-scale)"),
+)
+
+
 class ImageGeometryWarning(UserWarning):
     """Realizing an image geometry changed its topology at this mesh size, or found a touching pair of
     subvolumes with no surface class (see :func:`~vcell_fenics.backend.labels.label_geometry`)."""
@@ -1136,8 +1146,22 @@ def _realize_image_partition(
     def build() -> _NetgenArrays:
         labels = label_geometry(description, h=h)
         notes.extend(labels.warnings)
-        boundary = extract_boundary(labels.grid, extent=extent)
-        return _netgen_from_curves(boundary, h) if dim == 2 else _netgen_from_surfaces(boundary, h)
+        mesher = _netgen_from_curves if dim == 2 else _netgen_from_surfaces
+        failure: RealizationError | None = None
+        # Smoothed and projected first; if Netgen finds the boundary overlapping (surfaces of a thin
+        # region brought within a cell of each other), fall back to less smoothing — SurfaceNets' own
+        # boundary cannot intersect itself, so the last level always meshes.
+        for passes, project, label in _SURFACE_LEVELS:
+            try:
+                arrays = mesher(extract_boundary(labels.grid, extent=extent, passes=passes, project=project), h)
+            except RealizationError as exc:
+                failure = exc
+                continue
+            if failure is not None:
+                notes.append(f"its smoothed boundary overlapped at h = {h:g}; meshed with the {label} boundary")
+            return arrays
+        assert failure is not None
+        raise failure
 
     parent, material = _mesh_on_rank0(comm, build, cell="triangle" if dim == 2 else "tetrahedron", gdim=dim)
     for note in comm.bcast(notes, root=0):

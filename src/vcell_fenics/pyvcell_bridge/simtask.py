@@ -313,6 +313,12 @@ def _check_moving_boundary(task: SimulationTask) -> list[str]:
     dim = getattr(task.geometry, "dim", None)
     if dim != 2:
         raise SimulationTaskError(f"{prefix} in {dim}D; the FEniCSx moving-boundary path is 2D")
+    images = [sv.name for sv in getattr(task.geometry, "subvolumes", ()) if sv.subvolume_type.value == "image"]
+    if images:
+        raise SimulationTaskError(
+            f"{prefix} on an image-based geometry (subvolumes {', '.join(images)}); the moving-boundary path "
+            "does not yet run on images"
+        )
     if len(task.front_velocities) > 1:
         moving = ", ".join(repr(f.surface_name) for f in task.front_velocities)
         raise SimulationTaskError(f"{prefix} moves several membranes ({moving}); one moving front is supported")

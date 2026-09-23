@@ -394,6 +394,38 @@ def test_a_moving_task_without_a_front_velocity_is_refused(tmp_path: Path) -> No
         check_supported(task)
 
 
+def test_a_moving_task_on_an_image_geometry_is_refused(tmp_path: Path) -> None:
+    # the moving-boundary path is analytic-geometry only for now; an image geometry (here the fixture's
+    # disk and ec as a 4×4 segmented image) is refused, not realized and then solved on its initial shape
+    import zlib
+
+    pixels = bytes([1] * 5 + [2, 2] + [1, 1] + [2, 2] + [1] * 5)
+    data = zlib.compress(pixels)
+    image = (
+        f'<Image Name="seg"><ImageData X="4" Y="4" Z="1" CompressedSize="{len(data)}">{data.hex().upper()}</ImageData>'
+        '<PixelClass Name="ec" ImagePixelValue="1" /><PixelClass Name="cell" ImagePixelValue="2" /></Image>\n'
+    )
+    task = read_simtask(
+        _mb_variant(
+            tmp_path,
+            (
+                """    <SubVolume Name="cell" Handle="1" Type="Analytical" KeyValue="109369390">
+      <AnalyticExpression>((((x - 5.0) ^ 2.0) + ((y - 5.0) ^ 2.0)) &lt; (3.0 ^ 2.0))</AnalyticExpression>
+    </SubVolume>
+    <SubVolume Name="ec" Handle="0" Type="Analytical" KeyValue="109369391">
+      <AnalyticExpression>1.0</AnalyticExpression>
+    </SubVolume>
+""",
+                image
+                + '    <SubVolume Name="cell" Handle="1" Type="Image" ImagePixelValue="2" />\n'
+                + '    <SubVolume Name="ec" Handle="0" Type="Image" ImagePixelValue="1" />\n',
+            ),
+        )
+    )
+    with pytest.raises(SimulationTaskError, match="on an image-based geometry"):
+        check_supported(task)
+
+
 def test_species_on_the_moving_membrane_are_refused(tmp_path: Path) -> None:
     task = read_simtask(
         _mb_variant(

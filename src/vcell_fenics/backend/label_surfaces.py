@@ -22,7 +22,7 @@ mesher (``realize.py``) embeds as conforming internal boundaries:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -82,9 +82,14 @@ def face_names(dim: int) -> tuple[str, ...]:
     return ("x_minus", "x_plus", "y_minus", "y_plus", "z_minus", "z_plus")[: 2 * dim]
 
 
-def extract_boundary(grid: LabelGrid, *, extent: tuple[float, ...], passes: int = 10) -> LabelBoundary:
+def extract_boundary(
+    grid: LabelGrid, *, extent: tuple[float, ...], passes: int = 10, project: bool = True
+) -> LabelBoundary:
     """The conforming, oriented, smoothed boundaries of ``grid`` (see the module docstring). ``extent``
-    is the box size (the grid spans ``[origin, origin + extent]``); ``passes`` Taubin pairs smooth it."""
+    is the box size (the grid spans ``[origin, origin + extent]``); ``passes`` Taubin pairs smooth it, and
+    ``project`` moves the vertices onto the smooth interfaces (when the grid carries its indicators).
+    With ``passes = 0`` and no projection the boundary is SurfaceNets' own — one vertex per lattice
+    cell, so it cannot intersect itself: the mesher's last resort."""
 
     dim = grid.dim
     n_regions = int(grid.labels.max()) + 1
@@ -102,7 +107,7 @@ def extract_boundary(grid: LabelGrid, *, extent: tuple[float, ...], passes: int 
     lo = np.asarray(grid.origin[:dim], dtype=np.float64)
     hi = lo + np.asarray(extent[:dim], dtype=np.float64)
     boundary = LabelBoundary(dim=dim, points=points, elements=elements, pairs=pairs)
-    return _smooth(boundary, lo, hi, passes, grid)
+    return _smooth(boundary, lo, hi, passes, grid if project else replace(grid, indicators=None))
 
 
 def _surface_nets(grid: LabelGrid, n_regions: int) -> tuple[Floats, Ints, Ints]:

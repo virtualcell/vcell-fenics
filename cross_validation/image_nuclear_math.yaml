@@ -1,0 +1,222 @@
+name: dummy_math_description
+constants:
+- name: _F_
+  exp: '96485.3321'
+- name: _F_nmol_
+  exp: '9.64853321E-5'
+- name: _K_GHK_
+  exp: '1.0E-9'
+- name: _N_pmol_
+  exp: 6.02214179E11
+- name: _PI_
+  exp: '3.141592653589793'
+- name: _R_
+  exp: '8314.46261815'
+- name: _T_
+  exp: '300.0'
+- name: AreaPerUnitArea_nm
+  exp: '1.0'
+- name: AreaPerUnitArea_pm
+  exp: '1.0'
+- name: c_boundaryXm
+  exp: '0.0'
+- name: c_boundaryXp
+  exp: '0.0'
+- name: c_boundaryYm
+  exp: '0.0'
+- name: c_boundaryYp
+  exp: '0.0'
+- name: c_boundaryZm
+  exp: '0.0'
+- name: c_boundaryZp
+  exp: '0.0'
+- name: c_diffusionRate
+  exp: '5.0'
+- name: c_init_uM
+  exp: '1.0'
+- name: K_millivolts_per_volt
+  exp: '1000.0'
+- name: KMOLE
+  exp: '0.001660538783162726'
+- name: n_boundaryXm
+  exp: '0.0'
+- name: n_boundaryXp
+  exp: '0.0'
+- name: n_boundaryYm
+  exp: '0.0'
+- name: n_boundaryYp
+  exp: '0.0'
+- name: n_boundaryZm
+  exp: '0.0'
+- name: n_boundaryZp
+  exp: '0.0'
+- name: n_diffusionRate
+  exp: '5.0'
+- name: n_init_uM
+  exp: '0.0'
+- name: netValence
+  exp: '1.0'
+- name: V_nm
+  exp: '0.0'
+- name: V_pm
+  exp: '0.0'
+- name: VolumePerUnitVolume_cyt
+  exp: '1.0'
+- name: VolumePerUnitVolume_ec
+  exp: '1.0'
+- name: VolumePerUnitVolume_nuc
+  exp: '1.0'
+functions:
+- name: J_imp
+  exp: (0.5 * (c - n))
+  domain: Nucleus_cytosol_membrane
+- name: Size_cyt
+  exp: (VolumePerUnitVolume_cyt * vcRegionVolume('cytosol'))
+  domain: cytosol
+- name: Size_ec
+  exp: (VolumePerUnitVolume_ec * vcRegionVolume('ec'))
+  domain: ec
+- name: Size_nm
+  exp: (AreaPerUnitArea_nm * vcRegionArea('Nucleus_cytosol_membrane'))
+  domain: Nucleus_cytosol_membrane
+- name: Size_nuc
+  exp: (VolumePerUnitVolume_nuc * vcRegionVolume('Nucleus'))
+  domain: Nucleus
+- name: Size_pm
+  exp: (AreaPerUnitArea_pm * vcRegionArea('cytosol_ec_membrane'))
+  domain: cytosol_ec_membrane
+- name: sobj_cytosol1_ec0_size
+  exp: vcRegionArea('cytosol_ec_membrane')
+  domain: cytosol_ec_membrane
+- name: sobj_Nucleus2_cytosol1_size
+  exp: vcRegionArea('Nucleus_cytosol_membrane')
+  domain: Nucleus_cytosol_membrane
+- name: vobj_cytosol1_size
+  exp: vcRegionVolume('cytosol')
+  domain: cytosol
+- name: vobj_ec0_size
+  exp: vcRegionVolume('ec')
+  domain: ec
+- name: vobj_Nucleus2_size
+  exp: vcRegionVolume('Nucleus')
+  domain: Nucleus
+variables:
+- name: c
+  var_type: VolumeVariable
+  domain: cytosol
+- name: n
+  var_type: VolumeVariable
+  domain: Nucleus
+compartment_subdomains:
+- name: ec
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Flux
+  - boundary: Zp
+    type: Flux
+- name: cytosol
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Flux
+  - boundary: Zp
+    type: Flux
+  pde_equations:
+  - name: c
+    rate: '0.0'
+    diffusion: c_diffusionRate
+    initial: c_init_uM
+    solution_type: Unknown
+    boundaries:
+      xm: c_boundaryXm
+      xp: c_boundaryXp
+      ym: c_boundaryYm
+      yp: c_boundaryYp
+      zm: c_boundaryZm
+      zp: c_boundaryZp
+- name: Nucleus
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Flux
+  - boundary: Zp
+    type: Flux
+  pde_equations:
+  - name: n
+    rate: '0.0'
+    diffusion: n_diffusionRate
+    initial: n_init_uM
+    solution_type: Unknown
+    boundaries:
+      xm: n_boundaryXm
+      xp: n_boundaryXp
+      ym: n_boundaryYm
+      yp: n_boundaryYp
+      zm: n_boundaryZm
+      zp: n_boundaryZp
+membrane_subdomains:
+- name: cytosol_ec_membrane
+  inside_compartment: cytosol
+  outside_compartment: ec
+  boundary_types:
+  - boundary: Xm
+    type: Value
+  - boundary: Xp
+    type: Value
+  - boundary: Ym
+    type: Value
+  - boundary: Yp
+    type: Value
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  jump_conditions:
+  - name: c
+    in_flux: '0.0'
+    out_flux: '0.0'
+- name: Nucleus_cytosol_membrane
+  inside_compartment: Nucleus
+  outside_compartment: cytosol
+  boundary_types:
+  - boundary: Xm
+    type: Value
+  - boundary: Xp
+    type: Value
+  - boundary: Ym
+    type: Value
+  - boundary: Yp
+    type: Value
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  jump_conditions:
+  - name: c
+    in_flux: '0.0'
+    out_flux: '- (J_imp / VolumePerUnitVolume_cyt)'
+  - name: n
+    in_flux: (J_imp / VolumePerUnitVolume_nuc)
+    out_flux: '0.0'

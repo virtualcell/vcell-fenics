@@ -465,3 +465,35 @@ jump. That drops the strided-ALE mass drift from **O(dt)** (~2.4 % at 10 strides
 leaving only the geometric (concentration = mass / discrete-area) error as the first-order-in-stride term.
 (`_MeshMotion.effective_dilution_rate`; `tests/test_backend_mol_moving.py`.) Still on the explicit split:
 the multi-mesh `interface_coupled` / `fsi` coupled solvers — the same technique extends there next.
+
+## Image geometry — nucleocytoplasmic exchange on VCell's tutorial image (fvsolver)
+
+The first cross-validation on a real **segmented image**: VCell's 3D tutorial geometry (256×256×34 pixels,
+74.24 × 74.24 × 26 µm, anisotropic voxels 0.29 × 0.29 × 0.79 µm, ec ⊃ cytosol ⊃ Nucleus, from pyvcell's
+`examples/models/Tutorial_MultiApp_PDE.vcml`). On it, `c` in the cytosol (initially 1) and `n` in the
+Nucleus (initially 0) exchange across the nuclear membrane by a permeability flux `J = P·(c − n)`
+(P = 0.5 µm/s, D = 5 µm²/s, 5 s). The nucleus fills at a rate set by its area-to-volume ratio, so the
+**mean nuclear concentration over time** measures the realized geometry as much as the solver.
+
+vcell-fenics realizes the image body-fitted and smoothed ([ADR 012](../docs/decisions/012-image-geometry-realization.md))
+and solves the two compartments with the interface-coupled method of lines, `ec` dropped as the
+background. fvsolver meshes the same image as voxels. FV region membership is VCell's own (the nearest
+image pixel to each FV node), and FV integrals use the fractional-boundary (trapezoidal) weights.
+
+```bash
+../pyvcell/.venv/bin/python cross_validation/image_nuclear_fv.py --mesh 101 101 36   # stage 1 (also 51 51 19)
+.pixi/envs/dev/bin/python    cross_validation/image_nuclear.py --fv 101 --h 1.0 --dt 0.05
+```
+
+| FV mesh / FEniCSx h | mean n: t = 1 / 2.5 / 5 (FEniCSx / FV) | mean n, worst over time | c relL2 at t = 5 | ∫c + ∫n drift (FEniCSx / FV) |
+|---|---|---|---|---|
+| 51×51×19 / 2 µm | 0.135/0.135 · 0.270/0.273 · 0.413/0.421 | 1.9 % | 2.67 % | 4e-14 / 7e-16 |
+| 101×101×36 / 1 µm | 0.135/0.134 · 0.275/0.271 · 0.426/0.419 | **1.7 %** | **0.79 %** (36 502 nodes) | 1e-13 / 1e-14 |
+
+Refining both solvers reduces the field difference 3.4×; the filling curves agree to within 2 % at both
+resolutions. At h = 2 µm our cytosol is 5 % smaller than at 1 µm, because the smoothing trims its thin
+sheets. That coarse h is
+also where the nucleus reaches ec through the cytosol, and the run log says so (an `ImageGeometryWarning`).
+Both solvers conserve the total to round-off. The FEniCSx P1 field overshoots its initial maximum by
+about 2% near the membrane at the coarse h (no discrete maximum principle on unstructured tets); this
+does not affect the means or the conservation.
