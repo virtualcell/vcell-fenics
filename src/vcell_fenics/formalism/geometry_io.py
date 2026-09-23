@@ -62,6 +62,8 @@ def _image_to_dict(image: GeometryImage) -> dict[str, object]:
     out: dict[str, object] = {"name": image.name, "size": list(image.size)}
     if image.pixel_classes:
         out["pixel_classes"] = [{"name": p.name, "pixel_value": p.pixel_value} for p in image.pixel_classes]
+    if image.compressed_content is not None:
+        out["compressed_content"] = image.compressed_content
     return out
 
 

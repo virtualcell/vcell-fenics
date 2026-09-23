@@ -11,6 +11,8 @@ here — that is the realization layer's job.
 
 from __future__ import annotations
 
+import numpy as np
+
 from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume
 from vcell_fenics.formalism.parser import ExpressionSyntaxError, parse
 from vcell_fenics.formalism.validator import Diagnostic, FormalismValidationError
@@ -61,7 +63,30 @@ def validate_geometry(geometry: GeometryDescription) -> list[Diagnostic]:
     if geometry.dim == 0 and geometry.surfaces:
         out.append(Diagnostic("error", "surfaces", "a non-spatial (dim 0) geometry cannot have surfaces"))
 
+    _check_image_voxels(geometry, out)
     return out
+
+
+def _check_image_voxels(geometry: GeometryDescription, out: list[Diagnostic]) -> None:
+    """When the image carries voxels: they decode to its size, every pixel value belongs to an image
+    subvolume (VCell maps each value to a subvolume — an unmapped one would leave space unowned), and
+    each image subvolume's value occurs (an empty subvolume has nothing to mesh)."""
+
+    image = geometry.image
+    if image is None or image.compressed_content is None:
+        return
+    try:
+        voxels = image.voxels()
+    except ValueError as exc:
+        out.append(Diagnostic("error", "image.compressed_content", str(exc)))
+        return
+    present = {int(v) for v in np.unique(voxels)}
+    mapped = {s.pixel_value for s in geometry.subvolumes if s.type == "image" and s.pixel_value is not None}
+    for value in sorted(present - mapped):
+        out.append(Diagnostic("error", "image", f"pixel value {value} occurs in the image but no subvolume maps it"))
+    for i, sub in enumerate(geometry.subvolumes):
+        if sub.type == "image" and sub.pixel_value is not None and sub.pixel_value not in present:
+            out.append(Diagnostic("warning", f"subvolumes[{i}]", f"pixel_value {sub.pixel_value} occurs in no voxel"))
 
 
 def _check_subvolume(sub: SubVolume, path: str, geometry: GeometryDescription, out: list[Diagnostic]) -> None:

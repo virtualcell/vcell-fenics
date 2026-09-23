@@ -9,18 +9,22 @@ The names are the contract the MathDescription binds to (`cross_validate`): a su
 is a `volume` subdomain, a surface name is a `surface` subdomain. The concrete mesh is a
 *derived realization* (`backend/geometry.py`), not part of this spec.
 
-This is metadata only: an `image`-typed subvolume references a pixel class by value, and the
-`GeometryImage` carries the image's size and classes — but **not** the raw voxel blob (it is
-large and stays in the source; image meshing is a later increment). Analytic expressions are in
+An `image`-typed subvolume references a pixel class by value; the `GeometryImage` carries the
+image's size, classes and — when the source has it — its voxels, in VCell's own encoding (hex of a
+zlib stream of uint8, x-fastest), so the image imports losslessly and a YAML stays self-contained.
+Analytic expressions are in
 the same §1.8 expression language as the math formalism (`geom.x[…]`), so the two share one
 parser.
 """
 
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
+import numpy as np
+from numpy.typing import NDArray
 from pydantic import ConfigDict
 
 # Attached to each dataclass below so a `pydantic.TypeAdapter` (the geometry_io loader)
@@ -48,13 +52,47 @@ class PixelClass:
 
 @dataclass(frozen=True, slots=True)
 class GeometryImage:
-    """Metadata for a segmented image backing `image`-typed subvolumes. The raw voxel data is
-    deliberately not carried here (see the module docstring)."""
+    """A segmented image backing `image`-typed subvolumes: its `size` ``(nx, ny, nz)``, its pixel
+    classes, and its voxels as ``compressed_content`` — VCell's own encoding, the hex of a zlib stream
+    of ``nx·ny·nz`` uint8 pixels indexed ``x + nx·(y + ny·z)`` (``None`` when the source carried only
+    metadata). VCell's lattice is **vertex-centred**: pixel ``i`` sits at
+    ``origin + i·extent / (n − 1)``, so the first and last pixels lie on the domain boundary."""
 
     __pydantic_config__ = _FORBID_EXTRA
     name: str
     size: tuple[int, int, int]
     pixel_classes: tuple[PixelClass, ...] = ()
+    compressed_content: str | None = field(default=None, repr=False)
+
+    def voxels(self) -> NDArray[np.uint8]:
+        """The pixels as a ``(nz, ny, nx)`` uint8 array (decoded on each call). Raises ``ValueError``
+        if the image carries no voxels or they do not decode to ``nx·ny·nz`` bytes."""
+
+        if not self.compressed_content:
+            raise ValueError(f"image {self.name!r} carries no voxel data")
+        try:
+            raw = zlib.decompress(bytes.fromhex(self.compressed_content))
+        except (ValueError, zlib.error) as exc:
+            raise ValueError(f"image {self.name!r}: voxel data is not hex-encoded zlib ({exc})") from exc
+        nx, ny, nz = self.size
+        if len(raw) != nx * ny * nz:
+            raise ValueError(f"image {self.name!r}: {len(raw)} voxels decoded, size {self.size} needs {nx * ny * nz}")
+        return np.frombuffer(raw, dtype=np.uint8).reshape(nz, ny, nx)
+
+    @classmethod
+    def from_voxels(
+        cls, name: str, voxels: NDArray[np.uint8], pixel_classes: tuple[PixelClass, ...] = ()
+    ) -> GeometryImage:
+        """Encode a ``(nz, ny, nx)`` (or 2D ``(ny, nx)``) uint8 label array the way VCell stores it."""
+
+        array = np.asarray(voxels, dtype=np.uint8)
+        if array.ndim == 2:
+            array = array[np.newaxis]
+        if array.ndim != 3:
+            raise ValueError(f"image voxels must be 2D or 3D, got shape {array.shape}")
+        nz, ny, nx = array.shape
+        content = zlib.compress(np.ascontiguousarray(array).tobytes()).hex().upper()
+        return cls(name=name, size=(nx, ny, nz), pixel_classes=pixel_classes, compressed_content=content)
 
 
 @dataclass(frozen=True, slots=True)
