@@ -1,10 +1,12 @@
 # vcell-fenics as a VCell solver — design and progress
 
-**Started:** 2026-09-22 · **Status:** steps 0–10 **merged to `main`** (PRs #147–#156, in order) and
-the solver image is published. The VCell Java side (below) is the remaining work, as its own plan in
-`../vcell`.
-**Status:** in progress — see [Progress](#progress). This is a living document: update the status
-table and the progress log as steps land.
+**Started:** 2026-09-22 · **Status:** the vcell-fenics side (steps 0–10, PRs #147–#156) and the
+VCell Java side **V0–V5** (vcell #2084–#2091) are merged, and the image is multi-arch and public on
+GHCR. FEniCSx runs from the VCell desktop (Docker Quick Run → the browser field viewer) and on the
+cluster (Slurm/Apptainer, single rank), behind `vcell.fenics.enabled`. **Next: moving boundaries
+([M1–M5](#moving-boundaries-m1m5)).** The VCell-side plan is
+[`../vcell/docs/plan-fenics.md`](https://github.com/virtualcell/vcell/blob/master/docs/plan-fenics.md).
+This is a living document: update the status table and the progress log as steps land.
 
 Related records: [ADR 010 — results bundle](../decisions/010-results-bundle-vtu-zarr.md),
 [ADR 011 — VCell solver contract](../decisions/011-vcell-solver-contract.md),
@@ -241,6 +243,17 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 
 ## Follow-up — VCell Java side (`../vcell`, separate plan)
 
+**Built (2026-09-22), per [`../vcell/docs/plan-fenics.md`](https://github.com/virtualcell/vcell/blob/master/docs/plan-fenics.md):**
+- V1 registration: vcell #2085.
+- V2 Docker Quick Run: #2086.
+- V3 bundle reader and field viewer (point data): #2087, #2088.
+- V4 Slurm/Apptainer, single rank: #2089, plus vcell-fluxcd #56 for dev, awaiting a dev deploy.
+- V5 remote viewing through the data server: #2090.
+- Geometry check (analytic 2D/3D only, as issues before a run): #2091.
+
+Still open: V6 (FEniCSx options and UI), V7 (MPI), turning the gate on, and pyvcell `FenicsResult`.
+The original list follows for reference.
+
 - **Solver definition:**
   - `SolverDescription.FEniCSx` (database name `FEniCSx`; features Spatial and Deterministic;
     uniform and explicit output only) and a `SolverFactory` maker.
@@ -276,6 +289,29 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
   - A `FenicsResult` reader for the bundle, following `sim_results`' zarr conventions.
   - Later, upstream the SimulationTask reader.
 
+## Moving boundaries (M1–M5)
+
+VCell moving-boundary applications list only VCell's MovingBoundary solver. The ALE backend solves
+these problems (cross-validated against mbsolver: `cross_validation/mb_translation.py`,
+`mb_expansion.py`), but the SimulationTask path refuses them (`simtask.check_supported`), so they
+aren't solved on the initial shape.
+
+**First-pass scope** (decided 2026-09-22):
+- 2D, with species in the **moving interior volume** only (the fixture `SimID_274641196`: three
+  diffusing species in `cell`, an empty `ec`, front velocity `sin(t)`, `cos(t)`).
+- **Remeshing included.**
+- **Species-dependent front velocities allowed** (explicit one-step lag).
+- Membrane species on a moving front come later: no backend path handles a moving cell with
+  membrane species and an empty exterior yet.
+
+| Step | What | State |
+|---|---|---|
+| M1 | **Bridge.** Read `MathDescription/MembraneSubDomain/<Velocity>` (pyvcell drops it) into a `FrontVelocity` for `importer._front_motion` (prescribed motion on the inside compartment, v = v_b). Specific refusals: no velocity, 3D, more than one moving membrane, variables on the membrane or exterior, Dirichlet on the moving interior. Classify the velocity as prescribed or species-coupled. Fix `inlining._IDENT_RE`: `findall("sin(t)") → ['si','t']`. | ☐ |
+| M2 | **Bundle** (ADR 010 §2–3, schema 1). Per-row `_coords` `(T_seg, N, 3)` for an ALE domain, `profile: segmented`, and a new `seg000N/` segment per remesh. The recorder re-assembles the measure per row. Reader: segments and coords. PVD export with moving points and per-segment meshes. ADR amendment. | ☐ |
+| M3 | **Runner.** A `_run_moving` branch (backend `ale`, forced to backward Euler because MOL moving has no output hooks). It uses `ale.step_with_remeshing` with `set_time` before each step and again after each remesh (the drivers never advanced `sim.t`, and `rebuild_on_mesh` resets it). A new recorder segment per remesh. Mesh-quality failures become user errors. | ☐ |
+| M4 | **Cross-validation vs mbsolver.** The fixture simtask (translation); an expansion forcing remeshes; a species-dependent velocity. README and tracker; a new image. | ☐ |
+| M5 | **VCell.** `Feature_Moving` on FEniCSx; refusals mirrored as issues; `FenicsBundle` reads `_coords`; the viewer serves per-row geometry; default image bump. | ☐ |
+
 ## Risks and open questions
 
 - `TS.interpolate` accuracy with BDF and time-dependent Dirichlet data (spike; stepping fallback).
@@ -289,6 +325,19 @@ One commit per step. Status: ☐ not started · ◐ in progress · ☑ done.
 ## Progress
 
 Newest first. One entry per landed step or notable finding.
+
+- **2026-09-22** — **The VCell Java side works.** V0–V5 are merged in vcell (#2084–#2091), and
+  vcell-fluxcd #56 (dev) awaits a dev deploy.
+  - **Image:** `ARM64_RUNNER=ubuntu-24.04-arm` makes the image multi-arch (native on Apple silicon).
+    The GHCR image and SIF were made public.
+  - **Verified:** the field viewer in headless Chrome (2D disk and 3D two-domain bundles), and a
+    real Docker Quick Run from the desktop.
+  - **Found:** an image-based BioModel was offered FEniCSx and failed inside the container. VCell now
+    refuses non-analytic geometries as issues before the run (#2091).
+  - **Next phase:** moving boundaries (M1–M5, above).
+  - The integration suite passed on merged `main`: 72 passed, 3h32m. MPICH's `MPI_Finalize` failed
+    *after* the run (`OFI poll failed … en0`, a network blip on the Mac) and set the exit code to
+    143; it wasn't a test failure.
 
 - **2026-09-22** — **Merged.** PRs #147–#156 are on `main` (merge commits, in order); the gate passes
   there (725) and the whole `test-integration` suite passed on the stack (71, 3h34m). The push to
