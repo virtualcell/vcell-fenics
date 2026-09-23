@@ -16,12 +16,13 @@
 examples/*
 !examples/models
 
-# Only the SimulationTask fixtures from tests/ (the image's VCell-path self-test), same pattern.
+# Only the SimulationTask and image-model fixtures from tests/ (the image's self-tests), same pattern.
 !tests
 tests/*
 !tests/fixtures
 tests/fixtures/*
 !tests/fixtures/simtask
+!tests/fixtures/image
 
 # …minus the noise that lives inside those trees.
 **/__pycache__
