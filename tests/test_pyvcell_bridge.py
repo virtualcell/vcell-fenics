@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 import pyvcell.vcml.models_math as vm
 
-from vcell_fenics.formalism.schema import TemplateEquation
+from vcell_fenics.formalism.schema import ParameterExpression, TemplateEquation
 from vcell_fenics.pyvcell_bridge import (
     VcellImportError,
     import_math_description,
@@ -175,6 +175,41 @@ def test_velocity_becomes_a_relative_advection_vector() -> None:
     (eq,) = import_math_description(vcml).equations
     assert isinstance(eq, TemplateEquation)
     assert eq.terms["relative_advection"] == "[vx, 2*geom.x[1]]"
+
+
+def test_a_velocity_reached_through_functions_keeps_its_parameters() -> None:
+    # VCell routes a species velocity through functions to a dotted constant (the furrow model:
+    # vobj_Cyt1_velX → vproc_1.velocityX = 0). Regression: the velocity was not a root of the
+    # reachable set, so its constant function was dropped as dead and the equation named nothing.
+    vcml = vm.MathDescription(
+        name="m",
+        constants=[vm.Constant(name="vproc_1.velocityX", exp="0.0"), vm.Constant(name="vproc_1.velocityY", exp="0.0")],
+        functions=[
+            vm.MathFunction(name="vobj_Cyt1_velX", exp="vproc_1.velocityX"),
+            vm.MathFunction(name="vobj_Cyt1_velY", exp="vproc_1.velocityY"),
+        ],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="Cyt",
+                pde_equations=[
+                    vm.PdeEquation(
+                        name="Dex",
+                        diffusion="1.0",
+                        steady=False,
+                        velocity=vm.Velocity(x="vobj_Cyt1_velX", y="vobj_Cyt1_velY"),
+                    )
+                ],
+            )
+        ],
+    )
+    md = import_math_description(vcml)
+    (eq,) = md.equations
+    assert isinstance(eq, TemplateEquation)
+    assert eq.terms["relative_advection"] == "[vobj_Cyt1_velX, vobj_Cyt1_velY]"
+    params = {p.name: p for p in md.parameters}
+    assert isinstance(params["vobj_Cyt1_velX"], ParameterExpression)
+    assert params["vobj_Cyt1_velX"].expression == "vproc_1.velocityX"
+    assert "vproc_1.velocityX" in params
 
 
 def _moving_boundary_vcml(membranes: int = 1) -> vm.MathDescription:

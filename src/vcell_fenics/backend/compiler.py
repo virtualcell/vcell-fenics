@@ -143,8 +143,11 @@ def compile_expression(node: Expr, ctx: CompileContext) -> UflExpr:
         # callable scalar alias at runtime.
         return fem.Constant(ctx.mesh, PETSc.ScalarType(node.value))  # type: ignore[operator]
     if isinstance(node, Name):
-        if "." in node.name:  # a namespaced built-in: geom.* / sim.* (ADR 006)
-            return _resolve_qualified(node.name, ctx)
+        if "." in node.name:
+            # a namespaced built-in (geom.* / sim.*, ADR 006) — or a parameter whose VCell name has a dot
+            # (VCell names spatial-process quantities that way, e.g. ``vproc_1.velocityX``)
+            bound = ctx.symbols.get(node.name)
+            return bound if bound is not None else _resolve_qualified(node.name, ctx)
         try:
             return ctx.symbols[node.name]
         except KeyError:

@@ -112,6 +112,14 @@ def test_unresolved_name_raises() -> None:
         compile_expression(parse("mystery + 1"), _ctx())
 
 
+def test_a_dotted_parameter_name_resolves() -> None:
+    # VCell names spatial-process quantities with a dot (`vproc_1.velocityX`); a bound symbol wins over
+    # the geom.* / sim.* namespaces, which an unbound dotted name still falls through to
+    assert _mean("vproc_1.velocityX * 2", {"vproc_1.velocityX": 1.5}) == pytest.approx(3.0)
+    with pytest.raises(CompileError, match=r"unresolved name 'vproc_1\.velocityY'"):
+        compile_expression(parse("vproc_1.velocityY"), _ctx())
+
+
 def test_unsupported_construct_raises() -> None:
     # Tensor literals are not in the supported subset yet (vector literals now are).
     with pytest.raises(CompileError, match="not supported"):

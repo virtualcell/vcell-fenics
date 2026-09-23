@@ -22,7 +22,12 @@ import pytest
 from vcell_fenics.cli import main
 from vcell_fenics.results import Bundle
 
-_MB = Path(__file__).resolve().parent / "fixtures" / "simtask" / "SimID_274641196_0__0.simtask.xml"
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "simtask"
+_MB = _FIXTURES / "SimID_274641196_0__0.simtask.xml"
+# a real VCell moving-boundary BioModel (from the FRAP tutorial): a cleavage furrow pinches a 2D cell at
+# y = 0 (front velocity −exp(−y²/0.25)·tanh(x/5) in x); its species' velocity is routed through functions
+# to a dotted constant (vobj_Cyt1_velX → vproc_1.velocityX = 0), as VCell writes every moving-boundary model
+_FURROW = _FIXTURES / "furrow_SimID_1486629996_0__0.simtask.xml"
 _BUNDLE = "SimID_274641196_0_.fenics"
 _SPECIES = ("C_cyt", "Ran_cyt", "RanC_cyt")
 _VX = '<Function Name="sproc_0.velocityX" Domain="cell_ec_membrane">sin(t)</Function>'
@@ -129,3 +134,15 @@ def test_a_species_dependent_front(tmp_path: Path, capsys: pytest.CaptureFixture
     assert "previous step" in capsys.readouterr().err
     assert _shift(bundle)[0] > 0.0  # C_cyt = x > 0 everywhere in the cell, so the front moves right
     _assert_mass_conserved(bundle)
+
+
+def test_the_cleavage_furrow_pinches_the_cell_and_keeps_its_mass(tmp_path: Path) -> None:
+    # coarse and short: the full model (h ≈ 0.1, 30 s) takes ~10 minutes and remeshes 8 times
+    assert main(["--simtask", str(_FURROW), "--out", str(tmp_path), "--h", "0.5", "--t-final", "2.0"]) == 0
+    bundle = Bundle.open(tmp_path / "SimID_1486629996_0_.fenics")
+    assert bundle.manifest.status == "completed"
+    assert all(s.motion == "ale" for s in bundle.manifest.segments)
+    stats = bundle.stats("Cyt", "Dex")
+    totals, area = stats[:, 1], stats[:, 1] / stats[:, 0]
+    assert np.allclose(totals, totals[0], rtol=1e-12)
+    assert area[-1] < area[0]  # the furrow ingresses
