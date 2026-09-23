@@ -441,6 +441,8 @@ def _reachable_names(vcml: VcmlMathDescription) -> frozenset[str]:
     """The names transitively referenced by the model's equations, boundary values, and constant /
     function expressions — the live set. Used to drop dead pure functions (see
     :func:`_translate_parameters`). Roots are every PDE/ODE rate, diffusion, and initial expression,
+    each PDE velocity component (VCell routes a species velocity through functions, e.g.
+    ``vobj_Cyt1_velX`` → ``vproc_1.velocityX``),
     each per-face boundary value, each membrane jump flux, and each constant expression; the closure
     then follows function bodies. Identifier matching reuses the inliner's dotted-name-aware,
     call-excluding regex, so a built-in call like ``vcRegionVolume(...)`` is not itself a name."""
@@ -451,6 +453,8 @@ def _reachable_names(vcml: VcmlMathDescription) -> frozenset[str]:
     for subdomain in subdomains:
         for pde in subdomain.pde_equations:
             roots += [pde.rate, pde.diffusion, pde.initial]
+            if pde.velocity is not None:
+                roots += [pde.velocity.x, pde.velocity.y, pde.velocity.z]
             if pde.boundaries is not None:
                 roots += [getattr(pde.boundaries, face) for face in ("xm", "xp", "ym", "yp", "zm", "zp")]
         for ode in subdomain.ode_equations:
