@@ -1238,10 +1238,12 @@ def _netgen_from_surfaces(boundary: LabelBoundary, h: float) -> _NetgenArrays:
     region_of_domain = np.zeros(len(domains) + 1, dtype=np.int32)
     for region, number in domains.items():
         region_of_domain[number] = region + 1
-    points = np.asarray(mesh.Coordinates(), dtype=np.float64)  # type: ignore[attr-defined]
+    # Copies, not views: Coordinates() / NumPy() expose Netgen's own buffers, which are freed with `mesh`
+    # when this builder returns — a view then dangles into create_mesh (a segfault on linux-aarch64).
+    points = np.array(mesh.Coordinates(), dtype=np.float64, copy=True)  # type: ignore[attr-defined]
     elements = mesh.Elements3D().NumPy()  # type: ignore[attr-defined]
-    cells = np.asarray(elements["nodes"], dtype=np.int64)[:, :4] - 1
-    material = region_of_domain[np.asarray(elements["index"], dtype=np.int64)]
+    cells = np.array(elements["nodes"][:, :4], dtype=np.int64, copy=True) - 1
+    material = region_of_domain[np.array(elements["index"], dtype=np.int64, copy=True)]
     return points, cells, material
 
 
