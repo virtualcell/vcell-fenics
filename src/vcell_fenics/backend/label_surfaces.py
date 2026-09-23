@@ -226,8 +226,41 @@ def _smooth(boundary: LabelBoundary, lo: Floats, hi: Floats, passes: int, grid: 
             step[pinned] = 0.0
             points += step
     if grid.indicators is not None:
-        points = _project(points, sides, pinned, grid)
+        points = _guarded(points, _project(points, sides, pinned, grid), boundary.elements, grid)
     return LabelBoundary(dim=dim, points=points, elements=boundary.elements, pairs=boundary.pairs)
+
+
+def _guarded(before: Floats, after: Floats, elements: Ints, grid: LabelGrid) -> Floats:
+    """``after`` (the projected points), except where the projection is not to be trusted, which keep
+    their ``before`` (smoothed) positions: a vertex whose target lies more than half a cell away (where
+    clean-up relabelled nodes, the smoothed indicators no longer agree with the labels, so their level
+    set can lie across the extracted surface), and the vertices of any element the projection turned
+    over or twisted sharply (repeated until none is)."""
+
+    limit = 0.5 * float(min(grid.spacing))
+    out = after.copy()
+    far = np.linalg.norm(after - before, axis=1) > limit
+    out[far] = before[far]
+    reference = _normals(before, elements)
+    for _ in range(10):
+        turned = np.einsum("ij,ij->i", _normals(out, elements), reference) < 0.5  # rotated by > 60°
+        if not turned.any():
+            break
+        revert = np.unique(elements[turned])
+        out[revert] = before[revert]
+    return out
+
+
+def _normals(points: Floats, elements: Ints) -> Floats:
+    """Unit normals of the elements (the left normal of a segment in 2D)."""
+
+    corners = points[elements]
+    if elements.shape[1] == 2:
+        direction = corners[:, 1] - corners[:, 0]
+        normal = np.stack([-direction[:, 1], direction[:, 0]], axis=1)
+    else:
+        normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    return np.asarray(normal / np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-300), dtype=np.float64)
 
 
 def _project(points: Floats, sides: list[set[int]], pinned: NDArray[np.bool_], grid: LabelGrid) -> Floats:

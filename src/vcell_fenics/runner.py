@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from itertools import pairwise
 from pathlib import Path
@@ -39,7 +41,7 @@ from vcell_fenics.backend.assemble import assemble
 from vcell_fenics.backend.discrete import DiscreteProblem
 from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
-from vcell_fenics.backend.realize import realize
+from vcell_fenics.backend.realize import ImageGeometryWarning, realize
 from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_geometry_yaml, dump_yaml
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
 from vcell_fenics.results.schema import DomainKind
@@ -225,7 +227,8 @@ def _run_single_mesh(
 
     comm = MPI.COMM_WORLD
     log(f"realizing geometry {model.geometry.name!r} (dim {model.geometry.dim}) at h = {options.h:g}")
-    geometry: Geometry = realize(model.geometry, h=options.h, comm=comm)
+    with _logged_geometry_warnings():
+        geometry: Geometry = realize(model.geometry, h=options.h, comm=comm)
     domain = model.math.equations[0].subdomain
     cells = mesh_cell_count(geometry.mesh_of(domain))
     log(f"assembling (fe_degree {options.fe_degree}, {cells} cells)")
@@ -304,7 +307,8 @@ def _run_moving(
     if options.time_integration != "backward_euler":
         log(f"moving mesh: backward Euler with dt = {options.dt:g} (the method of lines has no moving-output path)")
     log(f"realizing geometry {model.geometry.name!r} (dim {model.geometry.dim}) at h = {options.h:g}")
-    geometry: Geometry = realize(model.geometry, h=options.h, comm=comm)
+    with _logged_geometry_warnings():
+        geometry: Geometry = realize(model.geometry, h=options.h, comm=comm)
     cells = mesh_cell_count(geometry.mesh_of(domain))
     log(f"assembling a moving problem on {domain!r} (fe_degree {options.fe_degree}, {cells} cells)")
     problem = assemble(model.math, geometry, dt=options.dt, fe_degree=options.fe_degree)
@@ -416,16 +420,17 @@ def _run_interface_coupled(
         f"realizing interface-coupled geometry {model.geometry.name!r}: inner {coupling.inner!r}, "
         f"outer {coupling.outer!r}, membrane {coupling.membrane!r} at h = {options.h:g}"
     )
-    geometry = realize_interface_coupled(
-        model.geometry,
-        inner_subdomain=coupling.inner,
-        outer_subdomain=coupling.outer,
-        membrane_subdomain=coupling.membrane,
-        interface=coupling.membrane,
-        background_subdomain=coupling.background,
-        h=options.h,
-        comm=comm,
-    )
+    with _logged_geometry_warnings():
+        geometry = realize_interface_coupled(
+            model.geometry,
+            inner_subdomain=coupling.inner,
+            outer_subdomain=coupling.outer,
+            membrane_subdomain=coupling.membrane,
+            interface=coupling.membrane,
+            background_subdomain=coupling.background,
+            h=options.h,
+            comm=comm,
+        )
     variable_of = {eq.subdomain: eq.variable for eq in model.math.equations}
     recorder.add_domain(coupling.inner, "volume", geometry.inner_mesh, [(variable_of[coupling.inner], None)])
     recorder.add_domain(coupling.outer, "volume", geometry.outer_mesh, [(variable_of[coupling.outer], None)])
@@ -489,6 +494,21 @@ def _interface_coupling(model: ModelInput) -> Coupling | None:
 def mesh_cell_count(mesh: Any) -> int:
     index_map = mesh.topology.index_map(mesh.topology.dim)
     return int(mesh.comm.allreduce(index_map.size_local, op=MPI.SUM))
+
+
+@contextmanager
+def _logged_geometry_warnings() -> Iterator[None]:
+    """Report an image geometry's realization warnings (topology changed at this mesh size, a touching
+    pair without a membrane) on the run log, where a VCell user sees them; other warnings pass through."""
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ImageGeometryWarning)
+        yield
+    for warning in caught:
+        if issubclass(warning.category, ImageGeometryWarning):
+            log(f"warning: {warning.message}")
+        else:
+            warnings.warn_explicit(warning.message, warning.category, warning.filename, warning.lineno)
 
 
 def log(message: str) -> None:

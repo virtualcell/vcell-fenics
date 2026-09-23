@@ -26,6 +26,7 @@ import pytest
 
 _PROBE = r"""
 import json
+import sys
 import ufl
 from dolfinx import fem
 from mpi4py import MPI
@@ -82,6 +83,20 @@ for bg in (None, "bg"):
         facets = g.facet_tags.find(tag)
         out[f"coupled[{bg}]/{label}_facets"] = comm.allreduce(int((facets < n_owned).sum()), op=MPI.SUM)
 
+# image geometries: meshed on rank 0 from the label field, so the mesh must be identical at any rank count
+sys.path.insert(0, TESTS)
+from test_realize_image import cells_3d, two_cells_2d
+for desc, h, tag in ((two_cells_2d(81), 0.05, "image2d"), (cells_3d(21), 0.2, "image3d")):
+    geom = realize(desc, h=h, comm=comm)
+    for sd in sorted(geom.subdomains):
+        record(f"{tag}/{sd}", geom.mesh_of(sd))
+g = realize_interface_coupled(two_cells_2d(81), inner_subdomain="c", outer_subdomain="ec",
+                              membrane_subdomain="c_ec", interface="pm", h=0.05, comm=comm)
+n_owned = g.parent_mesh.topology.index_map(g.parent_mesh.topology.dim - 1).size_local
+for label, tag in (("wall", g.outer_tag), ("interface", g.interface_tag)):
+    facets = g.facet_tags.find(tag)
+    out[f"image-coupled/{label}_facets"] = comm.allreduce(int((facets < n_owned).sum()), op=MPI.SUM)
+
 if comm.rank == 0:
     print("PROBE " + json.dumps(out, sort_keys=True))
 """
@@ -90,7 +105,7 @@ if comm.rank == 0:
 def _run(n: int) -> dict[str, object]:
     mpiexec = Path(sys.executable).parent / "mpiexec"
     result = subprocess.run(
-        [str(mpiexec), "-n", str(n), sys.executable, "-c", _PROBE],
+        [str(mpiexec), "-n", str(n), sys.executable, "-c", _PROBE.replace("TESTS", repr(str(Path(__file__).parent)))],
         capture_output=True,
         text=True,
         timeout=600,
