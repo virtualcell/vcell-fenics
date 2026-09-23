@@ -24,14 +24,21 @@ the formalism.
   subvolume whose priority-resolved field is negative at its midpoint; membrane facets between two
   regions are named by the ``SurfaceClass`` for that pair.
 
-**Not yet here:** 3D, ``image`` meshing, subvolumes touching the box boundary, and the unfitted
-(level-set / cut-FEM) consumption of the same field. Unsupported descriptions raise
-:class:`NotImplementedError`.
+- **3D body-fitted (``dim = 3``)**: the same recipe with marching cubes and a Netgen volume mesh.
+- **Image geometries (2D and 3D)**, any topology — nested regions, regions cut by the box, and
+  junctions where three or more subvolumes meet: the image's smoothed label field (`labels.py`), the
+  conforming boundaries between its subvolumes (`label_surfaces.py`, VTK SurfaceNets with a sentinel
+  label per box face), and a Netgen mesh with those boundaries embedded — Netgen's domain is the
+  region, so no classification is needed (:func:`_realize_image_partition`).
+
+**Not yet here:** analytic subvolumes touching the box boundary, and the unfitted (level-set /
+cut-FEM) consumption of the same field. Unsupported descriptions raise :class:`NotImplementedError`.
 """
 
 from __future__ import annotations
 
 import tempfile
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +60,8 @@ from vcell_fenics.backend.geometry import (
 )
 from vcell_fenics.backend.implicit_fields import RealizationError as RealizationError  # re-exported
 from vcell_fenics.backend.implicit_fields import eval_field as _eval_field
+from vcell_fenics.backend.label_surfaces import LabelBoundary, extract_boundary
+from vcell_fenics.backend.labels import label_geometry
 from vcell_fenics.formalism.expr import Expr
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
 from vcell_fenics.formalism.parser import parse
@@ -77,6 +86,15 @@ _FACE_NAMES_3D = ("x_minus", "x_plus", "y_minus", "y_plus", "z_minus", "z_plus")
 _SURFACE_TAG_BASE = 100  # membrane tags, in SurfaceClass order
 _FACE_TAG_BASE = 200  # x_minus=200, x_plus=201, …
 _OUTER_WALL_TAG = 300  # the whole box exterior, unioned, as one reservoir "wall" (realize_interface_coupled)
+
+# An image geometry is meshed serially on rank 0; refuse a mesh size that would make that intractable.
+# Tetrahedra per unit volume at edge length h ≈ 6√2 / h³ (a regular tetrahedron has volume h³ / (6√2)).
+_MAX_IMAGE_TETS = 4_000_000
+
+
+class ImageGeometryWarning(UserWarning):
+    """Realizing an image geometry changed its topology at this mesh size, or found a touching pair of
+    subvolumes with no surface class (see :func:`~vcell_fenics.backend.labels.label_geometry`)."""
 
 
 @dataclass(frozen=True)
@@ -159,6 +177,8 @@ def _realize_2d_partition(
     a plain `Geometry`) and `realize_interface_coupled` (which builds an `InterfaceCoupledGeometry`,
     retaining the submesh entity maps). Returns the parent mesh and its region / surface tagging."""
 
+    if _is_image(description):
+        return _realize_image_partition(description, h=h, comm=comm)
     subvolumes = description.subvolumes
     # Every subvolume but the last (the background / complement) defines an analytic shape we
     # body-fit to; the background owns whatever is left.
@@ -369,13 +389,15 @@ def realize_interface_coupled(
             parent, tagging, inner_subdomain, outer_subdomain
         )
     else:
-        # Box-bounded parent: the reservoir wall is the whole box exterior (every exterior facet is a box
-        # face — the membrane is interior).
+        # Box-bounded parent: the reservoir wall is the outer compartment's share of the box exterior.
         cell_tags = tagging.cell_tags
         region_tags = tagging.region_tags
         interface_facets = tagging.facet_tags.find(interface_tag)
         parent.topology.create_connectivity(tdim - 1, tdim)
         wall_facets = dmesh.exterior_facet_indices(parent.topology)
+    # Only the outer compartment's exterior is the reservoir wall: an image's inner compartment (or a third
+    # region) may touch the box too, and its exterior facets are not the outer reservoir's boundary.
+    wall_facets = _facets_of_region(parent, cell_tags, wall_facets, region_tags[outer_subdomain])
     if not comm.allreduce(interface_facets.size, op=MPI.SUM):  # global: every rank raises, or none does
         raise RealizationError(f"the membrane {membrane_subdomain!r} has no realized interface facets")
 
@@ -710,6 +732,8 @@ def _realize_3d_partition(
     priority-resolved fields (`_classify_and_tag`, shared with 2D). The 3D analog of
     `_realize_2d_partition`."""
 
+    if _is_image(description):
+        return _realize_image_partition(description, h=h, comm=comm)
     subvolumes = description.subvolumes
     for subvolume in subvolumes[:-1]:
         if subvolume.type != "analytic" or subvolume.expression is None:
@@ -949,9 +973,19 @@ def _classify_and_tag(
     regions) is named by the `SurfaceClass` for that pair; box faces are exterior facets, classified by
     position and the region they touch."""
 
+    return _tag_facets(
+        parent, description, _vote_cell_values(parent, description, fields, cell_face), origin=origin, extent=extent
+    )
+
+
+def _vote_cell_values(
+    parent: dmesh.Mesh, description: GeometryDescription, fields: dict[str, Expr], cell_face: dmesh.MeshTags
+) -> NDArray[np.int32]:
+    """Each cell's region tag (owned and ghost cells) by the priority-resolved analytic fields, each
+    body-fit face resolved as a whole by its majority (see :func:`_classify_and_tag`)."""
+
     subvolumes = description.subvolumes
     region_tags = {sv.name: i + 1 for i, sv in enumerate(subvolumes)}
-    tag_to_name = {tag: name for name, tag in region_tags.items()}
     tdim = parent.topology.dim
     comm = parent.comm
 
@@ -976,46 +1010,72 @@ def _classify_and_tag(
     votes = np.zeros((n_faces, len(subvolumes) + 1), dtype=np.int64)
     np.add.at(votes, (face_of_cell[:n_owned], per_cell[:n_owned]), 1)
     comm.Allreduce(MPI.IN_PLACE, votes, op=MPI.SUM)
-    cell_values = votes.argmax(axis=1).astype(np.int32)[face_of_cell]
+    return np.asarray(votes.argmax(axis=1).astype(np.int32)[face_of_cell], dtype=np.int32)
+
+
+def _tag_facets(
+    parent: dmesh.Mesh,
+    description: GeometryDescription,
+    cell_values: NDArray[np.int32],
+    *,
+    origin: tuple[float, ...],
+    extent: tuple[float, ...],
+) -> _Tagging:
+    """The cell and facet tagging of a partitioned mesh whose cells (owned and ghost) carry region tags
+    ``cell_values`` (subvolume index + 1): membrane facets (interior, between the two subvolumes of a
+    declared SurfaceClass) and box-face facets (exterior, classified by position), vectorized."""
+
+    subvolumes = description.subvolumes
+    region_tags = {sv.name: i + 1 for i, sv in enumerate(subvolumes)}
+    tag_to_name = {tag: name for name, tag in region_tags.items()}
+    tdim = parent.topology.dim
+    comm = parent.comm
+    cells = np.arange(cell_values.size, dtype=np.int32)
     cell_tags = dmesh.meshtags(parent, tdim, cells, cell_values)
 
     surface_tags = {sc.name: _SURFACE_TAG_BASE + i for i, sc in enumerate(description.surfaces)}
-    pair_to_tag = {
-        frozenset({sc.inside, sc.outside}): _SURFACE_TAG_BASE + i for i, sc in enumerate(description.surfaces)
-    }
+    # a (left, right) region-tag lookup → membrane tag (0: no declared SurfaceClass for that pair)
+    n_tags = len(subvolumes) + 1
+    pair_tag = np.zeros((n_tags, n_tags), dtype=np.int32)
+    for i, sc in enumerate(description.surfaces):
+        a, b = region_tags.get(sc.inside), region_tags.get(sc.outside)
+        if a is not None and b is not None:
+            pair_tag[a, b] = pair_tag[b, a] = _SURFACE_TAG_BASE + i
 
     parent.topology.create_connectivity(tdim - 1, tdim)
     facet_to_cell = parent.topology.connectivity(tdim - 1, tdim)
     num_facets = parent.topology.index_map(tdim - 1).size_local
-    facet_mid = dmesh.compute_midpoints(parent, tdim - 1, np.arange(num_facets, dtype=np.int32))
-    facet_index: list[int] = []
-    facet_value: list[int] = []
-    face_regions: dict[int, set[str]] = {}
-    for facet in range(num_facets):
-        incident = facet_to_cell.links(facet)
-        if incident.size == 1:  # exterior — a box face
-            face = _classify_face(tuple(float(facet_mid[facet, k]) for k in range(gdim)), origin=origin, extent=extent)
-            if face is not None:
-                tag = _FACE_TAG_BASE + face
-                facet_index.append(facet)
-                facet_value.append(tag)
-                face_regions.setdefault(tag, set()).add(tag_to_name[int(cell_values[incident[0]])])
-            continue
-        left, right = int(cell_values[incident[0]]), int(cell_values[incident[1]])
-        if left == right:
-            continue  # interior to one region
-        membrane_tag = pair_to_tag.get(frozenset({tag_to_name[left], tag_to_name[right]}))
-        if membrane_tag is not None:  # a declared SurfaceClass names this interface
-            facet_index.append(facet)
-            facet_value.append(membrane_tag)
+    offsets = np.asarray(facet_to_cell.offsets[: num_facets + 1])
+    links = np.asarray(facet_to_cell.array)
+    count = np.diff(offsets)
+    first = links[offsets[:-1]]
+    second = np.where(count == 2, links[np.minimum(offsets[:-1] + 1, links.size - 1)], first)
 
-    order = np.argsort(facet_index)
-    facet_tags = dmesh.meshtags(
-        parent,
-        tdim - 1,
-        np.asarray(facet_index, dtype=np.int32)[order],
-        np.asarray(facet_value, dtype=np.int32)[order],
-    )
+    # exterior facets: the box face their midpoint lies on (axis-major, the first match — as _classify_face)
+    exterior = np.flatnonzero(count == 1)
+    mids = dmesh.compute_midpoints(parent, tdim - 1, exterior.astype(np.int32))
+    face = np.full(exterior.size, -1, dtype=np.int64)
+    for axis in range(len(origin)):
+        for side, value in ((0, origin[axis]), (1, origin[axis] + extent[axis])):
+            hit = (face < 0) & np.isclose(mids[:, axis], value)
+            face[hit] = 2 * axis + side
+    on_face = face >= 0
+    box_facets = exterior[on_face]
+    box_tags = (_FACE_TAG_BASE + face[on_face]).astype(np.int32)
+
+    # interior facets between two regions with a declared SurfaceClass: membranes
+    interior = np.flatnonzero(count == 2)
+    membrane = pair_tag[cell_values[first[interior]], cell_values[second[interior]]]
+    named = membrane > 0
+    idx = np.concatenate([box_facets, interior[named]]).astype(np.int32)
+    val = np.concatenate([box_tags, membrane[named]]).astype(np.int32)
+    order = np.argsort(idx)
+    facet_tags = dmesh.meshtags(parent, tdim - 1, idx[order], val[order])
+
+    face_regions: dict[int, set[str]] = {}
+    box_cells = cell_values[first[box_facets]]
+    for tag in np.unique(box_tags).tolist():
+        face_regions[int(tag)] = {tag_to_name[int(v)] for v in np.unique(box_cells[box_tags == tag]).tolist()}
     # Which regions touch each box face is a property of the whole mesh, not of one rank's share.
     merged: dict[int, set[str]] = {}
     for part in comm.allgather(face_regions):
@@ -1041,3 +1101,138 @@ def _classify_face(point: tuple[float, ...], *, origin: tuple[float, ...], exten
         if np.isclose(c, o + length):
             return 2 * axis + 1
     return None
+
+
+# -- image geometries: label field → conforming boundaries → Netgen -------------------------------
+
+
+def _is_image(description: GeometryDescription) -> bool:
+    return any(subvolume.type == "image" for subvolume in description.subvolumes)
+
+
+def _realize_image_partition(
+    description: GeometryDescription, *, h: float, comm: MPI.Comm
+) -> tuple[dmesh.Mesh, _Tagging]:
+    """Body-fit and tag an image geometry (2D or 3D; any topology — nested, touching the box, junctions):
+    its smoothed label field (:func:`~vcell_fenics.backend.labels.label_geometry`), the conforming
+    boundaries between its subvolumes (:func:`~vcell_fenics.backend.label_surfaces.extract_boundary`),
+    and a Netgen mesh with those boundaries embedded, built on rank 0. Netgen's domain *is* the region
+    (subvolume index + 1), so no classification is needed — only the facet tagging. Topology changes at
+    this ``h`` are reported as :class:`ImageGeometryWarning`."""
+
+    dim = description.dim
+    origin = tuple(float(description.origin[i]) for i in range(dim))
+    extent = tuple(float(description.extent[i]) for i in range(dim))
+    if dim == 3:
+        estimate = 6.0 * np.sqrt(2.0) * float(np.prod(extent)) / h**3
+        if estimate > _MAX_IMAGE_TETS:
+            coarsest = (6.0 * np.sqrt(2.0) * float(np.prod(extent)) / _MAX_IMAGE_TETS) ** (1.0 / 3.0)
+            raise RealizationError(
+                f"image geometry {description.name!r} at h = {h:g} would need ~{estimate:.2g} tetrahedra "
+                f"(the limit is {_MAX_IMAGE_TETS:.2g}); use h ≥ {coarsest:.3g}"
+            )
+    notes: list[str] = []
+
+    def build() -> _NetgenArrays:
+        labels = label_geometry(description, h=h)
+        notes.extend(labels.warnings)
+        boundary = extract_boundary(labels.grid, extent=extent)
+        return _netgen_from_curves(boundary, h) if dim == 2 else _netgen_from_surfaces(boundary, h)
+
+    parent, material = _mesh_on_rank0(comm, build, cell="triangle" if dim == 2 else "tetrahedron", gdim=dim)
+    for note in comm.bcast(notes, root=0):
+        warnings.warn(f"image geometry {description.name!r}: {note}", ImageGeometryWarning, stacklevel=3)
+    cell_values = np.zeros(material.indices.size, dtype=np.int32)
+    cell_values[material.indices] = material.values
+    return parent, _tag_facets(parent, description, cell_values, origin=origin, extent=extent)
+
+
+def _domains(boundary: LabelBoundary) -> dict[int, int]:
+    """Netgen domain numbers for the regions a boundary separates: contiguous from 1 (0 is outside the
+    box), in region order."""
+
+    regions = sorted({int(side) for side in boundary.pairs.ravel().tolist() if side >= 0})
+    return {region: k + 1 for k, region in enumerate(regions)}
+
+
+def _netgen_from_curves(boundary: LabelBoundary, h: float) -> _NetgenArrays:
+    """Triangulate the box partitioned by the labelled 2D ``boundary`` (serial): every segment becomes a
+    Netgen spline segment between shared points — so the curves meet conformingly at junctions and box
+    edges — with ``leftdomain`` / ``rightdomain`` the regions on its two sides (a segment's left normal
+    points into ``pairs[:, 1]``). Returns points, triangles and each triangle's region tag."""
+
+    domains = _domains(boundary)
+
+    def domain(side: int) -> int:
+        return domains[side] if side >= 0 else 0
+
+    geo = SplineGeometry()
+    point_ids = [geo.AppendPoint(float(x), float(y)) for x, y in boundary.points]
+    for (p, q), (right, left) in zip(boundary.elements.tolist(), boundary.pairs.tolist(), strict=True):
+        geo.Append(["line", point_ids[p], point_ids[q]], leftdomain=domain(left), rightdomain=domain(right))
+    ngmesh = geo.GenerateMesh(maxh=float(h))
+    if not len(ngmesh.Elements2D()):
+        raise RealizationError(f"Netgen could not triangulate the image geometry's curves at h = {h:g}; try another h")
+
+    region_of_domain = np.zeros(len(domains) + 1, dtype=np.int32)
+    for region, number in domains.items():
+        region_of_domain[number] = region + 1
+    points = np.array([list(p.p)[:2] for p in ngmesh.Points()], dtype=np.float64)
+    cells = np.array([[v.nr - 1 for v in el.vertices] for el in ngmesh.Elements2D()], dtype=np.int64)
+    material = region_of_domain[np.array([el.index for el in ngmesh.Elements2D()], dtype=np.int64)]
+    return points, cells, material
+
+
+def _netgen_from_surfaces(boundary: LabelBoundary, h: float) -> _NetgenArrays:
+    """Tetrahedralize the box partitioned by the labelled 3D ``boundary`` (serial). Its triangles *are*
+    the surface mesh — one closed, conforming (non-manifold at junction curves) surface — loaded in bulk
+    under one ``FaceDescriptor`` per region pair (``domin`` / ``domout`` the regions the normal points
+    from / into, 0 outside the box), then ``GenerateVolumeMesh`` fills each domain. Returns points,
+    tetrahedra and each tetrahedron's region tag."""
+
+    domains = _domains(boundary)
+
+    def domain(side: int) -> int:
+        return domains[side] if side >= 0 else 0
+
+    mesh = NetgenMesh(dim=3)
+    mesh.AddPoints(np.ascontiguousarray(boundary.points, dtype=np.float64))  # type: ignore[attr-defined]  # stubs lag
+    pairs = boundary.pairs
+    for k, (a, b) in enumerate(np.unique(pairs, axis=0).tolist()):
+        chosen = (pairs[:, 0] == a) & (pairs[:, 1] == b)
+        fd = mesh.Add(FaceDescriptor(surfnr=k + 1, domin=domain(a), domout=domain(b), bc=k + 1))
+        triangles = np.ascontiguousarray(boundary.elements[chosen], dtype=np.int32)
+        mesh.AddElements(dim=2, index=fd, data=triangles, base=0)  # type: ignore[attr-defined]
+    mesh.GenerateVolumeMesh(maxh=float(h))  # type: ignore[call-arg]
+    if not len(mesh.Elements3D()):
+        # Netgen reports a failed domain on stdout and returns an empty mesh rather than raising
+        raise RealizationError(
+            f"Netgen could not tetrahedralize the image geometry's surfaces at h = {h:g} "
+            "(an overlapping or self-intersecting boundary); try another h"
+        )
+
+    region_of_domain = np.zeros(len(domains) + 1, dtype=np.int32)
+    for region, number in domains.items():
+        region_of_domain[number] = region + 1
+    points = np.asarray(mesh.Coordinates(), dtype=np.float64)  # type: ignore[attr-defined]
+    elements = mesh.Elements3D().NumPy()  # type: ignore[attr-defined]
+    cells = np.asarray(elements["nodes"], dtype=np.int64)[:, :4] - 1
+    material = region_of_domain[np.asarray(elements["index"], dtype=np.int64)]
+    return points, cells, material
+
+
+def _facets_of_region(
+    parent: dmesh.Mesh, cell_tags: dmesh.MeshTags, facets: NDArray[np.int32], region_tag: int
+) -> NDArray[np.int32]:
+    """The exterior ``facets`` whose (single) cell belongs to ``region_tag``."""
+
+    tdim = parent.topology.dim
+    parent.topology.create_connectivity(tdim - 1, tdim)
+    facet_to_cell = parent.topology.connectivity(tdim - 1, tdim)
+    cell_map = parent.topology.index_map(tdim)
+    lookup = np.zeros(cell_map.size_local + cell_map.num_ghosts, dtype=np.int32)
+    lookup[cell_tags.indices] = cell_tags.values
+    offsets = np.asarray(facet_to_cell.offsets)
+    cells = np.asarray(facet_to_cell.array)[offsets[np.asarray(facets, dtype=np.int64)]]
+    selected: NDArray[np.int32] = np.asarray(facets, dtype=np.int32)[lookup[cells] == region_tag]
+    return selected
