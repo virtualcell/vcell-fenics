@@ -30,11 +30,19 @@ if TYPE_CHECKING:
 
 # A bare identifier used as a *value* — optionally dotted (VCell `structure.param` names),
 # and NOT immediately followed by `(` (that would be a function call, not a name reference).
-_IDENT_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?!\s*\()")
+# The lookahead also refuses a word character, so the regex cannot backtrack into a call's name
+# (without it, `sin(t)` yielded the "value" `si`, and a species named `s` would match inside `sin`).
+_IDENT_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?![\w.]|\s*\()")
 
 # VCell's spatial coordinates and time — bare identifiers that make a function position- or
 # time-dependent (hence non-constant), exactly as a state-variable reference does.
 _COORDINATE_TIME_NAMES = frozenset({"x", "y", "z", "t"})
+
+
+def referenced_names(expr: str) -> set[str]:
+    """The identifiers ``expr`` uses as values (dotted names whole; function calls excluded)."""
+
+    return set(_IDENT_RE.findall(expr))
 
 
 class FunctionCycleError(ValueError):

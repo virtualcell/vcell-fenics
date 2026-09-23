@@ -96,6 +96,9 @@ class SimulationTask:
     math: Any  # pyvcell MathDescription, this job's overrides applied
     geometry: Any  # pyvcell Geometry
     warnings: tuple[str, ...] = field(default=())
+    # A moving-boundary task's front kinematics, one per membrane that carries a <Velocity> (pyvcell
+    # FrontVelocity, the raw VCell expressions; the importer inlines them). Empty for a fixed geometry.
+    front_velocities: tuple[Any, ...] = ()
 
     @property
     def job_prefix(self) -> str:
@@ -219,18 +222,64 @@ def read_simtask(path: str | Path) -> SimulationTask:
         moving_boundary=task.get("Solver") == "MovingB" or _child(task, "MovingBoundarySolverOptions") is not None,
         math=apply_overrides(math, resolved),
         geometry=geometry,
+        front_velocities=_front_velocities(children["MathDescription"]),
     )
+
+
+def _front_velocities(math_element: Any) -> tuple[Any, ...]:
+    """The ``<MembraneSubDomain><Velocity><X>…</X><Y>…</Y>[<Z>…</Z>]</Velocity>`` front kinematics of a
+    moving-boundary math description. pyvcell's reader drops this element (it models ``<Velocity>`` only
+    as a PDE's advection velocity, as attributes), so it is read from the raw XML here."""
+
+    from pyvcell.vcml.models_app import FrontVelocity
+
+    fronts = []
+    for membrane in math_element:
+        if _tag(membrane) != "MembraneSubDomain":
+            continue
+        velocity = _child(membrane, "Velocity")
+        if velocity is None:
+            continue
+        components = {
+            axis: (_child(velocity, axis).text or "0").strip() if _child(velocity, axis) is not None else "0.0"
+            for axis in ("X", "Y", "Z")
+        }
+        fronts.append(
+            FrontVelocity(
+                velocity_x=components["X"],
+                velocity_y=components["Y"],
+                velocity_z=components["Z"],
+                surface_name=membrane.get("Name"),
+            )
+        )
+    return tuple(fronts)
+
+
+VelocityDependence = Literal["prescribed", "species-coupled"]
+
+
+def front_velocity_dependence(task: SimulationTask) -> VelocityDependence:
+    """Whether the front velocity depends only on space, time and constants (``prescribed``) or also on
+    the solved species (``species-coupled``: the backend evaluates it with the species one step behind)."""
+
+    from vcell_fenics.pyvcell_bridge.importer import _collect_variable_names
+    from vcell_fenics.pyvcell_bridge.inlining import referenced_names, resolve_functions
+
+    variables = _collect_variable_names(task.math)
+    resolution = resolve_functions(list(task.math.functions), variables)
+    for front in task.front_velocities:
+        for component in (front.velocity_x, front.velocity_y, front.velocity_z):
+            if referenced_names(resolution.inline(str(component)) or "") & variables:
+                return "species-coupled"
+    return "prescribed"
 
 
 def check_supported(task: SimulationTask) -> list[str]:
     """Refuse what this solver would otherwise mis-solve (ADR 011 §1). Returns non-fatal warnings."""
 
     name = task.path.name
-    if task.moving_boundary:
-        raise SimulationTaskError(
-            f"{name}: a moving-boundary simulation (Solver={task.solver!r}); the FEniCSx solver runs fixed "
-            "geometries only and would otherwise solve it on the initial shape"
-        )
+    if task.moving_boundary or task.front_velocities:
+        _check_moving_boundary(task)
     if task.field_data:
         raise SimulationTaskError(f"{name}: field data (FieldFunctionIdentifierSpec) is not supported yet")
     if task.task_type.lower() != "unsteady":
@@ -249,6 +298,46 @@ def check_supported(task: SimulationTask) -> list[str]:
     if task.fenicsx is not None and task.fenicsx.unknown:
         warnings.append(f"ignoring unknown FEniCSxSolverOptions entries: {', '.join(task.fenicsx.unknown)}")
     return warnings
+
+
+def _check_moving_boundary(task: SimulationTask) -> None:
+    """What the FEniCSx moving-boundary path solves (the first pass, vcell-fenics tracker "Moving
+    boundaries"): a 2D geometry, one moving membrane with a front <Velocity>, and species only in the
+    volume it encloses (the interior rides the mesh, ``v = v_b``). Everything else is refused, each with
+    its own reason, rather than solved on the initial shape."""
+
+    name = task.path.name
+    prefix = f"{name}: a moving-boundary simulation (Solver={task.solver!r})"
+    if not task.front_velocities:
+        raise SimulationTaskError(f"{prefix} has no membrane <Velocity>, so the front's motion is unknown")
+    dim = getattr(task.geometry, "dim", None)
+    if dim != 2:
+        raise SimulationTaskError(f"{prefix} in {dim}D; the FEniCSx moving-boundary path is 2D")
+    if len(task.front_velocities) > 1:
+        moving = ", ".join(repr(f.surface_name) for f in task.front_velocities)
+        raise SimulationTaskError(f"{prefix} moves several membranes ({moving}); one moving front is supported")
+    front = task.front_velocities[0]
+    membrane = next((m for m in task.math.membrane_subdomains if m.name == front.surface_name), None)
+    if membrane is None:
+        raise SimulationTaskError(
+            f"{prefix}: the <Velocity> names membrane {front.surface_name!r}, which the math lacks"
+        )
+    if membrane.pde_equations or membrane.ode_equations:
+        raise SimulationTaskError(
+            f"{prefix} has species on the moving membrane {membrane.name!r}; the FEniCSx moving-boundary path "
+            "does not solve membrane species on a moving front yet"
+        )
+    for compartment in task.math.compartment_subdomains:
+        if compartment.name != membrane.inside_compartment and (compartment.pde_equations or compartment.ode_equations):
+            raise SimulationTaskError(
+                f"{prefix} has species in {compartment.name!r}, outside the moving front; the FEniCSx "
+                f"moving-boundary path solves species inside it ({membrane.inside_compartment!r}) only"
+            )
+    # Supported so far; the runner's moving path (vcell-fenics tracker M3) is not wired yet.
+    raise SimulationTaskError(
+        f"{prefix}: the FEniCSx solver reads its front ({front_velocity_dependence(task)} velocity) but does not "
+        "run moving-boundary simulations yet, and would otherwise solve it on the initial shape"
+    )
 
 
 def _visit_math_and_geometry(math_element: Any, geometry_element: Any) -> tuple[Any, Any]:

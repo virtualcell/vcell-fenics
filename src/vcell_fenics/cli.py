@@ -58,7 +58,12 @@ from vcell_fenics.formalism import (
 from vcell_fenics.formalism.validator import FormalismValidationError
 from vcell_fenics.pyvcell_bridge.importer import VcellImportError
 from vcell_fenics.pyvcell_bridge.overrides import OverrideError
-from vcell_fenics.pyvcell_bridge.simtask import SimulationTaskError, check_supported, read_simtask
+from vcell_fenics.pyvcell_bridge.simtask import (
+    SimulationTaskError,
+    check_supported,
+    front_velocity_dependence,
+    read_simtask,
+)
 from vcell_fenics.runner import ModelInput, RunError, RunOptions, run_model, uniform_output_times
 from vcell_fenics.runner import log as _log
 from vcell_fenics.status import Fanout, MessagingConfig, RestWorkerEvents, StatusReporter, StdoutMarkers, isolate_stdout
@@ -234,7 +239,8 @@ def load_simtask(path: Path) -> ModelInput:
     task = read_simtask(path)
     for warning in check_supported(task):
         _log(f"warning: {warning}")
-    gd, md = _import_vcell(task.geometry, task.math)
+    front = task.front_velocities[0] if task.front_velocities else None
+    gd, md = _import_vcell(task.geometry, task.math, front_velocity=front)
     times = task.output_times()
     options = task.fenicsx
     if task.num_processors > 1 and MPI.COMM_WORLD.size == 1:
@@ -250,6 +256,12 @@ def load_simtask(path: Path) -> ModelInput:
         "math_overrides": task.resolved_overrides,
         "number_processors": task.num_processors,
     }
+    if front is not None:
+        provenance["moving_boundary"] = {
+            "membrane": front.surface_name,
+            "velocity": [str(front.velocity_x), str(front.velocity_y)],
+            "velocity_dependence": front_velocity_dependence(task),
+        }
     max_size = options.max_element_size if options is not None else None
     return ModelInput(
         geometry=gd,
@@ -270,7 +282,9 @@ def load_simtask(path: Path) -> ModelInput:
     )
 
 
-def _import_vcell(vcml_geometry: Any, vcml_math: Any) -> tuple[GeometryDescription, MathDescription]:
+def _import_vcell(
+    vcml_geometry: Any, vcml_math: Any, *, front_velocity: Any = None
+) -> tuple[GeometryDescription, MathDescription]:
     """VCell geometry + math → the formalism pair, in the geometry's own frame.
 
     `normalize_to_geometry_frame` is not optional: a VCell math description written for a 3D box
@@ -281,7 +295,7 @@ def _import_vcell(vcml_geometry: Any, vcml_math: Any) -> tuple[GeometryDescripti
     from vcell_fenics.pyvcell_bridge import import_geometry, import_math_description, normalize_to_geometry_frame
 
     gd = import_geometry(vcml_geometry)
-    md = import_math_description(vcml_math, geometry=gd.name, dim=gd.dim)
+    md = import_math_description(vcml_math, geometry=gd.name, dim=gd.dim, front_velocity=front_velocity)
     return normalize_to_geometry_frame(gd, md)
 
 
