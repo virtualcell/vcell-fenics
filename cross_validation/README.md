@@ -378,6 +378,49 @@ interior compartment — so one VCML can drive both solvers. Next: chemistry-cou
 ALE backend evaluates only space/time motion today) and the *active-gel migration* model
 (`docs/modeling/active-protrusion-migration.md`).
 
+## Moving-boundary SWEPT — VCell's own semantics, through the SimulationTask path
+
+The translation and expansion cases above use the Lagrangian convention (species velocity = front
+velocity: the cell carries its cytoplasm). **VCell's default is different**. Its moving-boundary solver is
+Eulerian: a fixed grid and an embedded moving front, with each species at its own lab-frame velocity (zero
+unless the model sets one). The front then *sweeps* the species under the Rankine–Hugoniot condition
+`(−D∇u + (v − v_b)u)·n = 0`: in the cell's frame they drift backwards and pile against the trailing
+membrane. vcell-fenics solves that with the lab-frame `advection` slot, transporting relative to the mesh
+(`v − w`). The ALE mesh velocity `w` is bookkeeping and does not enter the answer
+(`tests/test_backend_lab_frame_advection.py`).
+
+These cases run the **real VCell moving-boundary SimulationTask** (`tests/fixtures/simtask/SimID_274641196`:
+a disk of radius 3 at (5, 5) in a 10 × 10 box, `C = x` and `Ran = y`, `D = 10`, no species velocity) through
+the CLI path, the code VCell's cluster and desktop runs take. The reference is mbsolver on the same problem
+authored in pyvcell. At each output time our P1 field is interpolated exactly, on that row's moved mesh, at
+mbsolver's inside grid nodes. A **negative control** re-runs the task with the species *carried*
+(lab velocity = front velocity), which shows the comparison separates the two conventions.
+
+```bash
+../pyvcell/.venv/bin/python  cross_validation/mb_swept_fv.py --case translate|deform|remesh [--mesh 61]   # stage 1
+.pixi/envs/dev/bin/python    cross_validation/mb_swept.py    --case translate|deform|remesh [--h 0.16 --dt 0.005]
+```
+
+| case (front velocity) | mbsolver mesh / fenics h | relL2 (relL∞) at t = 1 | carried control | right edge: fenics / mbsolver / exact |
+|---|---|---|---|---|
+| translate `(sin t, cos t)` | 31 / 0.32 | **0.41 %** (0.69 %) | 13.8 % (22.6 %) | 8.464 / 8.454 / 8.460 |
+| translate | 61 / 0.16 | **0.22 %** (0.34 %) | — | 8.461 / 8.458 / 8.460 |
+| deform `(0.2(x−5)² − 1.2, 0)` | 31 / 0.32 | 2.70 % (4.69 %) | 13.3 % (18.6 %) | 9.237 / 9.103 / 9.253 |
+| deform | 61 / 0.16 | 1.45 % (2.58 %) | — | 9.241 / 9.180 / 9.253 |
+| remesh `(0.4(x−5)² − 3.4, 0)`, **1 remesh** | 31 / 0.32 | 7.4 % (19.4 %) | 38.1 % (60.7 %) | 8.887 / 8.292 / 8.922 |
+
+- **Translation** agrees to 0.4 %, and **halves under refinement** of both solvers (0.41 → 0.22 %). The
+  fronts and areas coincide (28.230 vs 28.180 at mesh 31). The carried convention is 14 % off, so the
+  comparison discriminates by about 30×.
+- **Deforming fronts:** on the x-axis the front's extremes follow `du/dt = a u² − b` exactly (`v_y = 0`).
+  Ours stays within about 0.02 of that exact position, while mbsolver's lags on the fast-moving side, and the
+  field difference shrinks as mbsolver's front converges (2.70 → 1.45 %). The remaining gap is mbsolver's
+  front error, not ours.
+- **Remeshing:** the strong stretch remeshes once (a two-segment bundle), and the lab-frame answer still
+  separates from the carried one by 5×. The absolute agreement is limited by mbsolver: this build overflows in
+  `Voronoi32.cpp` above mesh 31 on this case, and at 31 its right edge is 0.63 short of exact (ours 0.035).
+- Mass is conserved to round-off in every run (the zero-total-flux front; the conservative ALE time term).
+
 ## Moving-boundary expansion + dilution (ALE ↔ FronTier FV)
 
 The translation case is rigid (`∇·v = 0`), so it leaves the mandatory `ρ ∇·v` **dilution** term inert.
