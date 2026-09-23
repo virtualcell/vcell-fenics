@@ -323,9 +323,9 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 | I1 | **Voxels** in `GeometryImage.compressed_content` (VCell's hex-zlib, vertex-centred lattice); import, IO, validation; the image3d simtask fixture. | ✅ #168 |
 | I2 | **Label field** (`backend/labels.py`): analytic overlay, per-axis Gaussian smoothing, ≈ h resampling, speck + pinch clean-up, topology report. | ✅ #169 |
 | I3 | **Conforming boundaries** (`backend/label_surfaces.py`): SurfaceNets with box-face sentinels, orientation, constrained Taubin, projection onto the smooth interfaces. | ✅ #170 |
-| I4 | **Realize** (`_realize_image_partition`): 2D SplineGeometry, 3D direct Netgen surface; vectorized facet tagging; the interface-coupled wall fix; warnings logged. | ◐ #172 |
-| I5 | **End to end + cross-validation**: a PDE model on VCell's tutorial image through the CLI; `cross_validation/image_nuclear*.py` vs fvsolver (filling curve 1.7 %, field 0.8 % relL2 at h = 1 µm); robust pinch repair and a boundary-smoothing fallback; the image in the container warm-up; the two-compartment solver refuses several species per compartment clearly. | ◐ |
-| I6 | **VCell**: lift the image refusal in `FenicsSolver.unsupportedReasons` (keep refusing images in moving-boundary apps); bump the default image and the vcell-fluxcd pin. | ☐ |
+| I4 | **Realize** (`_realize_image_partition`): 2D SplineGeometry, 3D direct Netgen surface; vectorized facet tagging; the interface-coupled wall fix; warnings logged. | ✅ #172 |
+| I5 | **End to end + cross-validation**: a PDE model on VCell's tutorial image through the CLI; `cross_validation/image_nuclear*.py` vs fvsolver (filling curve 1.7 %, field 0.8 % relL2 at h = 1 µm); robust pinch repair and a boundary-smoothing fallback; the image in the container warm-up; the two-compartment solver refuses several species per compartment clearly. | ✅ #173; image `sha-a651c4b` (multi-arch, plus SIF) |
+| I6 | **VCell**: lift the image refusal in `FenicsSolver.unsupportedReasons` (keep refusing images in moving-boundary apps); bump the default image and the vcell-fluxcd pin. | ✅ virtualcell/vcell#2094 (merged 2026-09-23): default image `sha-a651c4b`; vcell-fluxcd #56 pinned to match (for the user to merge). |
 
 ## Risks and open questions
 
