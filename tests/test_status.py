@@ -254,7 +254,8 @@ def test_fanout_reaches_every_reporter() -> None:
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SMOKE = _ROOT / "tests" / "fixtures" / "simtask" / "SimID_1585623750_0__0.simtask.xml"
-_MB = _ROOT / "tests" / "fixtures" / "simtask" / "SimID_274641196_0__0.simtask.xml"
+# a task the solver refuses (a compartmental, non-spatial one): the refusal's reporting path
+_REFUSED = _ROOT / "tests" / "fixtures" / "simtask" / "SimID_274631114_0__0.simtask.xml"
 
 
 def _cli(*args: str, timeout: float = 600) -> subprocess.CompletedProcess[str]:
@@ -296,11 +297,11 @@ def test_send_status_reports_the_run_to_the_broker(tmp_path: Path, broker: int) 
 
 def test_a_refused_task_reports_failure_and_exits_2(tmp_path: Path, broker: int) -> None:
     config = _config_file(tmp_path, broker)
-    result = _cli("--simtask", str(_MB), "--out", str(tmp_path), f"--vc-send-status-config={config}")
+    result = _cli("--simtask", str(_REFUSED), "--out", str(tmp_path), f"--vc-send-status-config={config}")
     assert result.returncode == 2
     statuses = [int(dict(_query(path))["WorkerEvent_Status"]) for _, path, _ in _Broker.received]
     assert statuses == [JOB_STARTING, JOB_FAILURE]
-    assert "moving-boundary" in dict(_query(_Broker.received[-1][1]))["WorkerEvent_StatusMsg"]
+    assert "non-spatial" in dict(_query(_Broker.received[-1][1]))["WorkerEvent_StatusMsg"]
 
 
 def test_an_unreachable_broker_does_not_fail_the_run(tmp_path: Path) -> None:

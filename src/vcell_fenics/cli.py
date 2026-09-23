@@ -275,8 +275,10 @@ def load_simtask(path: Path) -> ModelInput:
         suggested_rtol=task.rel_tol,
         suggested_atol=task.abs_tol,
         suggested_fe_degree=options.element_degree if options is not None else None,
-        # Real VCell kinetics are routinely nonlinear, which backward Euler cannot lower (ADR 011 §2).
-        suggested_time_integration=(options.time_integration if options is not None else None) or "method_of_lines",
+        # Real VCell kinetics are routinely nonlinear, which backward Euler cannot lower (ADR 011 §2); a
+        # moving front runs backward Euler (the ALE driver), the one path that moves the mesh with outputs.
+        suggested_time_integration=(options.time_integration if options is not None else None)
+        or ("backward_euler" if front is not None else "method_of_lines"),
         suggested_out_dir=path.resolve().parent,
         suggested_prefix=task.job_prefix,
     )

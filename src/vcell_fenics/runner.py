@@ -6,14 +6,18 @@ and writes the [ADR 010](../../docs/decisions/010-results-bundle-vtu-zarr.md) bu
 per-time statistics, the manifest — and, under ``provenance/``, the resolved native formalism
 (``math.yaml`` / ``geometry.yaml``) and ``summary.json``.
 
-Two solver paths, chosen by the model rather than by a flag:
+Three solver paths, chosen by the model rather than by a flag:
 
 - equations on **one** subdomain → ``realize`` → ``assemble`` → backward Euler (dt snapped per output
   interval) or adaptive method of lines (outputs recorded from the integrator's own monitor);
 - equations on **two** compartments joined by a membrane → ``realize_interface_coupled`` →
-  ``integrate_interface_coupled`` (adaptive method of lines over the blocked two-mesh system).
+  ``integrate_interface_coupled`` (adaptive method of lines over the blocked two-mesh system);
+- a **moving** subdomain (a VCell moving-boundary front: prescribed-velocity motion of the volume it
+  encloses) → ``realize`` → ``assemble`` → backward Euler through the ALE driver, remeshing when the
+  moving mesh degrades; the bundle records the mesh's coordinates every row and a new segment per
+  remesh (ADR 010 §2–3).
 
-Out of scope, each with its own driver: moving membranes / ALE remeshing, Stokes/FSI, phase field, and
+Out of scope, each with its own driver: Stokes/FSI, phase field, membrane species on a moving front, and
 surface PDEs coupled to a bulk (§1.6.6) — those raise a message naming the limitation.
 """
 
@@ -143,16 +147,26 @@ def run_model(
     recorder = BundleRecorder(writer, comm=comm)
     reporter: StatusReporter = status if status is not None else NullReporter()
     recorder.on_row(lambda t, row: reporter.data(t, t / options.t_final))
-    coupling = _interface_coupling(model)
+    moving = _moving_subdomains(model)
+    coupling = None if moving else _interface_coupling(model)
     run_info: dict[str, Any] = {
         "h": options.h,
         "t_final": options.t_final,
         "fe_degree": options.fe_degree,
         "mpi_ranks": comm.size,
-        "backend": "interface_coupled" if coupling is not None else "single_mesh",
+        "backend": "ale" if moving else "interface_coupled" if coupling is not None else "single_mesh",
     }
     try:
-        if coupling is not None:
+        if moving:
+            cells, steps, dt_used, remeshes = _run_moving(model, moving, options, recorder, reporter)
+            run_info |= {
+                "dt": dt_used,
+                "dt_requested": options.dt,
+                "time_integration": "backward_euler",
+                "steps": steps,
+                "remeshes": remeshes,
+            }
+        elif coupling is not None:
             cells, steps = _run_interface_coupled(model, coupling, options, recorder, reporter)
             run_info |= {"time_integration": "method_of_lines", "steps": steps}
         else:
@@ -254,6 +268,85 @@ def _run_single_mesh(
         on_step=lambda t: status.progress(t / options.t_final, t),
     )
     return cells, steps, dt_max
+
+
+# -- the moving (ALE) path ----------------------------------------------------------------------------
+
+# A remesh when the moving mesh's worst cell-size ratio has grown this much since it was built.
+_REMESH_QUALITY_LIMIT = 4.0
+
+
+def _moving_subdomains(model: ModelInput) -> list[str]:
+    return [s.name for s in model.math.subdomains if s.motion.kind == "prescribed"]
+
+
+def _run_moving(
+    model: ModelInput, moving: list[str], options: RunOptions, recorder: BundleRecorder, status: StatusReporter
+) -> tuple[int, int, float, int]:
+    """Backward Euler through the ALE driver on the moving volume: the mesh moves with the prescribed
+    velocity every step (the conservative ALE time term keeps each species' mass), remeshing when it
+    has degraded and continuing on the new mesh (conservatively remapped). Returns (cells, steps,
+    largest dt, remeshes)."""
+
+    from vcell_fenics.backend.ale import ALEState, StepTooLarge, step_with_remeshing
+    from vcell_fenics.backend.discrete import MeshQualityError
+
+    comm = MPI.COMM_WORLD
+    domains = sorted({equation.subdomain for equation in model.math.equations})
+    if len(moving) != 1 or domains != moving:
+        raise RunError(
+            f"the moving-boundary path solves species in the one moving volume; the model moves {moving} "
+            f"and has equations on {domains}"
+        )
+    domain = moving[0]
+    if options.fe_degree != 1:
+        raise RunError(f"the moving-boundary path is P1 (its remesh transfer is); got fe_degree {options.fe_degree}")
+    if options.time_integration != "backward_euler":
+        log(f"moving mesh: backward Euler with dt = {options.dt:g} (the method of lines has no moving-output path)")
+    log(f"realizing geometry {model.geometry.name!r} (dim {model.geometry.dim}) at h = {options.h:g}")
+    geometry: Geometry = realize(model.geometry, h=options.h, comm=comm)
+    cells = mesh_cell_count(geometry.mesh_of(domain))
+    log(f"assembling a moving problem on {domain!r} (fe_degree {options.fe_degree}, {cells} cells)")
+    problem = assemble(model.math, geometry, dt=options.dt, fe_degree=options.fe_degree)
+    if not isinstance(problem, DiscreteProblem) or problem.motion_velocity is None:
+        raise RunError(f"{domain!r} was given a motion, but it did not assemble to a moving problem")
+    state = ALEState(problem=problem, md=model.math)
+    names = problem.variable_name.split(",")
+    recorder.add_domain(domain, "volume", problem.V.mesh, _named(problem, names), moving=True)
+    recorder.open()
+    recorder.capture(0.0, progress=0.0)
+
+    steps, t, dt_max = 0, 0.0, 0.0
+    try:
+        for t_out in options.output_times[1:]:
+            n = max(1, round((t_out - t) / options.dt))
+            dt = (t_out - t) / n
+            state.problem.dt.value = dt
+            state.t = t
+            for _ in range(n):
+                remeshes = state.remesh_count
+                step_with_remeshing(state, quality_limit=_REMESH_QUALITY_LIMIT, target_h=options.h)
+                if state.remesh_count != remeshes:
+                    new_cells = mesh_cell_count(state.problem.V.mesh)
+                    log(f"remeshed at t = {state.t - dt:g} (mesh quality); continuing on {new_cells} cells")
+                    recorder.start_segment(
+                        {domain: (state.problem.V.mesh, _channels(state.problem.unknown, len(names)))}
+                    )
+                steps += 1
+                status.progress(state.t / options.t_final, state.t)
+            t, dt_max = t_out, max(dt_max, dt)
+            recorder.capture(t_out, progress=t_out / options.t_final)
+    except (StepTooLarge, MeshQualityError) as error:
+        raise RunError(f"the moving mesh failed near t = {state.t:g}: {error}") from error
+    except NotImplementedError as error:  # a remesh cannot carry boundary conditions yet
+        raise RunError(
+            f"the moving mesh needed a remesh near t = {state.t:g}, which is not possible here: {error}"
+        ) from error
+    return cells, steps, dt_max, state.remesh_count
+
+
+def _named(problem: DiscreteProblem, names: list[str]) -> list[tuple[str, Any]]:
+    return list(zip(names, _channels(problem.unknown, len(names)), strict=True))
 
 
 def _channels(unknown: Any, n_species: int) -> list[Any]:

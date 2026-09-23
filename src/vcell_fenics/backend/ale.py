@@ -83,12 +83,17 @@ class ALEState:
 
 
 def step_with_remeshing(state: ALEState, *, quality_limit: float, target_h: float) -> ALEState:
-    """Advance `state` by one `dt`, remeshing first if the moving mesh has distorted
-    past `quality_limit` (a cell-size-ratio growth factor, e.g. 4.0). Returns the
-    same (mutated) state. Raises `StepTooLarge` if a step tangles the mesh anyway."""
+    """Advance `state` by one `dt` (to `state.t + dt`, setting the problem's time), remeshing
+    first if the moving mesh has distorted past `quality_limit` (a cell-size-ratio growth factor,
+    e.g. 4.0). Returns the same (mutated) state. Raises `StepTooLarge` if a step tangles the mesh
+    anyway."""
 
     if state.problem.motion_velocity is not None and state.problem.mesh_quality_growth() >= quality_limit:
         state.remesh(target_h)  # swap on the still-valid geometry, before it tangles
+    # The step solves at t + dt: a time-dependent velocity (VCell's `sin(t)` front) or source must see
+    # that time. Set it on every step, and so also right after a remesh, whose rebuilt problem starts
+    # its `sim.t` at 0.
+    state.problem.set_time(state.t + float(state.problem.dt.value))
     try:
         state.problem.step()
     except MeshQualityError as exc:

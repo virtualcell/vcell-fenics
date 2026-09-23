@@ -1150,6 +1150,7 @@ def assemble_membrane_coupled(
             else None
         )
         for k, eq in enumerate(eqs):
+            _refuse_lab_frame_advection(eq)
             terms.append((trial[k] - prev[k]) * test[k] * dx)
             diffusion = eq.terms.get("diffusion")
             if diffusion is not None:
@@ -1501,6 +1502,7 @@ def integrate_membrane_coupled(
             else None
         )
         for k, eq in enumerate(eqs):
+            _refuse_lab_frame_advection(eq)
             local_terms.append(rate[k] * test[k] * dx)  # ċ·w
             precond_terms.append(sigma * trial[k] * test[k] * dx)  # σ·mass (the preconditioner's ∂/∂rate)
             diffusion = eq.terms.get("diffusion")
@@ -1723,3 +1725,13 @@ def _interpolate_component_ics(field: fem.Function, equations: list[TemplateEqua
         for eq in equations
     ]
     field.interpolate(fem.Expression(ufl.as_vector(components), field.function_space.element.interpolation_points))
+
+
+def _refuse_lab_frame_advection(eq: Any) -> None:
+    """The lab-frame ``advection`` slot is assembled by the single-mesh path only (``assemble``)."""
+
+    if "advection" in eq.terms:
+        raise NotImplementedError(
+            f"the lab-frame 'advection' slot (equation for {eq.variable!r}) is supported on the single-mesh "
+            "path only; the interface-coupled solvers take 'relative_advection'"
+        )

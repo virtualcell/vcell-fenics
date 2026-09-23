@@ -105,6 +105,8 @@ ENV XDG_CACHE_HOME=/opt/cache \
 #   2. the VCell path — a real SimulationTask, method of lines, with VCell's stdout status markers
 #      (stdout must carry markers only; the check below fails on anything else) — and the bundle
 #      reader and export on its result.
+#   3. a VCell moving-boundary SimulationTask (the ALE path: a moving mesh, backward Euler, a
+#      segmented bundle) — which also caches the moving problem's forms.
 RUN mkdir -p /opt/cache \
  && /usr/local/bin/vcell-fenics-entrypoint \
       --math /opt/vcell-fenics/examples/diffusion2d_math.yaml \
@@ -119,6 +121,14 @@ RUN mkdir -p /opt/cache \
       /tmp/warmup/SimID_1585623750_0_.fenics --require-status completed \
  && /usr/local/bin/vcell-fenics-entrypoint vcell-fenics-export \
       /tmp/warmup/SimID_1585623750_0_.fenics /tmp/warmup/paraview \
+ && /usr/local/bin/vcell-fenics-entrypoint vcell-fenics \
+      --simtask /opt/vcell-fenics/examples/simtask/SimID_274641196_0__0.simtask.xml \
+      --out /tmp/warmup --vc-print-status > /tmp/warmup/mb-markers.txt \
+ && grep -q '\[\[\[progress:100.0%\]\]\]' /tmp/warmup/mb-markers.txt \
+ && /usr/local/bin/vcell-fenics-entrypoint python -m vcell_fenics.results \
+      /tmp/warmup/SimID_274641196_0_.fenics --require-status completed \
+ && /usr/local/bin/vcell-fenics-entrypoint vcell-fenics-export \
+      /tmp/warmup/SimID_274641196_0_.fenics /tmp/warmup/paraview-mb \
  && rm -rf /tmp/warmup \
  && chmod -R a+rwX /opt/cache
 
