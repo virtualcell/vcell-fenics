@@ -6,8 +6,8 @@ The geometry analogue of :func:`~vcell_fenics.pyvcell_bridge.importer.import_mat
 maps construct-for-construct over the (typed) pydantic object. Subvolumes carry over with their
 type (analytic / csg / image / compartmental); analytic expressions are translated through the
 same coordinate/time rules as the math importer (`x/y/z` → `geom.x[…]`); surface classes become
-ordered membrane pairs; the image carries its metadata only (not the raw voxel blob — see the
-schema). Nothing is rejected: every VCell geometry maps, even where its subvolume type cannot yet
+ordered membrane pairs; the image carries its metadata and its voxels (VCell's hex-zlib encoding,
+unchanged). Nothing is rejected: every VCell geometry maps, even where its subvolume type cannot yet
 be *meshed* (the realization layer's concern), so the data imports losslessly.
 """
 
@@ -61,4 +61,5 @@ def _image(image: VcmlImage) -> GeometryImage:
         name=image.name,
         size=(int(image.size[0]), int(image.size[1]), int(image.size[2])),
         pixel_classes=tuple(PixelClass(name=p.name, pixel_value=int(p.pixel_value)) for p in image.pixel_classes),
+        compressed_content=image.compressed_content or None,
     )
