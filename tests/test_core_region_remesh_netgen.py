@@ -55,7 +55,7 @@ def _mesh_area(mesh: dmesh.Mesh) -> float:
     total = 0.0
     for tri in tris:
         a, b, c = verts[tri]
-        total += 0.5 * abs(float(np.cross(b - a, c - a)))
+        total += 0.5 * abs(float((b - a)[0] * (c - a)[1] - (b - a)[1] * (c - a)[0]))
     return total
 
 
@@ -116,7 +116,7 @@ def test_fresh_mesh_is_well_shaped() -> None:
     assert len(tris) > 0
     for tri in tris:
         a, b, c = verts[tri]
-        assert abs(float(np.cross(b - a, c - a))) > 1e-12
+        assert abs(float((b - a)[0] * (c - a)[1] - (b - a)[1] * (c - a)[0])) > 1e-12
     assert _min_angle_deg(mesh) > 20.0
 
 
