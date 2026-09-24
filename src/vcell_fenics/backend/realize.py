@@ -62,6 +62,7 @@ from vcell_fenics.backend.implicit_fields import RealizationError as Realization
 from vcell_fenics.backend.implicit_fields import eval_field as _eval_field
 from vcell_fenics.backend.label_surfaces import LabelBoundary, extract_boundary
 from vcell_fenics.backend.labels import label_geometry
+from vcell_fenics.core.region_remesh_netgen import write_stl
 from vcell_fenics.formalism.expr import Expr
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
 from vcell_fenics.formalism.parser import parse
@@ -942,27 +943,8 @@ def _remesh_surface(verts: NDArray[np.float64], faces: NDArray[np.int64], h: flo
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "surface.stl"
-        _write_stl(path, verts, faces)
+        write_stl(path, verts, faces)
         return STLGeometry(str(path)).GenerateMesh(maxh=h)
-
-
-def _write_stl(path: Path, verts: NDArray[np.float64], faces: NDArray[np.int64]) -> None:
-    """Write an ASCII STL for the triangle surface (verts, faces) with per-facet normals."""
-
-    a, b, c = verts[faces[:, 0]], verts[faces[:, 1]], verts[faces[:, 2]]
-    normals = np.cross(b - a, c - a)
-    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
-    normals = np.divide(normals, lengths, out=np.zeros_like(normals), where=lengths > 0)
-    lines = ["solid s"]
-    for i in range(faces.shape[0]):
-        lines.append(f"facet normal {normals[i, 0]:.6e} {normals[i, 1]:.6e} {normals[i, 2]:.6e}")
-        lines.append(" outer loop")
-        for p in (a[i], b[i], c[i]):
-            lines.append(f"  vertex {p[0]:.6e} {p[1]:.6e} {p[2]:.6e}")
-        lines.append(" endloop")
-        lines.append("endfacet")
-    lines.append("endsolid s")
-    path.write_text("\n".join(lines))
 
 
 def _classify_and_tag(
@@ -1262,3 +1244,23 @@ def _facets_of_region(
     cells = np.asarray(facet_to_cell.array)[offsets[np.asarray(facets, dtype=np.int64)]]
     selected: NDArray[np.int32] = np.asarray(facets, dtype=np.int32)[lookup[cells] == region_tag]
     return selected
+
+
+def netgen_fill_surface(
+    points: NDArray[np.float64], triangles: NDArray[np.int64], h: float
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """Tetrahedralize the region inside the closed, outward-oriented triangle surface ``(points, triangles)``
+    with Netgen, keeping the surface triangles as they are (``GenerateVolumeMesh`` at ``maxh = h``, which
+    should match the surface's triangle size). Returns (points, tetrahedra), copied out of Netgen's buffers."""
+
+    mesh = NetgenMesh(dim=3)
+    mesh.AddPoints(np.ascontiguousarray(points, dtype=np.float64))  # type: ignore[attr-defined]  # stubs lag
+    fd = mesh.Add(FaceDescriptor(surfnr=1, domin=1, domout=0, bc=1))
+    mesh.AddElements(dim=2, index=fd, data=np.ascontiguousarray(triangles, dtype=np.int32), base=0)  # type: ignore[attr-defined]
+    mesh.GenerateVolumeMesh(maxh=float(h))  # type: ignore[call-arg]
+    if not len(mesh.Elements3D()):
+        raise RealizationError(f"Netgen could not tetrahedralize the surface at h = {h:g}")
+    coords = np.array(mesh.Coordinates(), dtype=np.float64, copy=True)  # type: ignore[attr-defined]
+    elements = mesh.Elements3D().NumPy()  # type: ignore[attr-defined]
+    cells = np.array(elements["nodes"][:, :4], dtype=np.int64, copy=True) - 1
+    return coords, cells

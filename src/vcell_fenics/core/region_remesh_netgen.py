@@ -38,6 +38,8 @@ opt-in means gmsh-only code paths never load Netgen. Import it directly where yo
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import basix.ufl
 import numpy as np
 import pyngcore
@@ -120,3 +122,60 @@ def _signed_area(loop: Floats) -> float:
     """Shoelace signed area of the closed polygon `loop` (CCW positive)."""
     x, y = loop[:, 0], loop[:, 1]
     return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+class PinchOffError(RuntimeError):
+    """The region is thinner somewhere than the finest allowed mesh can resolve (a neck closing toward a
+    topological split) — raised *before* Netgen, which segfaults on such surfaces rather than failing."""
+
+
+def local_thickness(points: Floats, triangles: NDArray[np.int64], radius: float) -> Floats:
+    """At each surface vertex, the distance across the region to the facing side of the surface: the
+    nearest vertex within ``radius`` that lies along this vertex's inward normal and whose own outward
+    normal points on along that line (so a sharp crease, whose flanks also face each other, is not a neck).
+    ``inf`` where the region is at least ``radius`` thick. A cheap medial-axis proxy — what a pinching neck
+    needs, not an exact thickness."""
+
+    from scipy.spatial import cKDTree
+
+    a, b, c = points[triangles[:, 0]], points[triangles[:, 1]], points[triangles[:, 2]]
+    face_normals = np.cross(b - a, c - a)  # area-weighted, outward
+    normals = np.zeros_like(points)
+    for k in range(3):
+        np.add.at(normals, triangles[:, k], face_normals)
+    normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-300)
+    tree = cKDTree(points)
+    thickness = np.full(len(points), np.inf)
+    for i, near in enumerate(tree.query_ball_point(points, r=radius)):
+        near = np.asarray(near, dtype=np.int64)
+        near = near[near != i]
+        if not near.size:
+            continue
+        offset = points[near] - points[i]
+        distance = np.linalg.norm(offset, axis=1)
+        direction = offset / distance[:, None]
+        # across the region: the partner lies along this vertex's inward normal, and the partner's own
+        # outward normal points on along that line — true across a neck, false across a sharp crease
+        # (where neighbours on the two flanks also have opposing normals, but sideways)
+        across = (direction @ -normals[i] > 0.8) & (np.einsum("ij,ij->i", direction, normals[near]) > 0.8)
+        if across.any():
+            thickness[i] = float(distance[across].min())
+    return thickness
+
+
+def write_stl(path: Path, points: Floats, triangles: NDArray[np.int64]) -> None:
+    """Write an ASCII STL of the triangle surface ``(points, triangles)`` with per-facet normals."""
+
+    a, b, c = points[triangles[:, 0]], points[triangles[:, 1]], points[triangles[:, 2]]
+    normals = np.cross(b - a, c - a)
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = np.divide(normals, lengths, out=np.zeros_like(normals), where=lengths > 0)
+    lines = ["solid s"]
+    for n, p, q, r in zip(normals, a, b, c, strict=True):
+        lines.append(f"facet normal {n[0]:.17g} {n[1]:.17g} {n[2]:.17g}")
+        lines.append("outer loop")
+        lines.extend(f"vertex {v[0]:.17g} {v[1]:.17g} {v[2]:.17g}" for v in (p, q, r))
+        lines.append("endloop")
+        lines.append("endfacet")
+    lines.append("endsolid s")
+    path.write_text("\n".join(lines) + "\n")

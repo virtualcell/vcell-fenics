@@ -173,3 +173,29 @@ def test_the_3d_furrow_pinches_the_sphere_and_keeps_its_mass(tmp_path: Path) -> 
     assert radius[1][waist].max() < radius[0][waist].max() - 0.3
     poles = np.abs(first[:, 1]) > 4.5
     assert np.allclose(last[poles], first[poles], atol=1e-6)
+
+
+def test_the_3d_furrow_remeshes_and_keeps_its_mass(tmp_path: Path) -> None:
+    # past the first 3D remesh (t ≈ 1 at h = 1): new tetrahedral segments, the mass carried over exactly
+    argv = [
+        "--simtask",
+        str(_FURROW_3D),
+        "--out",
+        str(tmp_path),
+        "--h",
+        "1.0",
+        "--t-final",
+        "3.0",
+        "--output-dt",
+        "0.5",
+    ]
+    assert main(argv) == 0
+    bundle = Bundle.open(tmp_path / "SimID_1486629996_0_.fenics")
+    segments = bundle.manifest.segments
+    assert len(segments) >= 2 and all(s.motion == "ale" for s in segments)
+    stats = bundle.stats("Cyt", "Dex")
+    totals, volume = stats[:, 1], stats[:, 1] / stats[:, 0]
+    assert np.allclose(totals, totals[0], rtol=1e-12)
+    assert np.all(np.diff(volume) < 0.0)  # the ring keeps squeezing; remeshing does not jump the volume
+    for row in range(len(bundle.times)):
+        assert bundle.coords("Cyt", row).shape[0] == bundle.field("Cyt", "Dex", row).shape[0]
