@@ -5,16 +5,20 @@ boundary is a triangle surface the motion has degraded — thin triangles at a p
 STL surface mesher, fed that surface, hangs or segfaults. So the region is rebuilt **implicitly**, with
 the machinery the image-geometry realization already relies on (ADR 012):
 
-1. **A lattice** over the region's bounding box at spacing ``s = min(h, thinnest / 3)`` (down to
-   ``h / 4``): thin places — a closing neck — are resolved by the lattice itself. If the region is
-   thinner than ``2 · h / 4`` it is about to split, which a mesh cannot follow: :class:`PinchOffError`.
+1. **A lattice** over the region's bounding box at half the mesh size ``s = min(h, thinnest / 3)`` (the
+   mesh size itself down to ``h / 2``): thin places — a closing neck — are resolved by the lattice. The
+   refinement is global (the whole region is rebuilt at that size), so it is bounded: a region thinner
+   than ``h`` (twice the floor) stops the run with :class:`PinchOffError` — a clear message, since
+   Netgen would otherwise segfault — and a finer ``h`` runs further.
 2. **Inside/outside** at each node by exact point location in the current tetrahedral mesh, and the
    **signed distance** to its boundary surface (densely sampled).
 3. **The boundary** by SurfaceNets on that label grid, projected onto the zero level set of the signed
    distance (``label_surfaces.extract_boundary`` with the distance as the indicator) — so the new surface
    lies on the old one to O(s²).
-4. **Netgen** fills it directly (one ``FaceDescriptor``, ``GenerateVolumeMesh`` at ``maxh = s``), the
+4. **Netgen** fills it directly (one ``FaceDescriptor``, ``GenerateVolumeMesh`` at the mesh size), the
    route that is robust for surfaces at lattice resolution.
+5. **The volume is restored**: rebuilding a curved surface cuts its corners (a few % per remesh,
+   compounding); the new boundary is offset along its normals to the old volume exactly.
 
 The field transfer (``core.bulk_remap_mesh.remap_bulk_function_3d``) then interpolates and rescales the
 mass, so the small volume change of step 3 costs no conservation.
@@ -43,12 +47,12 @@ def remesh_region_3d(mesh: Mesh, h: float, *, min_h: float | None = None, lattic
     import ufl
 
     points, triangles = outward_boundary(mesh)
-    floor = h / 4.0 if min_h is None else min_h
+    floor = h / 2.0 if min_h is None else min_h
     thinnest = float(local_thickness(points, triangles, radius=3.0 * h).min())
     if thinnest < 2.0 * floor:
         raise PinchOffError(
-            f"the region is {thinnest:.3g} thick somewhere, under twice the finest mesh size {floor:.3g} — "
-            "a neck closing toward a split, which the mesh cannot follow"
+            f"the region is {thinnest:.3g} thick somewhere, under twice the finest mesh size {floor:.3g} at h = "
+            f"{h:g} — a neck closing toward a split, narrower than this mesh can follow (a finer h runs further)"
         )
     spacing = float(np.clip(thinnest / 3.0, floor, h))  # the volume mesh size (Netgen maxh)
     grid = _signed_distance_grid(mesh, points, triangles, lattice * spacing)  # the surface: finer

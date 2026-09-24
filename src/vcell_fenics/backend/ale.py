@@ -66,6 +66,7 @@ class ALEState:
     md: MathDescription
     t: float = 0.0
     remesh_count: int = 0
+    fresh_dihedral: float | None = None  # the current mesh's smallest dihedral angle when it was built (3D)
     steps: int = 0  # total inner TS steps (the method-of-lines driver); 0 for the backward-Euler driver
 
     @classmethod
@@ -81,38 +82,55 @@ class ALEState:
         new_mesh = _remesh(self.problem, target_h)
         self.problem = rebuild_on_mesh(self.problem, self.md, new_mesh)
         self.remesh_count += 1
+        self.fresh_dihedral = None  # measured on the next check
 
 
-# A tetrahedron flatter than this (its smallest dihedral angle, degrees) triggers a 3D remesh.
-_SLIVER_DEGREES = 5.0
+# A 3D remesh is triggered when the smallest dihedral angle has fallen to this fraction of the fresh
+# mesh's own (a fresh Netgen mesh already has a few angles of a few degrees — an absolute threshold would
+# remesh every step), or below the absolute floor.
+_SLIVER_FRACTION = 0.25
+_SLIVER_FLOOR_DEGREES = 1.0
 
 
-def _slivered(mesh: Mesh) -> bool:
-    """Whether a tetrahedral mesh has a cell whose smallest dihedral angle is under `_SLIVER_DEGREES`
-    (never for 2D meshes, whose shape the size ratio already tracks)."""
+def _min_dihedral_degrees(mesh: Mesh) -> float:
+    """The smallest dihedral angle of a tetrahedral mesh, in degrees (180 for a non-tetrahedral mesh)."""
 
     if mesh.topology.dim != 3:
-        return False
+        return 180.0
     corners = np.asarray(mesh.geometry.x, dtype=np.float64)[np.asarray(mesh.geometry.dofmap)]
     normals = []
     for face in ((1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2)):
         a, b, c = (corners[:, k] for k in face)
         n = np.cross(b - a, c - a)
         normals.append(n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-300))
-    # the dihedral angle at an edge is π minus the angle between the two faces' (consistently oriented) normals
+    # faces nearly parallel (|cos| → 1) mean a dihedral angle near 0 or 180: a flattened tetrahedron
     cosines = [np.abs(np.einsum("ij,ij->i", normals[i], normals[j])) for i in range(4) for j in range(i + 1, 4)]
-    return bool(np.max(cosines) > np.cos(np.radians(_SLIVER_DEGREES)))
+    return float(np.degrees(np.arccos(np.clip(np.max(cosines), -1.0, 1.0))))
+
+
+def _slivered(state: ALEState) -> bool:
+    """Whether the moving tetrahedral mesh has grown slivers: its smallest dihedral angle has fallen
+    below `_SLIVER_FRACTION` of what the mesh had when built, or below `_SLIVER_FLOOR_DEGREES` (never for
+    2D meshes, whose shape the size ratio already tracks)."""
+
+    mesh = state.problem.V.mesh
+    if mesh.topology.dim != 3:
+        return False
+    current = _min_dihedral_degrees(mesh)
+    if state.fresh_dihedral is None:
+        state.fresh_dihedral = current
+    return current < max(_SLIVER_FLOOR_DEGREES, _SLIVER_FRACTION * state.fresh_dihedral)
 
 
 def step_with_remeshing(state: ALEState, *, quality_limit: float, target_h: float) -> ALEState:
-    """Advance `state` by one `dt` (to `state.t + dt`, setting the problem's time), remeshing
-    first if the moving mesh has distorted past `quality_limit` (a cell-size-ratio growth factor,
-    e.g. 4.0) — or, on tetrahedra, grown slivers (a dihedral angle under `_SLIVER_DEGREES`, which a
-    size ratio does not see: a flattened tetrahedron can keep its volume). Returns the same (mutated)
-    state. Raises `StepTooLarge` if a step tangles the mesh anyway."""
+    """Advance `state` by one `dt` (to `state.t + dt`, setting the problem's time), remeshing first if
+    the moving mesh has distorted past `quality_limit` (a cell-size-ratio growth factor, e.g. 4.0) — or,
+    on tetrahedra, grown slivers (its smallest dihedral angle down to a quarter of what it was when
+    built, which a size ratio does not see: a flattened tetrahedron can keep its volume). Returns the
+    same (mutated) state. Raises `StepTooLarge` if a step tangles the mesh anyway."""
 
     if state.problem.motion_velocity is not None and (
-        state.problem.mesh_quality_growth() >= quality_limit or _slivered(state.problem.V.mesh)
+        state.problem.mesh_quality_growth() >= quality_limit or _slivered(state)
     ):
         state.remesh(target_h)  # swap on the still-valid geometry, before it tangles
     # The step solves at t + dt: a time-dependent velocity (VCell's `sin(t)` front) or source must see
