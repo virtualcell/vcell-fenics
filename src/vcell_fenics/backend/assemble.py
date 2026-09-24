@@ -409,7 +409,7 @@ def _dirichlet_bc(
 def _transfer_state(src: fem.Function, dst: fem.Function, *, conserve: bool) -> None:
     """Conservatively transfer `src` (old mesh) into `dst` (new mesh), component by
     component for a coupled vector space. The remap is chosen by topological
-    dimension: a 2D subdomain is a bulk field, a 1D subdomain a surface field."""
+    dimension: a 2D or 3D subdomain is a bulk field, a 1D subdomain a surface field."""
 
     tdim = src.function_space.mesh.topology.dim
     n = src.function_space.num_sub_spaces
@@ -425,11 +425,15 @@ def _transfer_state(src: fem.Function, dst: fem.Function, *, conserve: bool) -> 
 
 
 def _remap_scalar(src: fem.Function, V_new: fem.FunctionSpace, tdim: int, conserve: bool) -> fem.Function:
+    if tdim == 3:
+        from vcell_fenics.core.bulk_remap_mesh import remap_bulk_function_3d
+
+        return remap_bulk_function_3d(src, V_new, conserve=conserve)
     if tdim == 2:
         return remap_bulk_function(src, V_new, conserve=conserve)
     if tdim == 1:
         return remap_surface_function(src, V_new, conserve=conserve)
-    raise NotImplementedError(f"the rebuild path transfers 1D (surface) or 2D (bulk) fields, not tdim {tdim}")
+    raise NotImplementedError(f"the rebuild path transfers 1D (surface), 2D or 3D (bulk) fields, not tdim {tdim}")
 
 
 def _apply_initial_conditions(

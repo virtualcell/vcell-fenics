@@ -89,3 +89,28 @@ def _p1_mesh_arrays(V: fem.FunctionSpace) -> tuple[Floats, Ints]:
 def _total_mass(u: fem.Function) -> float:
     local = fem.assemble_scalar(fem.form(u * ufl.dx))
     return float(u.function_space.mesh.comm.allreduce(local.real, op=MPI.SUM))
+
+
+def remap_bulk_function_3d(u_old: fem.Function, V_new: fem.FunctionSpace, *, conserve: bool = True) -> fem.Function:
+    """Transfer a P1 field between two non-matching **tetrahedral** meshes of (nearly) the same region.
+
+    DOLFINx's non-matching interpolation evaluates ``u_old`` at the new mesh's nodes — a convex
+    combination per old cell, so no new extrema and no sign change — then, with ``conserve=True``, one
+    global rescale makes ∫ u_new equal ∫ u_old exactly (as in :func:`remap_bulk_function`). It is
+    globally, not locally, conservative: an exact 3D supermesh remap is the upgrade. New nodes a hair
+    outside the old region (the remesh resamples the boundary) are found within ``padding``."""
+
+    mesh_new = V_new.mesh
+    cell_map = mesh_new.topology.index_map(mesh_new.topology.dim)
+    cells = np.arange(cell_map.size_local + cell_map.num_ghosts, dtype=np.int32)
+    coords = u_old.function_space.mesh.geometry.x
+    padding = 1e-6 * float(np.ptp(coords, axis=0).max())
+    data = fem.create_interpolation_data(V_new, u_old.function_space, cells, padding=padding)
+    u_new = fem.Function(V_new, name=u_old.name)
+    u_new.interpolate_nonmatching(u_old, cells, data)
+    u_new.x.scatter_forward()
+    if conserve:
+        mass_old, mass_new = _total_mass(u_old), _total_mass(u_new)
+        if mass_new != 0.0:
+            u_new.x.array[:] *= mass_old / mass_new
+    return u_new

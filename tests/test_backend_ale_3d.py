@@ -83,3 +83,80 @@ def test_a_deforming_sphere_keeps_its_mass() -> None:
     _advance(problem, 0.5)
     assert _integral(problem, problem.unknown) == pytest.approx(mass0, rel=1e-12)
     assert _integral(problem, 1.0) < volume0  # the equator moved inward
+
+
+# -- 3D remeshing (backend/remesh_3d.py) and the 3D transfer (core/bulk_remap_mesh.py) ---------------------
+
+
+def _ball_mesh(
+    expression: str = "geom.x[0]**2 + geom.x[1]**2 + geom.x[2]**2 < 1.0", h: float = 0.25, extent: float = 4.0
+) -> object:
+    geometry = GeometryDescription(
+        name="ball",
+        dim=3,
+        extent=(extent, extent, extent),
+        origin=(-extent / 2, -extent / 2, -extent / 2),
+        subvolumes=(
+            SubVolume(name="cyto", type="analytic", expression=expression),
+            SubVolume(name="ext", type="analytic", expression="1.0"),
+        ),
+        surfaces=(SurfaceClass(name="pm", inside="cyto", outside="ext"),),
+    )
+    return realize(geometry, h=h).mesh_of("cyto")
+
+
+def _volume_of(mesh: object) -> float:
+    return float(fem.assemble_scalar(fem.form(1.0 * ufl.dx(domain=mesh))).real)
+
+
+def test_the_3d_remesh_keeps_the_region() -> None:
+    from vcell_fenics.backend.remesh_3d import outward_boundary, remesh_region_3d
+
+    old = _ball_mesh()
+    points, triangles = outward_boundary(old)  # type: ignore[arg-type]
+    a, b, c = points[triangles[:, 0]], points[triangles[:, 1]], points[triangles[:, 2]]
+    enclosed = float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6.0)
+    assert enclosed == pytest.approx(_volume_of(old), rel=1e-12)  # outward: the divergence theorem closes
+    new = remesh_region_3d(old, 0.25)  # type: ignore[arg-type]
+    assert _volume_of(new) == pytest.approx(_volume_of(old), rel=1e-12)  # the volume is restored exactly
+    corners = np.asarray(new.geometry.x, dtype=np.float64)[np.asarray(new.geometry.dofmap)]
+    signed = np.einsum(
+        "ij,ij->i",
+        corners[:, 1] - corners[:, 0],
+        np.cross(corners[:, 2] - corners[:, 0], corners[:, 3] - corners[:, 0]),
+    )
+    assert np.all(np.abs(signed) > 0.0)  # no degenerate tetrahedra
+    # the new boundary lies on the old one (the unit sphere, meshed at h = 0.25)
+    radius = np.linalg.norm(outward_boundary(new)[0], axis=1)
+    assert radius.min() > 0.95 and radius.max() < 1.03
+
+
+def test_the_3d_transfer_is_exact_on_linear_fields_and_conserves() -> None:
+    from vcell_fenics.core.bulk_remap_mesh import remap_bulk_function_3d
+
+    old, new = _ball_mesh(h=0.3), _ball_mesh(h=0.2)
+    V_old = fem.functionspace(old, ("Lagrange", 1))  # type: ignore[arg-type]
+    V_new = fem.functionspace(new, ("Lagrange", 1))  # type: ignore[arg-type]
+    u = fem.Function(V_old)
+    u.interpolate(lambda x: 2.0 + x[0] - 0.5 * x[2])
+    moved = remap_bulk_function_3d(u, V_new, conserve=False)
+    x = V_new.tabulate_dof_coordinates()
+    inside = np.linalg.norm(x, axis=1) < 0.9  # away from where the two boundaries differ
+    assert np.allclose(moved.x.array[inside], (2.0 + x[:, 0] - 0.5 * x[:, 2])[inside], atol=1e-10)
+    conserved = remap_bulk_function_3d(u, V_new)
+
+    def mass(f: fem.Function) -> float:
+        return float(fem.assemble_scalar(fem.form(f * ufl.dx)).real)
+
+    assert mass(conserved) == pytest.approx(mass(u), rel=1e-12)
+
+
+def test_a_neck_too_thin_to_mesh_is_a_pinch_off_not_a_crash() -> None:
+    from vcell_fenics.backend.remesh_3d import remesh_region_3d
+    from vcell_fenics.core.region_remesh_netgen import PinchOffError
+
+    # a slab 0.2 thick: remeshed at h = 0.8 the finest allowed size is 0.2, and the region is thinner than
+    # twice that — refused before Netgen (which segfaults on such surfaces)
+    slab = "geom.x[0]**2 < 0.01 && geom.x[1]**2 < 0.36 && geom.x[2]**2 < 0.36"
+    with pytest.raises(PinchOffError, match="neck closing"):
+        remesh_region_3d(_ball_mesh(slab, h=0.1, extent=2.0), 0.8)  # type: ignore[arg-type]
