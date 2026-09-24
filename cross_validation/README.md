@@ -497,3 +497,27 @@ also where the nucleus reaches ec through the cytosol, and the run log says so (
 Both solvers conserve the total to round-off. The FEniCSx P1 field overshoots its initial maximum by
 about 2% near the membrane at the coarse h (no discrete maximum principle on unstructured tets); this
 does not affect the means or the conservation.
+
+## 3D cleavage furrow — the mid-plane against the exact waist (no mbsolver in 3D)
+
+The 3D furrow task (`tests/fixtures/simtask/furrow3d_*`: a sphere `x² + y² + z² < 30` pinched by the ring
+`v = −exp(−y²/0.25)·tanh(ρ/5)·(x, 0, z)/ρ`) has no mbsolver counterpart, but its `z = 0` plane does: there the
+velocity is in-plane and equal to the 2D furrow's, and at the waist (`y = 0`) the front motion is closed-form,
+`sinh(x/5) = sinh(√30/5)·e^{−t/5}`. `furrow3d_midplane.py` runs the 2D and 3D tasks through the CLI at the same
+`h`, slices the 3D boundary at `z = 0`, and compares the waist half-width.
+
+```bash
+.pixi/envs/dev/bin/python cross_validation/furrow3d_midplane.py --h 1.0 0.6 --t-final 5
+```
+
+| h | waist at t = 5: exact / 2D / 3D | 3D error at t = 1 · 3 · 5 |
+|---|---|---|
+| 1.0 | 2.355 / 2.340 / 3.020 | +0.08 · +0.21 · +0.67 |
+| 0.6 | 2.355 / 2.340 / 2.710 | +0.08 · +0.21 · +0.36 |
+
+The 2D waist tracks the exact motion to 0.015. The 3D one converges with h (about first order at t = 5), but
+it lags. The ring's groove is a Gaussian about 0.5 µm wide, and a surface mesh at h ≳ 0.5 has no vertex near
+its bottom, so the section cuts a chord across the V. The 2D boundary starts far more finely sampled.
+Matching 2D needs h ≲ 0.2 at the surface, or local surface refinement near high curvature, which is a
+follow-up. The remesh snaps its new boundary onto the old surface, which halves the early error (t = 2, h = 1:
+0.18 vs 0.36–0.41 without); the volume is restored exactly at every remesh.

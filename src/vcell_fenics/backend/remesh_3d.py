@@ -17,8 +17,12 @@ the machinery the image-geometry realization already relies on (ADR 012):
    lies on the old one to O(s²).
 4. **Netgen** fills it directly (one ``FaceDescriptor``, ``GenerateVolumeMesh`` at the mesh size), the
    route that is robust for surfaces at lattice resolution.
-5. **The volume is restored**: rebuilding a curved surface cuts its corners (a few % per remesh,
-   compounding); the new boundary is offset along its normals to the old volume exactly.
+5. **The new boundary is snapped onto the old one**: each vertex moves to its closest point on the old
+   surface triangles. The lattice's signed distance rounds off features narrower than a couple of lattice
+   cells — the furrow's sharp groove lost depth at every remesh — and snapping keeps them better (the 3D
+   furrow's waist error at t = 2, h = 1: 0.18 with, 0.36–0.41 without).
+6. **The volume is restored**: rebuilding a curved surface still cuts its corners slightly; the new
+   boundary is offset along its normals to the old volume exactly.
 
 The field transfer (``core.bulk_remap_mesh.remap_bulk_function_3d``) then interpolates and rescales the
 mass, so the small volume change of step 3 costs no conservation.
@@ -60,7 +64,8 @@ def remesh_region_3d(mesh: Mesh, h: float, *, min_h: float | None = None, lattic
     boundary = extract_boundary(grid, extent=extent)
     inside = (boundary.pairs == (0, 1)).all(axis=1)  # outside (0) | region (1); no box faces (it is padded)
     triangles_new = boundary.elements[inside][:, ::-1]  # the normal pointed into the region: turn it outward
-    new_points, cells = _netgen_fill(boundary.points, triangles_new, spacing)
+    surface_points = snap_to_surface(boundary.points, points, triangles)
+    new_points, cells = _netgen_fill(surface_points, triangles_new, spacing)
     _restore_volume(new_points, cells, _volume(np.asarray(mesh.geometry.x), np.asarray(mesh.geometry.dofmap)))
     domain = ufl.Mesh(basix.ufl.element("Lagrange", "tetrahedron", 1, shape=(3,)))
     return create_mesh(mesh.comm, cells, domain, new_points)
@@ -120,6 +125,55 @@ def outward_boundary(mesh: Mesh) -> tuple[Floats, Ints]:
     triangles[inward] = triangles[inward][:, ::-1]
     used, local = np.unique(triangles, return_inverse=True)
     return x[used], local.reshape(-1, 3).astype(np.int64)
+
+
+def snap_to_surface(query: Floats, points: Floats, triangles: Ints, candidates: int = 12) -> Floats:
+    """Each ``query`` point moved to its closest point on the triangle surface ``(points, triangles)`` —
+    exact point-triangle projection over the ``candidates`` triangles with the nearest centroids."""
+
+    a, b, c = points[triangles[:, 0]], points[triangles[:, 1]], points[triangles[:, 2]]
+    k = min(candidates, len(triangles))
+    _, near = cKDTree((a + b + c) / 3.0).query(query, k=k)
+    near = np.asarray(near).reshape(len(query), k)
+    best = np.empty_like(query)
+    best_distance = np.full(len(query), np.inf)
+    for j in range(k):
+        t = near[:, j]
+        closest = _closest_on_triangles(query, a[t], b[t], c[t])
+        distance = np.linalg.norm(closest - query, axis=1)
+        better = distance < best_distance
+        best[better], best_distance[better] = closest[better], distance[better]
+    return best
+
+
+def _closest_on_triangles(p: Floats, a: Floats, b: Floats, c: Floats) -> Floats:
+    """The closest point on triangle (a, b, c) to p, row by row (Ericson, *Real-Time Collision Detection*
+    §5.1.5, vectorized)."""
+
+    ab, ac, ap = b - a, c - a, p - a
+    d1, d2 = np.einsum("ij,ij->i", ab, ap), np.einsum("ij,ij->i", ac, ap)
+    bp = p - b
+    d3, d4 = np.einsum("ij,ij->i", ab, bp), np.einsum("ij,ij->i", ac, bp)
+    cp = p - c
+    d5, d6 = np.einsum("ij,ij->i", ab, cp), np.einsum("ij,ij->i", ac, cp)
+    va, vb, vc = d3 * d6 - d5 * d4, d5 * d2 - d1 * d6, d1 * d4 - d3 * d2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        denom = 1.0 / (va + vb + vc)
+        out = a + ab * (vb * denom)[:, None] + ac * (vc * denom)[:, None]  # the face interior
+        t_ab = d1 / (d1 - d3)
+        on_ab = (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+        out[on_ab] = (a + ab * t_ab[:, None])[on_ab]
+        t_ac = d2 / (d2 - d6)
+        on_ac = (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+        out[on_ac] = (a + ac * t_ac[:, None])[on_ac]
+        t_bc = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        on_bc = (va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0)
+        out[on_bc] = (b + (c - b) * t_bc[:, None])[on_bc]
+    at_a = (d1 <= 0) & (d2 <= 0)  # the vertices last: they override the edge tests at the corners
+    at_b = (d3 >= 0) & (d4 <= d3)
+    at_c = (d6 >= 0) & (d5 <= d6)
+    out[at_a], out[at_b], out[at_c] = a[at_a], b[at_b], c[at_c]
+    return np.asarray(out, dtype=np.float64)
 
 
 def _signed_distance_grid(mesh: Mesh, points: Floats, triangles: Ints, spacing: float) -> LabelGrid:

@@ -31,7 +31,7 @@ _FURROW = _FIXTURES / "furrow_SimID_1486629996_0__0.simtask.xml"
 # the same furrow in 3D (hand-built from the 2D task): a sphere x² + y² + z² < 30 pinched by an axisymmetric
 # contractile ring about the y axis, v = −exp(−y²/0.25)·tanh(ρ/5)·(x, 0, z)/ρ with ρ = √(x² + z²) — its xy
 # cross-section is the 2D furrow's front
-_FURROW_3D = _FIXTURES / "furrow3d_SimID_1486629996_0__0.simtask.xml"
+_FURROW_3D = _FIXTURES / "furrow3d_SimID_516481304_0__0.simtask.xml"
 _BUNDLE = "SimID_274641196_0_.fenics"
 _SPECIES = ("C_cyt", "Ran_cyt", "RanC_cyt")
 _VX = '<Function Name="sproc_0.velocityX" Domain="cell_ec_membrane">sin(t)</Function>'
@@ -157,7 +157,7 @@ def test_the_cleavage_furrow_pinches_the_cell_and_keeps_its_mass(tmp_path: Path)
 def test_the_3d_furrow_pinches_the_sphere_and_keeps_its_mass(tmp_path: Path) -> None:
     # coarse and short (no remesh yet): the ring moves the equator inward and the swept species is conserved
     assert main(["--simtask", str(_FURROW_3D), "--out", str(tmp_path), "--h", "1.0", "--t-final", "1.0"]) == 0
-    bundle = Bundle.open(tmp_path / "SimID_1486629996_0_.fenics")
+    bundle = Bundle.open(tmp_path / "SimID_516481304_0_.fenics")
     assert bundle.manifest.status == "completed"
     (segment,) = bundle.manifest.segments
     assert segment.motion == "ale"
@@ -190,7 +190,7 @@ def test_the_3d_furrow_remeshes_and_keeps_its_mass(tmp_path: Path) -> None:
         "0.5",
     ]
     assert main(argv) == 0
-    bundle = Bundle.open(tmp_path / "SimID_1486629996_0_.fenics")
+    bundle = Bundle.open(tmp_path / "SimID_516481304_0_.fenics")
     segments = bundle.manifest.segments
     assert len(segments) >= 2 and all(s.motion == "ale" for s in segments)
     stats = bundle.stats("Cyt", "Dex")
@@ -199,3 +199,41 @@ def test_the_3d_furrow_remeshes_and_keeps_its_mass(tmp_path: Path) -> None:
     assert np.all(np.diff(volume) < 0.0)  # the ring keeps squeezing; remeshing does not jump the volume
     for row in range(len(bundle.times)):
         assert bundle.coords("Cyt", row).shape[0] == bundle.field("Cyt", "Dex", row).shape[0]
+
+
+def test_the_3d_furrow_mid_plane_follows_the_exact_waist(tmp_path: Path) -> None:
+    # at z = 0 the ring's velocity is the 2D furrow's, so the waist obeys dx/dt = −tanh(x/5) exactly:
+    # sinh(x(t)/5) = sinh(√30/5)·e^{−t/5}. At h = 1 the 3D surface resolves the 0.5 µm groove only coarsely,
+    # so the waist lags (it converges with h — cross_validation/furrow3d_midplane.py); pin the current accuracy
+    argv = ["--simtask", str(_FURROW_3D), "--out", str(tmp_path), "--h", "1.0", "--t-final", "3.0", "--output-dt", "1"]
+    assert main(argv) == 0
+    bundle = Bundle.open(tmp_path / "SimID_516481304_0_.fenics")
+    for row, t in enumerate(bundle.times):
+        exact = 5.0 * math.asinh(math.sinh(math.sqrt(30.0) / 5.0) * math.exp(-t / 5.0))
+        assert abs(_waist_3d(bundle, row) - exact) < 0.3, (t, _waist_3d(bundle, row), exact)  # 0.18 at t = 2
+
+
+def _waist_3d(bundle: Bundle, row: int) -> float:
+    """The 3D domain's half-width on the line y = z = 0: its boundary triangles' edges crossing z = 0 give the
+    z = 0 section's segments; the smallest |x| where one crosses y = 0."""
+
+    x, cells = bundle.coords("Cyt", row), bundle.mesh("Cyt", row).cells
+    faces = np.sort(
+        np.concatenate([cells[:, [0, 1, 2]], cells[:, [0, 1, 3]], cells[:, [0, 2, 3]], cells[:, [1, 2, 3]]]), axis=1
+    )
+    unique, counts = np.unique(faces, axis=0, return_counts=True)
+    crossings = []
+    for tri in unique[counts == 1]:
+        p = x[tri]
+        side = p[:, 2] > 0.0
+        if side.all() or not side.any():
+            continue
+        cut = [
+            p[i, :2] + p[i, 2] / (p[i, 2] - p[j, 2]) * (p[j, :2] - p[i, :2])
+            for i, j in ((0, 1), (1, 2), (2, 0))
+            if side[i] != side[j]
+        ]
+        (a, b) = cut
+        if a[1] * b[1] <= 0.0 and a[1] != b[1]:
+            crossings.append(float(abs(a[0] + a[1] / (a[1] - b[1]) * (b[0] - a[0]))))
+    return min(crossings)

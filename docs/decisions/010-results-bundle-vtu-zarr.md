@@ -120,6 +120,9 @@ Why this over VTKHDF, the strongest standard:
     row lands, `t0` holds the next planned time, because JSON has no NaN.
   - **`domains[*].n_points` / `n_cells` describe segment 0.** A later segment's sizes come from its
     own VTU and arrays.
+  - **3D moving runs use the same schema** (2026-09-24, tracker "3D moving boundaries"): tetrahedral
+    segments, `_coords` `(T_seg, N, 3)` as in 2D, a new `seg000N/` per 3D remesh. Nothing in the
+    reader, writer or viewer is dimension-specific.
   - **Reserved names:** `_coords` and `seg\d{4}` cannot name a domain or a variable.
 - **Reader rules:**
   - Refuse a `schema` newer than you know.
