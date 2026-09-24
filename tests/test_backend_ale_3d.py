@@ -160,3 +160,14 @@ def test_a_neck_too_thin_to_mesh_is_a_pinch_off_not_a_crash() -> None:
     slab = "geom.x[0]**2 < 0.01 && geom.x[1]**2 < 0.36 && geom.x[2]**2 < 0.36"
     with pytest.raises(PinchOffError, match="neck closing"):
         remesh_region_3d(_ball_mesh(slab, h=0.1, extent=2.0), 0.8)  # type: ignore[arg-type]
+
+
+def test_snapping_moves_points_onto_the_surface() -> None:
+    from vcell_fenics.backend.remesh_3d import snap_to_surface
+
+    # the unit right triangle in z = 0: points above it drop onto it, points off its edges onto the edges
+    points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    triangles = np.array([[0, 1, 2]])
+    query = np.array([[0.2, 0.2, 0.7], [2.0, -1.0, 0.0], [0.8, 0.8, -0.3], [-1.0, -1.0, 1.0]])
+    expected = np.array([[0.2, 0.2, 0.0], [1.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.0, 0.0, 0.0]])
+    assert np.allclose(snap_to_surface(query, points, triangles), expected)

@@ -312,6 +312,34 @@ aren't solved on the initial shape.
 | M4 | **Cross-validation vs mbsolver.** The fixture simtask (translation); an expansion forcing remeshes; a species-dependent velocity. README and tracker; a new image. | ✅ #163. `cross_validation/mb_swept*.py`: the real fixture through the CLI vs mbsolver. Translation agrees to 0.41 % → 0.22 % under refinement (carried control 14 %); deforming fronts converge toward ours as mbsolver refines (our front is within 0.02 of exact); the remeshing case separates the conventions 5× (mbsolver limited to mesh 31 there). | Image `sha-bfdf853` (multi-arch, plus SIF).
 | M5 | **VCell.** `Feature_Moving` on FEniCSx; refusals mirrored as issues; `FenicsBundle` reads `_coords`; the viewer serves per-row geometry; default image bump. | ✅ virtualcell/vcell#2093 (merged 2026-09-23): tests on two real moving bundles (translation; a remesh across two segments). Default image `sha-bfdf853`; vcell-fluxcd #56 pinned to match (for the user to merge). Browser check: the viewer re-fetches each row's moved mesh while scrubbing, and shows the remeshed shape. |
 
+### 3D moving boundaries (3M1–3M3, V-3D)
+
+The 2D cleavage-furrow BioModel ("Furrow") gets a **3D application with the same kinematics**: a sphere
+`x² + y² + z² < 30` pinched by an **axisymmetric contractile ring**,
+`v = −exp(−y²/0.25)·tanh(ρ/5)·(x, 0, z)/ρ`, `ρ = √(x² + z²)` — its xy cross-section is exactly the 2D
+furrow's front. Decided 2026-09-24: the ring (not the 2D field unchanged), 3D remeshing in the first pass,
+the application added to the user's BioModel.
+
+| Step | Scope | Status |
+|---|---|---|
+| 3M1 | **3D moving meshes.** The bridge, importer (Z front component), runner, `_MeshMotion` (vector-P1 harmonic extension) and bundle were already dimension-agnostic; the 2D-only refusal is lifted for analytic geometries. A hand-built 3D furrow fixture. | ✅ #176 |
+| 3M2 | **3D remeshing** (`backend/remesh_3d.py`): the deformed region rebuilt implicitly — a lattice at h/2, inside/outside by point location, the signed distance to the old boundary; SurfaceNets projected onto it; Netgen fills the surface directly (its STL resampler hung/segfaulted on the motion-degraded surface). The volume is restored exactly after each rebuild (corner-cutting lost 3.5–6 % per remesh, compounding). Thin places refine the (global) rebuild to thickness/3, down to h/2; thinner is a `PinchOffError` — a clean stop with "a finer h runs further", not a Netgen crash. The transfer: non-matching interpolation + global mass rescale. A relative sliver trigger (the smallest dihedral angle down to a quarter of the fresh mesh's). | ✅ #177 |
+| 3M3 | **Verification**: mass (1e-12 across remeshes), exact volume at remeshes, the **mid-plane against the exact waist motion** (`cross_validation/furrow3d_midplane.py`: at z = 0 the ring is the 2D furrow's field, and the waist obeys sinh(x/5) = sinh(√30/5)·e^{−t/5}). The 3D waist converges with h but lags (+0.36 µm at t = 5, h = 0.6; 2D: 0.015): the 0.5 µm groove needs h ≲ 0.2 or local surface refinement. The remesh snaps its new boundary onto the old surface (halves the early error). The hand-built fixture replaced by the task VCell generates for "Furrow 3D" (`furrow3d_SimID_516481304_0__0`). The 3D MMS plan (`mms/README.md`). Docs. | ✅ |
+| V-3D | **VCell** (virtualcell/vcell, branch `fenicsx/mb-3d`): `MembraneSubDomain.velocityZ` (VCML, XML `<Velocity><Z>`, compare), `DiffEquMathMapping` generates it for 3D, FEniCSx runs 3D moving boundaries, the native Moving Boundary solver (x/y-only input) refuses 3D. Then "Furrow 3D" authored in the BioModel and Quick Run. | ◐ |
+
+Findings so far:
+- **Cost.** At the task's own mesh (h ≈ 0.39) the first 3D remesh goes from 23k to 170k tetrahedra (the
+  h/2 surface lattice grades the volume mesh near the boundary) and a remesh takes 30–40 s; a 30 s run is
+  hours. Coarser meshes (h ≈ 0.7–1) run in minutes. Faster linear solves for the step and the harmonic
+  extension (CG + AMG instead of LU) are the follow-up.
+- **The 3D neck thins much faster than the 2D waist**, exponentially (the ring's velocity ∝ ρ/5 at the axis):
+  it never actually splits, but it outruns a fixed mesh. At h = 1 the furrow remeshes every 1–3 s (volume exact
+  at each) and stops cleanly at t ≈ 14.6 s — a resolution limit, reported as such; a finer h runs further.
+  Following the neck further needs *local* refinement (the rebuild refines the whole region); a real
+  division (topology change) is out of scope.
+- **Two traps found on the way:** an absolute 5° sliver trigger fired on fresh Netgen meshes and remeshed every
+  step (compounding surface noise into a spurious fin); a floor of h/4 made each remesh ~200k tets / 35 s.
+
 ## Image geometries (I1–I6)
 
 VCell image-based geometries (segmented 2D/3D label images, 16 % of the corpus), realized **body-fitted

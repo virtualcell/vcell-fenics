@@ -131,6 +131,41 @@ the error before the runner started refreshing it). The runner works around it b
 step; a cleaner fix would refresh position-dependent BCs inside `step()` after the move. Tracked as a
 follow-up. (This one is a genuine, if minor, solver gap — independent of the temporal floor above.)
 
+## 3D moving boundaries (planned)
+
+The moving-boundary path now runs on tetrahedra, with 3D remeshing (tracker "3D moving boundaries"). There
+is **no mbsolver in 3D**, so here the manufactured solution *is* the reference — MMS is the verification.
+The suite's discipline carries over unchanged: **every moving case has a static twin**, and **dt ∝ h²** for
+the spatial order (the moving scheme is O(dt)). Costs are 3D: keep `resolutions_h` short, and put the finest
+level under `integration`.
+
+**Runner work first.**
+- 3D geometries for the dev runner: `ball` (the analytic sphere via `realize`, as the tests do) and `box3d`
+  (a structured tetrahedral box, for nested refinement like `split_box_two_bulk`). A `nested_ball` —
+  refinements that keep the boundary nodes nested — would remove the re-meshed-boundary noise that
+  `nested_disk` removes in 2D.
+- The forcing formula is dimension-free (`f = ∂_t u* + ∇·(u* v) − D∇²u* − reaction`); only the case
+  derivations change (∇² and ∇·v in three components).
+
+**Cases** (each with its static twin):
+
+| case | motion (∇·v) | exact u* | exercises |
+|---|---|---|---|
+| `bulk3d_translation_diffusion_ball` | rigid `v = (0.4, −0.2, 0.3)` (0) | `2 + sin x·cos y·cos z` (lab-steady) | moving-mesh advection + source consistency, no dilution |
+| `bulk3d_expansion_timedependent_ball` | radial `v = k·x` (3k) | `e^{−3kt}(2 + cos x·cos y·cos z)`-type | the conservative ALE time term (the `u*∇·v` dilution in 3D) |
+| `bulk3d_anisotropic_stretch_ball` | `v = (a x, −b y, c z)` (a − b + c) | a time-dependent `u*` | per-axis stretch; tetrahedra flattening toward slivers (the dihedral trigger) |
+| `bulk3d_labframe_swept_ball` | a front sweeping lab-frame species (`advection` slot) | lab-frame `u*` with `f = ∂_t u* + ∇·(u* c) − D∇²u*`, c = 0 | VCell's swept semantics in 3D: the mesh velocity w must cancel (the `c − w` transport) |
+| `bulk3d_ring_squeeze_remesh_ball` | the furrow ring `−A e^{−y²/σ²}(x, 0, z)` | a lab-steady `u*` held across remeshes | **3D remeshing**: the implicit rebuild + volume restoration + interpolation/rescale transfer; report the error per remesh count, not only per h |
+
+**What to measure.** L2/L∞ vs `u*` and the spatial order (≈ 2 for P1 with dt ∝ h²); for the remesh case also
+the error jump at each remesh (the interpolation transfer is O(h²) per remesh and only globally
+conservative, so the order must survive a fixed number of remeshes), and the volume history against the
+exact motion's.
+
+**Later:** 3D membrane species on a moving surface (a surface PDE with the `ρ ∇_Γ·v_Γ` dilution on an
+expanding sphere, `ρ* = e^{−2kt}(2 + cos 2θ)` — the 2D membrane case's analogue) once the codim-1 3D path
+exists; an exact 3D supermesh remap would let the remesh case assert local conservation too.
+
 ## Roadmap
 
 - Fill the matrix (solver × motion × physics) — **bulk**, **membrane**, **coupled**, and **unknown-motion**
