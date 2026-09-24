@@ -301,8 +301,8 @@ def check_supported(task: SimulationTask) -> list[str]:
 
 
 def _check_moving_boundary(task: SimulationTask) -> list[str]:
-    """What the FEniCSx moving-boundary path solves (the first pass, vcell-fenics tracker "Moving
-    boundaries"): a 2D geometry, one moving membrane with a front <Velocity>, and species only in the
+    """What the FEniCSx moving-boundary path solves (vcell-fenics tracker "Moving boundaries"): a 2D or
+    3D analytic geometry, one moving membrane with a front <Velocity>, and species only in the
     volume it encloses (the interior rides the mesh, ``v = v_b``). Everything else is refused, each with
     its own reason, rather than solved on the initial shape. Returns non-fatal notes."""
 
@@ -311,8 +311,8 @@ def _check_moving_boundary(task: SimulationTask) -> list[str]:
     if not task.front_velocities:
         raise SimulationTaskError(f"{prefix} has no membrane <Velocity>, so the front's motion is unknown")
     dim = getattr(task.geometry, "dim", None)
-    if dim != 2:
-        raise SimulationTaskError(f"{prefix} in {dim}D; the FEniCSx moving-boundary path is 2D")
+    if dim not in (2, 3):
+        raise SimulationTaskError(f"{prefix} in {dim}D; the FEniCSx moving-boundary path is 2D or 3D")
     images = [sv.name for sv in getattr(task.geometry, "subvolumes", ()) if sv.subvolume_type.value == "image"]
     if images:
         raise SimulationTaskError(

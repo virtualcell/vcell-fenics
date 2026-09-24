@@ -259,7 +259,8 @@ def load_simtask(path: Path) -> ModelInput:
     if front is not None:
         provenance["moving_boundary"] = {
             "membrane": front.surface_name,
-            "velocity": [str(front.velocity_x), str(front.velocity_y)],
+            "velocity": [str(front.velocity_x), str(front.velocity_y)]
+            + ([str(front.velocity_z)] if gd.dim == 3 else []),
             "velocity_dependence": front_velocity_dependence(task),
         }
     max_size = options.max_element_size if options is not None else None

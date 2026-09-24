@@ -227,6 +227,8 @@ def _remesh(problem: DiscreteProblem, target_h: float) -> Mesh:
 
     mesh = problem.V.mesh
     gdim = mesh.geometry.dim
+    if gdim == 3:
+        raise NotImplementedError("remeshing a moving 3D mesh is not implemented yet; use a coarser h or a shorter run")
     if mesh.topology.dim == gdim:
         loop = BulkBoundaryTrace(problem.V).boundary_loop()
         return mesh_region_netgen(loop, target_h)
