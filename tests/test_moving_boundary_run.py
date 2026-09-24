@@ -28,6 +28,10 @@ _MB = _FIXTURES / "SimID_274641196_0__0.simtask.xml"
 # y = 0 (front velocity −exp(−y²/0.25)·tanh(x/5) in x); its species' velocity is routed through functions
 # to a dotted constant (vobj_Cyt1_velX → vproc_1.velocityX = 0), as VCell writes every moving-boundary model
 _FURROW = _FIXTURES / "furrow_SimID_1486629996_0__0.simtask.xml"
+# the same furrow in 3D (hand-built from the 2D task): a sphere x² + y² + z² < 30 pinched by an axisymmetric
+# contractile ring about the y axis, v = −exp(−y²/0.25)·tanh(ρ/5)·(x, 0, z)/ρ with ρ = √(x² + z²) — its xy
+# cross-section is the 2D furrow's front
+_FURROW_3D = _FIXTURES / "furrow3d_SimID_1486629996_0__0.simtask.xml"
 _BUNDLE = "SimID_274641196_0_.fenics"
 _SPECIES = ("C_cyt", "Ran_cyt", "RanC_cyt")
 _VX = '<Function Name="sproc_0.velocityX" Domain="cell_ec_membrane">sin(t)</Function>'
@@ -148,3 +152,24 @@ def test_the_cleavage_furrow_pinches_the_cell_and_keeps_its_mass(tmp_path: Path)
     totals, area = stats[:, 1], stats[:, 1] / stats[:, 0]
     assert np.allclose(totals, totals[0], rtol=1e-12)
     assert area[-1] < area[0]  # the furrow ingresses
+
+
+def test_the_3d_furrow_pinches_the_sphere_and_keeps_its_mass(tmp_path: Path) -> None:
+    # coarse and short (no remesh yet): the ring moves the equator inward and the swept species is conserved
+    assert main(["--simtask", str(_FURROW_3D), "--out", str(tmp_path), "--h", "1.0", "--t-final", "1.0"]) == 0
+    bundle = Bundle.open(tmp_path / "SimID_1486629996_0_.fenics")
+    assert bundle.manifest.status == "completed"
+    (segment,) = bundle.manifest.segments
+    assert segment.motion == "ale"
+    first, last = bundle.coords("Cyt", 0), bundle.coords("Cyt", len(bundle.times) - 1)
+    assert first.shape[1] == 3 and first.shape == last.shape
+    stats = bundle.stats("Cyt", "Dex")
+    totals, volume = stats[:, 1], stats[:, 1] / stats[:, 0]
+    assert np.allclose(totals, totals[0], rtol=1e-12)
+    assert volume[-1] < volume[0]
+    # the equator (|y| small) moves toward the axis; the poles (|y| large) do not
+    waist = np.abs(first[:, 1]) < 0.3
+    radius = np.hypot(first[:, 0], first[:, 2]), np.hypot(last[:, 0], last[:, 2])
+    assert radius[1][waist].max() < radius[0][waist].max() - 0.3
+    poles = np.abs(first[:, 1]) > 4.5
+    assert np.allclose(last[poles], first[poles], atol=1e-6)
