@@ -171,3 +171,65 @@ def test_snapping_moves_points_onto_the_surface() -> None:
     query = np.array([[0.2, 0.2, 0.7], [2.0, -1.0, 0.0], [0.8, 0.8, -0.3], [-1.0, -1.0, 1.0]])
     expected = np.array([[0.2, 0.2, 0.0], [1.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.0, 0.0, 0.0]])
     assert np.allclose(snap_to_surface(query, points, triangles), expected)
+
+
+# -- the remesh's surface fallback: Netgen refusing a surface, or filling only part of it -------------------
+
+
+def test_a_refused_surface_falls_back_and_keeps_the_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    import vcell_fenics.backend.remesh_3d as remesh_3d
+    from vcell_fenics.backend.realize import RealizationError
+
+    old = _ball_mesh()
+    real_fill, calls = remesh_3d._netgen_fill, []
+
+    def refuse_first(points: np.ndarray, triangles: np.ndarray, h: float) -> tuple[np.ndarray, np.ndarray]:
+        calls.append(h)
+        if len(calls) == 1:  # Netgen's "boundary mesh is overlapping", as on the cluster
+            raise RealizationError(f"Netgen could not tetrahedralize the surface at h = {h:g}")
+        return real_fill(points, triangles, h)
+
+    monkeypatch.setattr(remesh_3d, "_netgen_fill", refuse_first)
+    with pytest.warns(remesh_3d.RemeshWarning, match="the projected surface was needed"):
+        new = remesh_3d.remesh_region_3d(old, 0.25)  # type: ignore[arg-type]
+    assert len(calls) == 2
+    assert _volume_of(new) == pytest.approx(_volume_of(old), rel=1e-12)
+
+
+def test_a_partial_fill_is_rejected_not_inflated(monkeypatch: pytest.MonkeyPatch) -> None:
+    import vcell_fenics.backend.remesh_3d as remesh_3d
+
+    old = _ball_mesh()
+    real_fill, calls = remesh_3d._netgen_fill, []
+
+    def partial_first(points: np.ndarray, triangles: np.ndarray, h: float) -> tuple[np.ndarray, np.ndarray]:
+        calls.append(h)
+        new_points, cells = real_fill(points, triangles, h)
+        if len(calls) == 1:  # Netgen's "Stop meshing since too many attempts": part of the volume missing
+            return new_points, cells[: len(cells) // 2]
+        return new_points, cells
+
+    monkeypatch.setattr(remesh_3d, "_netgen_fill", partial_first)
+    with pytest.warns(remesh_3d.RemeshWarning, match="incomplete"):
+        new = remesh_3d.remesh_region_3d(old, 0.25)  # type: ignore[arg-type]
+    assert len(calls) == 2
+    corners = np.asarray(new.geometry.x, dtype=np.float64)[np.asarray(new.geometry.dofmap)]
+    signed = np.einsum(
+        "ij,ij->i",
+        corners[:, 1] - corners[:, 0],
+        np.cross(corners[:, 2] - corners[:, 0], corners[:, 3] - corners[:, 0]),
+    )
+    assert np.all(signed > 0.0) or np.all(signed < 0.0)  # a whole, untangled mesh
+    assert _volume_of(new) == pytest.approx(_volume_of(old), rel=1e-12)
+
+
+def test_when_every_surface_fails_the_remesh_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    import vcell_fenics.backend.remesh_3d as remesh_3d
+    from vcell_fenics.backend.realize import RealizationError
+
+    def refuse(points: np.ndarray, triangles: np.ndarray, h: float) -> tuple[np.ndarray, np.ndarray]:
+        raise RealizationError(f"Netgen could not tetrahedralize the surface at h = {h:g}")
+
+    monkeypatch.setattr(remesh_3d, "_netgen_fill", refuse)
+    with pytest.raises(remesh_3d.RemeshError, match=r"no rebuilt surface could be tetrahedralized.*unsmoothed"):
+        remesh_3d.remesh_region_3d(_ball_mesh(), 0.25)  # type: ignore[arg-type]

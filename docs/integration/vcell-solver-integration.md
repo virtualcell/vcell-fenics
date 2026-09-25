@@ -328,6 +328,17 @@ the application added to the user's BioModel.
 | V-3D | **VCell** (virtualcell/vcell, branch `fenicsx/mb-3d`): `MembraneSubDomain.velocityZ` (VCML, XML `<Velocity><Z>`, compare), `DiffEquMathMapping` generates it for 3D, FEniCSx runs 3D moving boundaries, the native Moving Boundary solver (x/y-only input) refuses 3D. The kinematics table shows Z on 3D geometries. "Furrow 3D" authored in the `movingboundary_cleavage_furrow` BioModel (sphere, ring, FEniCSx, 12 s, 31³) and Quick Run: 8 remeshes, mass exact, the viewer shows the sphere pinched into two lobes. Default image `sha-223b767`; vcell-fluxcd #56 re-pinned. | ✅ vcell #2097 |
 
 Findings so far:
+- **The first cluster run failed at a remesh (2026-09-25), and the remesh now falls back.** The 3D furrow
+  at h ≈ 0.645 ran to t = 12 on macOS/arm64 and failed on the cluster (linux/amd64) at t ≈ 5 with Netgen's
+  "boundary mesh is overlapping". The same input on the amd64 image showed why. At t = 0.9 Netgen gave up
+  part-way ("too many attempts") and returned a *partial* volume mesh, which the remesh accepted and the
+  exact volume restore then inflated. The distorted meshes set off bursts of remeshes (14 to t = 5.6, up
+  to 112k cells) until one surface overlapped. `remesh_3d` now tries surfaces of decreasing fidelity
+  (projected and snapped → projected → smoothed → SurfaceNets' own, as image geometries do). It accepts a
+  fill only if it is complete (its volume equals the volume the surface encloses) and untangled after the
+  restore, and reports a fallback as a warning on the run log. On the amd64 image: 4 remeshes to t = 5.6,
+  a steady 40k cells, mass to 5e-14. A remesh that fails at every level now reports its time, mesh size
+  and each level's reason.
 - **Cost.** At the task's own mesh (h ≈ 0.39) the first 3D remesh goes from 23k to 170k tetrahedra (the
   h/2 surface lattice grades the volume mesh near the boundary) and a remesh takes 30–40 s; a 30 s run is
   hours. Coarser meshes (h ≈ 0.7–1) run in minutes. Faster linear solves for the step and the harmonic

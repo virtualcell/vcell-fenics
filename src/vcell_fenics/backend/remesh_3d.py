@@ -24,11 +24,24 @@ the machinery the image-geometry realization already relies on (ADR 012):
 6. **The volume is restored**: rebuilding a curved surface still cuts its corners slightly; the new
    boundary is offset along its normals to the old volume exactly.
 
+**Fallbacks.** Steps 3 and 5 fit the new surface tightly to the old one, and near a narrowing neck that
+can fold a few triangles over each other; Netgen then refuses the surface ("boundary mesh is
+overlapping") or — worse — gives up part-way and returns a *partial* volume mesh ("too many attempts"),
+which step 6 would then inflate to the old volume. Whether it happens depends on floating-point details,
+so the same run can pass on one platform and fail on another (the 3D furrow at h = 0.645 ran on macOS/arm64
+and failed on the cluster's linux/amd64). So each remesh tries surfaces of decreasing fidelity
+(:data:`_SURFACE_LEVELS`), the way an image geometry is meshed (``realize._SURFACE_LEVELS``), and accepts a
+fill only if it is **complete** — the tetrahedra's volume equals the volume the surface encloses — and
+stays valid after the volume restore (no inverted tetrahedra). The last level, SurfaceNets' own boundary,
+cannot intersect itself. A fallback is reported as a :class:`RemeshWarning`.
+
 The field transfer (``core.bulk_remap_mesh.remap_bulk_function_3d``) then interpolates and rescales the
 mass, so the small volume change of step 3 costs no conservation.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import numpy as np
 from dolfinx import geometry as dgeometry
@@ -42,6 +55,27 @@ from vcell_fenics.core.region_remesh_netgen import PinchOffError, local_thicknes
 
 Floats = NDArray[np.float64]
 Ints = NDArray[np.int64]
+
+# The rebuilt surface handed to Netgen, most faithful first: (Taubin passes, project onto the signed
+# distance's zero level, snap onto the old surface's triangles, what to call it).
+_SURFACE_LEVELS: tuple[tuple[int, bool, bool, str], ...] = (
+    (10, True, True, "projected and snapped"),
+    (10, True, False, "projected"),
+    (10, False, False, "smoothed (unprojected)"),
+    (0, False, False, "unsmoothed (lattice-scale)"),
+)
+# A complete fill bounds exactly the surface it was given (Netgen keeps the surface triangles), so its
+# volume matches the enclosed volume to round-off; a partial fill ("Stop meshing since too many attempts")
+# is short by whole regions.
+_COMPLETE_RTOL = 1e-6
+
+
+class RemeshWarning(UserWarning):
+    """A remesh needed a less faithful rebuilt surface than the first choice (see the module docstring)."""
+
+
+class RemeshError(RuntimeError):
+    """No rebuilt surface could be tetrahedralized: every level was refused, left incomplete, or tangled."""
 
 
 def remesh_region_3d(mesh: Mesh, h: float, *, min_h: float | None = None, lattice: float = 0.5) -> Mesh:
@@ -61,14 +95,63 @@ def remesh_region_3d(mesh: Mesh, h: float, *, min_h: float | None = None, lattic
     spacing = float(np.clip(thinnest / 3.0, floor, h))  # the volume mesh size (Netgen maxh)
     grid = _signed_distance_grid(mesh, points, triangles, lattice * spacing)  # the surface: finer
     extent = tuple(float(grid.spacing[0] * (n - 1)) for n in grid.labels.shape)
-    boundary = extract_boundary(grid, extent=extent)
-    inside = (boundary.pairs == (0, 1)).all(axis=1)  # outside (0) | region (1); no box faces (it is padded)
-    triangles_new = boundary.elements[inside][:, ::-1]  # the normal pointed into the region: turn it outward
-    surface_points = snap_to_surface(boundary.points, points, triangles)
-    new_points, cells = _netgen_fill(surface_points, triangles_new, spacing)
-    _restore_volume(new_points, cells, _volume(np.asarray(mesh.geometry.x), np.asarray(mesh.geometry.dofmap)))
-    domain = ufl.Mesh(basix.ufl.element("Lagrange", "tetrahedron", 1, shape=(3,)))
-    return create_mesh(mesh.comm, cells, domain, new_points)
+    target = _volume(np.asarray(mesh.geometry.x), np.asarray(mesh.geometry.dofmap))
+    failures: list[str] = []
+    for passes, project, snap, label in _SURFACE_LEVELS:
+        boundary = extract_boundary(grid, extent=extent, passes=passes, project=project)
+        inside = (boundary.pairs == (0, 1)).all(axis=1)  # outside (0) | region (1); no box faces (padded)
+        triangles_new = boundary.elements[inside][:, ::-1]  # the normal pointed into the region: outward
+        surface_points = snap_to_surface(boundary.points, points, triangles) if snap else boundary.points
+        filled = _fill_checked(surface_points, triangles_new, spacing, target)
+        if isinstance(filled, str):
+            failures.append(f"{label}: {filled}")
+            continue
+        if failures:
+            warnings.warn(
+                f"remesh at mesh size {spacing:.3g}: the {label} surface was needed ({'; '.join(failures)})",
+                RemeshWarning,
+                stacklevel=2,
+            )
+        new_points, cells = filled
+        domain = ufl.Mesh(basix.ufl.element("Lagrange", "tetrahedron", 1, shape=(3,)))
+        return create_mesh(mesh.comm, cells, domain, new_points)
+    raise RemeshError(
+        f"no rebuilt surface could be tetrahedralized at mesh size {spacing:.3g} (lattice "
+        f"{lattice * spacing:.3g}, region thinnest {thinnest:.3g}): " + "; ".join(failures)
+    )
+
+
+def _fill_checked(points: Floats, triangles: Ints, spacing: float, target: float) -> tuple[Floats, Ints] | str:
+    """Tetrahedralize the surface and restore the volume, or say why the result cannot be used: Netgen
+    refused the surface, filled only part of it, or the volume restore turned a tetrahedron inside out."""
+
+    from vcell_fenics.backend.realize import RealizationError
+
+    try:
+        new_points, cells = _netgen_fill(points, triangles, spacing)
+    except RealizationError as error:
+        return f"refused ({error})"
+    enclosed = _enclosed_volume(points, triangles)
+    filled = _volume(new_points, cells)
+    if abs(filled - enclosed) > _COMPLETE_RTOL * abs(enclosed):
+        return f"incomplete (tetrahedra fill {filled:.6g} of the {enclosed:.6g} it encloses)"
+    _restore_volume(new_points, cells, target)
+    signed = _signed_volumes(new_points, cells)
+    if not (np.all(signed > 0.0) or np.all(signed < 0.0)):
+        return "the volume restore inverted a tetrahedron"
+    return new_points, cells
+
+
+def _enclosed_volume(points: Floats, triangles: Ints) -> float:
+    """The volume a closed, outward-oriented triangle surface encloses (divergence theorem)."""
+
+    a, b, c = points[triangles[:, 0]], points[triangles[:, 1]], points[triangles[:, 2]]
+    return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6.0)
+
+
+def _signed_volumes(x: Floats, cells: NDArray[np.integer]) -> Floats:
+    a, b, c, d = (x[cells[:, k]] for k in range(4))
+    return np.asarray(np.einsum("ij,ij->i", b - a, np.cross(c - a, d - a)) / 6.0, dtype=np.float64)
 
 
 def _volume(x: Floats, cells: NDArray[np.integer]) -> float:

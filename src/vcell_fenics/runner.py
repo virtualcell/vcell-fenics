@@ -42,6 +42,7 @@ from vcell_fenics.backend.discrete import DiscreteProblem
 from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
 from vcell_fenics.backend.realize import ImageGeometryWarning, realize
+from vcell_fenics.backend.remesh_3d import RemeshWarning
 from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_geometry_yaml, dump_yaml
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
 from vcell_fenics.results.schema import DomainKind
@@ -329,7 +330,14 @@ def _run_moving(
             state.t = t
             for _ in range(n):
                 remeshes = state.remesh_count
-                step_with_remeshing(state, quality_limit=_REMESH_QUALITY_LIMIT, target_h=options.h)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always", RemeshWarning)
+                    step_with_remeshing(state, quality_limit=_REMESH_QUALITY_LIMIT, target_h=options.h)
+                for warning in caught:
+                    if issubclass(warning.category, RemeshWarning):
+                        log(f"warning: {warning.message}")
+                    else:
+                        warnings.warn_explicit(warning.message, warning.category, warning.filename, warning.lineno)
                 if state.remesh_count != remeshes:
                     new_cells = mesh_cell_count(state.problem.V.mesh)
                     log(f"remeshed at t = {state.t - dt:g} (mesh quality); continuing on {new_cells} cells")

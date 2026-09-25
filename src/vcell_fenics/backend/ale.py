@@ -273,13 +273,13 @@ def _remesh(problem: DiscreteProblem, target_h: float) -> Mesh:
     if gdim == 3:
         if mesh.topology.dim != 3:
             raise NotImplementedError("remeshing a moving 3D membrane (a surface mesh) is not implemented yet")
-        from vcell_fenics.backend.remesh_3d import remesh_region_3d
+        from vcell_fenics.backend.remesh_3d import RemeshError, remesh_region_3d
         from vcell_fenics.core.region_remesh_netgen import PinchOffError
 
         try:
             return remesh_region_3d(mesh, target_h)
-        except PinchOffError as error:
-            raise MeshQualityError(str(error)) from error
+        except (PinchOffError, RemeshError) as error:
+            raise MeshQualityError(str(error)) from error  # the runner reports it with the time
     if mesh.topology.dim == gdim:
         loop = BulkBoundaryTrace(problem.V).boundary_loop()
         return mesh_region_netgen(loop, target_h)
