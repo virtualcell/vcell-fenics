@@ -422,8 +422,9 @@ class Coupling:
 def _run_interface_coupled(
     model: ModelInput, coupling: Coupling, options: RunOptions, recorder: BundleRecorder, status: StatusReporter
 ) -> tuple[int, int]:
-    """One species per compartment, coupled by the membrane flux; every output time recorded from
-    the integrator's monitor. Returns (cells, steps)."""
+    """Two compartments coupled by the membrane flux, any number of species in each (reactions within a
+    compartment may couple them); every output time recorded from the integrator's monitor. Returns
+    (cells, steps)."""
 
     from vcell_fenics.backend.interface_coupled import integrate_interface_coupled
     from vcell_fenics.backend.realize import realize_interface_coupled
@@ -435,12 +436,6 @@ def _run_interface_coupled(
     species: dict[str, list[str]] = {coupling.inner: [], coupling.outer: []}
     for eq in model.math.equations:
         species.setdefault(eq.subdomain, []).append(eq.variable)
-    crowded = {name: found for name, found in species.items() if len(found) != 1}
-    if crowded:
-        raise RunError(
-            "the two-compartment solver couples one species per compartment; "
-            + ", ".join(f"{name!r} has {len(found)} ({', '.join(found)})" for name, found in crowded.items())
-        )
     if options.time_integration != "method_of_lines":
         log("note: the two-compartment solver is method-of-lines; --time-integration is ignored")
 
@@ -460,16 +455,19 @@ def _run_interface_coupled(
             h=options.h,
             comm=comm,
         )
-    variable_of = {eq.subdomain: eq.variable for eq in model.math.equations}
-    recorder.add_domain(coupling.inner, "volume", geometry.inner_mesh, [(variable_of[coupling.inner], None)])
-    recorder.add_domain(coupling.outer, "volume", geometry.outer_mesh, [(variable_of[coupling.outer], None)])
+    for name, mesh in ((coupling.inner, geometry.inner_mesh), (coupling.outer, geometry.outer_mesh)):
+        recorder.add_domain(name, "volume", mesh, [(variable, None) for variable in species[name]])
     recorder.open()
 
     cells = mesh_cell_count(geometry.inner_mesh) + mesh_cell_count(geometry.outer_mesh)
     log(f"integrating to t = {options.t_final:g} (interface-coupled method of lines, {cells} cells)")
 
-    def on_output(t: float, inner: Any, outer: Any) -> None:
-        recorder.capture(t, {coupling.inner: [inner], coupling.outer: [outer]}, progress=t / options.t_final)
+    def on_output(t: float, fields: dict[str, Any]) -> None:
+        recorder.capture(
+            t,
+            {name: [fields[variable] for variable in species[name]] for name in (coupling.inner, coupling.outer)},
+            progress=t / options.t_final,
+        )
 
     result = integrate_interface_coupled(
         model.math,
@@ -478,7 +476,7 @@ def _run_interface_coupled(
         rtol=options.rtol,
         atol=options.atol,
         output_times=options.output_times,
-        on_output=on_output,
+        on_output_fields=on_output,
         on_progress=lambda t: status.progress(t / options.t_final, t),
     )
     return cells, int(result.steps)
@@ -505,8 +503,8 @@ def _run_membrane_coupled(
     empty = [name for name in (coupling.inner, coupling.outer) if not species[name]]
     if empty:
         raise RunError(
-            f"the membrane-coupled solver needs at least one species in each compartment; {', '.join(map(repr, empty))} "
-            "has none"
+            "the membrane-coupled solver needs at least one species in each compartment; "
+            f"{', '.join(map(repr, empty))} has none"
         )
 
     comm = MPI.COMM_WORLD
@@ -525,7 +523,7 @@ def _run_membrane_coupled(
             h=options.h,
             comm=comm,
         )
-    regions = (
+    regions: tuple[tuple[str, DomainKind, Any], ...] = (
         (coupling.inner, "volume", geometry.inner_mesh),
         (coupling.outer, "volume", geometry.outer_mesh),
         (coupling.membrane, "membrane", geometry.membrane_mesh),
@@ -611,6 +609,16 @@ def _interface_coupling(model: ModelInput) -> Coupling | None:
         return None
     if len(subdomains) != 2:
         return None
+    for surface in model.geometry.surfaces:
+        if surface.name in subdomains and (subdomains - {surface.name}) <= {surface.inside, surface.outside}:
+            # membrane species with bulk species on ONE side only (a receptor binding an extracellular ligand,
+            # nothing modelled in the cytosol): the membrane-coupled solver needs species in both compartments
+            (side,) = subdomains - {surface.name}
+            empty = ({surface.inside, surface.outside} - {side}).pop()
+            raise RunError(
+                f"membrane species on {surface.name!r} with bulk species only in {side!r}: the membrane-coupled "
+                f"solver needs species in both compartments it separates ({empty!r} has none) — not supported yet"
+            )
     for surface in model.geometry.surfaces:
         if {surface.inside, surface.outside} == subdomains:
             volumes = {sv.name for sv in model.geometry.subvolumes}

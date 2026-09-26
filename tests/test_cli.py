@@ -252,6 +252,65 @@ def test_run_couples_two_compartments_across_a_membrane(tmp_path: Path) -> None:
     assert species["s_cyto"]["total"] + species["s_ext"]["total"] == pytest.approx(cytosol_area, rel=1e-6)
 
 
+def test_run_couples_several_species_per_compartment(tmp_path: Path) -> None:
+    # The VCell permeability model with a second species in each compartment (vcell-fenics #183): in the
+    # cytosol p_cyto is made from s_cyto by a reaction (so the two are coupled), and the exterior carries
+    # an independent q_ext. The two-compartment solver took one species each and refused this.
+    math = yaml.safe_load((_CV / "coupled_perm_math.yaml").read_text())
+    math["constants"] += [
+        {"name": "kconv", "exp": "2.0"},
+        {"name": "p_cyto_diffusionRate", "exp": "0.5"},
+        {"name": "q_ext_diffusionRate", "exp": "1.0"},
+        {"name": "q_ext_init_uM", "exp": "0.25"},
+    ]
+    math["variables"] += [
+        {"name": "p_cyto", "var_type": "VolumeVariable", "domain": "cyto_dom"},
+        {"name": "q_ext", "var_type": "VolumeVariable", "domain": "ext_dom"},
+    ]
+    cyto, ext = math["compartment_subdomains"]
+    cyto["pde_equations"][0]["rate"] = "(- kconv * s_cyto)"
+    zero_flux = {side: "0.0" for side in ("xm", "xp", "ym", "yp", "zm", "zp")}
+    cyto["pde_equations"].append(
+        {
+            "name": "p_cyto",
+            "rate": "(kconv * s_cyto)",
+            "diffusion": "p_cyto_diffusionRate",
+            "initial": "0.0",
+            "solution_type": "Unknown",
+            "boundaries": zero_flux,
+        }
+    )
+    ext["pde_equations"].append(
+        {
+            "name": "q_ext",
+            "rate": "0.0",
+            "diffusion": "q_ext_diffusionRate",
+            "initial": "q_ext_init_uM",
+            "solution_type": "Unknown",
+            "boundaries": zero_flux,
+        }
+    )
+    math_file = tmp_path / "multi_math.yaml"
+    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
+    out = tmp_path / "results"
+    argv = ["--math", str(math_file), "--geometry", str(_CV / "coupled_perm_geom.yaml"), "--t-final", "0.4"]
+    status = main([*argv, "--output-dt", "0.1", "--h", "0.12", "--out", str(out)])
+    assert status == 0
+    bundle = Bundle.open(out / "results.fenics")
+    assert set(bundle.manifest.domains) == {"cyto_dom", "ext_dom"}
+    summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
+    assert summary["run"]["backend"] == "interface_coupled"
+    assert sorted(summary["species"]) == ["p_cyto", "q_ext", "s_cyto", "s_ext"]
+    rows = [row["species"] for row in summary["outputs"]]
+    assert len(rows) == 5 and rows[-1]["p_cyto"]["total"] > 0.0  # the reaction ran
+    # s moves across the membrane and converts to p, but never leaves: s_cyto + p_cyto + s_ext is conserved,
+    # and q_ext (untouched) keeps its total
+    linked = [r["s_cyto"]["total"] + r["p_cyto"]["total"] + r["s_ext"]["total"] for r in rows]
+    assert max(linked) - min(linked) <= 1e-11 * linked[0]
+    q = [r["q_ext"]["total"] for r in rows]
+    assert max(q) - min(q) <= 1e-12 * q[0]
+
+
 def test_run_couples_both_compartments_and_membrane_species(tmp_path: Path) -> None:
     # A VCell receptor model: ligand in both compartments (s_cyto | s_ext) bound by a membrane receptor R.
     # Equations on three subdomains — the two compartments and the membrane between them — route to the
@@ -291,6 +350,27 @@ def test_run_couples_both_compartments_and_membrane_species(tmp_path: Path) -> N
     ]
     assert summary["outputs"][-1]["species"]["R"]["total"] > 0.0
     assert max(totals) - min(totals) <= 1e-12 * totals[0]
+
+
+def test_membrane_species_with_one_sided_bulk_is_a_clean_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The receptor model without its cytosolic ligand: membrane species plus bulk species on one side
+    # only. Not supported yet (the membrane-coupled solver needs species in both compartments) — the
+    # refusal must say that, not that the geometry lacks a membrane.
+    math = yaml.safe_load((_CV / "receptor_math.yaml").read_text())
+    math["variables"] = [v for v in math["variables"] if v["name"] != "s_cyto"]
+    for compartment in math["compartment_subdomains"]:
+        if compartment["name"] == "cyto_dom":
+            compartment["pde_equations"] = []
+    for membrane in math["membrane_subdomains"]:
+        membrane["jump_conditions"] = [j for j in membrane.get("jump_conditions", []) if j["name"] != "s_cyto"]
+    math_file = tmp_path / "one_sided_math.yaml"
+    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
+    argv = ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "0.1"]
+    assert main([*argv, "--out", str(tmp_path / "out")]) != 0
+    err = capsys.readouterr().err
+    assert "bulk species only in 'ext_dom'" in err and "'cyto_dom' has none" in err
 
 
 def test_unknown_model_file_is_a_clean_error(capsys: pytest.CaptureFixture[str]) -> None:

@@ -9,6 +9,7 @@ by the interface-coupled method of lines, with ``ec`` dropped as the background.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -38,9 +39,19 @@ def test_an_image_geometry_model_runs_end_to_end(tmp_path: Path, capfd: pytest.C
     assert "'ec' and 'Nucleus' touch but no surface class" in capfd.readouterr().err
 
 
-def test_several_species_per_compartment_are_refused(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    # VCell's tutorial Ran model: three species in the cytosol — beyond the two-compartment solver, which
-    # couples one per compartment; refused before any meshing, with the species named
-    argv = ["--math", str(_FIXTURES / "ran_math.yaml"), "--geometry", str(_GEOMETRY), "--t-final", "0.1"]
-    assert main([*argv, "--h", "2.0", "--out", str(tmp_path)]) != 0
-    assert "'cytosol' has 3 (Ran_cyt, C_cyt, RanC_cyt)" in capfd.readouterr().err
+def test_the_ran_model_runs_with_several_species_per_compartment(tmp_path: Path) -> None:
+    # VCell's tutorial Ran model on the tutorial image: three species in the cytosol and one in the nucleus
+    # (vcell-fenics #183 — the two-compartment solver used to take one species each and refused it). RanC
+    # crosses the nuclear envelope and dissociates into Ran + C in the cytosol; nothing crosses the plasma
+    # membrane (its jump conditions are zero), so total Ran and total C are both conserved.
+    argv = ["--math", str(_FIXTURES / "ran_math.yaml"), "--geometry", str(_GEOMETRY), "--t-final", "1.0"]
+    assert main([*argv, "--output-dt", "0.5", "--h", "3.0", "--out", str(tmp_path)]) == 0
+    summary = json.loads((tmp_path / "results.fenics" / "provenance" / "summary.json").read_text())
+    assert summary["run"]["backend"] == "interface_coupled"
+    assert sorted(summary["species"]) == ["C_cyt", "RanC_cyt", "RanC_nuc", "Ran_cyt"]
+    rows = [row["species"] for row in summary["outputs"]]
+    ran = [r["Ran_cyt"]["total"] + r["RanC_cyt"]["total"] + r["RanC_nuc"]["total"] for r in rows]
+    c = [r["C_cyt"]["total"] + r["RanC_cyt"]["total"] + r["RanC_nuc"]["total"] for r in rows]
+    assert max(ran) - min(ran) <= 1e-10 * ran[0] and max(c) - min(c) <= 1e-10 * c[0]
+    assert rows[-1]["RanC_nuc"]["total"] < 0.8 * rows[0]["RanC_nuc"]["total"]  # RanC left the nucleus
+    assert rows[-1]["Ran_cyt"]["total"] > 0.0  # and dissociated in the cytosol

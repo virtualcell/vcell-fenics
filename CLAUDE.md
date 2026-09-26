@@ -86,11 +86,13 @@ pixi run -e dev vcell-fenics-export results/results.fenics paraview/      # → 
 docker build -f docker/Dockerfile -t vcell-fenics .     # same runner, containerised
 ```
 
-It drives the two fixed-domain paths (single mesh; two compartments across a membrane) and VCell
-moving boundaries (a prescribed front, species inside it; ALE with remeshing, in 2D and 3D — the
-tracker's "Moving boundaries" section). Stokes/FSI, phase field, unknown-motion mechanics and
-bulk-coupled surface PDEs keep their own drivers — extend the CLI deliberately rather than routing
-them through it. `docker/README.md`
+It drives the fixed-domain paths — a single mesh; two compartments across a membrane, any number of
+species in each; and both compartments plus **membrane species** on the membrane between them
+(receptor–ligand binding, `integrate_membrane_coupled`) — and VCell moving boundaries (a prescribed
+front, species inside it; ALE with remeshing, in 2D and 3D — the tracker's "Moving boundaries"
+section). Not yet: membrane species with bulk species on one side only, or on a moving front.
+Stokes/FSI, phase field and unknown-motion mechanics keep their own drivers — extend the CLI
+deliberately rather than routing them through it. `docker/README.md`
 is the container reference (results mount, MPI, uid, discretisation defaults).
 
 **Quality enforcement.** Ruff (lint+format) and mypy in `--strict` are required across `src/`, `tests/`, and `examples/` (mypy also covers `mms/` and `scripts/`; the package ships a `py.typed` marker so `examples/` get its real types, not `Any`). `pixi run -e dev check` is the gate. The FEniCSx stack ships `py.typed` but with many unannotated functions, so mypy uses its **real** types (we do *not* `follow_imports = "skip"`); strict mode's `disallow_untyped_calls` is suppressed for that stack via `untyped_calls_exclude` so calls like `grad()`/`dot()` don't flood, while every other real check is kept (ADR 005). When a third-party stub is genuinely wrong (e.g. petsc4py's `PETSc.ScalarType`, some pyvista signatures), use a targeted `# type: ignore[code]` or `cast()` at that exact call site — never a blanket `Any` in our own signatures. The `backend/_typing.py` aliases (`DolfinxFunction`, `UflForm`, …) document which opaque object a field holds where the upstream type is still `Any`.
