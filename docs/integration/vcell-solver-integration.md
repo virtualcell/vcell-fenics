@@ -400,6 +400,16 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-26** — **Coverage survey of saved BioModels**
+  ([`fenics-coverage-survey.md`](fenics-coverage-survey.md)).
+  - **Result:** on a 600-application sample of the 3,423 spatial deterministic FV applications, run
+    through the CLI on regenerated math, 8 % run end to end.
+  - **Blockers:** filed as vcell-fenics #185–#193. The largest are one-sided membrane species,
+    non-diffusing species, subvolumes touching the box, and 3D size.
+  - **VCell's gate:** it offers FEniCSx for 527 applications that then fail (virtualcell/vcell#2112).
+  - **pyvcell:** mis-reads CSG subvolumes (virtualcell/pyvcell#59).
+  - **FRAP:** agrees with fvsolver to 2 %.
+
 - **2026-09-22** — **The VCell Java side works.** V0–V5 are merged in vcell (#2084–#2091), and
   vcell-fluxcd #56 (dev) awaits a dev deploy.
   - **Image:** `ARM64_RUNNER=ubuntu-24.04-arm` makes the image multi-arch (native on Apple silicon).
