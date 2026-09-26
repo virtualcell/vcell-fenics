@@ -1373,6 +1373,9 @@ def integrate_membrane_coupled(
     velocity: str | None = None,
     motion: MembraneCoupledMeshMotion | ForceBalanceMeshMotion | None = None,
     motion_steps: int = 10,
+    output_times: Sequence[float] = (),
+    on_output: Callable[[float, fem.Function, fem.Function, fem.Function], None] | None = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> MembraneCoupledResult:
     """Integrate a **membrane species coupled to both bulks** to `t_final` with the method-of-lines
     integrator (PETSc TS adaptive BDF) — the fully-implicit counterpart of `assemble_membrane_coupled`'s
@@ -1410,6 +1413,12 @@ def integrate_membrane_coupled(
     **nonlinear** (e.g. mass-action `A*B`): the residual is evaluated at the state functions so the
     matrix-free Newton differences it exactly, and the assemblable linearisation (`ufl.derivative`) is added
     to the preconditioner.
+
+    **Outputs (fixed geometry).** ``on_output(t, inner, outer, membrane)`` receives the three regions'
+    fields — vector P1 ``Function``s, one component per species in declaration order (snapshots valid for
+    the call) — at each of ``output_times`` in [0, ``t_final``], recorded from a ``TS`` monitor by
+    interpolation so the step sequence is unchanged (``backend/output_times.py``); ``on_progress(t)``
+    follows every accepted step. The moving case records only its final state.
 
     Scope: a *prescribed* membrane velocity; the moving case freezes geometry within each outer interval
     (operator-split). Force-balance velocity is a follow-up.
@@ -1667,10 +1676,43 @@ def integrate_membrane_coupled(
 
     if motion is None:
         ts = make_ts(0.0, t_final)
+        monitor: OutputMonitor | None = None
+        work: PETSc.Vec | None = None
+        if on_output is not None or on_progress is not None:
+            snaps = (fem.Function(V_in), fem.Function(V_out), fem.Function(V_mem))
+            work = state_vec.duplicate()
+
+            def emit(t: float, x: PETSc.Vec) -> None:
+                snaps[0].x.array[:n_in] = x.array_r[:n_in]
+                snaps[1].x.array[:n_out] = x.array_r[n_in : n_in + n_out]
+                snaps[2].x.array[:n_mem] = x.array_r[n_in + n_out : n_in + n_out + n_mem]
+                for snap in snaps:
+                    snap.x.scatter_forward()
+                if on_output is not None:
+                    on_output(t, *snaps)
+
+            monitor = OutputMonitor(
+                output_times if on_output is not None else (),
+                t_start=0.0,
+                t_final=t_final,
+                work=work,
+                emit=emit,
+                progress=on_progress,
+            )
+            ts.setMonitor(monitor)
         ts.solve(state_vec)
         steps, final_time = ts.getStepNumber(), float(ts.getTime())
+        if monitor is not None:
+            monitor.finish(ts, final_time, state_vec)
         ts.destroy()
+        if work is not None:
+            work.destroy()
     else:
+        if on_output is not None:
+            raise NotImplementedError(
+                "per-output-time recording of a moving membrane-coupled solve is not implemented; "
+                "it records its final state only"
+            )
         # Operator-split moving solve: each outer step moves the substrate, then the adaptive BDF integrates
         # the stiff binding over that interval on the (frozen) deformed geometry — a FRESH TS per interval so
         # the BDF history never spans a geometry jump. `state_vec` carries the co-moving field across moves.

@@ -252,6 +252,47 @@ def test_run_couples_two_compartments_across_a_membrane(tmp_path: Path) -> None:
     assert species["s_cyto"]["total"] + species["s_ext"]["total"] == pytest.approx(cytosol_area, rel=1e-6)
 
 
+def test_run_couples_both_compartments_and_membrane_species(tmp_path: Path) -> None:
+    # A VCell receptor model: ligand in both compartments (s_cyto | s_ext) bound by a membrane receptor R.
+    # Equations on three subdomains — the two compartments and the membrane between them — route to the
+    # membrane-coupled solver (vcell-fenics #183) instead of being refused, with the membrane recorded as
+    # a domain of its own, and the substance conserved across the binding.
+    out = tmp_path / "results"
+    status = main(
+        [
+            "--math",
+            str(_CV / "receptor_math.yaml"),
+            "--geometry",
+            str(_CV / "receptor_geom.yaml"),
+            "--t-final",
+            "0.5",
+            "--output-dt",
+            "0.25",
+            "--out",
+            str(out),
+        ]
+    )
+    assert status == 0
+    bundle = Bundle.open(out / "results.fenics")
+    assert set(bundle.manifest.domains) == {"cyto_dom", "ext_dom", "mem_dom"}
+    assert bundle.manifest.domains["mem_dom"].kind == "membrane"
+    assert bundle.times == pytest.approx((0.0, 0.25, 0.5))  # every output, incl. the IC
+
+    summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
+    assert summary["run"]["backend"] == "membrane_coupled"
+    assert sorted(summary["species"]) == ["R", "s_cyto", "s_ext"]
+    # Free ligand (µM, over the compartments) plus bound receptor (molecules/µm², over the membrane)
+    # reconciled by KMOLE is the conserved substance: flat to round-off, while R actually binds.
+    constants = yaml.safe_load((_CV / "receptor_math.yaml").read_text())["constants"]
+    kmole = next(float(c["exp"]) for c in constants if c["name"] == "KMOLE")
+    totals = [
+        row["species"]["s_cyto"]["total"] + row["species"]["s_ext"]["total"] + kmole * row["species"]["R"]["total"]
+        for row in summary["outputs"]
+    ]
+    assert summary["outputs"][-1]["species"]["R"]["total"] > 0.0
+    assert max(totals) - min(totals) <= 1e-12 * totals[0]
+
+
 def test_unknown_model_file_is_a_clean_error(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--math", "nope.yaml", "--geometry", str(_GEOM), "--t-final", "1"]) == 2
     assert "error:" in capsys.readouterr().err
