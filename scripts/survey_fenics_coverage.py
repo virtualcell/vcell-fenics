@@ -203,6 +203,17 @@ def census(vcml_dir: Path, work: Path) -> None:
     print(f"census: {len(files)} files, {count} simulations, {len(failures)} files failed to parse -> {work}")
 
 
+_SAMPLE_SEED = 20260926
+
+
+def _sampled(work: Path, size: int) -> set[tuple[str, str]]:
+    """A seeded random sample of ``size`` candidate applications, drawn from all of them — so rows already
+    recorded count toward it, and ``report --sample`` summarises exactly the same set."""
+
+    keys = [(row["file"], row["application"]) for row in _candidates(work)]
+    return set(random.Random(_SAMPLE_SEED).sample(keys, min(size, len(keys))))
+
+
 def _candidates(work: Path) -> list[dict[str, str]]:
     """The first FV-served simulation of each spatial, deterministic application."""
 
@@ -347,6 +358,7 @@ def run(
     *,
     jobs: int,
     timeout: float,
+    timeout_3d: float | None,
     max_rss_gb: float,
     steps: int,
     limit: int | None,
@@ -364,8 +376,9 @@ def run(
                 migrate.writeheader()
                 migrate.writerows(recorded)
     todo = [row for row in _candidates(work) if (row["file"], row["application"]) not in done]
-    if sample is not None:  # a seeded random subset, for a pilot (its rows count toward the full run)
-        todo = random.Random(20260926).sample(todo, min(sample, len(todo)))
+    if sample is not None:  # a seeded random subset of all candidates (rows already recorded count toward it)
+        chosen = _sampled(work, sample)
+        todo = [row for row in todo if (row["file"], row["application"]) in chosen]
     if limit is not None:
         todo = todo[:limit]
     scratch = work / "scratch"
@@ -383,7 +396,8 @@ def run(
         def job(row: dict[str, str]) -> dict[str, str]:
             cache = slots.get()
             try:
-                return run_one(row, vcml_dir, scratch, steps, timeout, cache, max_rss_gb)
+                limit_s = timeout_3d if timeout_3d is not None and row["dim"] == "3" else timeout
+                return run_one(row, vcml_dir, scratch, steps, limit_s, cache, max_rss_gb)
             finally:
                 slots.put(cache)
 
@@ -400,15 +414,17 @@ def _pct(part: int, whole: int) -> str:
     return f"{100.0 * part / whole:.0f}%" if whole else "—"
 
 
-def report(work: Path) -> None:
+def report(work: Path, sample: int | None = None) -> None:
     with (work / "census.csv").open() as source:
         census_table = list(csv.DictReader(source))
     with (work / "runs.csv").open() as source:
         runs = {(r["file"], r["application"]): r for r in csv.DictReader(source)}
     fv_sims = [r for r in census_table if r["spatial"] == "1" and r["stochastic"] == "0" and r["solver"] in FV_SOLVERS]
     by_app: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    chosen = _sampled(work, sample) if sample is not None else None
     for row in fv_sims:
-        by_app[(row["file"], row["application"])].append(row)
+        if chosen is None or (row["file"], row["application"]) in chosen:
+            by_app[(row["file"], row["application"])].append(row)
     run_apps = {key: runs[key] for key in by_app if key in runs}
 
     def outcome(key: tuple[str, str]) -> str:
@@ -418,9 +434,16 @@ def report(work: Path) -> None:
         return {"ok": "ran", "memory": "timeout"}.get(r["status"], r["status"])
 
     lines = ["# FEniCSx coverage of saved VCell biomodels", ""]
+    if chosen is not None:
+        lines += [
+            f"*A seeded random sample (seed {_SAMPLE_SEED}) of {len(by_app)} applications; counts below are "
+            "over the sample, so percentages estimate the whole corpus.*",
+            "",
+        ]
     lines.append(
         f"Corpus: {len({r['file'] for r in census_table})} biomodels, {len(census_table)} simulations, of which "
-        f"**{len(fv_sims)} simulations in {len(by_app)} applications** are spatial, deterministic and saved with a "
+        f"**{len(fv_sims)} simulations in {len({(r['file'], r['application']) for r in fv_sims})} applications** "
+        "are spatial, deterministic and saved with a "
         f"VCell finite-volume-family solver. {len(run_apps)} of those applications were run through the FEniCSx CLI."
     )
     lines.append("")
@@ -602,6 +625,7 @@ def main() -> int:
     parser.add_argument("--work", type=Path, default=_WORK)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument("--timeout-3d", type=float, default=None, help="a separate timeout for 3D applications")
     parser.add_argument("--max-rss-gb", type=float, default=4.0, help="kill a run past this resident size")
     parser.add_argument("--steps", type=int, default=3, help="output intervals to solve (short horizon)")
     parser.add_argument("--limit", type=int, default=None)
@@ -615,13 +639,14 @@ def main() -> int:
             args.work,
             jobs=args.jobs,
             timeout=args.timeout,
+            timeout_3d=args.timeout_3d,
             max_rss_gb=args.max_rss_gb,
             steps=args.steps,
             limit=args.limit,
             sample=args.sample,
         )
     else:
-        report(args.work)
+        report(args.work, args.sample)
     return 0
 
 
