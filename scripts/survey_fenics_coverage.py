@@ -268,8 +268,8 @@ def run_one(
     result |= {"geometry_kind": row["geometry_kind"], "moving": row["moving"], "t_final": ""}
     # The simulation's settings are passed explicitly rather than via `--simulation`: pyvcell's reader drops a
     # simulation that has no <OutputOptions> (VCell's default: every time step), which is not FEniCSx's gap.
-    # A short horizon: `steps` output intervals, never past the simulation's end; a run that times out while
-    # time-stepping is retried once over a single interval (a timeout while meshing or compiling is not).
+    # A short horizon: `steps` output intervals, never past the simulation's end; a run that times out after
+    # reaching its first output time is retried once over that single interval.
     horizons = [min(end, n * step) for n in dict.fromkeys((steps, 1))] if step > 0.0 and end > 0.0 else [None]
     try:
         env = {**os.environ, "XDG_CACHE_HOME": str(cache), "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
@@ -280,7 +280,7 @@ def run_one(
                 returncode, text = _run_capped(timed, env, timeout, max_rss_gb)
                 break
             except subprocess.TimeoutExpired as expired:
-                if k + 1 == len(horizons) or not any(mark in str(expired.output or "") for mark in _PROGRESS):
+                if k + 1 == len(horizons) or not _PAST_FIRST_OUTPUT.search(str(expired.output or "")):
                     raise
         errors = _ERROR_RE.findall(text)
         backend = re.search(r'"backend": "(\w+)"', _read(out / "results.fenics" / "provenance" / "summary.json"))
@@ -299,8 +299,9 @@ def run_one(
     return result
 
 
-# The CLI's solve-start and per-output-time lines (stderr, flushed): any of them means the run got past meshing.
-_PROGRESS = ("[vcell-fenics] t = ", "[vcell-fenics] integrating to t = ", "[vcell-fenics] moving mesh: ")
+# The CLI's per-output-time line (stderr, flushed) at a time after 0: the run reached its first output interval
+# within the timeout, so a one-interval rerun (same setup cost) will finish; a run that never got there won't.
+_PAST_FIRST_OUTPUT = re.compile(r"^\[vcell-fenics\] t = (?!0 )[0-9.eE+-]+ ", re.MULTILINE)
 
 
 def _run_capped(argv: list[str], env: dict[str, str], timeout: float, max_rss_gb: float) -> tuple[int, str]:
