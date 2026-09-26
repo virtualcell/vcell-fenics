@@ -312,6 +312,22 @@ aren't solved on the initial shape.
 | M4 | **Cross-validation vs mbsolver.** The fixture simtask (translation); an expansion forcing remeshes; a species-dependent velocity. README and tracker; a new image. | ✅ #163. `cross_validation/mb_swept*.py`: the real fixture through the CLI vs mbsolver. Translation agrees to 0.41 % → 0.22 % under refinement (carried control 14 %); deforming fronts converge toward ours as mbsolver refines (our front is within 0.02 of exact); the remeshing case separates the conventions 5× (mbsolver limited to mesh 31 there). | Image `sha-bfdf853` (multi-arch, plus SIF).
 | M5 | **VCell.** `Feature_Moving` on FEniCSx; refusals mirrored as issues; `FenicsBundle` reads `_coords`; the viewer serves per-row geometry; default image bump. | ✅ virtualcell/vcell#2093 (merged 2026-09-23): tests on two real moving bundles (translation; a remesh across two segments). Default image `sha-bfdf853`; vcell-fluxcd #56 pinned to match (for the user to merge). Browser check: the viewer re-fetches each row's moved mesh while scrubbing, and shows the remeshed shape. |
 
+### Multi-species compartments and membrane species (#183)
+
+Two common VCell shapes were refused by the runner although the backend solves them. Now routed:
+
+- **Two compartments, several species in each** (reactions within a compartment may couple them):
+  `integrate_interface_coupled` is generalized to one scalar P1 block per species (exact Jacobian;
+  with one species each, the original two-block solver unchanged). Test: the VCell permeability
+  model plus a converted species and an inert one — conserved to 3e-13.
+- **Both compartments plus membrane species** (a membrane receptor binding ligand from both sides):
+  the runner detects equations on the two compartments *and* the membrane between them and solves with
+  `integrate_membrane_coupled`, which gained output-time/progress hooks; the membrane is recorded as a
+  `membrane` domain. VCell receptor model through the CLI: the KMOLE-reconciled total is flat to 1e-14
+  (2D and 3D).
+- Still refused, with an accurate message: membrane species with bulk species on **one side only**
+  (the solver needs species in both compartments), and membrane species on a moving front.
+
 ### 3D moving boundaries (3M1–3M3, V-3D)
 
 The 2D cleavage-furrow BioModel ("Furrow") gets a **3D application with the same kinematics**: a sphere

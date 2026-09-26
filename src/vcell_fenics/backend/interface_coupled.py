@@ -111,6 +111,7 @@ class InterfaceCoupledResult:
     outer: fem.Function
     steps: int
     time: float
+    fields: dict[str, fem.Function] | None = None  # every species by name (several per compartment)
 
     def total_mass(self) -> float:
         return _total_mass(self.inner, self.outer)
@@ -804,6 +805,7 @@ def integrate_interface_coupled(
     output_times: Sequence[float] = (),
     on_output: Callable[[float, fem.Function, fem.Function], None] | None = None,
     on_progress: Callable[[float], None] | None = None,
+    on_output_fields: Callable[[float, dict[str, fem.Function]], None] | None = None,
 ) -> InterfaceCoupledResult:
     """Integrate an interface-coupled two-bulk system to `t_final` with the **method-of-lines**
     integrator (PETSc TS adaptive BDF) — the same strategy as the FV solver and the single-mesh
@@ -816,6 +818,14 @@ def integrate_interface_coupled(
     monitor so the step sequence is unchanged (`backend/output_times.py`); `on_progress(t)` follows
     every accepted step.
 
+    **Several species per compartment.** Each species is its own scalar P1 block on its compartment's
+    mesh — any number in each — and an in-bulk `source` may reference its compartment's other species
+    (mass-action reactions within a compartment). ``on_output_fields(t, {species: field})`` receives every
+    species at each output time; ``on_output(t, inner, outer)`` is the one-species-each form (it requires
+    exactly one species per compartment). The result's `inner`/`outer` are the first species of each;
+    `fields` holds them all. With one species each the blocks, their order and so the numbers are those of
+    the original two-block solver.
+
     The residual `F(state, rate) = M·rate + K·state − coupling` is a 2-block form over the two
     compartment spaces (all integrals on the parent: region `dx`, interface `dS`); the exact Jacobian
     `σ ∂F/∂rate + ∂F/∂state` comes from `ufl.derivative`. Both are assembled monolithically
@@ -825,59 +835,65 @@ def integrate_interface_coupled(
     """
 
     validate_or_raise(md)
-    equations = {eq.subdomain: eq for eq in md.equations if isinstance(eq, TemplateEquation)}
-    inner_eq = _require_equation(equations, geometry.inner_subdomain)
-    outer_eq = _require_equation(equations, geometry.outer_subdomain)
-    inner_var, outer_var = inner_eq.variable, outer_eq.variable
+    template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
+    inner_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.inner_subdomain]
+    outer_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.outer_subdomain]
+    for subdomain, eqs in ((geometry.inner_subdomain, inner_eqs), (geometry.outer_subdomain, outer_eqs)):
+        if not eqs or any("diffusion" not in eq.terms for eq in eqs):
+            raise NotImplementedError(
+                f"interface coupling needs a bulk diffusion equation for each species on compartment {subdomain!r}"
+            )
+    if on_output is not None and (len(inner_eqs) != 1 or len(outer_eqs) != 1):
+        raise ValueError("on_output(t, inner, outer) is for one species per compartment; use on_output_fields")
 
     parent = geometry.parent_mesh
     tdim = parent.topology.dim
     parent.topology.create_connectivity(tdim - 1, tdim)
     V_in = fem.functionspace(geometry.inner_mesh, ("Lagrange", 1))
     V_out = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1))
-    u_in_fn = fem.Function(V_in, name=inner_var)
-    u_out_fn = fem.Function(V_out, name=outer_var)
-    rate_in, rate_out = fem.Function(V_in), fem.Function(V_out)
-    n_in = V_in.dofmap.index_map.size_local
-    n_out = V_out.dofmap.index_map.size_local
-
-    w_in, w_out = ufl.TestFunction(V_in), ufl.TestFunction(V_out)
     dx_in = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.inner_region_tag)
     dx_out = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.outer_region_tag)
     ds_int = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)(geometry.interface_tag)
     ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
 
+    # One scalar block per species, inner compartment's first (in declaration order), then the outer's.
+    eqs = [*inner_eqs, *outer_eqs]
+    spaces = [V_in] * len(inner_eqs) + [V_out] * len(outer_eqs)
+    dxs = [dx_in] * len(inner_eqs) + [dx_out] * len(outer_eqs)
+    states = [fem.Function(V, name=eq.variable) for V, eq in zip(spaces, eqs, strict=True)]
+    rates = [fem.Function(V) for V in spaces]
+    tests = [ufl.TestFunction(V) for V in spaces]
+    sizes = [V.dofmap.index_map.size_local for V in spaces]
+    offsets = [0]
+    for size in sizes:
+        offsets.append(offsets[-1] + size)
+    index_of = {eq.variable: k for k, eq in enumerate(eqs)}
+    compartment_of = {eq.variable: eq.subdomain for eq in eqs}
+
     params = _param_symbols(md, parent)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
-    d_in = compile_expression(parse(inner_eq.terms["diffusion"]), ctx)
-    d_out = compile_expression(parse(outer_eq.terms["diffusion"]), ctx)
 
     # The MOL residual uses the state Functions directly (so the coupling can be nonlinear), with the
-    # time derivative ċ = rate (a Function TS supplies). One block per compartment, all on the parent.
+    # time derivative ċ = rate (a Function TS supplies). One block per species, all on the parent.
+    diffusion = [compile_expression(parse(eq.terms["diffusion"]), ctx) for eq in eqs]
     residual = [
-        rate_in * w_in * dx_in + d_in * ufl.dot(ufl.grad(u_in_fn), ufl.grad(w_in)) * dx_in,
-        rate_out * w_out * dx_out + d_out * ufl.dot(ufl.grad(u_out_fn), ufl.grad(w_out)) * dx_out,
+        rates[k] * tests[k] * dxs[k] + diffusion[k] * ufl.dot(ufl.grad(states[k]), ufl.grad(tests[k])) * dxs[k]
+        for k in range(len(eqs))
     ]
-    test_of = {inner_var: w_in, outer_var: w_out}
-    index_of = {inner_var: 0, outer_var: 1}
-    dx_of = {inner_var: dx_in, outer_var: dx_out}
-    state_of = {inner_var: u_in_fn, outer_var: u_out_fn}
 
-    # Optional per-compartment in-bulk `source` (∂c/∂t = … + source), evaluated at the region's OWN species
-    # (affine, nonlinear, or a purely spatial manufactured forcing — the inner Newton differences it): F
-    # gains −source·w on that region. Same treatment as the BE assembler, minus its dt factor.
-    for eq in (inner_eq, outer_eq):
+    # Optional in-bulk `source` (∂c/∂t = … + source), evaluated at the states of the species in its OWN
+    # compartment (affine, nonlinear — e.g. mass action between two species there — or a purely spatial
+    # manufactured forcing; the inner Newton differences it): F gains −source·w on that region.
+    for k, eq in enumerate(eqs):
         if "source" in eq.terms:
-            src_ctx = CompileContext(parent, {**ctx.symbols, eq.variable: state_of[eq.variable]})
-            residual[index_of[eq.variable]] += (
-                -compile_expression(parse(eq.terms["source"]), src_ctx) * test_of[eq.variable] * dx_of[eq.variable]
-            )
-    # Both interface traces are in scope for every flux (a flux on one side may reference either bulk's
-    # trace); each `BCInterfaceFlux` then deposits its flux into its OWN side's residual block only.
+            siblings = {name: states[j] for name, j in index_of.items() if compartment_of[name] == eq.subdomain}
+            src_ctx = CompileContext(parent, {**ctx.symbols, **siblings})
+            residual[k] += -compile_expression(parse(eq.terms["source"]), src_ctx) * tests[k] * dxs[k]
+    # Every species' interface trace is in scope for every flux (a flux on one side may reference any
+    # species on either side); each `BCInterfaceFlux` then deposits its flux into its OWN species' block.
     coupling_symbols = {
-        inner_var: membrane_trace(u_in_fn),
-        outer_var: membrane_trace(u_out_fn),
+        **{eq.variable: membrane_trace(states[k]) for k, eq in enumerate(eqs)},
         "geom.x": ufl.SpatialCoordinate(parent),
         **params,
     }
@@ -887,43 +903,47 @@ def integrate_interface_coupled(
                 "the interface value-equality constraint (u = k·u_adjacent) is a follow-up increment; "
                 "this integrator handles single-sided interface flux BCs"
             )
-        if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in test_of:
+        if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in index_of:
             continue
         coupling_ctx = CompileContext(parent, coupling_symbols)
         flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
-        residual[index_of[bc.variable]] += -flux * membrane_trace(test_of[bc.variable]) * ds_int
+        k = index_of[bc.variable]
+        residual[k] += -flux * membrane_trace(tests[k]) * ds_int
 
-    # Optional outer-wall reservoir Dirichlet on the outer compartment, weak penalty (same as the BE
-    # assembler): F gains β(u_out − g)·w_out on the box wall.
-    for _, g_value in _reservoir_dirichlet(md, geometry, [outer_var], ctx):
-        residual[index_of[outer_var]] += _RESERVOIR_PENALTY * (u_out_fn - g_value) * w_out * ds_wall
+    # Optional outer-wall reservoir Dirichlet on outer-compartment species, weak penalty (same as the BE
+    # assembler): F gains β(u − g)·w on the box wall.
+    outer_names = [eq.variable for eq in outer_eqs]
+    for j, g_value in _reservoir_dirichlet(md, geometry, outer_names, ctx):
+        k = index_of[outer_names[j]]
+        residual[k] += _RESERVOIR_PENALTY * (states[k] - g_value) * tests[k] * ds_wall
 
-    states, rates = [u_in_fn, u_out_fn], [rate_in, rate_out]
+    n_blocks = len(eqs)
     shift = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # the TS σ
     jacobian = [
-        [shift * ufl.derivative(residual[i], rates[j]) + ufl.derivative(residual[i], states[j]) for j in range(2)]
-        for i in range(2)
+        [
+            shift * ufl.derivative(residual[i], rates[j]) + ufl.derivative(residual[i], states[j])
+            for j in range(n_blocks)
+        ]
+        for i in range(n_blocks)
     ]
     residual_form = fem.form(residual, entity_maps=emaps)
     jacobian_form = fem.form(jacobian, entity_maps=emaps)
 
-    _interpolate_ic(u_in_fn, inner_eq, ctx)
-    _interpolate_ic(u_out_fn, outer_eq, ctx)
+    for state, eq in zip(states, eqs, strict=True):
+        _interpolate_ic(state, eq, ctx)
 
     def unpack(x: PETSc.Vec) -> None:
-        u_in_fn.x.array[:n_in] = x.array_r[:n_in]
-        u_out_fn.x.array[:n_out] = x.array_r[n_in : n_in + n_out]
-        u_in_fn.x.scatter_forward()
-        u_out_fn.x.scatter_forward()
+        for k, state in enumerate(states):
+            state.x.array[: sizes[k]] = x.array_r[offsets[k] : offsets[k + 1]]
+            state.x.scatter_forward()
 
     def evaluate_residual(_ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
         unpack(x)
-        rate_in.x.array[:n_in] = x_dot.array_r[:n_in]
-        rate_out.x.array[:n_out] = x_dot.array_r[n_in : n_in + n_out]
-        # The owned part alone is not enough: cells on a partition boundary read ghost dofs of ċ in the
-        # mass term, and stale ghosts there leaked mass under MPI (as `unpack` refreshes the state's).
-        rate_in.x.scatter_forward()
-        rate_out.x.scatter_forward()
+        for k, rate in enumerate(rates):
+            rate.x.array[: sizes[k]] = x_dot.array_r[offsets[k] : offsets[k + 1]]
+            # The owned part alone is not enough: cells on a partition boundary read ghost dofs of ċ in the
+            # mass term, and stale ghosts there leaked mass under MPI (as `unpack` refreshes the state's).
+            rate.x.scatter_forward()
         b = _accumulate_ghosts(petsc.assemble_vector(residual_form, kind="mpi"))
         b.copy(result)
         b.destroy()
@@ -942,9 +962,9 @@ def integrate_interface_coupled(
     ts = PETSc.TS().create(parent.comm)
     ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
     ts.setType("bdf")
-    state_vec = petsc.create_vector([V_in, V_out], kind="mpi")
-    state_vec.array[:n_in] = u_in_fn.x.array[:n_in]
-    state_vec.array[n_in : n_in + n_out] = u_out_fn.x.array[:n_out]
+    state_vec = petsc.create_vector(spaces, kind="mpi")
+    for k, state in enumerate(states):
+        state_vec.array[offsets[k] : offsets[k + 1]] = state.x.array[: sizes[k]]
     # Jacobian holder via assemble_matrix → the full coupling sparsity (off-diagonal blocks present).
     jacobian_matrix = petsc.assemble_matrix(jacobian_form, kind="mpi")
     jacobian_matrix.assemble()
@@ -968,20 +988,22 @@ def integrate_interface_coupled(
 
     monitor: OutputMonitor | None = None
     work: PETSc.Vec | None = None
-    if on_output is not None or on_progress is not None:
-        snap_in, snap_out = fem.Function(V_in, name=inner_var), fem.Function(V_out, name=outer_var)
+    wants_output = on_output is not None or on_output_fields is not None
+    if wants_output or on_progress is not None:
+        snaps = [fem.Function(V, name=eq.variable) for V, eq in zip(spaces, eqs, strict=True)]
         work = state_vec.duplicate()
 
         def emit(t: float, x: PETSc.Vec) -> None:
-            snap_in.x.array[:n_in] = x.array_r[:n_in]
-            snap_out.x.array[:n_out] = x.array_r[n_in : n_in + n_out]
-            snap_in.x.scatter_forward()
-            snap_out.x.scatter_forward()
+            for k, snap in enumerate(snaps):
+                snap.x.array[: sizes[k]] = x.array_r[offsets[k] : offsets[k + 1]]
+                snap.x.scatter_forward()
             if on_output is not None:
-                on_output(t, snap_in, snap_out)
+                on_output(t, snaps[0], snaps[1])
+            if on_output_fields is not None:
+                on_output_fields(t, {eq.variable: snap for eq, snap in zip(eqs, snaps, strict=True)})
 
         monitor = OutputMonitor(
-            output_times if on_output is not None else (),
+            output_times if wants_output else (),
             t_start=0.0,
             t_final=t_final,
             work=work,
@@ -998,7 +1020,8 @@ def integrate_interface_coupled(
     for obj in (ts, state_vec, jacobian_matrix, work):
         if obj is not None:
             obj.destroy()
-    return InterfaceCoupledResult(u_in_fn, u_out_fn, steps, final_time)
+    fields = {eq.variable: state for eq, state in zip(eqs, states, strict=True)}
+    return InterfaceCoupledResult(states[0], states[len(inner_eqs)], steps, final_time, fields)
 
 
 def assemble_membrane_coupled(
@@ -1373,6 +1396,9 @@ def integrate_membrane_coupled(
     velocity: str | None = None,
     motion: MembraneCoupledMeshMotion | ForceBalanceMeshMotion | None = None,
     motion_steps: int = 10,
+    output_times: Sequence[float] = (),
+    on_output: Callable[[float, fem.Function, fem.Function, fem.Function], None] | None = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> MembraneCoupledResult:
     """Integrate a **membrane species coupled to both bulks** to `t_final` with the method-of-lines
     integrator (PETSc TS adaptive BDF) — the fully-implicit counterpart of `assemble_membrane_coupled`'s
@@ -1410,6 +1436,12 @@ def integrate_membrane_coupled(
     **nonlinear** (e.g. mass-action `A*B`): the residual is evaluated at the state functions so the
     matrix-free Newton differences it exactly, and the assemblable linearisation (`ufl.derivative`) is added
     to the preconditioner.
+
+    **Outputs (fixed geometry).** ``on_output(t, inner, outer, membrane)`` receives the three regions'
+    fields — vector P1 ``Function``s, one component per species in declaration order (snapshots valid for
+    the call) — at each of ``output_times`` in [0, ``t_final``], recorded from a ``TS`` monitor by
+    interpolation so the step sequence is unchanged (``backend/output_times.py``); ``on_progress(t)``
+    follows every accepted step. The moving case records only its final state.
 
     Scope: a *prescribed* membrane velocity; the moving case freezes geometry within each outer interval
     (operator-split). Force-balance velocity is a follow-up.
@@ -1667,10 +1699,43 @@ def integrate_membrane_coupled(
 
     if motion is None:
         ts = make_ts(0.0, t_final)
+        monitor: OutputMonitor | None = None
+        work: PETSc.Vec | None = None
+        if on_output is not None or on_progress is not None:
+            snaps = (fem.Function(V_in), fem.Function(V_out), fem.Function(V_mem))
+            work = state_vec.duplicate()
+
+            def emit(t: float, x: PETSc.Vec) -> None:
+                snaps[0].x.array[:n_in] = x.array_r[:n_in]
+                snaps[1].x.array[:n_out] = x.array_r[n_in : n_in + n_out]
+                snaps[2].x.array[:n_mem] = x.array_r[n_in + n_out : n_in + n_out + n_mem]
+                for snap in snaps:
+                    snap.x.scatter_forward()
+                if on_output is not None:
+                    on_output(t, *snaps)
+
+            monitor = OutputMonitor(
+                output_times if on_output is not None else (),
+                t_start=0.0,
+                t_final=t_final,
+                work=work,
+                emit=emit,
+                progress=on_progress,
+            )
+            ts.setMonitor(monitor)
         ts.solve(state_vec)
         steps, final_time = ts.getStepNumber(), float(ts.getTime())
+        if monitor is not None:
+            monitor.finish(ts, final_time, state_vec)
         ts.destroy()
+        if work is not None:
+            work.destroy()
     else:
+        if on_output is not None:
+            raise NotImplementedError(
+                "per-output-time recording of a moving membrane-coupled solve is not implemented; "
+                "it records its final state only"
+            )
         # Operator-split moving solve: each outer step moves the substrate, then the adaptive BDF integrates
         # the stiff binding over that interval on the (frozen) deformed geometry — a FRESH TS per interval so
         # the BDF history never spans a geometry jump. `state_vec` carries the co-moving field across moves.
