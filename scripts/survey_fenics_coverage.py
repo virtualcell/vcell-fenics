@@ -99,6 +99,7 @@ RUN_FIELDS = (
     "cells",
     "seconds",
     "error",
+    "t_final",
 )
 
 
@@ -259,19 +260,28 @@ def run_one(
         end = float(row["end_time"]) if row["end_time"] else 0.0
     except ValueError:
         step = end = 0.0
-    # The simulation's settings are passed explicitly rather than via `--simulation`: pyvcell's reader drops a
-    # simulation that has no <OutputOptions> (VCell's default: every time step), which is not FEniCSx's gap.
-    if step > 0.0 and end > 0.0:  # a short horizon: `steps` output intervals, never past the simulation's end
-        argv += ["--t-final", repr(min(end, steps * step)), "--output-dt", repr(step)]
     h = _h(row)
     if h is not None:
         argv += ["--h", repr(h)]
     started = time.monotonic()
     result = {key: row[key] for key in ("biomodel", "file", "application", "simulation", "solver", "dim")}
-    result |= {"geometry_kind": row["geometry_kind"], "moving": row["moving"]}
+    result |= {"geometry_kind": row["geometry_kind"], "moving": row["moving"], "t_final": ""}
+    # The simulation's settings are passed explicitly rather than via `--simulation`: pyvcell's reader drops a
+    # simulation that has no <OutputOptions> (VCell's default: every time step), which is not FEniCSx's gap.
+    # A short horizon: `steps` output intervals, never past the simulation's end; a run that times out while
+    # time-stepping is retried once over a single interval (a timeout while meshing or compiling is not).
+    horizons = [min(end, n * step) for n in dict.fromkeys((steps, 1))] if step > 0.0 and end > 0.0 else [None]
     try:
         env = {**os.environ, "XDG_CACHE_HOME": str(cache), "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
-        returncode, text = _run_capped(argv, env, timeout, max_rss_gb)
+        for k, t_final in enumerate(horizons):
+            timed = argv if t_final is None else [*argv, "--t-final", repr(t_final), "--output-dt", repr(step)]
+            result["t_final"] = "" if t_final is None else f"{t_final:g}"
+            try:
+                returncode, text = _run_capped(timed, env, timeout, max_rss_gb)
+                break
+            except subprocess.TimeoutExpired as expired:
+                if k + 1 == len(horizons) or not any(mark in str(expired.output or "") for mark in _PROGRESS):
+                    raise
         errors = _ERROR_RE.findall(text)
         backend = re.search(r'"backend": "(\w+)"', _read(out / "results.fenics" / "provenance" / "summary.json"))
         cells = _CELLS_RE.findall(text)
@@ -289,6 +299,10 @@ def run_one(
     return result
 
 
+# The CLI's solve-start and per-output-time lines (stderr, flushed): any of them means the run got past meshing.
+_PROGRESS = ("[vcell-fenics] t = ", "[vcell-fenics] integrating to t = ", "[vcell-fenics] moving mesh: ")
+
+
 def _run_capped(argv: list[str], env: dict[str, str], timeout: float, max_rss_gb: float) -> tuple[int, str]:
     """Run ``argv``, killing it past ``timeout`` (TimeoutExpired) or ``max_rss_gb`` resident (MemoryError).
 
@@ -298,10 +312,12 @@ def _run_capped(argv: list[str], env: dict[str, str], timeout: float, max_rss_gb
     with tempfile.TemporaryFile("w+") as log:
         proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, text=True, env=env)
         deadline = time.monotonic() + timeout
+        timed_out = False
         try:
             while proc.poll() is None:
                 if time.monotonic() > deadline:
-                    raise subprocess.TimeoutExpired(argv, timeout)
+                    timed_out = True
+                    break
                 rss = subprocess.run(["ps", "-o", "rss=", "-p", str(proc.pid)], capture_output=True, text=True)
                 if rss.stdout.strip() and int(rss.stdout.strip()) > max_rss_gb * 1024**2:
                     raise MemoryError
@@ -311,7 +327,10 @@ def _run_capped(argv: list[str], env: dict[str, str], timeout: float, max_rss_gb
                 proc.kill()
                 proc.wait()
         log.seek(0)
-        return proc.returncode, log.read()
+        text = log.read()
+        if timed_out:
+            raise subprocess.TimeoutExpired(argv, timeout, output=text)
+        return proc.returncode, text
 
 
 def _read(path: Path) -> str:
@@ -336,7 +355,13 @@ def run(
     done: set[tuple[str, str]] = set()
     if runs_csv.exists():
         with runs_csv.open() as source:
-            done = {(r["file"], r["application"]) for r in csv.DictReader(source)}
+            recorded = list(csv.DictReader(source))
+        done = {(r["file"], r["application"]) for r in recorded}
+        if recorded and set(recorded[0]) != set(RUN_FIELDS):  # an older runs.csv: rewrite it with today's columns
+            with runs_csv.open("w", newline="") as rewrite:
+                migrate = csv.DictWriter(rewrite, fieldnames=RUN_FIELDS, restval="", extrasaction="ignore")
+                migrate.writeheader()
+                migrate.writerows(recorded)
     todo = [row for row in _candidates(work) if (row["file"], row["application"]) not in done]
     if sample is not None:  # a seeded random subset, for a pilot (its rows count toward the full run)
         todo = random.Random(20260926).sample(todo, min(sample, len(todo)))
