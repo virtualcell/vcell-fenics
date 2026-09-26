@@ -277,6 +277,10 @@ def run_one(
     started = time.monotonic()
     result = {key: row[key] for key in ("biomodel", "file", "application", "simulation", "solver", "dim")}
     result |= {"geometry_kind": row["geometry_kind"], "moving": row["moving"], "t_final": ""}
+    if not (vcml_dir / row["file"]).exists():  # a regenerated corpus (regenerate_vcml.py) lacks files VCell failed on
+        why = _regeneration_failures(vcml_dir).get(row["file"], "")
+        error = f"no regenerated VCML: {why}" if why else f"no VCML file {row['file']} in {vcml_dir}"
+        return result | {"status": "missing", "backend": "", "cells": "", "error": error, "seconds": "0.0"}
     # The simulation's settings are passed explicitly rather than via `--simulation`: pyvcell's reader drops a
     # simulation that has no <OutputOptions> (VCell's default: every time step), which is not FEniCSx's gap.
     # A short horizon: `steps` output intervals, never past the simulation's end; a run that times out after
@@ -313,6 +317,16 @@ def run_one(
 # The CLI's per-output-time line (stderr, flushed) at a time after 0: the run reached its first output interval
 # within the timeout, so a one-interval rerun (same setup cost) will finish; a run that never got there won't.
 _PAST_FIRST_OUTPUT = re.compile(r"^\[vcell-fenics\] t = (?!0 )[0-9.eE+-]+ ", re.MULTILINE)
+
+
+def _regeneration_failures(vcml_dir: Path) -> dict[str, str]:
+    """``failures.csv`` written by ``regenerate_vcml.py``: file -> VCell's math-generation message."""
+
+    try:
+        with (vcml_dir / "failures.csv").open() as source:
+            return {r["file"]: r["message"] for r in csv.DictReader(source)}
+    except OSError:
+        return {}
 
 
 def _run_capped(argv: list[str], env: dict[str, str], timeout: float, max_rss_gb: float) -> tuple[int, str]:
@@ -542,6 +556,11 @@ def report(work: Path, sample: int | None = None) -> None:
 
 # Refusal / failure categories, most specific first: (name, pattern on the error line, what it means).
 CATEGORIES: tuple[tuple[str, str, str], ...] = (
+    (
+        "VCell cannot generate the math",
+        r"^no regenerated VCML",
+        "VCell's own math generation fails for this BioModel today (not a FEniCSx gap)",
+    ),
     ("timeout", r"^no result within", "no result within the timeout at the simulation's own mesh"),
     ("memory", r"^over .* GB resident", "past the survey's per-run memory cap at the simulation's own mesh"),
     (
