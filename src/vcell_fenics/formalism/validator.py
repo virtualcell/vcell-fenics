@@ -190,6 +190,25 @@ def _div_of_vector_variable(node: Expr, vector_vars: frozenset[str]) -> str | No
     return None
 
 
+def _names_in(node: Expr) -> set[str]:
+    """Every bare or qualified name an expression references (not callee names)."""
+    if isinstance(node, Name):
+        return {node.name}
+    if isinstance(node, FunctionCall):
+        return set().union(*(_names_in(a) for a in node.args)) if node.args else set()
+    if isinstance(node, BinaryOp):
+        return _names_in(node.left) | _names_in(node.right)
+    if isinstance(node, UnaryOp):
+        return _names_in(node.operand)
+    if isinstance(node, IndexAccess):
+        return _names_in(node.base) | _names_in(node.index)
+    if isinstance(node, VectorLiteral):
+        return set().union(*(_names_in(c) for c in node.components)) if node.components else set()
+    if isinstance(node, TensorLiteral):
+        return set().union(*(_names_in(row) for row in node.rows)) if node.rows else set()
+    return set()
+
+
 def _references_partial_t_of(node: Expr, variable: str) -> bool:
     """Whether the expression contains `partial_t(variable)` — i.e. the variable evolves in time
     (so it is not a pure Lagrange-multiplier constraint like a pressure)."""
@@ -746,6 +765,9 @@ class _Validator:
         if callee == "trace":
             self._check_trace(node, ctx)
             return
+        if callee == "region_size":
+            self._check_region_size(node, ctx)
+            return
         if callee in MEASURES:
             if not weak:
                 self._error(ctx.path, f"measure {callee!r} is only valid in a weak-form 'form:' expression (§2.3.4)")
@@ -877,6 +899,15 @@ class _Validator:
             return True
         return False
 
+    def _check_region_size(self, node: FunctionCall, ctx: _ExprContext) -> None:
+        """`region_size(<subdomain>)` (§1.8.4): one argument, the name of a declared subdomain."""
+        if len(node.args) != 1 or not isinstance(node.args[0], Name):
+            self._error(ctx.path, "region_size(...) takes one argument, a subdomain name (§1.8.4)")
+            return
+        name = node.args[0].name
+        if name not in self._subdomain_by_name:
+            self._error(ctx.path, f"region_size({name}): {name!r} is not a declared subdomain (§1.8.4)")
+
     def _check_trace(self, node: FunctionCall, ctx: _ExprContext) -> None:
         if ctx.kind == "parameter":
             self._error(ctx.path, "parameter expression may not reference variables via trace (§1.8.3)")
@@ -921,13 +952,41 @@ class _Validator:
                 )
 
     def _check_param_use_site(self, nm: str, ctx: _ExprContext) -> None:
+        # §1.11.10 confines a parameter whose body uses *subdomain-relative* geometry (curvature, normals, …
+        # — `geom.*` other than the position `geom.x`) to its subdomain: those quantities mean nothing
+        # elsewhere. A scope on a body that uses only position, time, sizes and other parameters (VCell's
+        # `Domain` on a clamped species or a unit factor) is advisory: the value is meaningful on the
+        # adjacent membrane too, where VCell evaluates it (#189).
         p = self._param_by_name.get(nm)
-        if isinstance(p, ParameterExpression) and p.subdomain is not None and p.subdomain != ctx.eval_subdomain:
+        if (
+            isinstance(p, ParameterExpression)
+            and p.subdomain is not None
+            and p.subdomain != ctx.eval_subdomain
+            and self._uses_scoped_geometry(nm, set())
+        ):
             self._error(
                 ctx.path,
                 f"parameter {nm!r} is scoped to subdomain {p.subdomain!r} (it uses geometric helpers) and cannot "
                 f"be used from an expression evaluated on {ctx.eval_subdomain!r} (§1.11.10)",
             )
+
+    def _uses_scoped_geometry(self, name: str, seen: set[str]) -> bool:
+        """Whether parameter ``name``'s body, or any parameter it references, uses subdomain-relative
+        geometry (`geom.*` other than `geom.x`)."""
+        if name in seen:
+            return False  # a cycle is reported by its own check
+        seen.add(name)
+        p = self._param_by_name.get(name)
+        if not isinstance(p, ParameterExpression):
+            return False
+        try:
+            tree = parse(p.expression)
+        except ExpressionSyntaxError:
+            return False  # reported where the parameter's own expression is checked
+        names = _names_in(tree)
+        if names & SCOPED_GEOMETRY_NAMES:
+            return True
+        return any(self._uses_scoped_geometry(other, seen) for other in names if other in self._param_by_name)
 
     def _check_weak_form_structure(self, eq: WeakFormEquation, tree: Expr, path: str) -> None:
         governed = eq.variable
@@ -1161,6 +1220,8 @@ class _Validator:
             return "vector"
         if callee == "partial_t":
             return self._infer(args[0], ctx) if args else "error"
+        if callee == "region_size":
+            return "scalar"
         if callee in STANDARD_FUNCTIONS or callee in RANDOM_FUNCTIONS:
             for a in args:
                 arg_type = self._infer(a, ctx)

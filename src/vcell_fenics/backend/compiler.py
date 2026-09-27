@@ -243,6 +243,12 @@ def _resolve_qualified(name: str, ctx: CompileContext) -> UflExpr:
     raise CompileError(f"unresolved name {name!r} (not in the compile context)")
 
 
+def region_size_symbol(subdomain: str) -> str:
+    """The compile-context key a solver binds a subdomain's realized measure under, for `region_size(...)`
+    (§1.8.4) — not an identifier, so it cannot collide with a model name."""
+    return f"region_size({subdomain})"
+
+
 def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
     # `partial_t(<var>)` resolves to the backend's time-discretised derivative, so it
     # is looked up by *name* (not compiled as an expression) — only valid in a
@@ -257,6 +263,20 @@ def _compile_call(node: FunctionCall, ctx: CompileContext) -> UflExpr:
                 f"governed by a time-dependent weak-form equation"
             )
         return derivative
+
+    # `region_size(<subdomain>)` is the subdomain's realized measure, which the solver binds from its mesh
+    # (looked up by name, like `partial_t`). A solver that cannot give a fixed number — a moving mesh, whose
+    # sizes change in time — binds none, and the model is refused here.
+    if node.callee == "region_size":
+        if len(node.args) != 1 or not isinstance(node.args[0], Name):
+            raise CompileError("region_size(...) takes a single subdomain name")
+        size = ctx.symbols.get(region_size_symbol(node.args[0].name))
+        if size is None:
+            raise CompileError(
+                f"region_size({node.args[0].name}) has no size here: this solver does not provide region sizes "
+                f"(they are bound on fixed geometries; on a moving mesh a size changes in time — not yet)"
+            )
+        return size
 
     args = [compile_expression(arg, ctx) for arg in node.args]
     if node.callee == "if":

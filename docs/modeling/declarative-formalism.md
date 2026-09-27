@@ -947,7 +947,7 @@ accessors derived from `geom.x` are listed under geometric quantities (§1.8.4).
 
 **Parameter resolution at evaluation time.** A bare-name reference to a parameter is replaced by the parameter's value at the current evaluation point. For **constant** parameters the value is the declared scalar. For **expression-valued** parameters (§2.2.3) the value is the parameter's body expression evaluated against the surrounding context — same `x`, same `t`, same subdomain. For **region-keyed** parameters the value is the entry corresponding to the current region. From the call-site's perspective the parameter is just a typed value at a point; the declaration form determines how that value is computed.
 
-Expression-valued parameters may carry an optional `subdomain:` scope (§2.2.3) and must declare one if their body references a subdomain-relative geometry quantity (anything under `geom.*` except `geom.x`). A reference from outside the scoping subdomain is a validation error (§1.11.10).
+Expression-valued parameters may carry an optional `subdomain:` scope (§2.2.3) and must declare one if their body references a subdomain-relative geometry quantity (anything under `geom.*` except `geom.x`). A reference from outside the scoping subdomain is a validation error (§1.11.10) **when the body — directly or through the parameters it uses — references such a quantity**: those quantities mean nothing off their subdomain. A scope on a body that uses only position, time, sizes and other parameters is advisory (the VCell import scopes every function that has a `Domain`, e.g. a clamped species' value); such a parameter may be used on the membrane next to its compartment, where VCell evaluates it.
 
 #### 1.8.4 Geometric quantities (`geom.*`)
 
@@ -960,6 +960,8 @@ Namespaced geometry quantities (ADR 006), addressed as `geom.<member>`. Availabl
 | `geom.curvature1`, `geom.curvature2` | Principal curvatures. | codim-1 surfaces in 3D |
 | `geom.tangent` | Tangent unit vector. | 1-curves in 2D, or codim-2 edges in 3D |
 | `geom.radius`, `geom.azimuth` | Polar accessors. Sugar for `sqrt(dot(geom.x, geom.x))` and `atan2(geom.x[1], geom.x[0])`. | any subdomain |
+
+**Region sizes.** `region_size(<subdomain>)` is the realized measure of a subdomain: its volume, or its area for a surface (an area and a length in 2D). Its argument is a subdomain *name* (like a measure's boundary label), not a value, and must be declared. It is a scalar, constant on a fixed geometry. It is VCell's `vcRegionVolume('X')` / `vcRegionArea('X')`, which VCell uses for sizes like `Size_cyt` — for example, a membrane potential's total current is a current density times `Size_membr`. The solvers bind it from their meshes on a fixed geometry; on a moving mesh a size changes in time, which is not modelled yet, so such a model is refused. With one region per subdomain (T5's v1) a subdomain's size is its region's.
 
 `geom.x` (position) is available everywhere; the quantities above are subdomain-relative. For subdomains with `motion.kind` of `prescribed` or `unknown` (§1.10.6), these are evaluated against the current (deformed) configuration at every time step. For `unknown` motion the $t = 0$ configuration comes from the motion variable's initial condition (§1.7, §1.10); for `prescribed` motion the $t = 0$ configuration is the reference configuration (no displacement has yet been applied). At any $t > 0$, `geom.normal`, `geom.mean_curvature`, the principal curvatures, and the tangent basis reflect the deformed shape — a moving membrane's outward normal is the *current* outward normal, not the reference one.
 
@@ -1794,6 +1796,7 @@ This section specifies which VCell `MathDescription` constructs map to which for
 | `PdeEquation` with `bSteady = false` | `Equation` template `bulk_radv_diff` or `surface_pde_with_dilution`, `temporality: time_dependent` |
 | `PdeEquation` with `bSteady = true` | Same template, `temporality: steady_state` |
 | `OdeEquation` | `Equation` template `lumped_ode`, `temporality: time_dependent` |
+| `vcRegionVolume('X')` / `vcRegionArea('X')` | `region_size(X)` (§1.8.4) — the subdomain's realized measure |
 | `VolumeRegionEquation` / `MembraneRegionEquation` (on a `VolumeRegionVariable` / `MembraneRegionVariable`) | `Variable` with `space: region` + `Equation` template `region_ode` (T5): `region_rate` ← `VolumeRate` / `MembraneRate`, `uniform_rate` ← `UniformRate`; a volume-region variable's jump conditions → its flux BCs |
 | Constant parameters | `Parameter` with plain `value` |
 | Initial expression on a PDE/ODE | `initial_condition` field on the equation |

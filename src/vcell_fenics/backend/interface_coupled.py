@@ -56,7 +56,7 @@ from scipy.spatial import cKDTree
 from ufl.algorithms.check_arities import ArityMismatch, check_form_arity
 
 from vcell_fenics.backend._typing import UflExpr
-from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.diagnostics import NonlinearTermError
 from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_trace
 from vcell_fenics.backend.linear_solvers import set_preconditioner
@@ -214,14 +214,23 @@ class MembraneCoupledResult(_MembraneCoupledFields):
     regions: dict[str, fem.Function] | None = None  # the region variables (Real Functions) by name
 
 
-def _param_symbols(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
+def _param_symbols(md: MathDescription, mesh: Mesh, region_sizes: dict[str, float] | None = None) -> dict[str, UflExpr]:
     """The model's parameters as symbols on `mesh`: constants as `fem.Constant`, expressions compiled in
     declaration order (the import keeps them dependency-ordered) — so a VCell unit factor like
     `KFlux = AreaPerUnitArea/VolumePerUnitVolume` or `UnitFactor = pow(KMOLE, 1)` binds as a UFL
-    expression, not only bare constants. Mirrors the single-mesh `_compile_context` parameter loop."""
+    expression, not only bare constants. Mirrors the single-mesh `_compile_context` parameter loop.
+
+    ``region_sizes`` (a fixed geometry's subdomain measures, from `_geometry_region_sizes`) binds
+    `region_size(<subdomain>)` (§1.8.4) — in parameter bodies (VCell's `Size_cyt`) and, since the returned
+    symbols carry them, in every expression compiled beside the parameters."""
+    sizes = {
+        region_size_symbol(name): fem.Constant(mesh, PETSc.ScalarType(value))  # type: ignore[operator]
+        for name, value in (region_sizes or {}).items()
+    }
     scratch: dict[str, UflExpr] = {
         "geom.x": ufl.SpatialCoordinate(mesh),
         "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
+        **sizes,
     }
     ctx = CompileContext(mesh=mesh, symbols=scratch)
     params: dict[str, UflExpr] = {}
@@ -233,7 +242,26 @@ def _param_symbols(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
         else:
             raise NotImplementedError(f"coupled assembly cannot bind parameter {p.name!r} of type {type(p).__name__}")
         scratch[p.name] = params[p.name] = value  # later parameters may reference this one
-    return params
+    return {**sizes, **params}
+
+
+def _geometry_region_sizes(geometry: InterfaceCoupledGeometry) -> dict[str, float]:
+    """The realized measure of each subdomain of a two-compartment geometry — the inner and outer
+    compartments' volumes (areas in 2D) and the membrane's area (length in 2D) — for `region_size(...)`."""
+
+    parent = geometry.parent_mesh
+    one = fem.Constant(parent, PETSc.ScalarType(1.0))  # type: ignore[operator]
+    cells = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)
+    facets = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)
+
+    def measure(form: UflExpr) -> float:
+        return float(parent.comm.allreduce(float(np.real(fem.assemble_scalar(fem.form(form)))), op=MPI.SUM))
+
+    return {
+        geometry.inner_subdomain: measure(one * cells(geometry.inner_region_tag)),
+        geometry.outer_subdomain: measure(one * cells(geometry.outer_region_tag)),
+        geometry.membrane_subdomain: measure(one("+") * facets(geometry.interface_tag)),
+    }
 
 
 class _SweptMeasures:
@@ -661,7 +689,7 @@ def assemble_interface_coupled(
     ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
 
-    params = _param_symbols(md, parent)
+    params = _param_symbols(md, parent, _geometry_region_sizes(geometry))
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
     d_in = compile_expression(parse(inner_eq.terms["diffusion"]), ctx)
     d_out = compile_expression(parse(outer_eq.terms["diffusion"]), ctx)
@@ -889,7 +917,7 @@ def integrate_interface_coupled(
     eq_of = {eq.variable: eq for eq in eqs}
     compartment_of = {eq.variable: eq.subdomain for eq in eqs}
 
-    params = _param_symbols(md, parent)
+    params = _param_symbols(md, parent, _geometry_region_sizes(geometry))
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
 
     # Side-aware traces on the membrane. `membrane_trace(f) = f('+') + f('-')` selects f's own side only for a
@@ -1309,9 +1337,11 @@ def assemble_membrane_coupled(
     )
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map, geometry.membrane_entity_map]
 
-    params = _param_symbols(md, parent)
+    # region sizes are fixed numbers only while the geometry is (a moving membrane changes them in time)
+    subdomain_sizes = _geometry_region_sizes(geometry) if motion is None and velocity is None else None
+    params = _param_symbols(md, parent, subdomain_sizes)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
-    surf_params = _param_symbols(md, geometry.membrane_mesh)
+    surf_params = _param_symbols(md, geometry.membrane_mesh, subdomain_sizes)
     surf_ctx = CompileContext(
         geometry.membrane_mesh, {"geom.x": ufl.SpatialCoordinate(geometry.membrane_mesh), **surf_params}
     )
@@ -1691,12 +1721,14 @@ def integrate_membrane_coupled(
     )
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map, geometry.membrane_entity_map]
 
-    params = _param_symbols(md, parent)
+    # region sizes are fixed numbers only while the geometry is (a moving membrane changes them in time)
+    subdomain_sizes = _geometry_region_sizes(geometry) if motion is None and velocity is None else None
+    params = _param_symbols(md, parent, subdomain_sizes)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
     # A Real is the same on both sides of the membrane: referenced as u (bulk) or u("+") (on dS).
     region_bulk = {eq.variable: u for eq, u in zip(region_eqs, region_fns, strict=True)}
     region_surface = {eq.variable: u("+") for eq, u in zip(region_eqs, region_fns, strict=True)}
-    surf_params = _param_symbols(md, membrane_mesh)
+    surf_params = _param_symbols(md, membrane_mesh, subdomain_sizes)
     surf_ctx = CompileContext(membrane_mesh, {"geom.x": ufl.SpatialCoordinate(membrane_mesh), **surf_params})
 
     # Moving membrane (optional): the motion driver + the per-region dilution coefficient `∇·v_mesh`. The

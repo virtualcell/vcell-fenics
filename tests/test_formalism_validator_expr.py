@@ -13,9 +13,12 @@ test_formalism_validator.py and already covers the happy path end-to-end.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from vcell_fenics.formalism import MathDescription, validate
 from vcell_fenics.formalism.schema import (
     MotionUnknown,
+    Parameter,
     ParameterConstant,
     ParameterExpression,
     Subdomain,
@@ -365,3 +368,61 @@ def test_random_primitive_outside_initial_condition_is_rejected() -> None:
 
 def test_random_primitive_arity_is_checked() -> None:
     assert any("takes two arguments" in m for m in _errors(_surface_model(ic="normal(0)")))
+
+
+def _cyto_membrane(*, parameters: Sequence[Parameter], membrane_source: str) -> MathDescription:
+    """A cytosolic species and a membrane species whose source is ``membrane_source``."""
+    return MathDescription(
+        geometry="g",
+        subdomains=[Subdomain(name="cyto", kind="volume"), Subdomain(name="membrane", kind="surface")],
+        variables=[Variable(name="c", subdomain="cyto"), Variable(name="rho", subdomain="membrane")],
+        parameters=list(parameters),
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="c",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "0.5"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="rho",
+                subdomain="membrane",
+                temporality="time_dependent",
+                terms={"source": membrane_source},
+                initial_condition="0.0",
+            ),
+        ],
+    )
+
+
+def test_a_position_only_scoped_parameter_is_usable_on_the_adjacent_membrane() -> None:
+    # VCell scopes every function with a Domain; a clamped species' value (position only) is meaningful on
+    # the membrane next to its compartment, where VCell evaluates it (#189)
+    md = _cyto_membrane(
+        parameters=[ParameterExpression(name="K_cyt", expression="140.0 + geom.x[0]", subdomain="cyto")],
+        membrane_source="K_cyt - rho",
+    )
+    assert _errors(md) == []
+
+
+def test_a_scoped_parameter_is_still_confined_through_another_that_uses_curvature() -> None:
+    md = _cyto_membrane(
+        parameters=[
+            ParameterExpression(name="kappa", expression="geom.mean_curvature", subdomain="cyto"),
+            ParameterExpression(name="scaled", expression="2.0 * kappa", subdomain="cyto"),
+        ],
+        membrane_source="scaled - rho",
+    )
+    assert any("parameter 'scaled' is scoped to subdomain 'cyto'" in m for m in _errors(md))
+
+
+def test_region_size_takes_a_declared_subdomain() -> None:
+    ok = _cyto_membrane(parameters=[], membrane_source="region_size(cyto) / region_size(membrane) - rho")
+    assert _errors(ok) == []
+    unknown = _cyto_membrane(parameters=[], membrane_source="region_size(nucleus) - rho")
+    assert any("'nucleus' is not a declared subdomain" in m for m in _errors(unknown))
+    not_a_name = _cyto_membrane(parameters=[], membrane_source="region_size(2.0) - rho")
+    assert any("region_size(...) takes one argument, a subdomain name" in m for m in _errors(not_a_name))

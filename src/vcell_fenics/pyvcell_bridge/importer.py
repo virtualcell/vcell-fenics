@@ -448,10 +448,11 @@ def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) ->
     inlined into equations and surfaced as observables instead.
 
     Pure functions that nothing in the model references are *not* imported: VCell emits region-size
-    bookkeeping (``Size_<compartment>``, ``vobj_<region>_size``) calling geometric built-ins like
-    ``vcRegionVolume('domain')`` that our expression formalism does not model. They are provably dead
-    (no equation, boundary, or other parameter reaches them), so dropping them removes no model
-    semantics — and a *referenced* such function is still emitted and rejected loudly at validation."""
+    bookkeeping for every compartment (``Size_<compartment>``, ``vobj_<region>_size``), and they are
+    provably dead (no equation, boundary, or other parameter reaches them), so dropping them removes no
+    model semantics. A *referenced* one (a membrane potential's current is a density times
+    ``Size_membr``) is emitted, its ``vcRegionVolume('X')`` / ``vcRegionArea('X')`` translated to
+    ``region_size(X)`` (§1.8.4)."""
 
     reachable = _reachable_names(vcml)
     parameters: list[Parameter] = []
@@ -472,7 +473,33 @@ def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) ->
                     subdomain=function.domain,
                 )
             )
-    return parameters
+    return _dependency_ordered(parameters)
+
+
+def _dependency_ordered(parameters: list[Parameter]) -> list[Parameter]:
+    """``parameters`` with each one after the parameters its expression uses — the order the backends
+    compile them in (a forward reference is an unresolved name). VCell's function order is not
+    dependency order (e.g. ``device_membrane.Capacitance = C_membrane * Size_membrane`` before
+    ``Size_membrane``), so this is a stable topological sort: an order that already works is kept. A cycle
+    is left as is for the validator to report."""
+
+    by_name = {p.name: p for p in parameters}
+    placed: set[str] = set()
+    ordered: list[Parameter] = []
+
+    def place(parameter: Parameter, visiting: set[str]) -> None:
+        if parameter.name in placed or parameter.name in visiting:
+            return
+        visiting.add(parameter.name)
+        if isinstance(parameter, ParameterExpression):
+            for name in sorted(referenced_names(parameter.expression) & by_name.keys()):
+                place(by_name[name], visiting)
+        placed.add(parameter.name)
+        ordered.append(parameter)
+
+    for parameter in parameters:
+        place(parameter, set())
+    return ordered
 
 
 def _reachable_names(vcml: VcmlMathDescription) -> frozenset[str]:
