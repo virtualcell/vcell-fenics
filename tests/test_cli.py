@@ -373,9 +373,12 @@ def test_membrane_species_with_one_sided_bulk_is_a_clean_error(
     assert "bulk species only in 'ext_dom'" in err and "'cyto_dom' has none" in err
 
 
-def test_region_variables_are_refused_clearly(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    # A well-mixed species (VCell's VolumeRegionVariable, §1.4.2 T5) imports and validates as a `region_ode`,
-    # but no backend solves it yet: the run must say so up front (#196), not fail as an unknown name.
+def test_region_variables_off_the_two_compartment_solver_are_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A well-mixed species (VCell's VolumeRegionVariable, §1.4.2 T5) in a model with membrane receptors routes
+    # to the membrane-coupled solver, which does not host region variables yet: the run must say so up front
+    # (#196), not fail as an unknown name.
     math = yaml.safe_load((_CV / "receptor_math.yaml").read_text())
     for variable in math["variables"]:
         if variable["name"] == "s_cyto":
@@ -391,8 +394,48 @@ def test_region_variables_are_refused_clearly(tmp_path: Path, capsys: pytest.Cap
     argv = ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "0.1"]
     assert main([*argv, "--out", str(tmp_path / "out")]) == 2
     err = capsys.readouterr().err
-    assert "region variables are not solved yet: 's_cyto' on 'cyto_dom'" in err and "#196" in err
+    assert "region variables are not solved yet here: 's_cyto' on 'cyto_dom'" in err and "#196" in err
     assert not (tmp_path / "out").exists()  # refused before any bundle was started
+
+
+def test_well_mixed_species_and_membrane_potential_run_on_the_two_compartment_solver(tmp_path: Path) -> None:
+    # The permeability model with its cytosolic species well-mixed (a VolumeRegionVariable) and a membrane
+    # potential added (a MembraneRegionVariable, C dV/dt = −g (V − E)): the two-compartment solver hosts both
+    # as Real blocks (#196). The bundle holds s_cyto as a constant field on the cytosol, V on the membrane.
+    math = yaml.safe_load((_CV / "coupled_perm_math.yaml").read_text())
+    for variable in math["variables"]:
+        if variable["name"] == "s_cyto":
+            variable["var_type"] = "VolumeRegionVariable"
+    math["variables"].append({"name": "V", "var_type": "MembraneRegionVariable", "domain": "mem_dom"})
+    math["constants"] += [
+        {"name": "g_leak", "exp": "2.0"},
+        {"name": "C_m", "exp": "0.5"},
+        {"name": "E_rev", "exp": "-60.0"},
+    ]
+    for compartment in math["compartment_subdomains"]:
+        if compartment["name"] == "cyto_dom":
+            compartment["pde_equations"] = []
+            compartment["volume_region_equations"] = [
+                {"name": "s_cyto", "uniform_rate": "0.0", "volume_rate": "0.0", "initial": "s_cyto_init_uM"}
+            ]
+    for membrane in math["membrane_subdomains"]:
+        membrane["membrane_region_equations"] = [
+            {"name": "V", "uniform_rate": "0.0", "membrane_rate": "(-g_leak * (V - E_rev) / C_m)", "initial": "-20.0"}
+        ]
+    math_file = tmp_path / "region_math.yaml"
+    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
+    out = tmp_path / "out"
+    argv = ["--math", str(math_file), "--geometry", str(_CV / "coupled_perm_geom.yaml"), "--t-final", "1.0"]
+    assert main([*argv, "--output-dt", "0.5", "--h", "0.2", "--no-fields", "--out", str(out)]) == 0
+
+    bundle = Bundle.open(out / "results.fenics")
+    s_cyto = bundle.stats("cyto_dom", "s_cyto")  # (T, 4): mean, total, min, max
+    assert np.allclose(s_cyto[:, 2], s_cyto[:, 3])  # one value on the whole cytosol
+    total = s_cyto[:, 1] + bundle.stats("ext_dom", "s_ext")[:, 1]
+    assert np.allclose(total, total[0], rtol=1e-8)  # exchange only: mass conserved
+    potential = bundle.stats("mem_dom", "V")[:, 0]
+    exact = -60.0 + 40.0 * np.exp(-4.0 * np.array([0.0, 0.5, 1.0]))
+    assert np.allclose(potential, exact, atol=1e-2)
 
 
 def test_unknown_model_file_is_a_clean_error(capsys: pytest.CaptureFixture[str]) -> None:

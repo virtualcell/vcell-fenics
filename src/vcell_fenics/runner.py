@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import dolfinx
+import numpy as np
 from mpi4py import MPI
 
 import vcell_fenics
@@ -131,7 +132,10 @@ def run_model(
     ``solver.overrides``); ``status`` hears progress during the solve and a data event per written row
     (ADR 011 §4) — starting/completed/failed are the caller's, since they bracket more than the solve."""
 
-    _refuse_region_variables(model.math)
+    # The model's shape (and any refusal of it) is settled before anything is written.
+    moving = _moving_subdomains(model)
+    coupling = None if moving else _interface_coupling(model)
+    _refuse_region_variables(model.math, coupling if coupling is not None and not coupling.membrane_species else None)
     comm = MPI.COMM_WORLD
     bundle = out_dir / f"{prefix}.fenics"
     if comm.rank == 0:
@@ -155,8 +159,6 @@ def run_model(
     recorder = BundleRecorder(writer, comm=comm)
     reporter: StatusReporter = status if status is not None else NullReporter()
     recorder.on_row(lambda t, row: reporter.data(t, t / options.t_final))
-    moving = _moving_subdomains(model)
-    coupling = None if moving else _interface_coupling(model)
     run_info: dict[str, Any] = {
         "h": options.h,
         "t_final": options.t_final,
@@ -217,14 +219,18 @@ def run_model(
     return summary
 
 
-def _refuse_region_variables(math: MathDescription) -> None:
-    """Region variables (§1.4.2 T5: a well-mixed species, the membrane potential) import and validate, but no
-    backend solves them yet (#196) — say so before any bundle is started."""
-    regions = [f"{v.name!r} on {v.subdomain!r}" for v in math.variables if v.space == REGION_SPACE]
-    if regions:
+def _refuse_region_variables(math: MathDescription, interface: Coupling | None) -> None:
+    """Region variables (§1.4.2 T5: a well-mixed species, the membrane potential) are solved by the
+    two-compartment solver — on either compartment or the membrane between them (``interface``). Every
+    other path refuses them before any bundle is started (#196)."""
+    regions = [v for v in math.variables if v.space == REGION_SPACE]
+    homes = {interface.inner, interface.outer, interface.membrane} if interface is not None else set()
+    unhosted = [f"{v.name!r} on {v.subdomain!r}" for v in regions if v.subdomain not in homes]
+    if unhosted:
         raise RunError(
-            f"region variables are not solved yet: {', '.join(regions)} — one value per region (a well-mixed "
-            f"species or a membrane potential); see virtualcell/vcell-fenics#196"
+            f"region variables are not solved yet here: {', '.join(unhosted)} — one value per region (a "
+            f"well-mixed species or a membrane potential); only the two-compartment solver hosts them so far "
+            f"(on either compartment or the membrane between them); see virtualcell/vcell-fenics#196"
         )
 
 
@@ -449,6 +455,7 @@ def _run_interface_coupled(
     species: dict[str, list[str]] = {coupling.inner: [], coupling.outer: []}
     for eq in model.math.equations:
         species.setdefault(eq.subdomain, []).append(eq.variable)
+    regions = {v.name for v in model.math.variables if v.space == REGION_SPACE}
     if options.time_integration != "method_of_lines":
         log("note: the two-compartment solver is method-of-lines; --time-integration is ignored")
 
@@ -470,15 +477,30 @@ def _run_interface_coupled(
         )
     for name, mesh in ((coupling.inner, geometry.inner_mesh), (coupling.outer, geometry.outer_mesh)):
         recorder.add_domain(name, "volume", mesh, [(variable, None) for variable in species[name]])
+    # A membrane potential (a membrane region variable) is written on the membrane, as a constant field.
+    domains = [coupling.inner, coupling.outer]
+    if species.get(coupling.membrane):
+        recorder.add_domain(
+            coupling.membrane, "membrane", geometry.membrane_mesh, [(v, None) for v in species[coupling.membrane]]
+        )
+        domains.append(coupling.membrane)
     recorder.open()
 
     cells = mesh_cell_count(geometry.inner_mesh) + mesh_cell_count(geometry.outer_mesh)
     log(f"integrating to t = {options.t_final:g} (interface-coupled method of lines, {cells} cells)")
 
+    def source(variable: str, field: Any) -> Any:
+        """A field as is; a region variable (one Real value, held by its owning rank) as a constant."""
+        if variable not in regions:
+            return field
+        n_owned = field.function_space.dofmap.index_map.size_local
+        value = comm.allreduce(float(np.sum(field.x.array[:n_owned].real)), op=MPI.SUM)
+        return lambda x: np.full(x.shape[1], value)
+
     def on_output(t: float, fields: dict[str, Any]) -> None:
         recorder.capture(
             t,
-            {name: [fields[variable] for variable in species[name]] for name in (coupling.inner, coupling.outer)},
+            {name: [source(v, fields[v]) for v in species[name]] for name in domains},
             progress=t / options.t_final,
         )
 
@@ -599,7 +621,13 @@ def _interface_coupling(model: ModelInput) -> Coupling | None:
     which the realizer drops so the outer compartment's own edge becomes the reservoir wall.
     """
 
-    subdomains = {eq.subdomain for eq in model.math.equations}
+    # A region variable (T5) is one value, not a field: a well-mixed species still makes its compartment a
+    # modelled one, but a membrane potential does not make the membrane a third (membrane-species) subdomain.
+    surfaces = {sd.name for sd in model.math.subdomains if sd.kind == "surface"}
+    membrane_regions = {
+        (v.name, v.subdomain) for v in model.math.variables if v.space == REGION_SPACE and v.subdomain in surfaces
+    }
+    subdomains = {eq.subdomain for eq in model.math.equations if (eq.variable, eq.subdomain) not in membrane_regions}
     if len(subdomains) == 3:
         # two compartments plus the membrane between them, each carrying equations: the membrane-coupled
         # shape — a SurfaceClass named after one of the subdomains, separating the other two

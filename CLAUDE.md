@@ -88,7 +88,8 @@ docker build -f docker/Dockerfile -t vcell-fenics .     # same runner, container
 
 It drives the fixed-domain paths — a single mesh; two compartments across a membrane, any number of
 species in each; and both compartments plus **membrane species** on the membrane between them
-(receptor–ligand binding, `integrate_membrane_coupled`) — and VCell moving boundaries (a prescribed
+(receptor–ligand binding, `integrate_membrane_coupled`), and on the two-compartment path **region
+variables** (a well-mixed species, a membrane potential — T5 `region_ode`) — and VCell moving boundaries (a prescribed
 front, species inside it; ALE with remeshing, in 2D and 3D — the tracker's "Moving boundaries"
 section). Not yet: membrane species with bulk species on one side only, or on a moving front.
 Stokes/FSI, phase field and unknown-motion mechanics keep their own drivers — extend the CLI
