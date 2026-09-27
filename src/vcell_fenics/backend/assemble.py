@@ -34,12 +34,13 @@ import ufl
 from dolfinx import fem
 from dolfinx import mesh as dmesh
 from dolfinx.mesh import Mesh
+from mpi4py import MPI
 from numpy.typing import NDArray
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
-from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
 from vcell_fenics.backend.discrete import BackwardEuler, BoundaryTerm, DiscreteProblem, Term, TermKind, _MeshMotion
 from vcell_fenics.backend.geometry import CoupledGeometry, Geometry, cross_validate
@@ -88,7 +89,9 @@ def assemble(
 
     equations = _resolve_equations(md)
     mesh = geometry.mesh_of(equations[0].subdomain)
-    ctx = _compile_context(md, mesh)
+    # region sizes (§1.8.4) are fixed numbers only while nothing moves (a moving mesh changes them in time)
+    static = all(isinstance(sd.motion, MotionNone) for sd in md.subdomains)
+    ctx = _compile_context(md, mesh, region_sizes=_region_sizes(geometry, mesh) if static else None)
     problem = _build_problem(md, equations, mesh, ctx, dt=dt, fe_degree=fe_degree, geometry=geometry)
     _apply_initial_conditions(problem, equations, ctx, len(equations))
     return problem
@@ -506,7 +509,31 @@ def _motion_velocity(
     )
 
 
-def _compile_context(md: MathDescription, mesh: Mesh, *, seed: int = 0) -> CompileContext:
+def _region_sizes(geometry: Geometry, mesh: Mesh) -> dict[str, float]:
+    """A single-mesh geometry's measures for `region_size(...)` (§1.8.4): each subdomain's volume (area in
+    2D), and each labelled boundary's area (length in 2D) — a membrane that bounds the compartment is a
+    boundary here, named as its surface subdomain."""
+
+    def measure(form: UflExpr, on: Mesh) -> float:
+        return float(on.comm.allreduce(float(np.real(fem.assemble_scalar(fem.form(form)))), op=MPI.SUM))
+
+    sizes = {
+        name: measure(fem.Constant(sub.mesh, PETSc.ScalarType(1.0)) * ufl.dx(domain=sub.mesh), sub.mesh)  # type: ignore[operator]
+        for name, sub in geometry.subdomains.items()
+    }
+    if geometry.parent_mesh is None or geometry.parent_mesh is mesh:  # boundary facets index this mesh's
+        fdim = mesh.topology.dim - 1
+        for name, boundary in geometry.boundaries.items():
+            facets = np.unique(boundary.facets).astype(np.int32)
+            tags = dmesh.meshtags(mesh, fdim, facets, np.ones(facets.size, dtype=np.int32))
+            ds = ufl.Measure("ds", domain=mesh, subdomain_data=tags)(1)
+            sizes.setdefault(name, measure(fem.Constant(mesh, PETSc.ScalarType(1.0)) * ds, mesh))  # type: ignore[operator]
+    return sizes
+
+
+def _compile_context(
+    md: MathDescription, mesh: Mesh, *, seed: int = 0, region_sizes: dict[str, float] | None = None
+) -> CompileContext:
     # The namespaced built-ins (ADR 006): `geom.x` is the position field, `sim.t` a mutable time
     # Constant. Expressions outside the IC (which the validator forbids `sim.t` in) may reference
     # the time, and the driver advances it each step — e.g. a time-dependent Dirichlet value
@@ -515,6 +542,11 @@ def _compile_context(md: MathDescription, mesh: Mesh, *, seed: int = 0) -> Compi
     symbols: dict[str, UflExpr] = {
         "geom.x": ufl.SpatialCoordinate(mesh),
         "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
+        # `region_size(<subdomain>)` (§1.8.4), bound only on a fixed geometry
+        **{
+            region_size_symbol(name): fem.Constant(mesh, PETSc.ScalarType(value))  # type: ignore[operator]
+            for name, value in (region_sizes or {}).items()
+        },
     }
     ctx = CompileContext(mesh=mesh, symbols=symbols, rng=np.random.default_rng(seed))
     # A ParameterExpression compiles against the symbols defined so far (constants, coordinates, time,

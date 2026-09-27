@@ -400,6 +400,21 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-27** — **Region sizes (#199) and cross-membrane scoping (#189).**
+  - **`region_size(<subdomain>)` (§1.8.4)** is a subdomain's realized measure. The bridge translates VCell's
+    `vcRegionVolume('X')` / `vcRegionArea('X')` to it. Both coupled solvers and the single-mesh path bind it
+    from their meshes; a moving mesh refuses it, because its sizes change in time (a follow-up).
+  - **Scoping (#189):** a compartment-scoped parameter whose body uses only position, time, sizes and other
+    parameters may be used on the adjacent membrane. Examples are VCell's clamped species and unit factors,
+    which a membrane potential's current uses. Subdomain-relative geometry (curvature, normals) stays
+    confined.
+  - **Bridge fix:** parameters are now emitted in dependency order; VCell's function order is not.
+  - **The 29 survey applications with region variables:**
+    - 20 now validate and integrate, then stop at #186 (non-diffusing species);
+    - 3 at per-face Dirichlet BCs in the membrane-coupled solver (#193);
+    - 5 are refused for region variables on 3+ compartments;
+    - 1 has one-sided membrane species (#185).
+
 - **2026-09-27** — **Region variables on the membrane-coupled solver too (#196, part 2).**
   - **What runs:** a membrane potential (or a well-mixed species beside another species) now runs next to
     membrane species. That is the shape of 23 of the survey's 29 region-variable applications.

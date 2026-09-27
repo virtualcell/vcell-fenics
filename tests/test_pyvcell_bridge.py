@@ -1039,3 +1039,34 @@ def test_a_function_used_only_by_a_region_equation_is_kept() -> None:
     )
     md = import_math_description(vcml)
     assert "g_leak" in {p.name for p in md.parameters}
+
+
+def test_parameters_are_emitted_in_dependency_order() -> None:
+    # VCell's function order is not dependency order: a capacitance defined from the membrane's size comes
+    # before the size. The backends compile parameters in order, so the import must reorder them.
+    vcml = vm.MathDescription(
+        name="m",
+        constants=[vm.Constant(name="C_m", exp="0.01"), vm.Constant(name="AreaPerUnitArea_pm", exp="1.0")],
+        functions=[
+            vm.MathFunction(name="device_pm.Capacitance", exp="(C_m * Size_pm)", domain="pm"),
+            vm.MathFunction(name="Size_pm", exp="(AreaPerUnitArea_pm * vcRegionArea('pm'))", domain="pm"),
+        ],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="k", diffusion="1.0", initial="1")])
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                membrane_region_equations=[
+                    vm.MembraneRegionEquation(
+                        name="V", uniform_rate="0.0", membrane_rate="-V / device_pm.Capacitance", initial="-70.0"
+                    )
+                ],
+            )
+        ],
+    )
+    names = [p.name for p in import_math_description(vcml).parameters]
+    assert names.index("Size_pm") < names.index("device_pm.Capacitance")
+    assert names.index("C_m") < names.index("device_pm.Capacitance")
