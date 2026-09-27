@@ -27,8 +27,10 @@ from vcell_fenics.formalism import (
     validate_or_raise,
 )
 from vcell_fenics.formalism.schema import (
+    BCDirichlet,
     BCNeumann,
     ParameterConstant,
+    Subdomain,
     TemplateEquation,
     Variable,
 )
@@ -354,3 +356,58 @@ def test_evolving_scalar_with_div_is_not_mistaken_for_a_pressure() -> None:
 """
     messages = _infsup_warnings(_stokes_model("lagrange_p1", "lagrange_p1", extra_var=extra_var, extra_eq=extra_eq))
     assert len(messages) == 1  # the p1/p1 pressure only; the evolving c is not flagged
+
+
+# ---------------------------------------------------------------------------
+# Region variables (§1.4.2 T5): a `region`-space variable is governed by `region_ode`, and only it.
+# ---------------------------------------------------------------------------
+
+
+def _region_model(*, space: str = "region", template: str = "region_ode") -> MathDescription:
+    """A well-mixed cytosolic species `ca` (one value per region) fed by a membrane flux."""
+    terms = {"region_rate": "-kd * ca"} if template == "region_ode" else {"rate": "-kd * ca"}
+    return MathDescription(
+        geometry="g",
+        subdomains=[Subdomain(name="cyto", kind="volume"), Subdomain(name="pm", kind="surface")],
+        variables=[Variable(name="ca", subdomain="cyto", space=space)],
+        equations=[
+            TemplateEquation(
+                template=template,
+                variable="ca",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms=terms,
+                initial_condition="0.1",
+            )
+        ],
+        parameters=[ParameterConstant(name="kd", value=1.0), ParameterConstant(name="j", value=2.0)],
+        boundary_conditions=[BCNeumann(variable="ca", boundary="pm", expression="j * (1.0 - trace(ca))")],
+    )
+
+
+def test_region_variable_under_region_ode_validates() -> None:
+    assert _errors(_region_model()) == []
+
+
+def test_region_ode_requires_a_region_variable() -> None:
+    assert any("'region_ode' governs region variables" in m for m in _errors(_region_model(space="lagrange_p1")))
+
+
+def test_region_variable_requires_region_ode() -> None:
+    assert any("only the 'region_ode' template" in m for m in _errors(_region_model(template="lumped_ode")))
+
+
+def test_region_variable_takes_only_flux_bcs() -> None:
+    md = _region_model()
+    bad = dataclasses.replace(md, boundary_conditions=[BCDirichlet(variable="ca", boundary="pm", expression="0.2")])
+    assert any("takes only flux BCs" in m for m in _errors(bad))
+
+
+def test_region_ode_is_time_dependent_only() -> None:
+    md = _region_model()
+    eq = md.equations[0]
+    assert isinstance(eq, TemplateEquation)
+    bad = dataclasses.replace(
+        md, equations=[dataclasses.replace(eq, temporality="steady_state", initial_condition=None)]
+    )
+    assert any("does not support temporality 'steady_state'" in m for m in _errors(bad))

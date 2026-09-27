@@ -1,0 +1,249 @@
+name: unnamed_spatialGeom_generated
+constants:
+- name: _F_
+  exp: '96485.3321'
+- name: _F_nmol_
+  exp: '9.64853321E-5'
+- name: _K_GHK_
+  exp: '1.0E-9'
+- name: _N_pmol_
+  exp: 6.02214179E11
+- name: _PI_
+  exp: '3.141592653589793'
+- name: _R_
+  exp: '8314.46261815'
+- name: _T_
+  exp: '300.0'
+- name: AreaPerUnitArea_m0
+  exp: '1.0'
+- name: K_millivolts_per_volt
+  exp: '1000.0'
+- name: Kf_r0
+  exp: '1.0'
+- name: Kf_r1
+  exp: '1.0'
+- name: Kf_r2
+  exp: '1.0'
+- name: KMOLE
+  exp: '0.001660538783162726'
+- name: Kr_r0
+  exp: '0.5'
+- name: Kr_r1
+  exp: '1.0'
+- name: Kr_r2
+  exp: '1.0'
+- name: netValence_r1
+  exp: '1.0'
+- name: netValence_r2
+  exp: '1.0'
+- name: s0_boundaryXm
+  exp: '0.0'
+- name: s0_boundaryXp
+  exp: '0.0'
+- name: s0_boundaryYm
+  exp: '0.0'
+- name: s0_boundaryYp
+  exp: '0.0'
+- name: s0_boundaryZm
+  exp: '0.0'
+- name: s0_boundaryZp
+  exp: '0.0'
+- name: s0_diffusionRate
+  exp: '1.0E-4'
+- name: s1_boundaryXm
+  exp: '0.0'
+- name: s1_boundaryXp
+  exp: '0.0'
+- name: s1_boundaryYm
+  exp: '0.0'
+- name: s1_boundaryYp
+  exp: '0.0'
+- name: s1_boundaryZm
+  exp: '0.0'
+- name: s1_boundaryZp
+  exp: '0.0'
+- name: s2_boundaryXm
+  exp: '0.0'
+- name: s2_boundaryXp
+  exp: '0.0'
+- name: s2_boundaryYm
+  exp: '0.0'
+- name: s2_boundaryYp
+  exp: '0.0'
+- name: s2_boundaryZm
+  exp: '0.0'
+- name: s2_boundaryZp
+  exp: '0.0'
+- name: s3_boundaryXm
+  exp: '0.0'
+- name: s3_boundaryXp
+  exp: '0.0'
+- name: s3_boundaryYm
+  exp: '0.0'
+- name: s3_boundaryYp
+  exp: '0.0'
+- name: s3_boundaryZm
+  exp: '0.0'
+- name: s3_boundaryZp
+  exp: '0.0'
+- name: s3_diffusionRate
+  exp: '1.0E-4'
+- name: Voltage_m0
+  exp: '0.0'
+- name: VolumePerUnitVolume_c0
+  exp: '1.0'
+- name: VolumePerUnitVolume_c1
+  exp: '1.0'
+functions:
+- name: J_r0
+  exp: ((Kf_r0 * s0) - (1.0 * Kr_r0 * s1))
+  domain: subdomain0
+- name: J_r1
+  exp: ((Kf_r1 * s0) - (Kr_r1 * s2))
+  domain: subdomain0_subdomain1_membrane
+- name: J_r2
+  exp: ((Kf_r2 * s2) - (Kr_r2 * s3))
+  domain: subdomain0_subdomain1_membrane
+- name: KFlux_m0_c0
+  exp: (AreaPerUnitArea_m0 / VolumePerUnitVolume_c0)
+  domain: subdomain0_subdomain1_membrane
+- name: KFlux_m0_c1
+  exp: (AreaPerUnitArea_m0 / VolumePerUnitVolume_c1)
+  domain: subdomain0_subdomain1_membrane
+- name: s0_init_umol_l_1
+  exp: (1.0 + sin(x))
+  domain: subdomain0
+- name: s1_init_umol_l_1
+  exp: (1.0 + cos(x))
+  domain: subdomain0
+- name: s2_init_umol_dm_2
+  exp: (1.0 + cos(y))
+  domain: subdomain0_subdomain1_membrane
+- name: s3_init_umol_l_1
+  exp: (1.0 + (sin(x) * cos(y)))
+  domain: subdomain1
+- name: Size_c0
+  exp: (VolumePerUnitVolume_c0 * vcRegionVolume('subdomain0'))
+  domain: subdomain0
+- name: Size_c1
+  exp: (VolumePerUnitVolume_c1 * vcRegionVolume('subdomain1'))
+  domain: subdomain1
+- name: Size_m0
+  exp: (AreaPerUnitArea_m0 * vcRegionArea('subdomain0_subdomain1_membrane'))
+  domain: subdomain0_subdomain1_membrane
+- name: sobj_subdomain11_subdomain00_size
+  exp: vcRegionArea('subdomain0_subdomain1_membrane')
+  domain: subdomain0_subdomain1_membrane
+- name: vobj_subdomain00_size
+  exp: vcRegionVolume('subdomain0')
+  domain: subdomain0
+- name: vobj_subdomain11_size
+  exp: vcRegionVolume('subdomain1')
+  domain: subdomain1
+variables:
+- name: s0
+  var_type: VolumeVariable
+  domain: subdomain0
+- name: s1
+  var_type: VolumeRegionVariable
+  domain: subdomain0
+- name: s2
+  var_type: MembraneRegionVariable
+  domain: subdomain0_subdomain1_membrane
+- name: s3
+  var_type: VolumeVariable
+  domain: subdomain1
+compartment_subdomains:
+- name: subdomain1
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Flux
+  - boundary: Zp
+    type: Flux
+  pde_equations:
+  - name: s3
+    rate: '0.0'
+    diffusion: s3_diffusionRate
+    initial: s3_init_umol_l_1
+    solution_type: Unknown
+    boundaries:
+      xm: s3_boundaryXm
+      xp: s3_boundaryXp
+      ym: s3_boundaryYm
+      yp: s3_boundaryYp
+      zm: s3_boundaryZm
+      zp: s3_boundaryZp
+- name: subdomain0
+  boundary_types:
+  - boundary: Xm
+    type: Flux
+  - boundary: Xp
+    type: Flux
+  - boundary: Ym
+    type: Flux
+  - boundary: Yp
+    type: Flux
+  - boundary: Zm
+    type: Flux
+  - boundary: Zp
+    type: Flux
+  pde_equations:
+  - name: s0
+    rate: '- J_r0'
+    diffusion: s0_diffusionRate
+    initial: s0_init_umol_l_1
+    solution_type: Unknown
+    boundaries:
+      xm: s0_boundaryXm
+      xp: s0_boundaryXp
+      ym: s0_boundaryYm
+      yp: s0_boundaryYp
+      zm: s0_boundaryZm
+      zp: s0_boundaryZp
+  volume_region_equations:
+  - name: s1
+    uniform_rate: '0.0'
+    volume_rate: J_r0
+    initial: s1_init_umol_l_1
+    solution_type: unknown
+membrane_subdomains:
+- name: subdomain0_subdomain1_membrane
+  inside_compartment: subdomain0
+  outside_compartment: subdomain1
+  boundary_types:
+  - boundary: Xm
+    type: Value
+  - boundary: Xp
+    type: Value
+  - boundary: Ym
+    type: Value
+  - boundary: Yp
+    type: Value
+  - boundary: Zm
+    type: Value
+  - boundary: Zp
+    type: Value
+  membrane_region_equations:
+  - name: s2
+    uniform_rate: '0.0'
+    membrane_rate: (J_r1 - J_r2)
+    initial: s2_init_umol_dm_2
+    solution_type: unknown
+  jump_conditions:
+  - name: s0
+    in_flux: ( - 1.0 * KFlux_m0_c0 * J_r1)
+    out_flux: '0.0'
+  - name: s1
+    in_flux: '0.0'
+    out_flux: '0.0'
+  - name: s3
+    in_flux: '0.0'
+    out_flux: (KFlux_m0_c1 * J_r2)

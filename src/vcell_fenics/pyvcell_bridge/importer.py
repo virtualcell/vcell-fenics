@@ -55,9 +55,10 @@ import functools
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vcell_fenics.formalism.schema import (
+    REGION_SPACE,
     BCDirichlet,
     BCInterfaceFlux,
     BCNeumann,
@@ -153,8 +154,12 @@ def import_model(
     # of a membrane (which our per-variable BC cannot yet disambiguate).
     species_compartments: dict[str, set[str]] = {}
     for compartment in vcml.compartment_subdomains:
-        for pde in compartment.pde_equations:
-            species_compartments.setdefault(pde.name, set()).add(compartment.name)
+        # A volume-region variable (a well-mixed species) is bulk too: its membrane jump conditions feed
+        # its region balance from its own side, and a membrane expression sees it through its trace.
+        for name in [pde.name for pde in compartment.pde_equations] + [
+            eq.name for eq in compartment.volume_region_equations
+        ]:
+            species_compartments.setdefault(name, set()).add(compartment.name)
     bulk_species = set(species_compartments)
 
     subdomains: list[Subdomain] = []
@@ -249,9 +254,11 @@ def _collect_variable_names(vcml: VcmlMathDescription) -> set[str]:
     for compartment in vcml.compartment_subdomains:
         names.update(p.name for p in compartment.pde_equations)
         names.update(o.name for o in compartment.ode_equations)
+        names.update(r.name for r in compartment.volume_region_equations)
     for membrane in vcml.membrane_subdomains:
         names.update(p.name for p in membrane.pde_equations)
         names.update(o.name for o in membrane.ode_equations)
+        names.update(r.name for r in membrane.membrane_region_equations)
     return names
 
 
@@ -315,6 +322,37 @@ def _translate_subdomain_equations(
                 temporality="time_dependent",
                 terms={"rate": expr(ode.rate)},  # type: ignore[dict-item]
                 initial_condition=expr(ode.initial),
+            )
+        )
+
+    # Region variables (VCell's VolumeRegion/MembraneRegion equations: a well-mixed species, the membrane
+    # potential) — one value per connected region, the `region_ode` template (§1.4.2 T5). A zero rate is
+    # the template's default, so it is left out.
+    regions: list[tuple[str, str | None, str | None, str | None]] = (
+        [
+            (r.name, r.uniform_rate, r.volume_rate, r.initial)
+            for r in cast("CompartmentSubDomain", subdomain).volume_region_equations
+        ]
+        if kind == "volume"
+        else [
+            (r.name, r.uniform_rate, r.membrane_rate, r.initial)
+            for r in cast("MembraneSubDomain", subdomain).membrane_region_equations
+        ]
+    )
+    for name, uniform_rate, region_rate, initial in regions:
+        region_terms: dict[str, str] = {}
+        for slot, raw in (("uniform_rate", uniform_rate), ("region_rate", region_rate)):
+            if raw is not None and _as_float(raw) != 0.0:
+                region_terms[slot] = expr(raw)  # type: ignore[assignment]
+        variables.append(Variable(name=name, subdomain=subdomain.name, type="scalar", space=REGION_SPACE))
+        equations.append(
+            TemplateEquation(
+                template="region_ode",
+                variable=name,
+                subdomain=subdomain.name,
+                temporality="time_dependent",
+                terms=region_terms,
+                initial_condition=expr(initial),
             )
         )
 

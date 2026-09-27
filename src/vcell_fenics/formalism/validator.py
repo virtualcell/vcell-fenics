@@ -66,6 +66,7 @@ from vcell_fenics.formalism.expr import (
 )
 from vcell_fenics.formalism.parser import ExpressionSyntaxError, parse
 from vcell_fenics.formalism.schema import (
+    REGION_SPACE,
     BCInterfaceFlux,
     BCInterfaceValueEquality,
     BoundaryCondition,
@@ -398,6 +399,7 @@ class _Validator:
             governed_count[key] = governed_count.get(key, 0) + 1
 
             self._check_ic_temporality(eq, key, path)
+            self._check_region_pairing(eq, var, path)
 
             if not isinstance(eq, WeakFormEquation):
                 self._check_template_equation(eq, var, subdomain, path)
@@ -409,6 +411,26 @@ class _Validator:
                 self._error("equations", f"{where} is not governed by any equation (undetermined)")
             elif count > 1:
                 self._error("equations", f"{where} is governed by {count} equations (overdetermined)")
+
+    def _check_region_pairing(self, eq: Equation, var: Variable | None, path: str) -> None:
+        """A `region`-space variable is governed by `region_ode`, and `region_ode` governs only
+        `region`-space variables (§1.4.2 T5): a spatially constant unknown has no field operator, and a
+        field has no single per-region value."""
+        if var is None:
+            return
+        is_region_ode = isinstance(eq, TemplateEquation) and eq.template == "region_ode"
+        if var.space == REGION_SPACE and not is_region_ode:
+            self._error(
+                path,
+                f"{var.name!r} is a region variable (space {REGION_SPACE!r}); only the 'region_ode' template "
+                f"governs it (§1.4.2 T5)",
+            )
+        elif is_region_ode and var.space != REGION_SPACE:
+            self._error(
+                path,
+                f"'region_ode' governs region variables; {var.name!r} has space {var.space!r}, not "
+                f"{REGION_SPACE!r} (§1.4.2 T5)",
+            )
 
     def _check_ic_temporality(self, eq: Equation, key: tuple[str, str], path: str) -> None:
         if eq.temporality == "time_dependent":
@@ -556,6 +578,12 @@ class _Validator:
                 self._error(path, f"adjacent_variable {bc.adjacent_variable!r} is not declared")
             if isinstance(bc, BCInterfaceFlux):
                 self._check_interface_flux_bulk_only(bc, path)
+            if bc.kind not in ("neumann", "interface_flux") and self._is_region_variable(bc.variable):
+                self._error(
+                    path,
+                    f"{bc.variable!r} is a region variable: it takes only flux BCs (neumann / interface_flux), "
+                    f"which feed its region balance; a {bc.kind!r} BC has nothing to constrain (§1.4.2 T5)",
+                )
             self._check_weak_form_dirichlet_only(bc, path, weak_form_vars)
             groups.setdefault((bc.variable, bc.boundary), set()).add(bc.kind)
 
@@ -565,6 +593,9 @@ class _Validator:
                     "boundary_conditions",
                     f"conflicting BC kinds {sorted(kinds)} for variable {variable!r} on boundary {boundary!r}",
                 )
+
+    def _is_region_variable(self, name: str) -> bool:
+        return any(v.name == name and v.space == REGION_SPACE for v in self._md.variables)
 
     def _check_interface_flux_bulk_only(self, bc: BCInterfaceFlux, path: str) -> None:
         hosts = self._var_subdomains.get(bc.variable)
