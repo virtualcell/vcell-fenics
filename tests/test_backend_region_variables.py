@@ -21,7 +21,12 @@ import pytest
 import ufl
 from dolfinx import fem
 
-from vcell_fenics.backend import InterfaceCoupledGeometry, integrate_interface_coupled, make_two_bulk_membrane_geometry
+from vcell_fenics.backend import (
+    InterfaceCoupledGeometry,
+    integrate_interface_coupled,
+    integrate_membrane_coupled,
+    make_two_bulk_membrane_geometry,
+)
 from vcell_fenics.formalism.schema import (
     BCInterfaceFlux,
     MathDescription,
@@ -186,3 +191,141 @@ def test_potential_gated_permeability_conserves_mass() -> None:
         assert area_in * gated[t]["c"] + area_out * gated[t]["u"] == pytest.approx(area_in, rel=1e-6)
     # the gate opens the membrane while V is depolarised (V > −60), so the exchange runs ahead
     assert gated[0.5]["c"] < ungated[0.5]["c"]
+
+
+# --- the membrane-coupled solver: a membrane potential next to membrane species ----------------------------
+
+
+def _receptor_model(*, gated: bool) -> MathDescription:
+    """A receptor R on the membrane captures ligand from both compartments (L_in, L_out), with a membrane
+    potential V (C dV/dt = −g (V − E)); ``gated`` makes the binding rate depend on V, kon·(1 + 0.01 (V + 60)).
+    Total ligand ∫L_in + ∫L_out + ∫R is conserved either way."""
+    kon = "kon * (1.0 + 0.01 * (V + 60.0))" if gated else "kon"
+    return MathDescription(
+        geometry="cell",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="ext", kind="volume"),
+            Subdomain(name="pm", kind="surface"),
+        ],
+        variables=[
+            Variable(name="L_in", subdomain="cyto"),
+            Variable(name="L_out", subdomain="ext"),
+            Variable(name="R", subdomain="pm"),
+            Variable(name="V", subdomain="pm", space="region"),
+        ],
+        parameters=[
+            ParameterConstant(name="kon", value=0.5),
+            ParameterConstant(name="Rmax", value=2.0),
+            ParameterConstant(name="g", value=2.0),
+            ParameterConstant(name="C", value=0.5),
+            ParameterConstant(name="E", value=-60.0),
+        ],
+        equations=[
+            _pde("L_in", "cyto", "1.0", "1.0"),
+            _pde("L_out", "ext", "1.0", "1.0"),
+            TemplateEquation(
+                template="surface_pde_with_dilution",
+                variable="R",
+                subdomain="pm",
+                temporality="time_dependent",
+                terms={"diffusion": "0.05", "source": f"{kon} * (trace(L_in) + trace(L_out)) * (Rmax - R)"},
+                initial_condition="0.0",
+            ),
+            _region("V", "pm", "-g * (V - E) / C", "-20.0"),
+        ],
+        boundary_conditions=[
+            BCInterfaceFlux(variable="L_in", boundary="pm", expression=f"-{kon} * trace(L_in) * (Rmax - R)"),
+            BCInterfaceFlux(variable="L_out", boundary="pm", expression=f"-{kon} * trace(L_out) * (Rmax - R)"),
+        ],
+    )
+
+
+def _receptor_geometry() -> InterfaceCoupledGeometry:
+    return make_two_bulk_membrane_geometry(
+        "cell", inner="cyto", outer_subdomain="ext", membrane="pm", interface="pm", outer="wall", h=0.13
+    )
+
+
+def _integral(field: fem.Function) -> float:
+    mesh = field.function_space.mesh
+    return float(mesh.comm.allreduce(fem.assemble_scalar(fem.form(field * ufl.dx(domain=mesh))).real))
+
+
+def _receptor_run(md: MathDescription, *, rtol: float, atol: float) -> tuple[dict[float, float], list[float]]:
+    """V at each output time (read through ``on_output_regions``)."""
+    potential: dict[float, float] = {}
+    integrate_membrane_coupled(
+        md,
+        _receptor_geometry(),
+        t_final=TIMES[-1],
+        output_times=TIMES,
+        on_output_regions=lambda t, values: potential.__setitem__(t, values["V"]),
+        rtol=rtol,
+        atol=atol,
+    )
+    return potential, []
+
+
+def test_membrane_potential_beside_membrane_species_matches_its_exact_relaxation() -> None:
+    potential, _ = _receptor_run(_receptor_model(gated=False), rtol=1.0e-8, atol=1.0e-12)
+    assert set(potential) == set(TIMES)
+    error = max(abs(potential[t] - (-60.0 + 40.0 * math.exp(-4.0 * t))) for t in TIMES)
+    assert error < 1.0e-3
+
+
+def test_potential_gated_binding_conserves_ligand() -> None:
+    def ligand(md: MathDescription) -> tuple[float, float, float]:
+        geometry = _receptor_geometry()
+        start = integrate_membrane_coupled(md, geometry, t_final=1.0e-9)
+        result = integrate_membrane_coupled(md, _receptor_geometry(), t_final=TIMES[-1])
+        total0 = sum(_integral(start.field(name)) for name in ("L_in", "L_out", "R"))
+        total = sum(_integral(result.field(name)) for name in ("L_in", "L_out", "R"))
+        return total0, total, _integral(result.field("R"))
+
+    total0, total, bound_gated = ligand(_receptor_model(gated=True))
+    assert total == pytest.approx(total0, rel=1e-7)
+    _, _, bound_plain = ligand(_receptor_model(gated=False))
+    assert bound_gated > bound_plain  # the gate speeds binding while V > −60
+
+
+def _two_cell_geometry() -> InterfaceCoupledGeometry:
+    """Two separate cells in one exterior: the cytosol class is two disks, the membrane two circles."""
+    from vcell_fenics.backend.realize import realize_interface_coupled
+    from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume, SurfaceClass
+
+    two_cells = GeometryDescription(
+        name="cell",
+        dim=2,
+        extent=(2.0, 2.0, 1.0),
+        origin=(-1.0, -1.0, 0.0),
+        subvolumes=(
+            SubVolume(
+                name="cyto",
+                type="analytic",
+                expression=(
+                    "((geom.x[0] - 0.45)**2 + geom.x[1]**2 < 0.09) || ((geom.x[0] + 0.45)**2 + geom.x[1]**2 < 0.09)"
+                ),
+            ),
+            SubVolume(name="ext", type="analytic", expression="1.0"),
+        ),
+        surfaces=(SurfaceClass(name="mem", inside="cyto", outside="ext"),),
+    )
+    return realize_interface_coupled(
+        two_cells, inner_subdomain="cyto", outer_subdomain="ext", membrane_subdomain="mem", interface="membrane", h=0.08
+    )
+
+
+def test_region_counts_see_disconnected_cells() -> None:
+    from vcell_fenics.backend.interface_coupled import connected_region_count
+
+    geometry = _two_cell_geometry()
+    assert connected_region_count(geometry.inner_mesh) == 2  # two cytosols
+    assert connected_region_count(geometry.membrane_mesh) == 2  # two membranes
+    assert connected_region_count(geometry.outer_mesh) == 1  # one exterior around both
+
+
+def test_a_region_variable_on_disconnected_regions_is_refused() -> None:
+    # one Real would couple the two cells' well-mixed pools into one — refused until per-region instancing
+    with pytest.raises(NotImplementedError, match="2 disconnected regions"):
+        integrate_interface_coupled(_exchange_model(well_mixed=True), _two_cell_geometry(), t_final=0.1)

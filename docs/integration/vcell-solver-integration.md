@@ -400,6 +400,22 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-27** — **Region variables on the membrane-coupled solver too (#196, part 2).**
+  - **What runs:** a membrane potential (or a well-mixed species beside another species) now runs next to
+    membrane species. That is the shape of 23 of the survey's 29 region-variable applications.
+  - **Verified:**
+    - V matches its exact relaxation;
+    - V-gated receptor binding conserves total ligand to 1e-7;
+    - a receptor-model CLI run writes V on the membrane domain.
+  - **Guard:** the solvers count each subdomain's connected regions (MPI-safe vertex label propagation) and
+    refuse a region variable on several disconnected regions until per-region instancing exists.
+  - **Bridge fix:** functions used only by region equations were dropped as dead (e.g. `Size_membr` in a
+    membrane potential's current); region equations are now roots of the live-function scan.
+  - **What still blocks those 23 real models:**
+    - #189: clamped volume species in the membrane potential's rate;
+    - VCell's region-size built-ins, `vcRegionArea('…')` / `vcRegionVolume('…')`, which the formalism doesn't
+      model yet.
+
 - **2026-09-27** — **Region variables run on the two-compartment solver (#196, part 1).**
   - **What runs:** a well-mixed species (VolumeRegionVariable) on either compartment, and a membrane
     potential (MembraneRegionVariable) on the membrane between them. Each is a scifem Real block in

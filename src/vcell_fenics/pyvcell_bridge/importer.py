@@ -478,7 +478,8 @@ def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) ->
 def _reachable_names(vcml: VcmlMathDescription) -> frozenset[str]:
     """The names transitively referenced by the model's equations, boundary values, and constant /
     function expressions — the live set. Used to drop dead pure functions (see
-    :func:`_translate_parameters`). Roots are every PDE/ODE rate, diffusion, and initial expression,
+    :func:`_translate_parameters`). Roots are every PDE/ODE/region-equation rate, diffusion, and initial
+    expression,
     each PDE velocity component (VCell routes a species velocity through functions, e.g.
     ``vobj_Cyt1_velX`` → ``vproc_1.velocityX``),
     each per-face boundary value, each membrane jump flux, and each constant expression; the closure
@@ -497,7 +498,12 @@ def _reachable_names(vcml: VcmlMathDescription) -> frozenset[str]:
                 roots += [getattr(pde.boundaries, face) for face in ("xm", "xp", "ym", "yp", "zm", "zp")]
         for ode in subdomain.ode_equations:
             roots += [ode.rate, ode.initial]
+    for compartment in vcml.compartment_subdomains:  # region equations (T5): their rates and initial values
+        for volume_region in compartment.volume_region_equations:
+            roots += [volume_region.uniform_rate, volume_region.volume_rate, volume_region.initial]
     for membrane in vcml.membrane_subdomains:
+        for membrane_region in membrane.membrane_region_equations:
+            roots += [membrane_region.uniform_rate, membrane_region.membrane_rate, membrane_region.initial]
         for jc in membrane.jump_conditions:
             roots += [jc.in_flux, jc.out_flux]
     roots += [constant.exp for constant in vcml.constants]

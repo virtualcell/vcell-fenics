@@ -135,7 +135,7 @@ def run_model(
     # The model's shape (and any refusal of it) is settled before anything is written.
     moving = _moving_subdomains(model)
     coupling = None if moving else _interface_coupling(model)
-    _refuse_region_variables(model.math, coupling if coupling is not None and not coupling.membrane_species else None)
+    _refuse_region_variables(model.math, coupling)
     comm = MPI.COMM_WORLD
     bundle = out_dir / f"{prefix}.fenics"
     if comm.rank == 0:
@@ -220,17 +220,29 @@ def run_model(
 
 
 def _refuse_region_variables(math: MathDescription, interface: Coupling | None) -> None:
-    """Region variables (§1.4.2 T5: a well-mixed species, the membrane potential) are solved by the
-    two-compartment solver — on either compartment or the membrane between them (``interface``). Every
-    other path refuses them before any bundle is started (#196)."""
+    """Region variables (§1.4.2 T5: a well-mixed species, the membrane potential) are solved by the two
+    coupled solvers — two compartments, with or without membrane species — on either compartment or the
+    membrane between them (``interface``). The single-mesh and moving paths refuse them before any bundle is
+    started (#196)."""
     regions = [v for v in math.variables if v.space == REGION_SPACE]
+    if interface is not None and interface.membrane_species and regions:
+        # the membrane-coupled solver carries each compartment's species as one vector field, so a
+        # compartment of region variables only (a well-mixed cytosol) has no field to hold them beside
+        fields = {v.subdomain for v in math.variables if v.space != REGION_SPACE}
+        bare = sorted({v.subdomain for v in regions} & ({interface.inner, interface.outer} - fields))
+        if bare:
+            raise RunError(
+                f"with membrane species, each compartment needs a diffusing species: {', '.join(map(repr, bare))} "
+                f"has only region variables (a well-mixed species) — not supported yet; see "
+                f"virtualcell/vcell-fenics#196"
+            )
     homes = {interface.inner, interface.outer, interface.membrane} if interface is not None else set()
     unhosted = [f"{v.name!r} on {v.subdomain!r}" for v in regions if v.subdomain not in homes]
     if unhosted:
         raise RunError(
             f"region variables are not solved yet here: {', '.join(unhosted)} — one value per region (a "
-            f"well-mixed species or a membrane potential); only the two-compartment solver hosts them so far "
-            f"(on either compartment or the membrane between them); see virtualcell/vcell-fenics#196"
+            f"well-mixed species or a membrane potential); only the coupled two-compartment solvers host them so "
+            f"far (on either compartment or the membrane between them); see virtualcell/vcell-fenics#196"
         )
 
 
@@ -532,9 +544,11 @@ def _run_membrane_coupled(
         raise RunError("the membrane-coupled solver is P1 only; drop --fe-degree for this model")
     if options.time_integration != "method_of_lines":
         log("note: the membrane-coupled solver is method-of-lines; --time-integration is ignored")
+    region_names = {v.name for v in model.math.variables if v.space == REGION_SPACE}
     species: dict[str, list[str]] = {coupling.inner: [], coupling.outer: [], coupling.membrane: []}
+    region_vars: dict[str, list[str]] = {coupling.inner: [], coupling.outer: [], coupling.membrane: []}
     for eq in model.math.equations:
-        species[eq.subdomain].append(eq.variable)
+        (region_vars if eq.variable in region_names else species)[eq.subdomain].append(eq.variable)
     empty = [name for name in (coupling.inner, coupling.outer) if not species[name]]
     if empty:
         raise RunError(
@@ -564,7 +578,8 @@ def _run_membrane_coupled(
         (coupling.membrane, "membrane", geometry.membrane_mesh),
     )
     for name, kind, mesh in regions:
-        recorder.add_domain(name, kind, mesh, [(variable, None) for variable in species[name]])
+        channels = [*species[name], *region_vars[name]]  # a region variable is written as a constant field
+        recorder.add_domain(name, kind, mesh, [(variable, None) for variable in channels])
     recorder.open()
 
     cells = sum(mesh_cell_count(mesh) for _, _, mesh in regions[:2])
@@ -588,13 +603,22 @@ def _run_membrane_coupled(
         scalars[key].x.array[:] = field.x.array
         return [scalars[key]]
 
+    region_values: dict[str, float] = {}
+
+    def on_output_regions(_t: float, values: dict[str, float]) -> None:
+        region_values.update(values)  # called just before on_output, at the same time
+
+    def constant(name: str) -> Any:
+        value = region_values[name]
+        return lambda x: np.full(x.shape[1], value)
+
     def on_output(t: float, inner: Any, outer: Any, membrane: Any) -> None:
+        fields = {coupling.inner: inner, coupling.outer: outer, coupling.membrane: membrane}
         recorder.capture(
             t,
             {
-                coupling.inner: components(inner, len(species[coupling.inner])),
-                coupling.outer: components(outer, len(species[coupling.outer])),
-                coupling.membrane: components(membrane, len(species[coupling.membrane])),
+                name: [*components(fields[name], len(species[name])), *map(constant, region_vars[name])]
+                for name in (coupling.inner, coupling.outer, coupling.membrane)
             },
             progress=t / options.t_final,
         )
@@ -607,6 +631,7 @@ def _run_membrane_coupled(
         atol=options.atol,
         output_times=options.output_times,
         on_output=on_output,
+        on_output_regions=on_output_regions,
         on_progress=lambda t: status.progress(t / options.t_final, t),
     )
     return cells, int(result.steps)
