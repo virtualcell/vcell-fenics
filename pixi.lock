@@ -408,8 +408,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
       - pypi: .
       - pypi: https://files.pythonhosted.org/packages/42/3d/ef4dcfffd22d27a61805d8ed9f7fb888495bc6aa88648fa07c1eaa5586b6/lxml-6.1.1-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/70/8a/f0f3a244fd447f7f8dbccc3c933674518699b74b787803c4c50c4593be38/pyvcell-0.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/88/e1/3db65117f02cdefb0e5e4c440daf1c30beb45051b7f47aded25b7f4f2f34/numexpr-2.14.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/f1/d0/d9c65fce06863ff8c1598efd9fea95425030c191bc27b1a919956cd17f07/pyvcell-0.4.1-py3-none-any.whl
       linux-aarch64:
       - conda: https://conda.anaconda.org/conda-forge/linux-aarch64/_openmp_mutex-4.5-20_gnu.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-aarch64/adios2-2.12.1-mpi_mpich_py312_h1913781_5.conda
@@ -803,7 +803,7 @@ environments:
       - pypi: .
       - pypi: https://files.pythonhosted.org/packages/29/91/317b332636bfc7bddcff828d41b3307f50043f4b237e40849c333d80fa1a/lxml-6.1.1-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl
       - pypi: https://files.pythonhosted.org/packages/41/13/ed5efda74ace9a7e2e933476b85bba6d00f2ebf6b833ef59a796ec9af88c/numexpr-2.14.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
-      - pypi: https://files.pythonhosted.org/packages/70/8a/f0f3a244fd447f7f8dbccc3c933674518699b74b787803c4c50c4593be38/pyvcell-0.4.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/f1/d0/d9c65fce06863ff8c1598efd9fea95425030c191bc27b1a919956cd17f07/pyvcell-0.4.1-py3-none-any.whl
       osx-arm64:
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/aiohappyeyeballs-2.6.2-pyhd8ed1ab_0.conda
@@ -1144,7 +1144,7 @@ environments:
       - pypi: .
       - pypi: https://files.pythonhosted.org/packages/13/c1/a5c78ae637402c5550e2e0ba175275d2515d432ec28af0cdc23c9b476e65/numexpr-2.14.1-cp314-cp314-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/13/e2/2e325795566de01d0d7c3bb57d3c370616b2d07b01214e84eec5d3b10963/lxml-6.1.1-cp314-cp314-macosx_10_15_universal2.whl
-      - pypi: https://files.pythonhosted.org/packages/70/8a/f0f3a244fd447f7f8dbccc3c933674518699b74b787803c4c50c4593be38/pyvcell-0.4.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/f1/d0/d9c65fce06863ff8c1598efd9fea95425030c191bc27b1a919956cd17f07/pyvcell-0.4.1-py3-none-any.whl
   dev:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
@@ -1645,8 +1645,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
       - pypi: .
       - pypi: https://files.pythonhosted.org/packages/42/3d/ef4dcfffd22d27a61805d8ed9f7fb888495bc6aa88648fa07c1eaa5586b6/lxml-6.1.1-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/70/8a/f0f3a244fd447f7f8dbccc3c933674518699b74b787803c4c50c4593be38/pyvcell-0.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/88/e1/3db65117f02cdefb0e5e4c440daf1c30beb45051b7f47aded25b7f4f2f34/numexpr-2.14.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/f1/d0/d9c65fce06863ff8c1598efd9fea95425030c191bc27b1a919956cd17f07/pyvcell-0.4.1-py3-none-any.whl
       linux-aarch64:
       - conda: https://conda.anaconda.org/conda-forge/linux-aarch64/_openmp_mutex-4.5-20_gnu.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-aarch64/adios2-2.12.1-mpi_mpich_py312_h1913781_5.conda
@@ -2138,7 +2138,7 @@ environments:
       - pypi: .
       - pypi: https://files.pythonhosted.org/packages/29/91/317b332636bfc7bddcff828d41b3307f50043f4b237e40849c333d80fa1a/lxml-6.1.1-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl
       - pypi: https://files.pythonhosted.org/packages/41/13/ed5efda74ace9a7e2e933476b85bba6d00f2ebf6b833ef59a796ec9af88c/numexpr-2.14.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
-      - pypi: https://files.pythonhosted.org/packages/70/8a/f0f3a244fd447f7f8dbccc3c933674518699b74b787803c4c50c4593be38/pyvcell-0.4.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/f1/d0/d9c65fce06863ff8c1598efd9fea95425030c191bc27b1a919956cd17f07/pyvcell-0.4.1-py3-none-any.whl
       osx-arm64:
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/aiohappyeyeballs-2.6.2-pyhd8ed1ab_0.conda
@@ -2579,7 +2579,7 @@ environments:
       - pypi: .
       - pypi: https://files.pythonhosted.org/packages/13/c1/a5c78ae637402c5550e2e0ba175275d2515d432ec28af0cdc23c9b476e65/numexpr-2.14.1-cp314-cp314-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/13/e2/2e325795566de01d0d7c3bb57d3c370616b2d07b01214e84eec5d3b10963/lxml-6.1.1-cp314-cp314-macosx_10_15_universal2.whl
-      - pypi: https://files.pythonhosted.org/packages/70/8a/f0f3a244fd447f7f8dbccc3c933674518699b74b787803c4c50c4593be38/pyvcell-0.4.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/f1/d0/d9c65fce06863ff8c1598efd9fea95425030c191bc27b1a919956cd17f07/pyvcell-0.4.1-py3-none-any.whl
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
@@ -20610,10 +20610,17 @@ packages:
   - beautifulsoup4 ; extra == 'htmlsoup'
   - lxml-html-clean ; extra == 'html-clean'
   requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/70/8a/f0f3a244fd447f7f8dbccc3c933674518699b74b787803c4c50c4593be38/pyvcell-0.4.0-py3-none-any.whl
+- pypi: https://files.pythonhosted.org/packages/88/e1/3db65117f02cdefb0e5e4c440daf1c30beb45051b7f47aded25b7f4f2f34/numexpr-2.14.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+  name: numexpr
+  version: 2.14.1
+  sha256: 439ec4d57b853792ebe5456e3160312281c3a7071ecac5532ded3278ede614de
+  requires_dist:
+  - numpy>=1.23.0
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/f1/d0/d9c65fce06863ff8c1598efd9fea95425030c191bc27b1a919956cd17f07/pyvcell-0.4.1-py3-none-any.whl
   name: pyvcell
-  version: 0.4.0
-  sha256: e831d9dc7a541af4895da8c04caf47895f6a3e79b759d1151236f7bc21e780f9
+  version: 0.4.1
+  sha256: 8fa46ae37871c135c3cf7c3f80d227c4d445f9272f03d5b456f6d6efd6bd971e
   requires_dist:
   - lxml>=6.1.0,<7
   - numexpr>=2.10,<3
@@ -20647,10 +20654,3 @@ packages:
   - trame-vuetify>=3.2.2,<4 ; extra == 'viz'
   - vtk>=9.3.1,<10 ; extra == 'viz'
   requires_python: '>=3.12,<4.0'
-- pypi: https://files.pythonhosted.org/packages/88/e1/3db65117f02cdefb0e5e4c440daf1c30beb45051b7f47aded25b7f4f2f34/numexpr-2.14.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-  name: numexpr
-  version: 2.14.1
-  sha256: 439ec4d57b853792ebe5456e3160312281c3a7071ecac5532ded3278ede614de
-  requires_dist:
-  - numpy>=1.23.0
-  requires_python: '>=3.10'
