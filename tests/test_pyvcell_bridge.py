@@ -1012,3 +1012,30 @@ def test_membrane_region_equation_is_a_region_ode_on_the_membrane() -> None:
     eq = next(e for e in md.equations if e.variable == "V")
     assert isinstance(eq, TemplateEquation) and eq.template == "region_ode"
     assert eq.terms == {"region_rate": "-g * (V - log(trace(k))) / C"}
+
+
+def test_a_function_used_only_by_a_region_equation_is_kept() -> None:
+    # A pure function referenced by nothing but a region equation's rate (a membrane potential's leak
+    # conductance, VCell's `Size_membr`) is live: the dead-function pruning must count region equations.
+    vcml = vm.MathDescription(
+        name="m",
+        constants=[vm.Constant(name="g0", exp="1.5")],
+        functions=[vm.MathFunction(name="g_leak", exp="(2.0 * g0)", domain="pm")],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="k", diffusion="1.0", initial="1")])
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                membrane_region_equations=[
+                    vm.MembraneRegionEquation(
+                        name="V", uniform_rate="0.0", membrane_rate="-g_leak * V", initial="-70.0"
+                    )
+                ],
+            )
+        ],
+    )
+    md = import_math_description(vcml)
+    assert "g_leak" in {p.name for p in md.parameters}

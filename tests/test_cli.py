@@ -373,12 +373,12 @@ def test_membrane_species_with_one_sided_bulk_is_a_clean_error(
     assert "bulk species only in 'ext_dom'" in err and "'cyto_dom' has none" in err
 
 
-def test_region_variables_off_the_two_compartment_solver_are_refused(
+def test_a_well_mixed_compartment_beside_membrane_species_is_refused(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # A well-mixed species (VCell's VolumeRegionVariable, §1.4.2 T5) in a model with membrane receptors routes
-    # to the membrane-coupled solver, which does not host region variables yet: the run must say so up front
-    # (#196), not fail as an unknown name.
+    # A well-mixed species (VCell's VolumeRegionVariable, §1.4.2 T5) as a compartment's ONLY species, in a
+    # model with membrane receptors: the membrane-coupled solver holds each compartment's species as one
+    # vector field, so it cannot host a compartment of region variables alone — refused up front (#196).
     math = yaml.safe_load((_CV / "receptor_math.yaml").read_text())
     for variable in math["variables"]:
         if variable["name"] == "s_cyto":
@@ -394,7 +394,7 @@ def test_region_variables_off_the_two_compartment_solver_are_refused(
     argv = ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "0.1"]
     assert main([*argv, "--out", str(tmp_path / "out")]) == 2
     err = capsys.readouterr().err
-    assert "region variables are not solved yet here: 's_cyto' on 'cyto_dom'" in err and "#196" in err
+    assert "'cyto_dom' has only region variables" in err and "#196" in err
     assert not (tmp_path / "out").exists()  # refused before any bundle was started
 
 
@@ -436,6 +436,34 @@ def test_well_mixed_species_and_membrane_potential_run_on_the_two_compartment_so
     potential = bundle.stats("mem_dom", "V")[:, 0]
     exact = -60.0 + 40.0 * np.exp(-4.0 * np.array([0.0, 0.5, 1.0]))
     assert np.allclose(potential, exact, atol=1e-2)
+
+
+def test_a_membrane_potential_runs_beside_membrane_receptors(tmp_path: Path) -> None:
+    # The receptor model (ligand in both compartments, receptors on the membrane) with a membrane potential
+    # added, C dV/dt = −g (V − E): the membrane-coupled solver hosts it as a Real block (#196), written on
+    # the membrane domain as a constant field beside the receptor density.
+    math = yaml.safe_load((_CV / "receptor_math.yaml").read_text())
+    membrane = math["membrane_subdomains"][0]["name"]
+    math["variables"].append({"name": "V", "var_type": "MembraneRegionVariable", "domain": membrane})
+    math["constants"] += [
+        {"name": "g_leak", "exp": "2.0"},
+        {"name": "C_m", "exp": "0.5"},
+        {"name": "E_rev", "exp": "-60.0"},
+    ]
+    math["membrane_subdomains"][0]["membrane_region_equations"] = [
+        {"name": "V", "uniform_rate": "0.0", "membrane_rate": "(-g_leak * (V - E_rev) / C_m)", "initial": "-20.0"}
+    ]
+    math_file = tmp_path / "receptor_v_math.yaml"
+    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
+    out = tmp_path / "out"
+    argv = ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "1.0"]
+    assert main([*argv, "--output-dt", "0.5", "--h", "0.25", "--no-fields", "--out", str(out)]) == 0
+
+    bundle = Bundle.open(out / "results.fenics")
+    potential = bundle.stats(membrane, "V")  # (T, 4): mean, total, min, max
+    assert np.allclose(potential[:, 2], potential[:, 3])  # one value on the whole membrane
+    exact = -60.0 + 40.0 * np.exp(-4.0 * np.array([0.0, 0.5, 1.0]))
+    assert np.allclose(potential[:, 0], exact, atol=1e-2)
 
 
 def test_unknown_model_file_is_a_clean_error(capsys: pytest.CaptureFixture[str]) -> None:
