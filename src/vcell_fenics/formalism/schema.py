@@ -168,6 +168,11 @@ class Variable:
     space: str = "lagrange_p1"
 
 
+# The `space` of a region variable (§1.4.2 T5): one value per connected region of its subdomain — spatially
+# constant within each region, governed only by the `region_ode` template.
+REGION_SPACE = "region"
+
+
 # ---------------------------------------------------------------------------
 # Parameter (§2.2.3) — three forms.
 # ---------------------------------------------------------------------------

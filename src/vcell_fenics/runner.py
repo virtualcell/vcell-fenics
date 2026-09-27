@@ -47,6 +47,7 @@ from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
 from vcell_fenics.backend.realize import ImageGeometryWarning, realize
 from vcell_fenics.backend.remesh_3d import RemeshWarning
 from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_geometry_yaml, dump_yaml
+from vcell_fenics.formalism.schema import REGION_SPACE
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
 from vcell_fenics.results.schema import DomainKind
 from vcell_fenics.status import NullReporter, StatusReporter
@@ -130,6 +131,7 @@ def run_model(
     ``solver.overrides``); ``status`` hears progress during the solve and a data event per written row
     (ADR 011 §4) — starting/completed/failed are the caller's, since they bracket more than the solve."""
 
+    _refuse_region_variables(model.math)
     comm = MPI.COMM_WORLD
     bundle = out_dir / f"{prefix}.fenics"
     if comm.rank == 0:
@@ -213,6 +215,17 @@ def run_model(
     writer.write_provenance("summary.json", json.dumps(summary, indent=2) + "\n")
     writer.finalize("completed")
     return summary
+
+
+def _refuse_region_variables(math: MathDescription) -> None:
+    """Region variables (§1.4.2 T5: a well-mixed species, the membrane potential) import and validate, but no
+    backend solves them yet (#196) — say so before any bundle is started."""
+    regions = [f"{v.name!r} on {v.subdomain!r}" for v in math.variables if v.space == REGION_SPACE]
+    if regions:
+        raise RunError(
+            f"region variables are not solved yet: {', '.join(regions)} — one value per region (a well-mixed "
+            f"species or a membrane potential); see virtualcell/vcell-fenics#196"
+        )
 
 
 def _source_info(model: ModelInput) -> SourceInfo:

@@ -103,6 +103,21 @@ REGISTRY: dict[str, TemplateSpec] = {
         temporalities=_BOTH_TEMPORALITIES,
         slots=(SlotSpec(name="rate", types=_SCALAR, required=True),),
     ),
+    "region_ode": TemplateSpec(  # T5 — VCell's region variables (§1.4.2 T5)
+        # One value per connected region of the subdomain (a variable in the `region` space):
+        #   d/dt u_R = uniform_rate + (1/|R|) ∫_R region_rate + (1/|R|) ∫_{∂R} flux
+        # where `flux` is the variable's own Neumann / interface-flux BCs (a well-mixed species' membrane
+        # fluxes). VCell's VolumeRegionEquation (region_rate = VolumeRate) and MembraneRegionEquation
+        # (region_rate = MembraneRate, e.g. the membrane potential). Always time-dependent.
+        name="region_ode",
+        governed_types=_SCALAR,
+        subdomain_kinds=frozenset({"volume", "surface"}),
+        temporalities=frozenset({"time_dependent"}),
+        slots=(
+            SlotSpec(name="uniform_rate", types=_SCALAR, required=False),
+            SlotSpec(name="region_rate", types=_SCALAR, required=False),
+        ),
+    ),
     "cahn_hilliard": TemplateSpec(  # diffuse-interface phase separation
         # A 4th-order conserved order parameter ∂φ/∂t = ∇·(M∇μ), μ = f'(φ) − ε²∇²φ, with the
         # standard double-well f = W φ²(1−φ)². The backend expands it into a mixed (φ, μ) system

@@ -7,7 +7,8 @@ Three tiers, under `tests/fixtures/vcell_import/`:
 
 - **accept/<case>/** — `input.yaml` (a pyvcell `MathDescription`) + `expected.yaml`
   (the golden formalism `MathDescription`) + optional `meta.yaml` (`geometry:` for the
-  import's geometry arg; `run:` to also solve it end-to-end; `note:`). Both YAML, for
+  import's geometry arg; `dim:` its dimension, needed to translate per-face boundary conditions;
+  `run:` to also solve it end-to-end; `note:`). Both YAML, for
   readability. Each accepted golden must also *validate* (no formalism errors).
 - **reject/<case>/** — `input.yaml` + `error.txt` (`<ExceptionType>: <message substring>`):
   constructs that must be rejected loudly (§2.6.3 out-of-scope / §2.6.2 not-yet).
@@ -72,7 +73,7 @@ def _load_meta(case_dir: pathlib.Path) -> dict[str, Any]:
 def test_accept_fixture_matches_golden(case: str) -> None:
     case_dir = _FIXTURES / "accept" / case
     meta = _load_meta(case_dir)
-    imported = import_math_description(_load_input(case_dir), geometry=meta.get("geometry"))
+    imported = import_math_description(_load_input(case_dir), geometry=meta.get("geometry"), dim=meta.get("dim"))
 
     expected_path = case_dir / "expected.yaml"
     if _UPDATE_GOLDENS:
