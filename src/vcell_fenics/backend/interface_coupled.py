@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import scifem
 import ufl
 from dolfinx import fem
 from dolfinx.fem import petsc
@@ -66,6 +67,7 @@ from vcell_fenics.formalism.schema import (
     BCDirichlet,
     BCInterfaceFlux,
     BCInterfaceValueEquality,
+    BCNeumann,
     MathDescription,
     ParameterConstant,
     ParameterExpression,
@@ -836,10 +838,23 @@ def integrate_interface_coupled(
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
-    inner_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.inner_subdomain]
-    outer_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.outer_subdomain]
+    # Region variables (§1.4.2 T5: a well-mixed species, a membrane potential) are one Real unknown each,
+    # appended after the field blocks; the field equations are everything else.
+    region_eqs = [eq for eq in template_eqs if eq.template == "region_ode"]
+    field_eqs = [eq for eq in template_eqs if eq.template != "region_ode"]
+    inner_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.inner_subdomain]
+    outer_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.outer_subdomain]
+    region_homes = {geometry.inner_subdomain, geometry.outer_subdomain, geometry.membrane_subdomain}
+    for eq in region_eqs:
+        if eq.subdomain not in region_homes:
+            raise NotImplementedError(
+                f"region variable {eq.variable!r} lives on {eq.subdomain!r}; the two-compartment solver hosts "
+                f"them on {sorted(region_homes)}"
+            )
     for subdomain, eqs in ((geometry.inner_subdomain, inner_eqs), (geometry.outer_subdomain, outer_eqs)):
-        if not eqs or any("diffusion" not in eq.terms for eq in eqs):
+        # each compartment carries field species (each a diffusion equation), region variables, or both
+        well_mixed_only = not eqs and any(eq.subdomain == subdomain for eq in region_eqs)
+        if (not eqs and not well_mixed_only) or any("diffusion" not in eq.terms for eq in eqs):
             raise NotImplementedError(
                 f"interface coupling needs a bulk diffusion equation for each species on compartment {subdomain!r}"
             )
@@ -869,10 +884,42 @@ def integrate_interface_coupled(
     for size in sizes:
         offsets.append(offsets[-1] + size)
     index_of = {eq.variable: k for k, eq in enumerate(eqs)}
+    eq_of = {eq.variable: eq for eq in eqs}
     compartment_of = {eq.variable: eq.subdomain for eq in eqs}
 
     params = _param_symbols(md, parent)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
+
+    # Side-aware traces on the membrane. `membrane_trace(f) = f('+') + f('-')` selects f's own side only for a
+    # *coefficient*; for a submesh *argument* (a test or trial function) DOLFINx 0.10 aliases both
+    # restrictions to the same submesh cell, so an interface-flux Jacobian block counts it twice per side
+    # (the over-count behind the BE fix, memory `project_interface_flux_overcount`). Weighting each side by an
+    # exact 0/1 indicator of the function's own compartment counts it once — identical for coefficients (the
+    # residual, and so the solution, is unchanged) and exact for arguments (the Jacobian becomes the true
+    # one: Newton converges quadratically, and a Real block's row — dominated by the flux — is right).
+    side = {
+        geometry.inner_subdomain: _compartment_indicator(parent, geometry.cell_tags, geometry.inner_region_tag),
+        geometry.outer_subdomain: _compartment_indicator(parent, geometry.cell_tags, geometry.outer_region_tag),
+    }
+
+    def trace_on(subdomain: str, f: UflExpr) -> UflExpr:
+        chi = side[subdomain]
+        return f("+") * chi("+") + f("-") * chi("-")
+
+    # Region blocks: a Real (one global DOF) on the parent per region variable, integrated over its region
+    # (a compartment's dx, or the membrane's dS). A Real has the same value on both sides of the membrane,
+    # so on dS it is referenced as u("+") alone.
+    real = scifem.create_real_functionspace(parent)
+    region_states = [fem.Function(real, name=eq.variable) for eq in region_eqs]
+    region_rates = [fem.Function(real) for _ in region_eqs]
+    region_tests = [ufl.TestFunction(real) for _ in region_eqs]
+    region_on_membrane = [eq.subdomain == geometry.membrane_subdomain for eq in region_eqs]
+    region_dx = [
+        ds_int if on_membrane else (dx_in if eq.subdomain == geometry.inner_subdomain else dx_out)
+        for eq, on_membrane in zip(region_eqs, region_on_membrane, strict=True)
+    ]
+    region_bulk = {eq.variable: u for eq, u in zip(region_eqs, region_states, strict=True)}
+    region_surface = {eq.variable: u("+") for eq, u in zip(region_eqs, region_states, strict=True)}
 
     # The MOL residual uses the state Functions directly (so the coupling can be nonlinear), with the
     # time derivative ċ = rate (a Function TS supplies). One block per species, all on the parent.
@@ -888,12 +935,13 @@ def integrate_interface_coupled(
     for k, eq in enumerate(eqs):
         if "source" in eq.terms:
             siblings = {name: states[j] for name, j in index_of.items() if compartment_of[name] == eq.subdomain}
-            src_ctx = CompileContext(parent, {**ctx.symbols, **siblings})
+            src_ctx = CompileContext(parent, {**ctx.symbols, **region_bulk, **siblings})
             residual[k] += -compile_expression(parse(eq.terms["source"]), src_ctx) * tests[k] * dxs[k]
     # Every species' interface trace is in scope for every flux (a flux on one side may reference any
     # species on either side); each `BCInterfaceFlux` then deposits its flux into its OWN species' block.
     coupling_symbols = {
-        **{eq.variable: membrane_trace(states[k]) for k, eq in enumerate(eqs)},
+        **{eq.variable: trace_on(eq.subdomain, states[k]) for k, eq in enumerate(eqs)},
+        **region_surface,
         "geom.x": ufl.SpatialCoordinate(parent),
         **params,
     }
@@ -904,11 +952,38 @@ def integrate_interface_coupled(
                 "this integrator handles single-sided interface flux BCs"
             )
         if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in index_of:
-            continue
+            continue  # (a region variable's flux BCs join its region balance, below)
         coupling_ctx = CompileContext(parent, coupling_symbols)
         flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
         k = index_of[bc.variable]
-        residual[k] += -flux * membrane_trace(tests[k]) * ds_int
+        residual[k] += -flux * trace_on(eq_of[bc.variable].subdomain, tests[k]) * ds_int
+
+    # Region balances (T5), in the weak form of a Real test w (w ≡ 1 on its region):
+    #   ∫_R u̇ w = ∫_R (uniform_rate + region_rate) w + ∫_{∂R} flux w
+    # i.e. |R|·u̇ = |R|·uniform_rate + ∫_R region_rate + ∫ flux — the template's (1/|R|)-averaged ODE.
+    region_residual: list[UflExpr] = []
+    for r, eq in enumerate(region_eqs):
+        w, measure = region_tests[r], region_dx[r]
+        if region_on_membrane[r]:
+            rate_ctx = CompileContext(parent, coupling_symbols)
+            w_here, rate_here = w("+"), region_rates[r]("+")
+        else:
+            siblings = {name: states[j] for name, j in index_of.items() if compartment_of[name] == eq.subdomain}
+            rate_ctx = CompileContext(parent, {**ctx.symbols, **region_bulk, **siblings})
+            w_here, rate_here = w, region_rates[r]
+        form = rate_here * w_here * measure
+        for slot in ("uniform_rate", "region_rate"):
+            if slot in eq.terms:
+                form += -compile_expression(parse(eq.terms[slot]), rate_ctx) * w_here * measure
+        for bc in md.boundary_conditions:
+            if (
+                isinstance(bc, (BCInterfaceFlux, BCNeumann))
+                and bc.variable == eq.variable
+                and bc.boundary == geometry.interface
+            ):
+                flux = compile_expression(parse(bc.expression), CompileContext(parent, coupling_symbols))
+                form += -flux * w("+") * ds_int
+        region_residual.append(form)
 
     # Optional outer-wall reservoir Dirichlet on outer-compartment species, weak penalty (same as the BE
     # assembler): F gains β(u − g)·w on the box wall.
@@ -917,7 +992,17 @@ def integrate_interface_coupled(
         k = index_of[outer_names[j]]
         residual[k] += _RESERVOIR_PENALTY * (states[k] - g_value) * tests[k] * ds_wall
 
-    n_blocks = len(eqs)
+    # The region blocks join the system after the field blocks: one list of spaces/states/rates/residuals.
+    n_fields = len(eqs)
+    spaces = [*spaces, *([real] * len(region_eqs))]
+    states = [*states, *region_states]
+    rates = [*rates, *region_rates]
+    residual = [*residual, *region_residual]
+    sizes = [V.dofmap.index_map.size_local for V in spaces]
+    offsets = [0]
+    for size in sizes:
+        offsets.append(offsets[-1] + size)
+    n_blocks = len(states)
     shift = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # the TS σ
     jacobian = [
         [
@@ -929,8 +1014,10 @@ def integrate_interface_coupled(
     residual_form = fem.form(residual, entity_maps=emaps)
     jacobian_form = fem.form(jacobian, entity_maps=emaps)
 
-    for state, eq in zip(states, eqs, strict=True):
+    for state, eq in zip(states[:n_fields], eqs, strict=True):
         _interpolate_ic(state, eq, ctx)
+    for state, eq, measure, on_membrane in zip(region_states, region_eqs, region_dx, region_on_membrane, strict=True):
+        state.x.array[:] = _region_average(eq, ctx, measure, on_membrane, parent)
 
     def unpack(x: PETSc.Vec) -> None:
         for k, state in enumerate(states):
@@ -990,7 +1077,8 @@ def integrate_interface_coupled(
     work: PETSc.Vec | None = None
     wants_output = on_output is not None or on_output_fields is not None
     if wants_output or on_progress is not None:
-        snaps = [fem.Function(V, name=eq.variable) for V, eq in zip(spaces, eqs, strict=True)]
+        names = [eq.variable for eq in (*eqs, *region_eqs)]
+        snaps = [fem.Function(V, name=name) for V, name in zip(spaces, names, strict=True)]
         work = state_vec.duplicate()
 
         def emit(t: float, x: PETSc.Vec) -> None:
@@ -1000,7 +1088,7 @@ def integrate_interface_coupled(
             if on_output is not None:
                 on_output(t, snaps[0], snaps[1])
             if on_output_fields is not None:
-                on_output_fields(t, {eq.variable: snap for eq, snap in zip(eqs, snaps, strict=True)})
+                on_output_fields(t, dict(zip(names, snaps, strict=True)))
 
         monitor = OutputMonitor(
             output_times if wants_output else (),
@@ -1020,8 +1108,34 @@ def integrate_interface_coupled(
     for obj in (ts, state_vec, jacobian_matrix, work):
         if obj is not None:
             obj.destroy()
-    fields = {eq.variable: state for eq, state in zip(eqs, states, strict=True)}
+    fields = {eq.variable: state for eq, state in zip((*eqs, *region_eqs), states, strict=True)}
     return InterfaceCoupledResult(states[0], states[len(inner_eqs)], steps, final_time, fields)
+
+
+def _compartment_indicator(parent: Mesh, cell_tags: Any, region_tag: int) -> fem.Function:
+    """An exact 0/1 DG0 indicator of one compartment's cells on the parent mesh."""
+
+    indicator = fem.Function(fem.functionspace(parent, ("DG", 0)))
+    indicator.x.array[:] = 0.0
+    indicator.x.array[cell_tags.indices[cell_tags.values == region_tag]] = 1.0
+    indicator.x.scatter_forward()
+    return indicator
+
+
+def _region_average(
+    eq: TemplateEquation, ctx: CompileContext, measure: ufl.Measure, on_membrane: bool, parent: Mesh
+) -> float:
+    """A region variable's initial value: its initial condition averaged over its region (exact for a
+    constant; a spatially varying VCell initial expression has no single value, so its mean is taken)."""
+
+    assert eq.initial_condition is not None  # the validator requires one (time-dependent)
+    ic = compile_expression(parse(eq.initial_condition), ctx)
+    one = fem.Constant(parent, PETSc.ScalarType(1.0))  # type: ignore[operator]
+    if on_membrane:
+        ic = ic("+")
+    total = parent.comm.allreduce(fem.assemble_scalar(fem.form(ic * measure)), op=MPI.SUM)
+    size = parent.comm.allreduce(fem.assemble_scalar(fem.form(one * measure)), op=MPI.SUM)
+    return float(np.real(total) / np.real(size))
 
 
 def assemble_membrane_coupled(

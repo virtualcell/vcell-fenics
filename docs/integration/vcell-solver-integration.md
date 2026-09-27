@@ -400,6 +400,22 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-27** — **Region variables run on the two-compartment solver (#196, part 1).**
+  - **What runs:** a well-mixed species (VolumeRegionVariable) on either compartment, and a membrane
+    potential (MembraneRegionVariable) on the membrane between them. Each is a scifem Real block in
+    `integrate_interface_coupled`'s method-of-lines system and is written to the bundle as a constant field;
+    a potential gets a membrane domain.
+  - **Verified:**
+    - a well-mixed species matches its fast-diffusion (D = 1000) PDE twin to 5e-5;
+    - mass is conserved to 1e-14;
+    - C dV/dt = −g (V − E) matches its exact exponential, with an error that shrinks with the tolerance;
+    - serial and 2-rank runs agree.
+  - **Found and fixed on the way:** the interface-flux Jacobian was over-counted, because `membrane_trace`
+    aliases submesh arguments (the known DOLFINx 0.10 limitation). Side-masked traces (a 0/1 compartment
+    indicator per `dS` side) make it exact: Newton converges quadratically, and mass conservation tightened for
+    all two-compartment models (1e-12 → 3e-15).
+  - **Still refused:** region variables on the single-mesh and membrane-coupled paths.
+
 - **2026-09-22** — **The VCell Java side works.** V0–V5 are merged in vcell (#2084–#2091), and
   vcell-fluxcd #56 (dev) awaits a dev deploy.
   - **Image:** `ARM64_RUNNER=ubuntu-24.04-arm` makes the image multi-arch (native on Apple silicon).

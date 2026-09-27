@@ -4,7 +4,8 @@ Their default preconditioner, ILU, is sequential in PETSc — under `mpiexec -n 
 ("Could not locate a solver type for factorization type ILU and matrix type mpiaij"), found by the first
 MPI smoke run of the container image. `backend/linear_solvers.set_preconditioner` substitutes block
 Jacobi (ILU(0) per rank) in parallel. This runs a single-mesh MOL solve on a Netgen-realized disk and an
-interface-coupled MOL solve, serially and at n=2, and compares totals and extremes. They agree to the
+interface-coupled MOL solve (with and without a region variable, a Real block), serially and at n=2, and
+compares totals and extremes. They agree to the
 integrator tolerance, not bitwise: the parallel preconditioner (and so every Krylov iterate) differs.
 """
 
@@ -92,6 +93,27 @@ geometry = realize_interface_coupled(nested, inner_subdomain="inner", outer_subd
                                      h=0.1, comm=comm)
 result = integrate_interface_coupled(coupled, geometry, t_final=0.5, rtol=1e-8, atol=1e-10)
 out["coupled_inner"], out["coupled_outer"] = total(result.inner), total(result.outer)
+
+# (c) the same pair with a membrane potential (a region variable: one Real DOF, owned by one rank) gating the
+# permeability, C dV/dt = -g (V - E): the Real block must give the serial answer too
+from dataclasses import replace
+gated = replace(
+    coupled,
+    subdomains=[*coupled.subdomains, Subdomain(name="m", kind="surface")],
+    variables=[*coupled.variables, Variable(name="V", subdomain="m", space="region")],
+    parameters=[*coupled.parameters, ParameterConstant(name="g", value=2.0), ParameterConstant(name="E", value=-60.0)],
+    equations=[*coupled.equations, TemplateEquation(template="region_ode", variable="V", subdomain="m",
+               temporality="time_dependent", terms={"region_rate": "-g * (V - E)"}, initial_condition="-20.0")],
+    boundary_conditions=[
+        BCInterfaceFlux(variable="a", boundary="pm", expression="P * (1.0 + 0.01 * (V + 60.0)) * (b - a)"),
+        BCInterfaceFlux(variable="b", boundary="pm", expression="P * (1.0 + 0.01 * (V + 60.0)) * (a - b)"),
+    ],
+)
+region = integrate_interface_coupled(gated, geometry, t_final=0.5, rtol=1e-8, atol=1e-10)
+potential = region.fields["V"]
+n_owned = potential.function_space.dofmap.index_map.size_local
+out["region_V"] = comm.allreduce(float(potential.x.array[:n_owned].sum()), op=MPI.SUM)
+out["region_inner"], out["region_outer"] = total(region.inner), total(region.outer)
 if comm.rank == 0:
     print("PROBE " + json.dumps(out))
 """
@@ -117,4 +139,7 @@ def test_method_of_lines_solves_agree_under_mpi() -> None:
     # the coupled pair conserves its substance whatever the rank count
     assert parallel["coupled_inner"] + parallel["coupled_outer"] == pytest.approx(
         serial["coupled_inner"] + serial["coupled_outer"], rel=1e-9
+    )
+    assert parallel["region_inner"] + parallel["region_outer"] == pytest.approx(
+        serial["region_inner"] + serial["region_outer"], rel=1e-9
     )

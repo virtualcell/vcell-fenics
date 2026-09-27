@@ -388,7 +388,7 @@ The boundary term $j$ is the variable's own **flux boundary conditions** (`neuma
 
 In weak form with a region-constant test function $w$ this is $\int_R \dot u\, w = \int_R (r_u + r_R)\, w + \int_{\partial R} j\, w$ — an extra per-region unknown in the same method-of-lines system as the fields it couples to (a Real space per region; `scifem`).
 
-Covers VCell's `VolumeRegionVariable` + `VolumeRegionEquation` (a **well-mixed species** in a spatial application; $r_R$ = its `VolumeRate`) and `MembraneRegionVariable` + `MembraneRegionEquation` (most often the **membrane potential**, $C\,dV/dt = -I_{\text{total}}$; $r_R$ = its `MembraneRate`). v1 of the backends refuses region variables (vcell-fenics #196); a subdomain realised as several disconnected regions needs per-region instancing (§1.2.6 (2)).
+Covers VCell's `VolumeRegionVariable` + `VolumeRegionEquation` (a **well-mixed species** in a spatial application; $r_R$ = its `VolumeRate`) and `MembraneRegionVariable` + `MembraneRegionEquation` (most often the **membrane potential**, $C\,dV/dt = -I_{\text{total}}$; $r_R$ = its `MembraneRate`). The two-compartment solver (`integrate_interface_coupled`) solves them — a region variable on either compartment or on the membrane between them, a scifem Real block in its method-of-lines system; the single-mesh and membrane-coupled solvers still refuse them (vcell-fenics #196). v1 is one region per subdomain: a subdomain realised as several disconnected regions needs per-region instancing (§1.2.6 (2)).
 
 #### 1.4.3 Sketched for v2+
 
@@ -2316,7 +2316,7 @@ A consolidated record of everything explicitly deferred to v2 (or beyond), pulle
 | **formalism → VCell converter** | §2.6.4 | Lossy in one direction; offered only for the subset that fits in VCell's quirks. |
 | **SBML Spatial converter** | §2.6.4 | Schemas diverge non-trivially (no weak-form, no first-class unknown motion, different per-face BC machinery). Substantial standalone project. |
 | **VCell `Event`** | §2.6.3 | Discrete state transitions; needs its own design pass. |
-| **Solving region variables** (`region_ode`, T5) | §1.4.2 | The formalism and the VCell import carry them; the backends refuse them until a per-region Real unknown joins the method-of-lines systems (vcell-fenics #196). |
+| **Solving region variables everywhere** (`region_ode`, T5) | §1.4.2 | The two-compartment solver hosts them; the single-mesh and membrane-coupled solvers, and several regions per subdomain, are to come (vcell-fenics #196). |
 | **`FastSystem` / `FastInvariant` / `FastRate`** | §2.6.3 (memory decision) | Solver-side QSSA reduction; user's read is "could be done via change of variables, not worth it." |
 | **Particle / `StochVolVariable` / stochastic constructs** | §2.6.3 | Out of scope for this formalism entirely — different primitives. |
 | **`PostProcessingBlock`** | §2.6.3 | Observables / derived outputs belong with the solver-configuration / output-spec object. |
