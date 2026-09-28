@@ -502,3 +502,16 @@ def test_help_renders(capsys: pytest.CaptureFixture[str]) -> None:
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
     assert "--simtask" in out and "[[[progress:…%]]]" in out
+
+
+def test_a_vcml_application_with_a_fast_system_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # the .vcml path reads the FastSystem from the XML (pyvcell drops it) and refuses it before solving
+    pytest.importorskip("pyvcell.vcml.vcml_reader")
+    text = (_CV / "minimal_diffusion_2d_v1.vcml").read_text()
+    marker = "</CompartmentSubDomain>"
+    assert text.count(marker) == 1
+    fast = "<FastSystem><FastInvariant>(u + uB)</FastInvariant><FastRate>J_buffering</FastRate></FastSystem>"
+    model = tmp_path / "fast.vcml"
+    model.write_text(text.replace(marker, fast + marker))
+    assert main(["--vcml", str(model), "--out", str(tmp_path / "out")]) == 2
+    assert "FastSystem" in capsys.readouterr().err

@@ -453,3 +453,23 @@ def test_value_identifiers_do_not_match_inside_call_names() -> None:
     assert referenced_names("sin(t)") == {"t"}
     assert referenced_names("s * sin(s) + exp(x)") == {"s", "x"}
     assert referenced_names("sproc_0.velocityX + a.b") == {"sproc_0.velocityX", "a.b"}
+
+
+def _add_fast_system(math: etree._Element) -> None:
+    """Give the first compartment of a <MathDescription> a VCell FastSystem (fast buffering)."""
+    compartment = next(c for c in math if etree.QName(c).localname == "CompartmentSubDomain")
+    fast = etree.SubElement(compartment, f"{{{_NS}}}FastSystem")
+    etree.SubElement(fast, f"{{{_NS}}}FastInvariant").text = "(Ca + CaB)"
+    etree.SubElement(fast, f"{{{_NS}}}FastRate").text = "J_buffering"
+
+
+def test_a_fast_system_is_refused(tmp_path: Path) -> None:
+    # pyvcell's reader drops a FastSystem, and solving without it would be silently wrong for the buffered
+    # species (20 of 22 electrophysiology models that otherwise run have one): the task is refused
+    path = _edit(
+        tmp_path, lambda root: _add_fast_system(next(c for c in root if etree.QName(c).localname == "MathDescription"))
+    )
+    task = read_simtask(path)
+    assert task.fast_systems
+    with pytest.raises(SimulationTaskError, match="FastSystem"):
+        check_supported(task)

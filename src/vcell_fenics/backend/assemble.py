@@ -43,6 +43,7 @@ from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
 from vcell_fenics.backend.discrete import BackwardEuler, BoundaryTerm, DiscreteProblem, Term, TermKind, _MeshMotion
+from vcell_fenics.backend.equations import as_field_equation
 from vcell_fenics.backend.geometry import CoupledGeometry, Geometry, cross_validate
 from vcell_fenics.core import remap_bulk_function, remap_surface_function
 from vcell_fenics.formalism.parser import parse
@@ -457,7 +458,17 @@ def _apply_initial_conditions(
 
 def _resolve_equations(md: MathDescription) -> list[TemplateEquation]:
     equations: list[TemplateEquation] = []
-    for eq in md.equations:
+    subdomains_by_name = {sd.name: sd for sd in md.subdomains}
+    for original in md.equations:
+        eq = original
+        if isinstance(original, TemplateEquation) and original.template == "lumped_ode":
+            home = subdomains_by_name[original.subdomain]
+            if not isinstance(home.motion, MotionNone):
+                raise NotImplementedError(
+                    f"a non-diffusing species ({original.variable!r}) on a moving subdomain is not supported yet: "
+                    f"VCell sweeps it with the front, and pure advection without diffusion needs stabilization (#186)"
+                )
+            eq = as_field_equation(original, home.kind)  # a field without transport (T4 on a spatial subdomain)
         if not isinstance(eq, TemplateEquation) or eq.template not in _SUPPORTED_TEMPLATES:
             template = getattr(eq, "template", None)
             raise NotImplementedError(f"backend v1 supports templates {sorted(_SUPPORTED_TEMPLATES)}, not {template!r}")

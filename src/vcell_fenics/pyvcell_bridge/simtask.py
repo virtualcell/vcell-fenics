@@ -96,6 +96,9 @@ class SimulationTask:
     math: Any  # pyvcell MathDescription, this job's overrides applied
     geometry: Any  # pyvcell Geometry
     warnings: tuple[str, ...] = field(default=())
+    # subdomains whose math carries a VCell FastSystem (rapid-equilibrium reduction) — pyvcell's reader
+    # drops the element, so it is read from the XML here and refused by `check_supported`
+    fast_systems: tuple[str, ...] = ()
     # A moving-boundary task's front kinematics, one per membrane that carries a <Velocity> (pyvcell
     # FrontVelocity, the raw VCell expressions; the importer inlines them). Empty for a fixed geometry.
     front_velocities: tuple[Any, ...] = ()
@@ -219,6 +222,7 @@ def read_simtask(path: str | Path) -> SimulationTask:
         overrides=overrides,
         resolved_overrides=resolved,
         field_data=field_data,
+        fast_systems=fast_system_subdomains(children["MathDescription"]),
         moving_boundary=task.get("Solver") == "MovingB" or _child(task, "MovingBoundarySolverOptions") is not None,
         math=apply_overrides(math, resolved),
         geometry=geometry,
@@ -274,6 +278,28 @@ def front_velocity_dependence(task: SimulationTask) -> VelocityDependence:
     return "prescribed"
 
 
+def fast_system_subdomains(math: Any) -> tuple[str, ...]:
+    """The subdomains of a VCell ``<MathDescription>`` element that carry a ``<FastSystem>``: VCell's
+    rapid-equilibrium reduction (fast buffering), solved algebraically by VCell's solvers. pyvcell's math
+    reader does not model it, so a solve that ignores it would be silently wrong; the loaders refuse it."""
+
+    names: list[str] = []
+    for subdomain in math:
+        if _tag(subdomain) in ("CompartmentSubDomain", "MembraneSubDomain") and any(
+            _tag(child) == "FastSystem" for child in subdomain
+        ):
+            names.append(subdomain.get("Name", "?"))
+    return tuple(names)
+
+
+def fast_system_refusal(subdomains: tuple[str, ...]) -> str:
+    return (
+        f"the math has a FastSystem (VCell's rapid-equilibrium reduction, e.g. fast calcium buffering) on "
+        f"{', '.join(map(repr, subdomains))}; FEniCSx does not solve fast systems, and ignoring one would give "
+        f"wrong results for the buffered species"
+    )
+
+
 def check_supported(task: SimulationTask) -> list[str]:
     """Refuse what this solver would otherwise mis-solve (ADR 011 §1). Returns non-fatal warnings."""
 
@@ -283,6 +309,8 @@ def check_supported(task: SimulationTask) -> list[str]:
         warnings.extend(_check_moving_boundary(task))
     if task.field_data:
         raise SimulationTaskError(f"{name}: field data (FieldFunctionIdentifierSpec) is not supported yet")
+    if task.fast_systems:
+        raise SimulationTaskError(f"{name}: {fast_system_refusal(task.fast_systems)}")
     if task.task_type.lower() != "unsteady":
         raise SimulationTaskError(f"{name}: TaskType={task.task_type!r}; only time-dependent (Unsteady) tasks run")
     if task.start_time != 0.0:
