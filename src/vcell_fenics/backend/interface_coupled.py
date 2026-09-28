@@ -1727,8 +1727,8 @@ def integrate_membrane_coupled(
     _refuse_several_regions(region_eqs, _region_meshes(geometry))
     if region_eqs and (motion is not None or velocity is not None):
         raise NotImplementedError("region variables on a moving membrane are a follow-up (#196)")
-    if not inner_eqs or not outer_eqs:
-        raise NotImplementedError("membrane coupling needs at least one bulk species in each compartment")
+    if not inner_eqs and not outer_eqs and not region_eqs:
+        raise NotImplementedError("membrane coupling needs species in at least one of the two compartments")
     if not membrane_eqs:
         raise NotImplementedError(
             f"membrane coupling needs a surface equation on the membrane subdomain "
@@ -1742,8 +1742,11 @@ def integrate_membrane_coupled(
     tdim = parent.topology.dim
     parent.topology.create_connectivity(tdim - 1, tdim)
     membrane_mesh = geometry.membrane_mesh
-    V_in = fem.functionspace(geometry.inner_mesh, ("Lagrange", 1, (len(inner_species),)))
-    V_out = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1, (len(outer_species),)))
+    # A compartment with no field species (the unmodelled side of a one-sided membrane, #185, or a well-mixed
+    # cytosol of region variables only) keeps a one-component *placeholder* block — held at zero by a mass-only
+    # residual, named by no species, coupled to nothing — so the three-block structure is unchanged.
+    V_in = fem.functionspace(geometry.inner_mesh, ("Lagrange", 1, (max(len(inner_species), 1),)))
+    V_out = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1, (max(len(outer_species), 1),)))
     V_mem = fem.functionspace(membrane_mesh, ("Lagrange", 1, (len(membrane_species),)))
     u_in_fn, u_out_fn, rho_fn = fem.Function(V_in), fem.Function(V_out), fem.Function(V_mem)
     rate_in, rate_out, rate_mem = fem.Function(V_in), fem.Function(V_out), fem.Function(V_mem)
@@ -1845,6 +1848,13 @@ def integrate_membrane_coupled(
                 reaction_form = -compile_expression(parse(source), react_ctx) * test[k] * dx
                 local_terms.append(reaction_form)
                 precond_terms.append(ufl.derivative(reaction_form, state, trial))  # assemblable linearisation
+    for species, rate, trial, test, dx, sigma in (
+        (inner_species, rate_in, u_in, w_in, dx_in, shift),
+        (outer_species, rate_out, u_out, w_out, dx_out, shift),
+    ):
+        if not species:  # the placeholder block: u̇ = 0 from u = 0
+            local_terms.append(rate[0] * test[0] * dx)
+            precond_terms.append(sigma * trial[0] * test[0] * dx)
     f_local = _sum_forms(local_terms)
     j_local = _sum_forms(precond_terms)
 
@@ -1886,7 +1896,10 @@ def integrate_membrane_coupled(
                 "the interface value-equality constraint (u = k·u_adjacent) is a follow-up increment; "
                 "this integrator handles single-sided interface flux BCs"
             )
-        if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in bulk_test_of:
+        # With one side unmodelled the import writes the other side's flux as a plain Neumann BC on the
+        # membrane (#185): on this mesh that is the same single-sided interface flux.
+        interface_flux = isinstance(bc, (BCInterfaceFlux, BCNeumann)) and bc.boundary == geometry.interface
+        if not interface_flux or bc.variable not in bulk_test_of:
             continue
         flux = compile_expression(parse(bc.expression), coupling_ctx)
         test, k = bulk_test_of[bc.variable]
@@ -1926,6 +1939,10 @@ def integrate_membrane_coupled(
     for w in region_tests:
         f_local += zero * w * dx_in
         f_coup += zero * w("+") * ds_int
+    # Likewise an empty compartment's placeholder block, whose state has no coupling term to differentiate.
+    for species, state, test, dx in ((inner_species, u_in_fn, w_in, dx_in), (outer_species, u_out_fn, w_out, dx_out)):
+        if not species:
+            f_coup += zero * state[0] * test[0] * dx
 
     # The assemblable part of the coupling Jacobian (the bulk-trial columns; the membrane-trial columns
     # are zero — that block is what the matrix-free operator supplies). Used only for preconditioning.
@@ -1943,7 +1960,8 @@ def integrate_membrane_coupled(
         (u_out_fn, outer_eqs, ctx),
         (rho_fn, membrane_eqs, surf_ctx),
     ):
-        _interpolate_component_ics(fn, eqs, region_ctx)
+        if eqs:  # a placeholder block stays at its zero initial state
+            _interpolate_component_ics(fn, eqs, region_ctx)
     for fn, eq in zip(region_fns, region_eqs, strict=True):
         on_membrane = eq.subdomain == geometry.membrane_subdomain
         measure = ds_int if on_membrane else (dx_in if eq.subdomain == geometry.inner_subdomain else dx_out)

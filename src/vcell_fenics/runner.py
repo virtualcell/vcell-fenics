@@ -225,17 +225,6 @@ def _refuse_region_variables(math: MathDescription, interface: Coupling | None) 
     membrane between them (``interface``). The single-mesh and moving paths refuse them before any bundle is
     started (#196)."""
     regions = [v for v in math.variables if v.space == REGION_SPACE]
-    if interface is not None and interface.membrane_species and regions:
-        # the membrane-coupled solver carries each compartment's species as one vector field, so a
-        # compartment of region variables only (a well-mixed cytosol) has no field to hold them beside
-        fields = {v.subdomain for v in math.variables if v.space != REGION_SPACE}
-        bare = sorted({v.subdomain for v in regions} & ({interface.inner, interface.outer} - fields))
-        if bare:
-            raise RunError(
-                f"with membrane species, each compartment needs a diffusing species: {', '.join(map(repr, bare))} "
-                f"has only region variables (a well-mixed species) — not supported yet; see "
-                f"virtualcell/vcell-fenics#196"
-            )
     homes = {interface.inner, interface.outer, interface.membrane} if interface is not None else set()
     unhosted = [f"{v.name!r} on {v.subdomain!r}" for v in regions if v.subdomain not in homes]
     if unhosted:
@@ -549,12 +538,6 @@ def _run_membrane_coupled(
     region_vars: dict[str, list[str]] = {coupling.inner: [], coupling.outer: [], coupling.membrane: []}
     for eq in model.math.equations:
         (region_vars if eq.variable in region_names else species)[eq.subdomain].append(eq.variable)
-    empty = [name for name in (coupling.inner, coupling.outer) if not species[name]]
-    if empty:
-        raise RunError(
-            "the membrane-coupled solver needs at least one species in each compartment; "
-            f"{', '.join(map(repr, empty))} has none"
-        )
 
     comm = MPI.COMM_WORLD
     log(
@@ -577,9 +560,12 @@ def _run_membrane_coupled(
         (coupling.outer, "volume", geometry.outer_mesh),
         (coupling.membrane, "membrane", geometry.membrane_mesh),
     )
+    recorded = []  # a compartment with nothing in it (the unmodelled side of a one-sided membrane) is not written
     for name, kind, mesh in regions:
         channels = [*species[name], *region_vars[name]]  # a region variable is written as a constant field
-        recorder.add_domain(name, kind, mesh, [(variable, None) for variable in channels])
+        if channels:
+            recorder.add_domain(name, kind, mesh, [(variable, None) for variable in channels])
+            recorded.append(name)
     recorder.open()
 
     cells = sum(mesh_cell_count(mesh) for _, _, mesh in regions[:2])
@@ -595,6 +581,8 @@ def _run_membrane_coupled(
         """The integrator's fields are vector P1, one component per species. A one-component vector space
         has no sub-spaces in DOLFINx, but its dof layout is scalar P1's, so that one is copied into a
         scalar Function on the same mesh (made once per region)."""
+        if n == 0:  # a placeholder block (no species there)
+            return []
         if n > 1:
             return [field.sub(k) for k in range(n)]
         key = id(field.function_space.mesh)
@@ -618,7 +606,7 @@ def _run_membrane_coupled(
             t,
             {
                 name: [*components(fields[name], len(species[name])), *map(constant, region_vars[name])]
-                for name in (coupling.inner, coupling.outer, coupling.membrane)
+                for name in recorded
             },
             progress=t / options.t_final,
         )
@@ -678,12 +666,19 @@ def _interface_coupling(model: ModelInput) -> Coupling | None:
     for surface in model.geometry.surfaces:
         if surface.name in subdomains and (subdomains - {surface.name}) <= {surface.inside, surface.outside}:
             # membrane species with bulk species on ONE side only (a receptor binding an extracellular ligand,
-            # nothing modelled in the cytosol): the membrane-coupled solver needs species in both compartments
-            (side,) = subdomains - {surface.name}
-            empty = ({surface.inside, surface.outside} - {side}).pop()
-            raise RunError(
-                f"membrane species on {surface.name!r} with bulk species only in {side!r}: the membrane-coupled "
-                f"solver needs species in both compartments it separates ({empty!r} has none) — not supported yet"
+            # nothing modelled in the cytosol): the membrane-coupled solver, the empty side a placeholder (#185)
+            spare = sorted({sv.name for sv in model.geometry.subvolumes} - {surface.inside, surface.outside})
+            if len(spare) > 1:
+                raise RunError(
+                    f"geometry {model.geometry.name!r} has more unmodelled subvolumes than the coupled "
+                    f"solver can drop ({', '.join(spare)}); it supports two compartments plus one background"
+                )
+            return Coupling(
+                inner=surface.inside,
+                outer=surface.outside,
+                membrane=surface.name,
+                background=spare[0] if spare else None,
+                membrane_species=True,
             )
     for surface in model.geometry.surfaces:
         if {surface.inside, surface.outside} == subdomains:
