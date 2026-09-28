@@ -330,6 +330,32 @@ assembled partial Jacobian. Comparing it to FV (Sundials/CVODE) under joint refi
 Clean ~2×/level (first-order — the body-fitted membrane is O(h) on each side) → the matrix-free
 membrane-coupled MOL converges to VCell's fvsolver on a receptor-ligand model imported end-to-end.
 
+## Three compartments: nucleus | cytosol | outside (the multi-compartment solver)
+
+`nucleus_fv.py` + `nucleus_compare.py` are the cross-solver check for **any number of compartments and
+membranes** (`integrate_multi_compartment`, the runner's path for every fixed-geometry model whose equations
+span two or more subdomains). The cell is:
+- an off-centre nucleus (r = 0.25) in a cytosol (r = 0.6) in a 2 × 2 box, with a ligand in each compartment;
+- passive nuclear transport across the nuclear envelope, a membrane reaction `s_cyto → s_nuc` at
+  `kt·(s_cyto − s_nuc)`;
+- a receptor `R` on the plasma membrane capturing both the cytosolic and the outside ligand (as the receptor
+  case).
+
+VCell lowers this to jump conditions on both membranes, with its `KFlux·KMOLE` unit factors, and a membrane PDE
+for `R`. The FEniCSx side imports that math verbatim. The comparison at `t = 1`:
+- the nucleus starts empty and fills to ≈ 0.6;
+- each ligand is compared on the FV grid away from the membranes (a band of 0.1·r around each);
+- the drift column is the KMOLE-reconciled substance total, `∫s_nuc + ∫s_cyto + ∫s_ext + KMOLE·∫R`.
+
+| N | h | s_nuc L2 / L∞ | s_cyto L2 / L∞ | s_ext L2 / L∞ | drift |
+|---|---|---|---|---|---|
+| 64 | 0.031 | 0.67 % / 0.71 % | 0.17 % / 0.32 % | 0.011 % / 0.014 % | −1.5e-12 |
+| 128 | 0.016 | 0.34 % / 0.35 % | 0.050 % / 0.083 % | 0.001 % / 0.001 % | −2.3e-11 |
+| 256 | 0.008 | 0.11 % / 0.12 % | 0.047 % / 0.065 % | 0.001 % / 0.004 % | −1.0e-10 |
+
+The nucleus, the most sensitive field, converges from 0.67 % to 0.11 %. The substance total is conserved to
+round-off at every h.
+
 ## Moving-boundary translation (ALE ↔ FronTier FV)
 
 A first cross-validation of a **moving boundary** against `../vcell-mbsolver` (the FronTier

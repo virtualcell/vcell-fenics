@@ -373,6 +373,30 @@ def _undeclared_membranes(description: GeometryDescription, labels: Labels) -> l
     ]
 
 
+def has_junction(description: GeometryDescription, *, h: float) -> bool:
+    """Whether three or more of an analytic geometry's subvolumes meet (in one cell of the ``h`` lattice):
+    two cells touching in extracellular space, a cell split into two compartments. The marching path embeds
+    each subvolume's boundary as its own closed curve / surface, which can't share a junction, so such a
+    geometry is realized through its label field instead."""
+
+    dim = description.dim
+    extent = tuple(float(description.extent[i]) for i in range(dim))
+    origin = tuple(float(description.origin[i]) for i in range(dim))
+    fields = subvolume_implicit_functions(description)
+    counts = tuple(max(3, round(extent[i] / h) + 1) for i in range(dim))
+    axes = [np.linspace(origin[i], origin[i] + extent[i], counts[i]) for i in range(dim)]
+    coords = tuple(np.meshgrid(*axes, indexing="ij"))
+    labels = np.argmax(np.stack([-eval_field(fields[s.name], coords) for s in description.subvolumes]), axis=0)
+    # the distinct labels among each lattice cell's 2^dim corners
+    corners = [
+        labels[tuple(slice(o, o + n - 1) for o, n in zip(offset, labels.shape, strict=True))]
+        for offset in np.ndindex(*(2,) * dim)
+    ]
+    stack = np.sort(np.stack(corners), axis=0)
+    distinct = 1 + np.count_nonzero(np.diff(stack, axis=0), axis=0)
+    return bool((distinct >= 3).any())
+
+
 def analytic_label_geometry(description: GeometryDescription, *, h: float) -> LabelGeometry:
     """The label field of an analytic geometry at mesh size ≈ ``h``, for the partitions the contour /
     marching path can't body-fit — a subvolume that touches the box (#187). No smoothing: each node of a

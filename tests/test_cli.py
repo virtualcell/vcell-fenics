@@ -241,7 +241,7 @@ def test_run_couples_two_compartments_across_a_membrane(tmp_path: Path) -> None:
     assert bundle.times == pytest.approx((0.0, 0.05, 0.1, 0.15, 0.2))  # every output, incl. the IC
 
     summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
-    assert summary["run"]["backend"] == "interface_coupled"
+    assert summary["run"]["backend"] == "multi_compartment"
     assert sorted(summary["species"]) == ["s_cyto", "s_ext"]
     species = summary["outputs"][-1]["species"]
     assert species["s_ext"]["total"] > 0.0  # substance actually crossed the membrane
@@ -300,7 +300,7 @@ def test_run_couples_several_species_per_compartment(tmp_path: Path) -> None:
     bundle = Bundle.open(out / "results.fenics")
     assert set(bundle.manifest.domains) == {"cyto_dom", "ext_dom"}
     summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
-    assert summary["run"]["backend"] == "interface_coupled"
+    assert summary["run"]["backend"] == "multi_compartment"
     assert sorted(summary["species"]) == ["p_cyto", "q_ext", "s_cyto", "s_ext"]
     rows = [row["species"] for row in summary["outputs"]]
     assert len(rows) == 5 and rows[-1]["p_cyto"]["total"] > 0.0  # the reaction ran
@@ -339,7 +339,7 @@ def test_run_couples_both_compartments_and_membrane_species(tmp_path: Path) -> N
     assert bundle.times == pytest.approx((0.0, 0.25, 0.5))  # every output, incl. the IC
 
     summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
-    assert summary["run"]["backend"] == "membrane_coupled"
+    assert summary["run"]["backend"] == "multi_compartment"
     assert sorted(summary["species"]) == ["R", "s_cyto", "s_ext"]
     # Free ligand (µM, over the compartments) plus bound receptor (molecules/µm², over the membrane)
     # reconciled by KMOLE is the conserved substance: flat to round-off, while R actually binds.
@@ -382,8 +382,8 @@ def _one_sided(math: dict[str, Any]) -> None:
 
 def test_membrane_species_with_one_sided_bulk_run(tmp_path: Path) -> None:
     # The receptor model without its cytosolic ligand: membrane species with bulk species on one side only
-    # (#185). The empty cytosol is a placeholder, so the run must equal the same model WITH a cytosolic ligand
-    # that binds nothing (only the empty side's block differs), and it conserves the ligand: the free
+    # (#185). The empty cytosol carries no unknowns, so the run must equal the same model WITH a cytosolic ligand
+    # that binds nothing, and it conserves the ligand: the free
     # extracellular pool plus the bound receptors, KMOLE-reconciled (∫s_ext dV + KMOLE·∫R dA).
     one_sided, inert = tmp_path / "one_sided", tmp_path / "inert"
     options = ["--output-dt", "0.25", "--h", "0.3", "--no-fields"]
@@ -392,7 +392,8 @@ def test_membrane_species_with_one_sided_bulk_run(tmp_path: Path) -> None:
     a, b = Bundle.open(one_sided / "results.fenics"), Bundle.open(inert / "results.fenics")
     assert "cyto_dom" not in a.manifest.domains  # nothing to write for the unmodelled side
     for domain, variable in (("ext_dom", "s_ext"), ("mem_dom", "R")):
-        assert np.allclose(a.stats(domain, variable), b.stats(domain, variable), rtol=1e-8, atol=1e-10), variable
+        # to the adaptive integrator's tolerance: the two solves have different blocks, so different steps
+        assert np.allclose(a.stats(domain, variable), b.stats(domain, variable), rtol=1e-5, atol=1e-8), variable
     kmole = 1.0 / 602.214076
     total = a.stats("ext_dom", "s_ext")[:, 1] + kmole * a.stats("mem_dom", "R")[:, 1]
     assert np.allclose(total, total[0], rtol=1e-7)
