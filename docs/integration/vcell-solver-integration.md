@@ -400,6 +400,26 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-27** — **Non-diffusing species (#186), and VCell's electrophysiology models run.**
+  - **T4 `lumped_ode` on a spatial subdomain** is a field without transport: VCell's non-diffusing species
+    (buffers, ER-bound states, channel gating variables). All three method-of-lines paths assemble it as a
+    transport-free field block (`backend/equations.as_field_equation`).
+  - **Latent bug fixed:** the membrane-coupled solver read only a membrane equation's `source`, so a
+    membrane ODE's `rate` (a gating variable's kinetics) was silently ignored.
+  - **`sim.t` is live** in both coupled solvers. It had crashed (`KeyError`), and parameters would have been
+    frozen at t = 0.
+  - **Reservoirs:** VCell's per-face Value BCs now work.
+    - The same value on every box face is a reservoir on the outer wall.
+    - An interior compartment's per-face BCs, which are boilerplate, are dropped.
+  - **Validated against fvsolver:**
+    - a Hodgkin–Huxley model (`120428417 / combined_spatial`) reproduces its repetitive firing: the same four
+      action potentials, V to 0.1 mV between spikes, Na⁺ per spike to 1%;
+    - a volt & calcium model's membrane potential matches to 0.002 mV over 10 s.
+  - **FastSystem found, and now refused:** the same volt & calcium model's *calcium* was wrong, because its
+    math has a `FastSystem` (rapid buffering) that pyvcell's reader drops. Both loaders now read it from the
+    XML and refuse it. That covers 20 of the 22 region-variable models that otherwise run, 116 of 600
+    sampled applications (19%), and 2 earlier survey "ran" results that were silently wrong.
+
 - **2026-09-27** — **Region sizes (#199) and cross-membrane scoping (#189).**
   - **`region_size(<subdomain>)` (§1.8.4)** is a subdomain's realized measure. The bridge translates VCell's
     `vcRegionVolume('X')` / `vcRegionArea('X')` to it. Both coupled solvers and the single-mesh path bind it

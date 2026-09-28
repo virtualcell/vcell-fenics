@@ -371,7 +371,9 @@ For `temporality = steady_state`, this collapses to the algebraic $r(u) = 0$.
 |---|---|---|---|
 | `rate` | scalar expression | yes | r — the right-hand side |
 
-Covers: non-spatial signalling-network models, lumped-compartment kinetics, any case where a variable is constant in space within its subdomain.
+Covers: non-spatial signalling-network models and lumped-compartment kinetics.
+
+**On a spatial subdomain** (a volume or a surface) T4 is a **field without transport**: the variable has a value at every point, governed by $\partial_t u = r(u, x, t)$ there, with no flux between points. That is VCell's `OdeEquation` on a spatial compartment or membrane — a species that does not diffuse (an immobile buffer, an ER-bound state, a channel gating variable). The solvers assemble it as the field template with no diffusion or advection and `source` $= r$: a P1 field whose nodes evolve independently. A variable that is *constant in space* within its subdomain (a well-mixed pool, a membrane potential) is not T4 but a region variable (T5). A non-diffusing species on a moving subdomain is not supported yet: VCell sweeps it with the front, and pure advection without diffusion needs a stabilized scheme.
 
 ##### T5 — Region ODE (`region_ode`: one value per connected region)
 
@@ -1816,7 +1818,7 @@ This section specifies which VCell `MathDescription` constructs map to which for
 
 | VCell construct | Reason it does not map |
 |---|---|
-| `FastSystem`, `FastInvariant`, `FastRate` | Solver-side QSSA reduction; not part of this formalism (memory decision: "out of scope"). |
+| `FastSystem`, `FastInvariant`, `FastRate` | Solver-side QSSA reduction; not part of this formalism (memory decision: "out of scope"). pyvcell's reader drops the element, so the VCML and SimulationTask loaders read it from the XML and **refuse** the model: solving without it is silently wrong for the buffered species. It is common — 116 of 600 sampled public applications (19%), most of VCell's electrophysiology-with-calcium models. |
 | `Event` | Discrete state transitions are deferred to v2 (no template). |
 | `ParticleMolecularType`, `StochVolVariable` | Stochastic dynamics are out of scope for this formalism entirely. |
 | `PostProcessingBlock` | Observables / derived outputs are out of scope for the formalism — they belong with the solver-configuration / output-spec object. |

@@ -61,6 +61,8 @@ from vcell_fenics.pyvcell_bridge.overrides import OverrideError
 from vcell_fenics.pyvcell_bridge.simtask import (
     SimulationTaskError,
     check_supported,
+    fast_system_refusal,
+    fast_system_subdomains,
     front_velocity_dependence,
     read_simtask,
 )
@@ -129,6 +131,18 @@ def detect_format(document: object) -> str:
     )
 
 
+def _vcml_fast_systems(path: Path, application: str) -> tuple[str, ...]:
+    """The subdomains of ``application``'s math (in the ``.vcml`` XML) that carry a VCell FastSystem."""
+
+    from lxml import etree
+
+    for spec in etree.parse(str(path)).getroot().iter("{*}SimulationSpec"):
+        if spec.get("Name") == application:
+            math = next(spec.iter("{*}MathDescription"), None)
+            return fast_system_subdomains(math) if math is not None else ()
+    return ()
+
+
 def load_vcml(path: Path, *, application: str | None = None, simulation: str | None = None) -> ModelInput:
     """Load a VCell ``.vcml`` biomodel and import the chosen application's math + geometry.
 
@@ -157,6 +171,9 @@ def load_vcml(path: Path, *, application: str | None = None, simulation: str | N
         )
     if app.math_description is None:
         raise CliError(f"{path}: application {app.name!r} carries no generated math description")
+    fast = _vcml_fast_systems(path, app.name)
+    if fast:  # pyvcell's reader drops a FastSystem, so it is read from the XML (see simtask.fast_system_subdomains)
+        raise CliError(f"{path}: application {app.name!r}: {fast_system_refusal(fast)}")
     if app.geometry is None:
         raise CliError(f"{path}: application {app.name!r} carries no geometry")
 

@@ -58,6 +58,7 @@ from ufl.algorithms.check_arities import ArityMismatch, check_form_arity
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.diagnostics import NonlinearTermError
+from vcell_fenics.backend.equations import as_field_equation
 from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_trace
 from vcell_fenics.backend.linear_solvers import set_preconditioner
 from vcell_fenics.backend.output_times import OutputMonitor
@@ -214,7 +215,9 @@ class MembraneCoupledResult(_MembraneCoupledFields):
     regions: dict[str, fem.Function] | None = None  # the region variables (Real Functions) by name
 
 
-def _param_symbols(md: MathDescription, mesh: Mesh, region_sizes: dict[str, float] | None = None) -> dict[str, UflExpr]:
+def _param_symbols(
+    md: MathDescription, mesh: Mesh, region_sizes: dict[str, float] | None = None, time: fem.Constant | None = None
+) -> dict[str, UflExpr]:
     """The model's parameters as symbols on `mesh`: constants as `fem.Constant`, expressions compiled in
     declaration order (the import keeps them dependency-ordered) — so a VCell unit factor like
     `KFlux = AreaPerUnitArea/VolumePerUnitVolume` or `UnitFactor = pow(KMOLE, 1)` binds as a UFL
@@ -222,16 +225,15 @@ def _param_symbols(md: MathDescription, mesh: Mesh, region_sizes: dict[str, floa
 
     ``region_sizes`` (a fixed geometry's subdomain measures, from `_geometry_region_sizes`) binds
     `region_size(<subdomain>)` (§1.8.4) — in parameter bodies (VCell's `Size_cyt`) and, since the returned
-    symbols carry them, in every expression compiled beside the parameters."""
+    symbols carry them, in every expression compiled beside the parameters. ``time`` is the solver's `sim.t`
+    Constant, which it advances to each stage time; it is returned as `sim.t` too, so a time-dependent
+    parameter or flux (a stimulus) follows the integration rather than staying at t = 0."""
     sizes = {
         region_size_symbol(name): fem.Constant(mesh, PETSc.ScalarType(value))  # type: ignore[operator]
         for name, value in (region_sizes or {}).items()
     }
-    scratch: dict[str, UflExpr] = {
-        "geom.x": ufl.SpatialCoordinate(mesh),
-        "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
-        **sizes,
-    }
+    sim_t = time if time is not None else fem.Constant(mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
+    scratch: dict[str, UflExpr] = {"geom.x": ufl.SpatialCoordinate(mesh), "sim.t": sim_t, **sizes}
     ctx = CompileContext(mesh=mesh, symbols=scratch)
     params: dict[str, UflExpr] = {}
     for p in md.parameters:
@@ -242,7 +244,7 @@ def _param_symbols(md: MathDescription, mesh: Mesh, region_sizes: dict[str, floa
         else:
             raise NotImplementedError(f"coupled assembly cannot bind parameter {p.name!r} of type {type(p).__name__}")
         scratch[p.name] = params[p.name] = value  # later parameters may reference this one
-    return {**sizes, **params}
+    return {**sizes, "sim.t": sim_t, **params}
 
 
 def _geometry_region_sizes(geometry: InterfaceCoupledGeometry) -> dict[str, float]:
@@ -633,6 +635,9 @@ _RESERVOIR_PENALTY = 1.0e6
 """Weak-Dirichlet penalty for a reservoir BC: the boundary value is held to ~1/penalty."""
 
 
+_BOX_FACES = ("x_minus", "x_plus", "y_minus", "y_plus", "z_minus", "z_plus")
+
+
 def _reservoir_dirichlet(
     md: MathDescription, geometry: InterfaceCoupledGeometry, outer_species: list[str], ctx: CompileContext
 ) -> list[tuple[int, UflExpr]]:
@@ -640,16 +645,31 @@ def _reservoir_dirichlet(
     concentration on the outer box boundary that sustains a bulk species against depletion (e.g. a ligand
     reservoir feeding the membrane binding). Enforced **weakly** by a penalty term `β ∮_wall (u − g) w ds`
     rather than a strong constraint, so it composes with the blocked cross-mesh form as an ordinary
-    boundary integral (no per-block Dirichlet bookkeeping). Only the **outer** compartment touches the box,
-    so a Dirichlet on any other boundary or species is rejected loudly."""
+    boundary integral (no per-block Dirichlet bookkeeping).
+
+    VCell writes a Value BC per box face (``x_minus``, ``x_plus``, …) and for *every* compartment. Both are
+    read for what they mean here:
+    - an outer species held at the **same** value on every box face is a reservoir on the whole outer wall
+      (the wall is the outer compartment's part of the box); faces that differ, or only some faces, are
+      not supported yet;
+    - a box-face BC on a species of a compartment that does not touch the box has no face to act on
+      (VCell's boilerplate for an interior compartment) and is dropped. Anything else is rejected loudly."""
+
+    tdim = geometry.parent_mesh.topology.dim
+    faces = set(_BOX_FACES[: 2 * tdim])
+    inner_touches_box = _touches_box(geometry)
+    per_face: dict[str, dict[str, str]] = {}
     reservoirs: list[tuple[int, UflExpr]] = []
     for bc in md.boundary_conditions:
         if not isinstance(bc, BCDirichlet):
             continue
+        if bc.boundary in faces:
+            per_face.setdefault(bc.variable, {})[bc.boundary] = bc.expression
+            continue
         if bc.boundary != geometry.outer:
             raise NotImplementedError(
-                f"Dirichlet BC on boundary {bc.boundary!r}: the membrane-coupled solver supports a reservoir "
-                f"Dirichlet only on the outer box boundary {geometry.outer!r}"
+                f"Dirichlet BC on boundary {bc.boundary!r}: the coupled solvers support a reservoir Dirichlet "
+                f"only on the outer box boundary {geometry.outer!r} (or the same value on every box face)"
             )
         if bc.variable not in outer_species:
             raise NotImplementedError(
@@ -657,7 +677,35 @@ def _reservoir_dirichlet(
                 f"the outer box boundary {geometry.outer!r}"
             )
         reservoirs.append((outer_species.index(bc.variable), compile_expression(parse(bc.expression), ctx)))
+    for variable, by_face in per_face.items():
+        if variable in outer_species:
+            values = set(by_face.values())
+            if set(by_face) != faces or len(values) != 1:
+                raise NotImplementedError(
+                    f"Dirichlet BCs on {variable!r} on box faces {sorted(by_face)}: a reservoir needs the same value "
+                    f"on every box face ({sorted(faces)}); per-face values are not supported yet"
+                )
+            reservoirs.append((outer_species.index(variable), compile_expression(parse(values.pop()), ctx)))
+        elif inner_touches_box:
+            raise NotImplementedError(
+                f"Dirichlet BCs on box faces for {variable!r}: its compartment touches the box, and only the outer "
+                f"compartment's box boundary holds a reservoir"
+            )
+        # else: an interior compartment has no box face — VCell's per-face boilerplate, nothing to impose
     return reservoirs
+
+
+def _touches_box(geometry: InterfaceCoupledGeometry) -> bool:
+    """Whether the inner compartment reaches the parent mesh's outer boundary (the box)."""
+
+    parent = geometry.parent_mesh
+    tdim = parent.topology.dim
+    parent.topology.create_connectivity(tdim - 1, tdim)
+    exterior = exterior_facet_indices(parent.topology)
+    facet_to_cell = parent.topology.connectivity(tdim - 1, tdim)
+    inner_cells = set(geometry.cell_tags.indices[geometry.cell_tags.values == geometry.inner_region_tag].tolist())
+    local = any(int(facet_to_cell.links(f)[0]) in inner_cells for f in exterior)
+    return bool(parent.comm.allreduce(local, op=MPI.LOR))
 
 
 def assemble_interface_coupled(
@@ -870,7 +918,9 @@ def integrate_interface_coupled(
     # Region variables (§1.4.2 T5: a well-mixed species, a membrane potential) are one Real unknown each,
     # appended after the field blocks; the field equations are everything else.
     region_eqs = [eq for eq in template_eqs if eq.template == "region_ode"]
-    field_eqs = [eq for eq in template_eqs if eq.template != "region_ode"]
+    # a non-diffusing species (T4 on a spatial subdomain) is a field block without transport (#186)
+    kind_of = {sd.name: sd.kind for sd in md.subdomains}
+    field_eqs = [as_field_equation(eq, kind_of[eq.subdomain]) for eq in template_eqs if eq.template != "region_ode"]
     inner_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.inner_subdomain]
     outer_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.outer_subdomain]
     region_homes = {geometry.inner_subdomain, geometry.outer_subdomain, geometry.membrane_subdomain}
@@ -883,11 +933,9 @@ def integrate_interface_coupled(
     _refuse_several_regions(region_eqs, _region_meshes(geometry))
     for subdomain, eqs in ((geometry.inner_subdomain, inner_eqs), (geometry.outer_subdomain, outer_eqs)):
         # each compartment carries field species (each a diffusion equation), region variables, or both
-        well_mixed_only = not eqs and any(eq.subdomain == subdomain for eq in region_eqs)
-        if (not eqs and not well_mixed_only) or any("diffusion" not in eq.terms for eq in eqs):
-            raise NotImplementedError(
-                f"interface coupling needs a bulk diffusion equation for each species on compartment {subdomain!r}"
-            )
+        # each compartment carries field species (diffusing or not), region variables, or both
+        if not eqs and not any(eq.subdomain == subdomain for eq in region_eqs):
+            raise NotImplementedError(f"interface coupling needs at least one species on compartment {subdomain!r}")
     if on_output is not None and (len(inner_eqs) != 1 or len(outer_eqs) != 1):
         raise ValueError("on_output(t, inner, outer) is for one species per compartment; use on_output_fields")
 
@@ -917,7 +965,8 @@ def integrate_interface_coupled(
     eq_of = {eq.variable: eq for eq in eqs}
     compartment_of = {eq.variable: eq.subdomain for eq in eqs}
 
-    params = _param_symbols(md, parent, _geometry_region_sizes(geometry))
+    time = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # sim.t, set to each stage time
+    params = _param_symbols(md, parent, _geometry_region_sizes(geometry), time)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
 
     # Side-aware traces on the membrane. `membrane_trace(f) = f('+') + f('-')` selects f's own side only for a
@@ -953,11 +1002,11 @@ def integrate_interface_coupled(
 
     # The MOL residual uses the state Functions directly (so the coupling can be nonlinear), with the
     # time derivative ċ = rate (a Function TS supplies). One block per species, all on the parent.
-    diffusion = [compile_expression(parse(eq.terms["diffusion"]), ctx) for eq in eqs]
-    residual = [
-        rates[k] * tests[k] * dxs[k] + diffusion[k] * ufl.dot(ufl.grad(states[k]), ufl.grad(tests[k])) * dxs[k]
-        for k in range(len(eqs))
-    ]
+    residual = [rates[k] * tests[k] * dxs[k] for k in range(len(eqs))]
+    for k, eq in enumerate(eqs):  # a non-diffusing species has no transport term
+        if "diffusion" in eq.terms:
+            d = compile_expression(parse(eq.terms["diffusion"]), ctx)
+            residual[k] += d * ufl.dot(ufl.grad(states[k]), ufl.grad(tests[k])) * dxs[k]
 
     # Optional in-bulk `source` (∂c/∂t = … + source), evaluated at the states of the species in its OWN
     # compartment (affine, nonlinear — e.g. mass action between two species there — or a purely spatial
@@ -1054,7 +1103,8 @@ def integrate_interface_coupled(
             state.x.array[: sizes[k]] = x.array_r[offsets[k] : offsets[k + 1]]
             state.x.scatter_forward()
 
-    def evaluate_residual(_ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+    def evaluate_residual(_ts: PETSc.TS, t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+        time.value = t
         unpack(x)
         for k, rate in enumerate(rates):
             rate.x.array[: sizes[k]] = x_dot.array_r[offsets[k] : offsets[k + 1]]
@@ -1066,8 +1116,9 @@ def integrate_interface_coupled(
         b.destroy()
 
     def evaluate_jacobian(
-        _ts: PETSc.TS, _t: float, x: PETSc.Vec, _x_dot: PETSc.Vec, sigma: float, mat: PETSc.Mat, _pre: PETSc.Mat
+        _ts: PETSc.TS, t: float, x: PETSc.Vec, _x_dot: PETSc.Vec, sigma: float, mat: PETSc.Mat, _pre: PETSc.Mat
     ) -> None:
+        time.value = t
         unpack(x)
         shift.value = sigma
         fresh = petsc.assemble_matrix(jacobian_form, kind="mpi")
@@ -1659,7 +1710,10 @@ def integrate_membrane_coupled(
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
     region_eqs = [eq for eq in template_eqs if eq.template == "region_ode"]
-    field_eqs = [eq for eq in template_eqs if eq.template != "region_ode"]
+    # a non-diffusing species (T4 on a spatial subdomain: a buffer, a membrane gating variable) is a field
+    # block without transport, its `rate` the `source` (#186)
+    kind_of = {sd.name: sd.kind for sd in md.subdomains}
+    field_eqs = [as_field_equation(eq, kind_of[eq.subdomain]) for eq in template_eqs if eq.template != "region_ode"]
     inner_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.inner_subdomain]
     outer_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.outer_subdomain]
     membrane_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.membrane_subdomain]
@@ -1680,9 +1734,6 @@ def integrate_membrane_coupled(
             f"membrane coupling needs a surface equation on the membrane subdomain "
             f"{geometry.membrane_subdomain!r} (the species coupled to both bulks)"
         )
-    for eq in (*inner_eqs, *outer_eqs):
-        if "diffusion" not in eq.terms:
-            raise NotImplementedError(f"membrane coupling needs a bulk diffusion equation for {eq.variable!r}")
     inner_species = [eq.variable for eq in inner_eqs]
     outer_species = [eq.variable for eq in outer_eqs]
     membrane_species = [eq.variable for eq in membrane_eqs]
@@ -1723,12 +1774,15 @@ def integrate_membrane_coupled(
 
     # region sizes are fixed numbers only while the geometry is (a moving membrane changes them in time)
     subdomain_sizes = _geometry_region_sizes(geometry) if motion is None and velocity is None else None
-    params = _param_symbols(md, parent, subdomain_sizes)
+    # sim.t on each mesh, set to each stage time (a stimulus current, a time-dependent flux)
+    time = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]
+    time_mem = fem.Constant(membrane_mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
+    params = _param_symbols(md, parent, subdomain_sizes, time)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
     # A Real is the same on both sides of the membrane: referenced as u (bulk) or u("+") (on dS).
     region_bulk = {eq.variable: u for eq, u in zip(region_eqs, region_fns, strict=True)}
     region_surface = {eq.variable: u("+") for eq, u in zip(region_eqs, region_fns, strict=True)}
-    surf_params = _param_symbols(md, membrane_mesh, subdomain_sizes)
+    surf_params = _param_symbols(md, membrane_mesh, subdomain_sizes, time_mem)
     surf_ctx = CompileContext(membrane_mesh, {"geom.x": ufl.SpatialCoordinate(membrane_mesh), **surf_params})
 
     # Moving membrane (optional): the motion driver + the per-region dilution coefficient `∇·v_mesh`. The
@@ -1916,7 +1970,8 @@ def integrate_membrane_coupled(
         b.destroy()
         coupling_b.destroy()
 
-    def evaluate_residual(_ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+    def evaluate_residual(_ts: PETSc.TS, t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+        time.value = time_mem.value = t
         residual(x, x_dot, result)
 
     # Preconditioner holder with the union sparsity of (σ·mass + diffusion) and the assemblable coupling.
@@ -1939,8 +1994,9 @@ def integrate_membrane_coupled(
     operator.setUp()
 
     def evaluate_jacobian(
-        _ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, sigma: float, _mat: PETSc.Mat, pre: PETSc.Mat
+        _ts: PETSc.TS, t: float, x: PETSc.Vec, x_dot: PETSc.Vec, sigma: float, _mat: PETSc.Mat, pre: PETSc.Mat
     ) -> None:
+        time.value = time_mem.value = t  # the matrix-free operator differences the residual at this time
         mf.set_base(x, x_dot, sigma)  # refresh the matrix-free operator's linearisation point
         unpack(x)
         shift.value, shift_mem.value = sigma, sigma
