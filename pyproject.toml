@@ -36,6 +36,14 @@ channels = ["conda-forge"]
 # needs that platform in the lock or every build has to run emulated under QEMU.
 platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
 
+# macOS only: MPICH's default libfabric provider there (`sockets`) starts two threads that each spin a
+# full core for the life of every process, one rank or many — a single solve showed ~300 % CPU, and six
+# in parallel stalled a 16-core machine. The `tcp` provider idles at 0 % and runs multi-rank `mpiexec`
+# as before. Linux (the container image, the cluster) picks a provider that doesn't spin, so it keeps
+# its default.
+[tool.pixi.target.osx-arm64.activation.env]
+FI_PROVIDER = "tcp"
+
 [tool.pixi.pypi-dependencies]
 vcell-fenics = { path = ".", editable = true }
 # VCell integration (pyvcell_bridge). pyvcell >= 0.4.0 publishes the pure-Pydantic VCML data
