@@ -400,6 +400,15 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-28** — **Coverage survey on 8.2.0.04: 193 of 600 run (32 %)**, up from 51 (8 %) two days earlier
+  ([`fenics-coverage-survey.md`](fenics-coverage-survey.md)).
+  - **Largest gap:** 3D size and speed (158 applications: timeouts, meshes too large, the memory cap), #192.
+  - **Refused:** FastSystem (116), by decision.
+  - **VCell side:** VCell's own math-generation failures (67).
+  - **Feature gaps left:** small. One solver bug ("Found multiple domains") accounts for 11 applications.
+  - **macOS:** MPICH's default libfabric provider spins two cores per process, fixed with `FI_PROVIDER=tcp`
+    (#205).
+
 - **2026-09-28** — **The multi-compartment solver: any number of compartments and membranes.**
   - **Why:** about a fifth of the saved spatial BioModels have three or more subvolumes (nucleus, ER, two
     cells). The two-compartment paths refused them, or dropped a background subvolume to fit.
@@ -501,6 +510,15 @@ Newest first. One entry per landed step or notable finding.
     indicator per `dS` side) make it exact: Newton converges quadratically, and mass conservation tightened for
     all two-compartment models (1e-12 → 3e-15).
   - **Still refused:** region variables on the single-mesh and membrane-coupled paths.
+- **2026-09-26** — **Coverage survey of saved BioModels**
+  ([`fenics-coverage-survey.md`](fenics-coverage-survey.md)).
+  - **Result:** on a 600-application sample of the 3,423 spatial deterministic FV applications, run
+    through the CLI on regenerated math, 8 % run end to end.
+  - **Blockers:** filed as vcell-fenics #185–#193. The largest are one-sided membrane species,
+    non-diffusing species, subvolumes touching the box, and 3D size.
+  - **VCell's gate:** it offers FEniCSx for 527 applications that then fail (virtualcell/vcell#2112).
+  - **pyvcell:** mis-reads CSG subvolumes (virtualcell/pyvcell#59).
+  - **FRAP:** agrees with fvsolver to 2 %.
 
 - **2026-09-22** — **The VCell Java side works.** V0–V5 are merged in vcell (#2084–#2091), and
   vcell-fluxcd #56 (dev) awaits a dev deploy.
