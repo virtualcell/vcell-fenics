@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -352,50 +353,76 @@ def test_run_couples_both_compartments_and_membrane_species(tmp_path: Path) -> N
     assert max(totals) - min(totals) <= 1e-12 * totals[0]
 
 
-def test_membrane_species_with_one_sided_bulk_is_a_clean_error(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # The receptor model without its cytosolic ligand: membrane species plus bulk species on one side
-    # only. Not supported yet (the membrane-coupled solver needs species in both compartments) — the
-    # refusal must say that, not that the geometry lacks a membrane.
+def _receptor(tmp_path: Path, name: str, edit: Any) -> list[str]:
+    """The receptor model (ligand in both compartments binding a membrane receptor R), edited by ``edit``,
+    as CLI arguments."""
     math = yaml.safe_load((_CV / "receptor_math.yaml").read_text())
+    edit(math)
+    math_file = tmp_path / f"{name}_math.yaml"
+    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
+    return ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "0.5"]
+
+
+def _no_cytosolic_binding(math: dict[str, Any]) -> None:
+    for function in math["functions"]:
+        if function["name"] == "J_bind_in":
+            function["exp"] = "0.0"  # nothing binds from the cytosol
+
+
+def _one_sided(math: dict[str, Any]) -> None:
+    """Drop the cytosolic ligand: membrane species with bulk species in the extracellular space only."""
+    _no_cytosolic_binding(math)
     math["variables"] = [v for v in math["variables"] if v["name"] != "s_cyto"]
     for compartment in math["compartment_subdomains"]:
         if compartment["name"] == "cyto_dom":
             compartment["pde_equations"] = []
     for membrane in math["membrane_subdomains"]:
         membrane["jump_conditions"] = [j for j in membrane.get("jump_conditions", []) if j["name"] != "s_cyto"]
-    math_file = tmp_path / "one_sided_math.yaml"
-    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
-    argv = ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "0.1"]
-    assert main([*argv, "--out", str(tmp_path / "out")]) != 0
-    err = capsys.readouterr().err
-    assert "bulk species only in 'ext_dom'" in err and "'cyto_dom' has none" in err
 
 
-def test_a_well_mixed_compartment_beside_membrane_species_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # A well-mixed species (VCell's VolumeRegionVariable, §1.4.2 T5) as a compartment's ONLY species, in a
-    # model with membrane receptors: the membrane-coupled solver holds each compartment's species as one
-    # vector field, so it cannot host a compartment of region variables alone — refused up front (#196).
-    math = yaml.safe_load((_CV / "receptor_math.yaml").read_text())
-    for variable in math["variables"]:
-        if variable["name"] == "s_cyto":
-            variable["var_type"] = "VolumeRegionVariable"
-    for compartment in math["compartment_subdomains"]:
-        if compartment["name"] == "cyto_dom":
-            compartment["pde_equations"] = [p for p in compartment["pde_equations"] if p["name"] != "s_cyto"]
-            compartment["volume_region_equations"] = [
-                {"name": "s_cyto", "uniform_rate": "0.0", "volume_rate": "0.0", "initial": "s_cyto_init_uM"}
-            ]
-    math_file = tmp_path / "well_mixed_math.yaml"
-    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
-    argv = ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "0.1"]
-    assert main([*argv, "--out", str(tmp_path / "out")]) == 2
-    err = capsys.readouterr().err
-    assert "'cyto_dom' has only region variables" in err and "#196" in err
-    assert not (tmp_path / "out").exists()  # refused before any bundle was started
+def test_membrane_species_with_one_sided_bulk_run(tmp_path: Path) -> None:
+    # The receptor model without its cytosolic ligand: membrane species with bulk species on one side only
+    # (#185). The empty cytosol is a placeholder, so the run must equal the same model WITH a cytosolic ligand
+    # that binds nothing (only the empty side's block differs), and it conserves the ligand: the free
+    # extracellular pool plus the bound receptors, KMOLE-reconciled (∫s_ext dV + KMOLE·∫R dA).
+    one_sided, inert = tmp_path / "one_sided", tmp_path / "inert"
+    options = ["--output-dt", "0.25", "--h", "0.3", "--no-fields"]
+    assert main([*_receptor(tmp_path, "one_sided", _one_sided), *options, "--out", str(one_sided)]) == 0
+    assert main([*_receptor(tmp_path, "inert", _no_cytosolic_binding), *options, "--out", str(inert)]) == 0
+    a, b = Bundle.open(one_sided / "results.fenics"), Bundle.open(inert / "results.fenics")
+    assert "cyto_dom" not in a.manifest.domains  # nothing to write for the unmodelled side
+    for domain, variable in (("ext_dom", "s_ext"), ("mem_dom", "R")):
+        assert np.allclose(a.stats(domain, variable), b.stats(domain, variable), rtol=1e-8, atol=1e-10), variable
+    kmole = 1.0 / 602.214076
+    total = a.stats("ext_dom", "s_ext")[:, 1] + kmole * a.stats("mem_dom", "R")[:, 1]
+    assert np.allclose(total, total[0], rtol=1e-7)
+    assert a.stats("mem_dom", "R")[-1, 1] > a.stats("mem_dom", "R")[0, 1]  # it did bind
+
+
+def test_a_well_mixed_compartment_beside_membrane_species_runs(tmp_path: Path) -> None:
+    # A well-mixed cytosolic ligand (VCell's VolumeRegionVariable, §1.4.2 T5) as the cytosol's only species,
+    # beside membrane receptors: the cytosol's field block is a placeholder and s_cyto a Real block (#185,
+    # #196). One value on the whole cytosol, and the ligand is conserved across both pools and the receptors.
+    def well_mixed(math: dict[str, Any]) -> None:
+        for variable in math["variables"]:
+            if variable["name"] == "s_cyto":
+                variable["var_type"] = "VolumeRegionVariable"
+        for compartment in math["compartment_subdomains"]:
+            if compartment["name"] == "cyto_dom":
+                compartment["pde_equations"] = [p for p in compartment["pde_equations"] if p["name"] != "s_cyto"]
+                compartment["volume_region_equations"] = [
+                    {"name": "s_cyto", "uniform_rate": "0.0", "volume_rate": "0.0", "initial": "s_cyto_init_uM"}
+                ]
+
+    out = tmp_path / "out"
+    options = ["--output-dt", "0.25", "--h", "0.3", "--no-fields", "--out", str(out)]
+    assert main([*_receptor(tmp_path, "well_mixed", well_mixed), *options]) == 0
+    bundle = Bundle.open(out / "results.fenics")
+    s_cyto = bundle.stats("cyto_dom", "s_cyto")
+    assert np.allclose(s_cyto[:, 2], s_cyto[:, 3])  # one value on the whole cytosol
+    kmole = 1.0 / 602.214076
+    total = s_cyto[:, 1] + bundle.stats("ext_dom", "s_ext")[:, 1] + kmole * bundle.stats("mem_dom", "R")[:, 1]
+    assert np.allclose(total, total[0], rtol=1e-7)
 
 
 def test_well_mixed_species_and_membrane_potential_run_on_the_two_compartment_solver(tmp_path: Path) -> None:
