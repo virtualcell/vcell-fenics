@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import scifem
 import ufl
 from dolfinx import fem
 from dolfinx.fem import petsc
@@ -55,8 +56,9 @@ from scipy.spatial import cKDTree
 from ufl.algorithms.check_arities import ArityMismatch, check_form_arity
 
 from vcell_fenics.backend._typing import UflExpr
-from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.diagnostics import NonlinearTermError
+from vcell_fenics.backend.equations import as_field_equation
 from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_trace
 from vcell_fenics.backend.linear_solvers import set_preconditioner
 from vcell_fenics.backend.output_times import OutputMonitor
@@ -66,6 +68,7 @@ from vcell_fenics.formalism.schema import (
     BCDirichlet,
     BCInterfaceFlux,
     BCInterfaceValueEquality,
+    BCNeumann,
     MathDescription,
     ParameterConstant,
     ParameterExpression,
@@ -209,17 +212,28 @@ class MembraneCoupledResult(_MembraneCoupledFields):
 
     steps: int
     time: float
+    regions: dict[str, fem.Function] | None = None  # the region variables (Real Functions) by name
 
 
-def _param_symbols(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
+def _param_symbols(
+    md: MathDescription, mesh: Mesh, region_sizes: dict[str, float] | None = None, time: fem.Constant | None = None
+) -> dict[str, UflExpr]:
     """The model's parameters as symbols on `mesh`: constants as `fem.Constant`, expressions compiled in
     declaration order (the import keeps them dependency-ordered) — so a VCell unit factor like
     `KFlux = AreaPerUnitArea/VolumePerUnitVolume` or `UnitFactor = pow(KMOLE, 1)` binds as a UFL
-    expression, not only bare constants. Mirrors the single-mesh `_compile_context` parameter loop."""
-    scratch: dict[str, UflExpr] = {
-        "geom.x": ufl.SpatialCoordinate(mesh),
-        "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
+    expression, not only bare constants. Mirrors the single-mesh `_compile_context` parameter loop.
+
+    ``region_sizes`` (a fixed geometry's subdomain measures, from `_geometry_region_sizes`) binds
+    `region_size(<subdomain>)` (§1.8.4) — in parameter bodies (VCell's `Size_cyt`) and, since the returned
+    symbols carry them, in every expression compiled beside the parameters. ``time`` is the solver's `sim.t`
+    Constant, which it advances to each stage time; it is returned as `sim.t` too, so a time-dependent
+    parameter or flux (a stimulus) follows the integration rather than staying at t = 0."""
+    sizes = {
+        region_size_symbol(name): fem.Constant(mesh, PETSc.ScalarType(value))  # type: ignore[operator]
+        for name, value in (region_sizes or {}).items()
     }
+    sim_t = time if time is not None else fem.Constant(mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
+    scratch: dict[str, UflExpr] = {"geom.x": ufl.SpatialCoordinate(mesh), "sim.t": sim_t, **sizes}
     ctx = CompileContext(mesh=mesh, symbols=scratch)
     params: dict[str, UflExpr] = {}
     for p in md.parameters:
@@ -230,7 +244,26 @@ def _param_symbols(md: MathDescription, mesh: Mesh) -> dict[str, UflExpr]:
         else:
             raise NotImplementedError(f"coupled assembly cannot bind parameter {p.name!r} of type {type(p).__name__}")
         scratch[p.name] = params[p.name] = value  # later parameters may reference this one
-    return params
+    return {**sizes, "sim.t": sim_t, **params}
+
+
+def _geometry_region_sizes(geometry: InterfaceCoupledGeometry) -> dict[str, float]:
+    """The realized measure of each subdomain of a two-compartment geometry — the inner and outer
+    compartments' volumes (areas in 2D) and the membrane's area (length in 2D) — for `region_size(...)`."""
+
+    parent = geometry.parent_mesh
+    one = fem.Constant(parent, PETSc.ScalarType(1.0))  # type: ignore[operator]
+    cells = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)
+    facets = ufl.Measure("dS", domain=parent, subdomain_data=geometry.facet_tags)
+
+    def measure(form: UflExpr) -> float:
+        return float(parent.comm.allreduce(float(np.real(fem.assemble_scalar(fem.form(form)))), op=MPI.SUM))
+
+    return {
+        geometry.inner_subdomain: measure(one * cells(geometry.inner_region_tag)),
+        geometry.outer_subdomain: measure(one * cells(geometry.outer_region_tag)),
+        geometry.membrane_subdomain: measure(one("+") * facets(geometry.interface_tag)),
+    }
 
 
 class _SweptMeasures:
@@ -602,6 +635,9 @@ _RESERVOIR_PENALTY = 1.0e6
 """Weak-Dirichlet penalty for a reservoir BC: the boundary value is held to ~1/penalty."""
 
 
+_BOX_FACES = ("x_minus", "x_plus", "y_minus", "y_plus", "z_minus", "z_plus")
+
+
 def _reservoir_dirichlet(
     md: MathDescription, geometry: InterfaceCoupledGeometry, outer_species: list[str], ctx: CompileContext
 ) -> list[tuple[int, UflExpr]]:
@@ -609,16 +645,31 @@ def _reservoir_dirichlet(
     concentration on the outer box boundary that sustains a bulk species against depletion (e.g. a ligand
     reservoir feeding the membrane binding). Enforced **weakly** by a penalty term `β ∮_wall (u − g) w ds`
     rather than a strong constraint, so it composes with the blocked cross-mesh form as an ordinary
-    boundary integral (no per-block Dirichlet bookkeeping). Only the **outer** compartment touches the box,
-    so a Dirichlet on any other boundary or species is rejected loudly."""
+    boundary integral (no per-block Dirichlet bookkeeping).
+
+    VCell writes a Value BC per box face (``x_minus``, ``x_plus``, …) and for *every* compartment. Both are
+    read for what they mean here:
+    - an outer species held at the **same** value on every box face is a reservoir on the whole outer wall
+      (the wall is the outer compartment's part of the box); faces that differ, or only some faces, are
+      not supported yet;
+    - a box-face BC on a species of a compartment that does not touch the box has no face to act on
+      (VCell's boilerplate for an interior compartment) and is dropped. Anything else is rejected loudly."""
+
+    tdim = geometry.parent_mesh.topology.dim
+    faces = set(_BOX_FACES[: 2 * tdim])
+    inner_touches_box = _touches_box(geometry)
+    per_face: dict[str, dict[str, str]] = {}
     reservoirs: list[tuple[int, UflExpr]] = []
     for bc in md.boundary_conditions:
         if not isinstance(bc, BCDirichlet):
             continue
+        if bc.boundary in faces:
+            per_face.setdefault(bc.variable, {})[bc.boundary] = bc.expression
+            continue
         if bc.boundary != geometry.outer:
             raise NotImplementedError(
-                f"Dirichlet BC on boundary {bc.boundary!r}: the membrane-coupled solver supports a reservoir "
-                f"Dirichlet only on the outer box boundary {geometry.outer!r}"
+                f"Dirichlet BC on boundary {bc.boundary!r}: the coupled solvers support a reservoir Dirichlet "
+                f"only on the outer box boundary {geometry.outer!r} (or the same value on every box face)"
             )
         if bc.variable not in outer_species:
             raise NotImplementedError(
@@ -626,7 +677,35 @@ def _reservoir_dirichlet(
                 f"the outer box boundary {geometry.outer!r}"
             )
         reservoirs.append((outer_species.index(bc.variable), compile_expression(parse(bc.expression), ctx)))
+    for variable, by_face in per_face.items():
+        if variable in outer_species:
+            values = set(by_face.values())
+            if set(by_face) != faces or len(values) != 1:
+                raise NotImplementedError(
+                    f"Dirichlet BCs on {variable!r} on box faces {sorted(by_face)}: a reservoir needs the same value "
+                    f"on every box face ({sorted(faces)}); per-face values are not supported yet"
+                )
+            reservoirs.append((outer_species.index(variable), compile_expression(parse(values.pop()), ctx)))
+        elif inner_touches_box:
+            raise NotImplementedError(
+                f"Dirichlet BCs on box faces for {variable!r}: its compartment touches the box, and only the outer "
+                f"compartment's box boundary holds a reservoir"
+            )
+        # else: an interior compartment has no box face — VCell's per-face boilerplate, nothing to impose
     return reservoirs
+
+
+def _touches_box(geometry: InterfaceCoupledGeometry) -> bool:
+    """Whether the inner compartment reaches the parent mesh's outer boundary (the box)."""
+
+    parent = geometry.parent_mesh
+    tdim = parent.topology.dim
+    parent.topology.create_connectivity(tdim - 1, tdim)
+    exterior = exterior_facet_indices(parent.topology)
+    facet_to_cell = parent.topology.connectivity(tdim - 1, tdim)
+    inner_cells = set(geometry.cell_tags.indices[geometry.cell_tags.values == geometry.inner_region_tag].tolist())
+    local = any(int(facet_to_cell.links(f)[0]) in inner_cells for f in exterior)
+    return bool(parent.comm.allreduce(local, op=MPI.LOR))
 
 
 def assemble_interface_coupled(
@@ -658,7 +737,7 @@ def assemble_interface_coupled(
     ds_wall = ufl.Measure("ds", domain=parent, subdomain_data=geometry.facet_tags)(geometry.outer_tag)
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map]
 
-    params = _param_symbols(md, parent)
+    params = _param_symbols(md, parent, _geometry_region_sizes(geometry))
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
     d_in = compile_expression(parse(inner_eq.terms["diffusion"]), ctx)
     d_out = compile_expression(parse(outer_eq.terms["diffusion"]), ctx)
@@ -836,13 +915,27 @@ def integrate_interface_coupled(
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
-    inner_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.inner_subdomain]
-    outer_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.outer_subdomain]
-    for subdomain, eqs in ((geometry.inner_subdomain, inner_eqs), (geometry.outer_subdomain, outer_eqs)):
-        if not eqs or any("diffusion" not in eq.terms for eq in eqs):
+    # Region variables (§1.4.2 T5: a well-mixed species, a membrane potential) are one Real unknown each,
+    # appended after the field blocks; the field equations are everything else.
+    region_eqs = [eq for eq in template_eqs if eq.template == "region_ode"]
+    # a non-diffusing species (T4 on a spatial subdomain) is a field block without transport (#186)
+    kind_of = {sd.name: sd.kind for sd in md.subdomains}
+    field_eqs = [as_field_equation(eq, kind_of[eq.subdomain]) for eq in template_eqs if eq.template != "region_ode"]
+    inner_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.inner_subdomain]
+    outer_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.outer_subdomain]
+    region_homes = {geometry.inner_subdomain, geometry.outer_subdomain, geometry.membrane_subdomain}
+    for eq in region_eqs:
+        if eq.subdomain not in region_homes:
             raise NotImplementedError(
-                f"interface coupling needs a bulk diffusion equation for each species on compartment {subdomain!r}"
+                f"region variable {eq.variable!r} lives on {eq.subdomain!r}; the two-compartment solver hosts "
+                f"them on {sorted(region_homes)}"
             )
+    _refuse_several_regions(region_eqs, _region_meshes(geometry))
+    for subdomain, eqs in ((geometry.inner_subdomain, inner_eqs), (geometry.outer_subdomain, outer_eqs)):
+        # each compartment carries field species (each a diffusion equation), region variables, or both
+        # each compartment carries field species (diffusing or not), region variables, or both
+        if not eqs and not any(eq.subdomain == subdomain for eq in region_eqs):
+            raise NotImplementedError(f"interface coupling needs at least one species on compartment {subdomain!r}")
     if on_output is not None and (len(inner_eqs) != 1 or len(outer_eqs) != 1):
         raise ValueError("on_output(t, inner, outer) is for one species per compartment; use on_output_fields")
 
@@ -869,18 +962,51 @@ def integrate_interface_coupled(
     for size in sizes:
         offsets.append(offsets[-1] + size)
     index_of = {eq.variable: k for k, eq in enumerate(eqs)}
+    eq_of = {eq.variable: eq for eq in eqs}
     compartment_of = {eq.variable: eq.subdomain for eq in eqs}
 
-    params = _param_symbols(md, parent)
+    time = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # sim.t, set to each stage time
+    params = _param_symbols(md, parent, _geometry_region_sizes(geometry), time)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
+
+    # Side-aware traces on the membrane. `membrane_trace(f) = f('+') + f('-')` selects f's own side only for a
+    # *coefficient*; for a submesh *argument* (a test or trial function) DOLFINx 0.10 aliases both
+    # restrictions to the same submesh cell, so an interface-flux Jacobian block counts it twice per side
+    # (the over-count behind the BE fix, memory `project_interface_flux_overcount`). Weighting each side by an
+    # exact 0/1 indicator of the function's own compartment counts it once — identical for coefficients (the
+    # residual, and so the solution, is unchanged) and exact for arguments (the Jacobian becomes the true
+    # one: Newton converges quadratically, and a Real block's row — dominated by the flux — is right).
+    side = {
+        geometry.inner_subdomain: _compartment_indicator(parent, geometry.cell_tags, geometry.inner_region_tag),
+        geometry.outer_subdomain: _compartment_indicator(parent, geometry.cell_tags, geometry.outer_region_tag),
+    }
+
+    def trace_on(subdomain: str, f: UflExpr) -> UflExpr:
+        chi = side[subdomain]
+        return f("+") * chi("+") + f("-") * chi("-")
+
+    # Region blocks: a Real (one global DOF) on the parent per region variable, integrated over its region
+    # (a compartment's dx, or the membrane's dS). A Real has the same value on both sides of the membrane,
+    # so on dS it is referenced as u("+") alone.
+    real = scifem.create_real_functionspace(parent)
+    region_states = [fem.Function(real, name=eq.variable) for eq in region_eqs]
+    region_rates = [fem.Function(real) for _ in region_eqs]
+    region_tests = [ufl.TestFunction(real) for _ in region_eqs]
+    region_on_membrane = [eq.subdomain == geometry.membrane_subdomain for eq in region_eqs]
+    region_dx = [
+        ds_int if on_membrane else (dx_in if eq.subdomain == geometry.inner_subdomain else dx_out)
+        for eq, on_membrane in zip(region_eqs, region_on_membrane, strict=True)
+    ]
+    region_bulk = {eq.variable: u for eq, u in zip(region_eqs, region_states, strict=True)}
+    region_surface = {eq.variable: u("+") for eq, u in zip(region_eqs, region_states, strict=True)}
 
     # The MOL residual uses the state Functions directly (so the coupling can be nonlinear), with the
     # time derivative ċ = rate (a Function TS supplies). One block per species, all on the parent.
-    diffusion = [compile_expression(parse(eq.terms["diffusion"]), ctx) for eq in eqs]
-    residual = [
-        rates[k] * tests[k] * dxs[k] + diffusion[k] * ufl.dot(ufl.grad(states[k]), ufl.grad(tests[k])) * dxs[k]
-        for k in range(len(eqs))
-    ]
+    residual = [rates[k] * tests[k] * dxs[k] for k in range(len(eqs))]
+    for k, eq in enumerate(eqs):  # a non-diffusing species has no transport term
+        if "diffusion" in eq.terms:
+            d = compile_expression(parse(eq.terms["diffusion"]), ctx)
+            residual[k] += d * ufl.dot(ufl.grad(states[k]), ufl.grad(tests[k])) * dxs[k]
 
     # Optional in-bulk `source` (∂c/∂t = … + source), evaluated at the states of the species in its OWN
     # compartment (affine, nonlinear — e.g. mass action between two species there — or a purely spatial
@@ -888,12 +1014,13 @@ def integrate_interface_coupled(
     for k, eq in enumerate(eqs):
         if "source" in eq.terms:
             siblings = {name: states[j] for name, j in index_of.items() if compartment_of[name] == eq.subdomain}
-            src_ctx = CompileContext(parent, {**ctx.symbols, **siblings})
+            src_ctx = CompileContext(parent, {**ctx.symbols, **region_bulk, **siblings})
             residual[k] += -compile_expression(parse(eq.terms["source"]), src_ctx) * tests[k] * dxs[k]
     # Every species' interface trace is in scope for every flux (a flux on one side may reference any
     # species on either side); each `BCInterfaceFlux` then deposits its flux into its OWN species' block.
     coupling_symbols = {
-        **{eq.variable: membrane_trace(states[k]) for k, eq in enumerate(eqs)},
+        **{eq.variable: trace_on(eq.subdomain, states[k]) for k, eq in enumerate(eqs)},
+        **region_surface,
         "geom.x": ufl.SpatialCoordinate(parent),
         **params,
     }
@@ -904,11 +1031,38 @@ def integrate_interface_coupled(
                 "this integrator handles single-sided interface flux BCs"
             )
         if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in index_of:
-            continue
+            continue  # (a region variable's flux BCs join its region balance, below)
         coupling_ctx = CompileContext(parent, coupling_symbols)
         flux = compile_expression(parse(bc.expression), coupling_ctx)  # D∇u_var·n = flux INTO var's side
         k = index_of[bc.variable]
-        residual[k] += -flux * membrane_trace(tests[k]) * ds_int
+        residual[k] += -flux * trace_on(eq_of[bc.variable].subdomain, tests[k]) * ds_int
+
+    # Region balances (T5), in the weak form of a Real test w (w ≡ 1 on its region):
+    #   ∫_R u̇ w = ∫_R (uniform_rate + region_rate) w + ∫_{∂R} flux w
+    # i.e. |R|·u̇ = |R|·uniform_rate + ∫_R region_rate + ∫ flux — the template's (1/|R|)-averaged ODE.
+    region_residual: list[UflExpr] = []
+    for r, eq in enumerate(region_eqs):
+        w, measure = region_tests[r], region_dx[r]
+        if region_on_membrane[r]:
+            rate_ctx = CompileContext(parent, coupling_symbols)
+            w_here, rate_here = w("+"), region_rates[r]("+")
+        else:
+            siblings = {name: states[j] for name, j in index_of.items() if compartment_of[name] == eq.subdomain}
+            rate_ctx = CompileContext(parent, {**ctx.symbols, **region_bulk, **siblings})
+            w_here, rate_here = w, region_rates[r]
+        form = rate_here * w_here * measure
+        for slot in ("uniform_rate", "region_rate"):
+            if slot in eq.terms:
+                form += -compile_expression(parse(eq.terms[slot]), rate_ctx) * w_here * measure
+        for bc in md.boundary_conditions:
+            if (
+                isinstance(bc, (BCInterfaceFlux, BCNeumann))
+                and bc.variable == eq.variable
+                and bc.boundary == geometry.interface
+            ):
+                flux = compile_expression(parse(bc.expression), CompileContext(parent, coupling_symbols))
+                form += -flux * w("+") * ds_int
+        region_residual.append(form)
 
     # Optional outer-wall reservoir Dirichlet on outer-compartment species, weak penalty (same as the BE
     # assembler): F gains β(u − g)·w on the box wall.
@@ -917,7 +1071,17 @@ def integrate_interface_coupled(
         k = index_of[outer_names[j]]
         residual[k] += _RESERVOIR_PENALTY * (states[k] - g_value) * tests[k] * ds_wall
 
-    n_blocks = len(eqs)
+    # The region blocks join the system after the field blocks: one list of spaces/states/rates/residuals.
+    n_fields = len(eqs)
+    spaces = [*spaces, *([real] * len(region_eqs))]
+    states = [*states, *region_states]
+    rates = [*rates, *region_rates]
+    residual = [*residual, *region_residual]
+    sizes = [V.dofmap.index_map.size_local for V in spaces]
+    offsets = [0]
+    for size in sizes:
+        offsets.append(offsets[-1] + size)
+    n_blocks = len(states)
     shift = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]  # the TS σ
     jacobian = [
         [
@@ -929,15 +1093,18 @@ def integrate_interface_coupled(
     residual_form = fem.form(residual, entity_maps=emaps)
     jacobian_form = fem.form(jacobian, entity_maps=emaps)
 
-    for state, eq in zip(states, eqs, strict=True):
+    for state, eq in zip(states[:n_fields], eqs, strict=True):
         _interpolate_ic(state, eq, ctx)
+    for state, eq, measure, on_membrane in zip(region_states, region_eqs, region_dx, region_on_membrane, strict=True):
+        state.x.array[:] = _region_average(eq, ctx, measure, on_membrane, parent)
 
     def unpack(x: PETSc.Vec) -> None:
         for k, state in enumerate(states):
             state.x.array[: sizes[k]] = x.array_r[offsets[k] : offsets[k + 1]]
             state.x.scatter_forward()
 
-    def evaluate_residual(_ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+    def evaluate_residual(_ts: PETSc.TS, t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+        time.value = t
         unpack(x)
         for k, rate in enumerate(rates):
             rate.x.array[: sizes[k]] = x_dot.array_r[offsets[k] : offsets[k + 1]]
@@ -949,8 +1116,9 @@ def integrate_interface_coupled(
         b.destroy()
 
     def evaluate_jacobian(
-        _ts: PETSc.TS, _t: float, x: PETSc.Vec, _x_dot: PETSc.Vec, sigma: float, mat: PETSc.Mat, _pre: PETSc.Mat
+        _ts: PETSc.TS, t: float, x: PETSc.Vec, _x_dot: PETSc.Vec, sigma: float, mat: PETSc.Mat, _pre: PETSc.Mat
     ) -> None:
+        time.value = t
         unpack(x)
         shift.value = sigma
         fresh = petsc.assemble_matrix(jacobian_form, kind="mpi")
@@ -990,7 +1158,8 @@ def integrate_interface_coupled(
     work: PETSc.Vec | None = None
     wants_output = on_output is not None or on_output_fields is not None
     if wants_output or on_progress is not None:
-        snaps = [fem.Function(V, name=eq.variable) for V, eq in zip(spaces, eqs, strict=True)]
+        names = [eq.variable for eq in (*eqs, *region_eqs)]
+        snaps = [fem.Function(V, name=name) for V, name in zip(spaces, names, strict=True)]
         work = state_vec.duplicate()
 
         def emit(t: float, x: PETSc.Vec) -> None:
@@ -1000,7 +1169,7 @@ def integrate_interface_coupled(
             if on_output is not None:
                 on_output(t, snaps[0], snaps[1])
             if on_output_fields is not None:
-                on_output_fields(t, {eq.variable: snap for eq, snap in zip(eqs, snaps, strict=True)})
+                on_output_fields(t, dict(zip(names, snaps, strict=True)))
 
         monitor = OutputMonitor(
             output_times if wants_output else (),
@@ -1020,8 +1189,90 @@ def integrate_interface_coupled(
     for obj in (ts, state_vec, jacobian_matrix, work):
         if obj is not None:
             obj.destroy()
-    fields = {eq.variable: state for eq, state in zip(eqs, states, strict=True)}
+    fields = {eq.variable: state for eq, state in zip((*eqs, *region_eqs), states, strict=True)}
     return InterfaceCoupledResult(states[0], states[len(inner_eqs)], steps, final_time, fields)
+
+
+def connected_region_count(mesh: Mesh) -> int:
+    """How many connected pieces ``mesh`` has (cells sharing a vertex are connected) — the number of regions
+    a region variable (T5) would need one value each for.
+
+    MPI-safe label propagation on the *vertices* (a P1 function: one DOF per vertex, shared across ranks —
+    a codim-1 membrane submesh has no ghost cells, but its vertices are shared): each vertex starts with
+    its global index; each sweep gives every cell the smallest label among its vertices and every vertex the
+    smallest among its cells, then settles shared vertices across ranks (a max-reduction of the negated
+    labels — PETSc scatters take MAX, not MIN), until nothing changes anywhere. The distinct labels left
+    are the pieces."""
+
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    index_map = space.dofmap.index_map
+    n_owned, n_all = index_map.size_local, index_map.size_local + index_map.num_ghosts
+    cell_dofs = space.dofmap.list  # (cells, vertices per cell), local dof indices
+    negated = fem.Function(space)  # −label, so the cross-rank reduction is a MAX
+    negated.x.array[:n_all] = -index_map.local_to_global(np.arange(n_all, dtype=np.int32)).astype(np.float64)
+    vec = negated.x.petsc_vec
+    while True:
+        before = negated.x.array[:n_owned].copy()
+        cell_max = negated.x.array[cell_dofs].max(axis=1)  # the smallest label of each cell's vertices
+        np.maximum.at(negated.x.array, cell_dofs.ravel(), np.repeat(cell_max, cell_dofs.shape[1]))
+        vec.ghostUpdate(addv=PETSc.InsertMode.MAX_VALUES, mode=PETSc.ScatterMode.REVERSE)
+        vec.ghostUpdate(addv=PETSc.InsertMode.INSERT_VALUES, mode=PETSc.ScatterMode.FORWARD)
+        changed = bool(np.any(negated.x.array[:n_owned] != before))
+        if not mesh.comm.allreduce(changed, op=MPI.LOR):
+            break
+    owned = set(np.unique(negated.x.array[:n_owned]).tolist())
+    return len(set().union(*mesh.comm.allgather(owned)))
+
+
+def _region_meshes(geometry: InterfaceCoupledGeometry) -> dict[str, Mesh]:
+    return {
+        geometry.inner_subdomain: geometry.inner_mesh,
+        geometry.outer_subdomain: geometry.outer_mesh,
+        geometry.membrane_subdomain: geometry.membrane_mesh,
+    }
+
+
+def _refuse_several_regions(region_eqs: Sequence[TemplateEquation], meshes: dict[str, Mesh]) -> None:
+    """One Real per region variable is one value for its whole subdomain: right only while the subdomain is
+    one connected region. Several (two cells' cytosols, two membranes) need one value each — per-region
+    instancing (§1.2.6 (2)), not yet — so refuse rather than couple them silently."""
+
+    counts: dict[str, int] = {}
+    for eq in region_eqs:
+        if eq.subdomain not in counts:
+            counts[eq.subdomain] = connected_region_count(meshes[eq.subdomain])
+        if counts[eq.subdomain] > 1:
+            raise NotImplementedError(
+                f"region variable {eq.variable!r} lives on {eq.subdomain!r}, which is realized as "
+                f"{counts[eq.subdomain]} disconnected regions; one value per region (per-region instancing) "
+                f"is not supported yet (#196)"
+            )
+
+
+def _compartment_indicator(parent: Mesh, cell_tags: Any, region_tag: int) -> fem.Function:
+    """An exact 0/1 DG0 indicator of one compartment's cells on the parent mesh."""
+
+    indicator = fem.Function(fem.functionspace(parent, ("DG", 0)))
+    indicator.x.array[:] = 0.0
+    indicator.x.array[cell_tags.indices[cell_tags.values == region_tag]] = 1.0
+    indicator.x.scatter_forward()
+    return indicator
+
+
+def _region_average(
+    eq: TemplateEquation, ctx: CompileContext, measure: ufl.Measure, on_membrane: bool, parent: Mesh
+) -> float:
+    """A region variable's initial value: its initial condition averaged over its region (exact for a
+    constant; a spatially varying VCell initial expression has no single value, so its mean is taken)."""
+
+    assert eq.initial_condition is not None  # the validator requires one (time-dependent)
+    ic = compile_expression(parse(eq.initial_condition), ctx)
+    one = fem.Constant(parent, PETSc.ScalarType(1.0))  # type: ignore[operator]
+    if on_membrane:
+        ic = ic("+")
+    total = parent.comm.allreduce(fem.assemble_scalar(fem.form(ic * measure)), op=MPI.SUM)
+    size = parent.comm.allreduce(fem.assemble_scalar(fem.form(one * measure)), op=MPI.SUM)
+    return float(np.real(total) / np.real(size))
 
 
 def assemble_membrane_coupled(
@@ -1137,9 +1388,11 @@ def assemble_membrane_coupled(
     )
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map, geometry.membrane_entity_map]
 
-    params = _param_symbols(md, parent)
+    # region sizes are fixed numbers only while the geometry is (a moving membrane changes them in time)
+    subdomain_sizes = _geometry_region_sizes(geometry) if motion is None and velocity is None else None
+    params = _param_symbols(md, parent, subdomain_sizes)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
-    surf_params = _param_symbols(md, geometry.membrane_mesh)
+    surf_params = _param_symbols(md, geometry.membrane_mesh, subdomain_sizes)
     surf_ctx = CompileContext(
         geometry.membrane_mesh, {"geom.x": ufl.SpatialCoordinate(geometry.membrane_mesh), **surf_params}
     )
@@ -1399,6 +1652,7 @@ def integrate_membrane_coupled(
     output_times: Sequence[float] = (),
     on_output: Callable[[float, fem.Function, fem.Function, fem.Function], None] | None = None,
     on_progress: Callable[[float], None] | None = None,
+    on_output_regions: Callable[[float, dict[str, float]], None] | None = None,
 ) -> MembraneCoupledResult:
     """Integrate a **membrane species coupled to both bulks** to `t_final` with the method-of-lines
     integrator (PETSc TS adaptive BDF) — the fully-implicit counterpart of `assemble_membrane_coupled`'s
@@ -1443,25 +1697,43 @@ def integrate_membrane_coupled(
     interpolation so the step sequence is unchanged (``backend/output_times.py``); ``on_progress(t)``
     follows every accepted step. The moving case records only its final state.
 
+    **Region variables** (§1.4.2 T5: a membrane potential, a well-mixed species) are one Real unknown each,
+    appended after the three field blocks, as in `integrate_interface_coupled`: the balance
+    ``∫u̇ w = ∫(uniform_rate + region_rate) w + ∫ flux·w("+") dS`` over its region, a potential referenced by
+    the membrane species and the fluxes. ``on_output_regions(t, {name: value})`` receives their values at
+    each output time, just before ``on_output``. Fixed geometry only.
+
     Scope: a *prescribed* membrane velocity; the moving case freezes geometry within each outer interval
     (operator-split). Force-balance velocity is a follow-up.
     """
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
-    inner_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.inner_subdomain]
-    outer_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.outer_subdomain]
-    membrane_eqs = [eq for eq in template_eqs if eq.subdomain == geometry.membrane_subdomain]
-    if not inner_eqs or not outer_eqs:
-        raise NotImplementedError("membrane coupling needs at least one bulk species in each compartment")
+    region_eqs = [eq for eq in template_eqs if eq.template == "region_ode"]
+    # a non-diffusing species (T4 on a spatial subdomain: a buffer, a membrane gating variable) is a field
+    # block without transport, its `rate` the `source` (#186)
+    kind_of = {sd.name: sd.kind for sd in md.subdomains}
+    field_eqs = [as_field_equation(eq, kind_of[eq.subdomain]) for eq in template_eqs if eq.template != "region_ode"]
+    inner_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.inner_subdomain]
+    outer_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.outer_subdomain]
+    membrane_eqs = [eq for eq in field_eqs if eq.subdomain == geometry.membrane_subdomain]
+    region_homes = {geometry.inner_subdomain, geometry.outer_subdomain, geometry.membrane_subdomain}
+    for eq in region_eqs:
+        if eq.subdomain not in region_homes:
+            raise NotImplementedError(
+                f"region variable {eq.variable!r} lives on {eq.subdomain!r}; the membrane-coupled solver hosts "
+                f"them on {sorted(region_homes)}"
+            )
+    _refuse_several_regions(region_eqs, _region_meshes(geometry))
+    if region_eqs and (motion is not None or velocity is not None):
+        raise NotImplementedError("region variables on a moving membrane are a follow-up (#196)")
+    if not inner_eqs and not outer_eqs and not region_eqs:
+        raise NotImplementedError("membrane coupling needs species in at least one of the two compartments")
     if not membrane_eqs:
         raise NotImplementedError(
             f"membrane coupling needs a surface equation on the membrane subdomain "
             f"{geometry.membrane_subdomain!r} (the species coupled to both bulks)"
         )
-    for eq in (*inner_eqs, *outer_eqs):
-        if "diffusion" not in eq.terms:
-            raise NotImplementedError(f"membrane coupling needs a bulk diffusion equation for {eq.variable!r}")
     inner_species = [eq.variable for eq in inner_eqs]
     outer_species = [eq.variable for eq in outer_eqs]
     membrane_species = [eq.variable for eq in membrane_eqs]
@@ -1470,8 +1742,11 @@ def integrate_membrane_coupled(
     tdim = parent.topology.dim
     parent.topology.create_connectivity(tdim - 1, tdim)
     membrane_mesh = geometry.membrane_mesh
-    V_in = fem.functionspace(geometry.inner_mesh, ("Lagrange", 1, (len(inner_species),)))
-    V_out = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1, (len(outer_species),)))
+    # A compartment with no field species (the unmodelled side of a one-sided membrane, #185, or a well-mixed
+    # cytosol of region variables only) keeps a one-component *placeholder* block — held at zero by a mass-only
+    # residual, named by no species, coupled to nothing — so the three-block structure is unchanged.
+    V_in = fem.functionspace(geometry.inner_mesh, ("Lagrange", 1, (max(len(inner_species), 1),)))
+    V_out = fem.functionspace(geometry.outer_mesh, ("Lagrange", 1, (max(len(outer_species), 1),)))
     V_mem = fem.functionspace(membrane_mesh, ("Lagrange", 1, (len(membrane_species),)))
     u_in_fn, u_out_fn, rho_fn = fem.Function(V_in), fem.Function(V_out), fem.Function(V_mem)
     rate_in, rate_out, rate_mem = fem.Function(V_in), fem.Function(V_out), fem.Function(V_mem)
@@ -1479,9 +1754,19 @@ def integrate_membrane_coupled(
     n_out = V_out.dofmap.index_map.size_local * V_out.dofmap.index_map_bs
     n_mem = V_mem.dofmap.index_map.size_local * V_mem.dofmap.index_map_bs
 
-    mixed = ufl.MixedFunctionSpace(V_in, V_out, V_mem)
-    u_in, u_out, rho = ufl.TrialFunctions(mixed)
-    w_in, w_out, w_rho = ufl.TestFunctions(mixed)
+    # Region blocks: a Real (one global DOF) on the parent per region variable, after the three fields.
+    real = scifem.create_real_functionspace(parent)
+    region_fns = [fem.Function(real, name=eq.variable) for eq in region_eqs]
+    region_rates = [fem.Function(real) for _ in region_eqs]
+    spaces = [V_in, V_out, V_mem, *([real] * len(region_eqs))]
+    sizes = [n_in, n_out, n_mem, *(real.dofmap.index_map.size_local for _ in region_eqs)]
+    offsets = [0]
+    for size in sizes:
+        offsets.append(offsets[-1] + size)
+
+    mixed = ufl.MixedFunctionSpace(*spaces)
+    u_in, u_out, rho, *region_trials = ufl.TrialFunctions(mixed)
+    w_in, w_out, w_rho, *region_tests = ufl.TestFunctions(mixed)
     dx_in = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.inner_region_tag)
     dx_out = ufl.Measure("dx", domain=parent, subdomain_data=geometry.cell_tags)(geometry.outer_region_tag)
     dx_mem = ufl.Measure("dx", domain=membrane_mesh)
@@ -1490,9 +1775,17 @@ def integrate_membrane_coupled(
     )
     emaps = [geometry.inner_entity_map, geometry.outer_entity_map, geometry.membrane_entity_map]
 
-    params = _param_symbols(md, parent)
+    # region sizes are fixed numbers only while the geometry is (a moving membrane changes them in time)
+    subdomain_sizes = _geometry_region_sizes(geometry) if motion is None and velocity is None else None
+    # sim.t on each mesh, set to each stage time (a stimulus current, a time-dependent flux)
+    time = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]
+    time_mem = fem.Constant(membrane_mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
+    params = _param_symbols(md, parent, subdomain_sizes, time)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
-    surf_params = _param_symbols(md, membrane_mesh)
+    # A Real is the same on both sides of the membrane: referenced as u (bulk) or u("+") (on dS).
+    region_bulk = {eq.variable: u for eq, u in zip(region_eqs, region_fns, strict=True)}
+    region_surface = {eq.variable: u("+") for eq, u in zip(region_eqs, region_fns, strict=True)}
+    surf_params = _param_symbols(md, membrane_mesh, subdomain_sizes, time_mem)
     surf_ctx = CompileContext(membrane_mesh, {"geom.x": ufl.SpatialCoordinate(membrane_mesh), **surf_params})
 
     # Moving membrane (optional): the motion driver + the per-region dilution coefficient `∇·v_mesh`. The
@@ -1529,7 +1822,7 @@ def integrate_membrane_coupled(
         # nonlinear source (e.g. mass-action A*B) is fine here — the matrix-free Newton differences the
         # residual; the assemblable linearisation is added to the preconditioner.
         react_ctx = (
-            CompileContext(parent, {**ctx.symbols, **{e.variable: state[j] for j, e in enumerate(eqs)}})
+            CompileContext(parent, {**ctx.symbols, **region_bulk, **{e.variable: state[j] for j, e in enumerate(eqs)}})
             if is_bulk
             else None
         )
@@ -1555,6 +1848,13 @@ def integrate_membrane_coupled(
                 reaction_form = -compile_expression(parse(source), react_ctx) * test[k] * dx
                 local_terms.append(reaction_form)
                 precond_terms.append(ufl.derivative(reaction_form, state, trial))  # assemblable linearisation
+    for species, rate, trial, test, dx, sigma in (
+        (inner_species, rate_in, u_in, w_in, dx_in, shift),
+        (outer_species, rate_out, u_out, w_out, dx_out, shift),
+    ):
+        if not species:  # the placeholder block: u̇ = 0 from u = 0
+            local_terms.append(rate[0] * test[0] * dx)
+            precond_terms.append(sigma * trial[0] * test[0] * dx)
     f_local = _sum_forms(local_terms)
     j_local = _sum_forms(precond_terms)
 
@@ -1574,6 +1874,7 @@ def integrate_membrane_coupled(
         coupling_symbols[name] = membrane_trace(u_out_fn[k])
     for k, name in enumerate(membrane_species):
         coupling_symbols[name] = rho_fn[k]("+")
+    coupling_symbols.update(region_surface)
     coupling_ctx = CompileContext(parent, coupling_symbols)
     zero = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]
     structural = (
@@ -1595,15 +1896,59 @@ def integrate_membrane_coupled(
                 "the interface value-equality constraint (u = k·u_adjacent) is a follow-up increment; "
                 "this integrator handles single-sided interface flux BCs"
             )
-        if not isinstance(bc, BCInterfaceFlux) or bc.boundary != geometry.interface or bc.variable not in bulk_test_of:
+        # With one side unmodelled the import writes the other side's flux as a plain Neumann BC on the
+        # membrane (#185): on this mesh that is the same single-sided interface flux.
+        interface_flux = isinstance(bc, (BCInterfaceFlux, BCNeumann)) and bc.boundary == geometry.interface
+        if not interface_flux or bc.variable not in bulk_test_of:
             continue
         flux = compile_expression(parse(bc.expression), coupling_ctx)
         test, k = bulk_test_of[bc.variable]
         f_coup += -flux * membrane_trace(test[k]) * ds_int
+    # Region balances (T5) with a Real test w: ∫_R u̇ w = ∫_R (uniform_rate + region_rate) w + ∫ flux·w("+") dS.
+    # A compartment's (dx) terms join the local part; a membrane's (dS) terms and every flux the coupling part.
+    bulk_state_of = {name: (u_in_fn, k) for k, name in enumerate(inner_species)}
+    bulk_state_of.update({name: (u_out_fn, k) for k, name in enumerate(outer_species)})
+    for r, eq in enumerate(region_eqs):
+        w, trial = region_tests[r], region_trials[r]
+        if eq.subdomain == geometry.membrane_subdomain:
+            f_coup += region_rates[r]("+") * w("+") * ds_int
+            j_local += shift * trial("+") * w("+") * ds_int
+            for slot in ("uniform_rate", "region_rate"):
+                if slot in eq.terms:
+                    f_coup += -compile_expression(parse(eq.terms[slot]), coupling_ctx) * w("+") * ds_int
+        else:
+            dx_r = dx_in if eq.subdomain == geometry.inner_subdomain else dx_out
+            in_inner = eq.subdomain == geometry.inner_subdomain
+            siblings = {name: fn[k] for name, (fn, k) in bulk_state_of.items() if (fn is u_in_fn) == in_inner}
+            rate_ctx = CompileContext(parent, {**ctx.symbols, **region_bulk, **siblings})
+            f_local += region_rates[r] * w * dx_r
+            j_local += shift * trial * w * dx_r
+            for slot in ("uniform_rate", "region_rate"):
+                if slot in eq.terms:
+                    f_local += -compile_expression(parse(eq.terms[slot]), rate_ctx) * w * dx_r
+        for bc in md.boundary_conditions:
+            if (
+                isinstance(bc, (BCInterfaceFlux, BCNeumann))
+                and bc.variable == eq.variable
+                and bc.boundary == geometry.interface
+            ):
+                f_coup += -compile_expression(parse(bc.expression), coupling_ctx) * w("+") * ds_int
+
+    # Every region block in both parts (a structural zero where it has no term there), so the two parts'
+    # blocked vectors line up: a membrane potential has only dS terms, a well-mixed species' mass is on dx.
+    for w in region_tests:
+        f_local += zero * w * dx_in
+        f_coup += zero * w("+") * ds_int
+    # Likewise an empty compartment's placeholder block, whose state has no coupling term to differentiate.
+    for species, state, test, dx in ((inner_species, u_in_fn, w_in, dx_in), (outer_species, u_out_fn, w_out, dx_out)):
+        if not species:
+            f_coup += zero * state[0] * test[0] * dx
+
     # The assemblable part of the coupling Jacobian (the bulk-trial columns; the membrane-trial columns
     # are zero — that block is what the matrix-free operator supplies). Used only for preconditioning.
-    states, trials = [u_in_fn, u_out_fn, rho_fn], [u_in, u_out, rho]
-    j_coup = _sum_forms([ufl.derivative(f_coup, states[j], trials[j]) for j in range(3)])
+    states = [u_in_fn, u_out_fn, rho_fn, *region_fns]
+    trials = [u_in, u_out, rho, *region_trials]
+    j_coup = _sum_forms([ufl.derivative(f_coup, states[j], trials[j]) for j in range(len(states))])
 
     f_local_form = fem.form(ufl.extract_blocks(f_local), entity_maps=emaps)
     f_coup_form = fem.form(ufl.extract_blocks(f_coup), entity_maps=emaps)
@@ -1615,22 +1960,27 @@ def integrate_membrane_coupled(
         (u_out_fn, outer_eqs, ctx),
         (rho_fn, membrane_eqs, surf_ctx),
     ):
-        _interpolate_component_ics(fn, eqs, region_ctx)
+        if eqs:  # a placeholder block stays at its zero initial state
+            _interpolate_component_ics(fn, eqs, region_ctx)
+    for fn, eq in zip(region_fns, region_eqs, strict=True):
+        on_membrane = eq.subdomain == geometry.membrane_subdomain
+        measure = ds_int if on_membrane else (dx_in if eq.subdomain == geometry.inner_subdomain else dx_out)
+        fn.x.array[:] = _region_average(eq, ctx, measure, on_membrane, parent)
+
+    state_fns = [u_in_fn, u_out_fn, rho_fn, *region_fns]
+    rate_fns = [rate_in, rate_out, rate_mem, *region_rates]
+
+    def scatter(x: PETSc.Vec, fns: Sequence[fem.Function]) -> None:
+        for k, fn in enumerate(fns):
+            fn.x.array[: sizes[k]] = x.array_r[offsets[k] : offsets[k + 1]]
+            fn.x.scatter_forward()  # ghost dofs too — see integrate_interface_coupled
 
     def unpack(x: PETSc.Vec) -> None:
-        u_in_fn.x.array[:n_in] = x.array_r[:n_in]
-        u_out_fn.x.array[:n_out] = x.array_r[n_in : n_in + n_out]
-        rho_fn.x.array[:n_mem] = x.array_r[n_in + n_out : n_in + n_out + n_mem]
-        for fn in (u_in_fn, u_out_fn, rho_fn):
-            fn.x.scatter_forward()
+        scatter(x, state_fns)
 
     def residual(state: PETSc.Vec, rate: PETSc.Vec, out: PETSc.Vec) -> None:
         unpack(state)
-        rate_in.x.array[:n_in] = rate.array_r[:n_in]
-        rate_out.x.array[:n_out] = rate.array_r[n_in : n_in + n_out]
-        rate_mem.x.array[:n_mem] = rate.array_r[n_in + n_out : n_in + n_out + n_mem]
-        for fn in (rate_in, rate_out, rate_mem):  # ghost dofs of ċ too — see integrate_interface_coupled
-            fn.x.scatter_forward()
+        scatter(rate, rate_fns)
         b = _accumulate_ghosts(petsc.assemble_vector(f_local_form, kind="mpi"))
         coupling_b = _accumulate_ghosts(petsc.assemble_vector(f_coup_form, kind="mpi"))
         b.axpy(1.0, coupling_b)
@@ -1638,7 +1988,8 @@ def integrate_membrane_coupled(
         b.destroy()
         coupling_b.destroy()
 
-    def evaluate_residual(_ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+    def evaluate_residual(_ts: PETSc.TS, t: float, x: PETSc.Vec, x_dot: PETSc.Vec, result: PETSc.Vec) -> None:
+        time.value = time_mem.value = t
         residual(x, x_dot, result)
 
     # Preconditioner holder with the union sparsity of (σ·mass + diffusion) and the assemblable coupling.
@@ -1650,20 +2001,20 @@ def integrate_membrane_coupled(
     precond.axpy(1.0, coupling_pre, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)
     coupling_pre.destroy()
 
-    state_vec = petsc.create_vector([V_in, V_out, V_mem], kind="mpi")
-    state_vec.array[:n_in] = u_in_fn.x.array[:n_in]
-    state_vec.array[n_in : n_in + n_out] = u_out_fn.x.array[:n_out]
-    state_vec.array[n_in + n_out : n_in + n_out + n_mem] = rho_fn.x.array[:n_mem]
+    state_vec = petsc.create_vector(spaces, kind="mpi")
+    for k, fn in enumerate(state_fns):
+        state_vec.array[offsets[k] : offsets[k + 1]] = fn.x.array[: sizes[k]]
 
     mf = _MatrixFreeShiftedJacobian(residual, state_vec)
-    sizes = state_vec.getSizes()  # (local, global); petsc4py types it loosely as int | tuple
-    operator = PETSc.Mat().createPython((sizes, sizes), comm=parent.comm)  # type: ignore[arg-type]
+    vec_sizes = state_vec.getSizes()  # (local, global); petsc4py types it loosely as int | tuple
+    operator = PETSc.Mat().createPython((vec_sizes, vec_sizes), comm=parent.comm)  # type: ignore[arg-type]
     operator.setPythonContext(mf)
     operator.setUp()
 
     def evaluate_jacobian(
-        _ts: PETSc.TS, _t: float, x: PETSc.Vec, x_dot: PETSc.Vec, sigma: float, _mat: PETSc.Mat, pre: PETSc.Mat
+        _ts: PETSc.TS, t: float, x: PETSc.Vec, x_dot: PETSc.Vec, sigma: float, _mat: PETSc.Mat, pre: PETSc.Mat
     ) -> None:
+        time.value = time_mem.value = t  # the matrix-free operator differences the residual at this time
         mf.set_base(x, x_dot, sigma)  # refresh the matrix-free operator's linearisation point
         unpack(x)
         shift.value, shift_mem.value = sigma, sigma
@@ -1701,21 +2052,26 @@ def integrate_membrane_coupled(
         ts = make_ts(0.0, t_final)
         monitor: OutputMonitor | None = None
         work: PETSc.Vec | None = None
-        if on_output is not None or on_progress is not None:
-            snaps = (fem.Function(V_in), fem.Function(V_out), fem.Function(V_mem))
+        wants_output = on_output is not None or on_output_regions is not None
+        if wants_output or on_progress is not None:
+            snaps = [fem.Function(V) for V in spaces]
             work = state_vec.duplicate()
 
             def emit(t: float, x: PETSc.Vec) -> None:
-                snaps[0].x.array[:n_in] = x.array_r[:n_in]
-                snaps[1].x.array[:n_out] = x.array_r[n_in : n_in + n_out]
-                snaps[2].x.array[:n_mem] = x.array_r[n_in + n_out : n_in + n_out + n_mem]
-                for snap in snaps:
-                    snap.x.scatter_forward()
+                scatter(x, snaps)
+                if on_output_regions is not None:  # a Real's value is held by its owning rank
+                    on_output_regions(
+                        t,
+                        {
+                            eq.variable: parent.comm.allreduce(float(np.sum(snap.x.array[: sizes[3 + r]].real)))
+                            for r, (eq, snap) in enumerate(zip(region_eqs, snaps[3:], strict=True))
+                        },
+                    )
                 if on_output is not None:
-                    on_output(t, *snaps)
+                    on_output(t, snaps[0], snaps[1], snaps[2])
 
             monitor = OutputMonitor(
-                output_times if on_output is not None else (),
+                output_times if wants_output else (),
                 t_start=0.0,
                 t_final=t_final,
                 work=work,
@@ -1751,7 +2107,15 @@ def integrate_membrane_coupled(
     for obj in (state_vec, operator, precond):
         obj.destroy()
     return MembraneCoupledResult(
-        inner_species, outer_species, membrane_species, u_in_fn, u_out_fn, rho_fn, steps, final_time
+        inner_species,
+        outer_species,
+        membrane_species,
+        u_in_fn,
+        u_out_fn,
+        rho_fn,
+        steps,
+        final_time,
+        regions={eq.variable: fn for eq, fn in zip(region_eqs, region_fns, strict=True)},
     )
 
 

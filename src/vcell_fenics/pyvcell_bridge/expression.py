@@ -229,12 +229,21 @@ def _apply(source: str, tokens: list[_Tok], wraps: list[tuple[int, int]]) -> str
     return "".join(out)
 
 
+# `vcRegionVolume('X')` / `vcRegionArea('X')` (either quote style): a subdomain's measure.
+_REGION_SIZE_RE = re.compile(r"""vcRegion(?:Volume|Area)\(\s*['"]([A-Za-z_][\w]*)['"]\s*\)""")
+
+
 def translate_expression(vcell_expr: str) -> str:
     """Translate one VCell expression string into the formalism's syntax: map the bare
     coordinate/time names to their `geom.*` / `sim.*` built-ins and `^` to `**`, inserting the
     parentheses needed to preserve VCell's unary-minus-vs-power precedence (`-x^2 → (-x)**2`).
-    Anything that cannot be parsed falls back to the plain substitution."""
+    Anything that cannot be parsed falls back to the plain substitution.
 
+    VCell's region-size built-ins, ``vcRegionVolume('X')`` / ``vcRegionArea('X')``, become the formalism's
+    ``region_size(X)`` (§1.8.4) first — their quoted argument is a subdomain name, which the formalism writes
+    bare."""
+
+    vcell_expr = _REGION_SIZE_RE.sub(lambda m: f"region_size({m.group(1)})", vcell_expr)
     try:
         tokens = _tokenize(vcell_expr)
         parser = _Parser(tokens)

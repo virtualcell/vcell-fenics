@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -240,7 +241,7 @@ def test_run_couples_two_compartments_across_a_membrane(tmp_path: Path) -> None:
     assert bundle.times == pytest.approx((0.0, 0.05, 0.1, 0.15, 0.2))  # every output, incl. the IC
 
     summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
-    assert summary["run"]["backend"] == "interface_coupled"
+    assert summary["run"]["backend"] == "multi_compartment"
     assert sorted(summary["species"]) == ["s_cyto", "s_ext"]
     species = summary["outputs"][-1]["species"]
     assert species["s_ext"]["total"] > 0.0  # substance actually crossed the membrane
@@ -299,7 +300,7 @@ def test_run_couples_several_species_per_compartment(tmp_path: Path) -> None:
     bundle = Bundle.open(out / "results.fenics")
     assert set(bundle.manifest.domains) == {"cyto_dom", "ext_dom"}
     summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
-    assert summary["run"]["backend"] == "interface_coupled"
+    assert summary["run"]["backend"] == "multi_compartment"
     assert sorted(summary["species"]) == ["p_cyto", "q_ext", "s_cyto", "s_ext"]
     rows = [row["species"] for row in summary["outputs"]]
     assert len(rows) == 5 and rows[-1]["p_cyto"]["total"] > 0.0  # the reaction ran
@@ -338,7 +339,7 @@ def test_run_couples_both_compartments_and_membrane_species(tmp_path: Path) -> N
     assert bundle.times == pytest.approx((0.0, 0.25, 0.5))  # every output, incl. the IC
 
     summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
-    assert summary["run"]["backend"] == "membrane_coupled"
+    assert summary["run"]["backend"] == "multi_compartment"
     assert sorted(summary["species"]) == ["R", "s_cyto", "s_ext"]
     # Free ligand (µM, over the compartments) plus bound receptor (molecules/µm², over the membrane)
     # reconciled by KMOLE is the conserved substance: flat to round-off, while R actually binds.
@@ -352,25 +353,145 @@ def test_run_couples_both_compartments_and_membrane_species(tmp_path: Path) -> N
     assert max(totals) - min(totals) <= 1e-12 * totals[0]
 
 
-def test_membrane_species_with_one_sided_bulk_is_a_clean_error(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # The receptor model without its cytosolic ligand: membrane species plus bulk species on one side
-    # only. Not supported yet (the membrane-coupled solver needs species in both compartments) — the
-    # refusal must say that, not that the geometry lacks a membrane.
+def _receptor(tmp_path: Path, name: str, edit: Any) -> list[str]:
+    """The receptor model (ligand in both compartments binding a membrane receptor R), edited by ``edit``,
+    as CLI arguments."""
     math = yaml.safe_load((_CV / "receptor_math.yaml").read_text())
+    edit(math)
+    math_file = tmp_path / f"{name}_math.yaml"
+    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
+    return ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "0.5"]
+
+
+def _no_cytosolic_binding(math: dict[str, Any]) -> None:
+    for function in math["functions"]:
+        if function["name"] == "J_bind_in":
+            function["exp"] = "0.0"  # nothing binds from the cytosol
+
+
+def _one_sided(math: dict[str, Any]) -> None:
+    """Drop the cytosolic ligand: membrane species with bulk species in the extracellular space only."""
+    _no_cytosolic_binding(math)
     math["variables"] = [v for v in math["variables"] if v["name"] != "s_cyto"]
     for compartment in math["compartment_subdomains"]:
         if compartment["name"] == "cyto_dom":
             compartment["pde_equations"] = []
     for membrane in math["membrane_subdomains"]:
         membrane["jump_conditions"] = [j for j in membrane.get("jump_conditions", []) if j["name"] != "s_cyto"]
-    math_file = tmp_path / "one_sided_math.yaml"
+
+
+def test_membrane_species_with_one_sided_bulk_run(tmp_path: Path) -> None:
+    # The receptor model without its cytosolic ligand: membrane species with bulk species on one side only
+    # (#185). The empty cytosol carries no unknowns, so the run must equal the same model WITH a cytosolic ligand
+    # that binds nothing, and it conserves the ligand: the free
+    # extracellular pool plus the bound receptors, KMOLE-reconciled (∫s_ext dV + KMOLE·∫R dA).
+    one_sided, inert = tmp_path / "one_sided", tmp_path / "inert"
+    options = ["--output-dt", "0.25", "--h", "0.3", "--no-fields"]
+    assert main([*_receptor(tmp_path, "one_sided", _one_sided), *options, "--out", str(one_sided)]) == 0
+    assert main([*_receptor(tmp_path, "inert", _no_cytosolic_binding), *options, "--out", str(inert)]) == 0
+    a, b = Bundle.open(one_sided / "results.fenics"), Bundle.open(inert / "results.fenics")
+    assert "cyto_dom" not in a.manifest.domains  # nothing to write for the unmodelled side
+    for domain, variable in (("ext_dom", "s_ext"), ("mem_dom", "R")):
+        # to the adaptive integrator's tolerance: the two solves have different blocks, so different steps
+        assert np.allclose(a.stats(domain, variable), b.stats(domain, variable), rtol=1e-5, atol=1e-8), variable
+    kmole = 1.0 / 602.214076
+    total = a.stats("ext_dom", "s_ext")[:, 1] + kmole * a.stats("mem_dom", "R")[:, 1]
+    assert np.allclose(total, total[0], rtol=1e-7)
+    assert a.stats("mem_dom", "R")[-1, 1] > a.stats("mem_dom", "R")[0, 1]  # it did bind
+
+
+def test_a_well_mixed_compartment_beside_membrane_species_runs(tmp_path: Path) -> None:
+    # A well-mixed cytosolic ligand (VCell's VolumeRegionVariable, §1.4.2 T5) as the cytosol's only species,
+    # beside membrane receptors: the cytosol's field block is a placeholder and s_cyto a Real block (#185,
+    # #196). One value on the whole cytosol, and the ligand is conserved across both pools and the receptors.
+    def well_mixed(math: dict[str, Any]) -> None:
+        for variable in math["variables"]:
+            if variable["name"] == "s_cyto":
+                variable["var_type"] = "VolumeRegionVariable"
+        for compartment in math["compartment_subdomains"]:
+            if compartment["name"] == "cyto_dom":
+                compartment["pde_equations"] = [p for p in compartment["pde_equations"] if p["name"] != "s_cyto"]
+                compartment["volume_region_equations"] = [
+                    {"name": "s_cyto", "uniform_rate": "0.0", "volume_rate": "0.0", "initial": "s_cyto_init_uM"}
+                ]
+
+    out = tmp_path / "out"
+    options = ["--output-dt", "0.25", "--h", "0.3", "--no-fields", "--out", str(out)]
+    assert main([*_receptor(tmp_path, "well_mixed", well_mixed), *options]) == 0
+    bundle = Bundle.open(out / "results.fenics")
+    s_cyto = bundle.stats("cyto_dom", "s_cyto")
+    assert np.allclose(s_cyto[:, 2], s_cyto[:, 3])  # one value on the whole cytosol
+    kmole = 1.0 / 602.214076
+    total = s_cyto[:, 1] + bundle.stats("ext_dom", "s_ext")[:, 1] + kmole * bundle.stats("mem_dom", "R")[:, 1]
+    assert np.allclose(total, total[0], rtol=1e-7)
+
+
+def test_well_mixed_species_and_membrane_potential_run_on_the_two_compartment_solver(tmp_path: Path) -> None:
+    # The permeability model with its cytosolic species well-mixed (a VolumeRegionVariable) and a membrane
+    # potential added (a MembraneRegionVariable, C dV/dt = −g (V − E)): the two-compartment solver hosts both
+    # as Real blocks (#196). The bundle holds s_cyto as a constant field on the cytosol, V on the membrane.
+    math = yaml.safe_load((_CV / "coupled_perm_math.yaml").read_text())
+    for variable in math["variables"]:
+        if variable["name"] == "s_cyto":
+            variable["var_type"] = "VolumeRegionVariable"
+    math["variables"].append({"name": "V", "var_type": "MembraneRegionVariable", "domain": "mem_dom"})
+    math["constants"] += [
+        {"name": "g_leak", "exp": "2.0"},
+        {"name": "C_m", "exp": "0.5"},
+        {"name": "E_rev", "exp": "-60.0"},
+    ]
+    for compartment in math["compartment_subdomains"]:
+        if compartment["name"] == "cyto_dom":
+            compartment["pde_equations"] = []
+            compartment["volume_region_equations"] = [
+                {"name": "s_cyto", "uniform_rate": "0.0", "volume_rate": "0.0", "initial": "s_cyto_init_uM"}
+            ]
+    for membrane in math["membrane_subdomains"]:
+        membrane["membrane_region_equations"] = [
+            {"name": "V", "uniform_rate": "0.0", "membrane_rate": "(-g_leak * (V - E_rev) / C_m)", "initial": "-20.0"}
+        ]
+    math_file = tmp_path / "region_math.yaml"
     math_file.write_text(yaml.safe_dump(math, sort_keys=False))
-    argv = ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "0.1"]
-    assert main([*argv, "--out", str(tmp_path / "out")]) != 0
-    err = capsys.readouterr().err
-    assert "bulk species only in 'ext_dom'" in err and "'cyto_dom' has none" in err
+    out = tmp_path / "out"
+    argv = ["--math", str(math_file), "--geometry", str(_CV / "coupled_perm_geom.yaml"), "--t-final", "1.0"]
+    assert main([*argv, "--output-dt", "0.5", "--h", "0.2", "--no-fields", "--out", str(out)]) == 0
+
+    bundle = Bundle.open(out / "results.fenics")
+    s_cyto = bundle.stats("cyto_dom", "s_cyto")  # (T, 4): mean, total, min, max
+    assert np.allclose(s_cyto[:, 2], s_cyto[:, 3])  # one value on the whole cytosol
+    total = s_cyto[:, 1] + bundle.stats("ext_dom", "s_ext")[:, 1]
+    assert np.allclose(total, total[0], rtol=1e-8)  # exchange only: mass conserved
+    potential = bundle.stats("mem_dom", "V")[:, 0]
+    exact = -60.0 + 40.0 * np.exp(-4.0 * np.array([0.0, 0.5, 1.0]))
+    assert np.allclose(potential, exact, atol=1e-2)
+
+
+def test_a_membrane_potential_runs_beside_membrane_receptors(tmp_path: Path) -> None:
+    # The receptor model (ligand in both compartments, receptors on the membrane) with a membrane potential
+    # added, C dV/dt = −g (V − E): the membrane-coupled solver hosts it as a Real block (#196), written on
+    # the membrane domain as a constant field beside the receptor density.
+    math = yaml.safe_load((_CV / "receptor_math.yaml").read_text())
+    membrane = math["membrane_subdomains"][0]["name"]
+    math["variables"].append({"name": "V", "var_type": "MembraneRegionVariable", "domain": membrane})
+    math["constants"] += [
+        {"name": "g_leak", "exp": "2.0"},
+        {"name": "C_m", "exp": "0.5"},
+        {"name": "E_rev", "exp": "-60.0"},
+    ]
+    math["membrane_subdomains"][0]["membrane_region_equations"] = [
+        {"name": "V", "uniform_rate": "0.0", "membrane_rate": "(-g_leak * (V - E_rev) / C_m)", "initial": "-20.0"}
+    ]
+    math_file = tmp_path / "receptor_v_math.yaml"
+    math_file.write_text(yaml.safe_dump(math, sort_keys=False))
+    out = tmp_path / "out"
+    argv = ["--math", str(math_file), "--geometry", str(_CV / "receptor_geom.yaml"), "--t-final", "1.0"]
+    assert main([*argv, "--output-dt", "0.5", "--h", "0.25", "--no-fields", "--out", str(out)]) == 0
+
+    bundle = Bundle.open(out / "results.fenics")
+    potential = bundle.stats(membrane, "V")  # (T, 4): mean, total, min, max
+    assert np.allclose(potential[:, 2], potential[:, 3])  # one value on the whole membrane
+    exact = -60.0 + 40.0 * np.exp(-4.0 * np.array([0.0, 0.5, 1.0]))
+    assert np.allclose(potential[:, 0], exact, atol=1e-2)
 
 
 def test_unknown_model_file_is_a_clean_error(capsys: pytest.CaptureFixture[str]) -> None:
@@ -409,3 +530,16 @@ def test_help_renders(capsys: pytest.CaptureFixture[str]) -> None:
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
     assert "--simtask" in out and "[[[progress:…%]]]" in out
+
+
+def test_a_vcml_application_with_a_fast_system_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # the .vcml path reads the FastSystem from the XML (pyvcell drops it) and refuses it before solving
+    pytest.importorskip("pyvcell.vcml.vcml_reader")
+    text = (_CV / "minimal_diffusion_2d_v1.vcml").read_text()
+    marker = "</CompartmentSubDomain>"
+    assert text.count(marker) == 1
+    fast = "<FastSystem><FastInvariant>(u + uB)</FastInvariant><FastRate>J_buffering</FastRate></FastSystem>"
+    model = tmp_path / "fast.vcml"
+    model.write_text(text.replace(marker, fast + marker))
+    assert main(["--vcml", str(model), "--out", str(tmp_path / "out")]) == 2
+    assert "FastSystem" in capsys.readouterr().err

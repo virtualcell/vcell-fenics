@@ -78,8 +78,13 @@ TIME_DERIVATIVE: frozenset[str] = frozenset({"partial_t"})
 MEASURES: frozenset[str] = frozenset({"dx", "dx_Gamma", "dl", "dp", "ds", "dS", "dl_Gamma"})
 
 # Names that may appear only as a call's callee, never as a bare value.
+# `region_size(<subdomain>)`: the realized measure of a subdomain — its volume, or its area for a surface
+# (§1.8.4). Its argument is a subdomain *name*, not a value (like a measure's boundary label). VCell's
+# `vcRegionVolume('X')` / `vcRegionArea('X')`.
+REGION_SIZE: frozenset[str] = frozenset({"region_size"})
+
 RESERVED_CALLABLES: frozenset[str] = (
-    STANDARD_FUNCTIONS | CALCULUS_OPERATORS | TRACE | TENSOR_ALGEBRA | RANDOM_FUNCTIONS | TIME_DERIVATIVE
+    STANDARD_FUNCTIONS | CALCULUS_OPERATORS | TRACE | TENSOR_ALGEBRA | RANDOM_FUNCTIONS | TIME_DERIVATIVE | REGION_SIZE
 )
 
 # Names a user may NOT take for a subdomain, variable, or parameter (§1.11.3, §2.4.1). Per ADR 006

@@ -1,0 +1,162 @@
+math_description:
+  geometry: spatialGeom
+  subdomains:
+  - name: subdomain1
+    kind: volume
+  - name: subdomain0
+    kind: volume
+  - name: subdomain0_subdomain1_membrane
+    kind: surface
+  variables:
+  - name: s3
+    subdomain: subdomain1
+  - name: s0
+    subdomain: subdomain0
+  - name: s1
+    subdomain: subdomain0
+    space: region
+  - name: s2
+    subdomain: subdomain0_subdomain1_membrane
+    space: region
+  equations:
+  - template: bulk_radv_diff
+    variable: s3
+    subdomain: subdomain1
+    temporality: time_dependent
+    terms:
+      diffusion: s3_diffusionRate
+      source: '0.0'
+    initial_condition: ((1.0 + (sin(geom.x[0]) * cos(geom.x[1]))))
+  - template: bulk_radv_diff
+    variable: s0
+    subdomain: subdomain0
+    temporality: time_dependent
+    terms:
+      diffusion: s0_diffusionRate
+      source: '- (((Kf_r0 * s0) - (1.0 * Kr_r0 * s1)))'
+    initial_condition: ((1.0 + sin(geom.x[0])))
+  - template: region_ode
+    variable: s1
+    subdomain: subdomain0
+    temporality: time_dependent
+    terms:
+      region_rate: (((Kf_r0 * s0) - (1.0 * Kr_r0 * s1)))
+    initial_condition: ((1.0 + cos(geom.x[0])))
+  - template: region_ode
+    variable: s2
+    subdomain: subdomain0_subdomain1_membrane
+    temporality: time_dependent
+    terms:
+      region_rate: ((((Kf_r1 * trace(s0)) - (Kr_r1 * s2))) - (((Kf_r2 * s2) - (Kr_r2
+        * trace(s3)))))
+    initial_condition: ((1.0 + cos(geom.x[1])))
+  parameters:
+  - name: _F_
+    value: 96485.3321
+  - name: _F_nmol_
+    value: 9.64853321e-05
+  - name: _K_GHK_
+    value: 1.0e-09
+  - name: _N_pmol_
+    value: 602214179000.0
+  - name: _PI_
+    value: 3.141592653589793
+  - name: _R_
+    value: 8314.46261815
+  - name: _T_
+    value: 300.0
+  - name: AreaPerUnitArea_m0
+    value: 1.0
+  - name: K_millivolts_per_volt
+    value: 1000.0
+  - name: Kf_r0
+    value: 1.0
+  - name: Kf_r1
+    value: 1.0
+  - name: Kf_r2
+    value: 1.0
+  - name: KMOLE
+    value: 0.001660538783162726
+  - name: Kr_r0
+    value: 0.5
+  - name: Kr_r1
+    value: 1.0
+  - name: Kr_r2
+    value: 1.0
+  - name: netValence_r1
+    value: 1.0
+  - name: netValence_r2
+    value: 1.0
+  - name: s0_boundaryXm
+    value: 0.0
+  - name: s0_boundaryXp
+    value: 0.0
+  - name: s0_boundaryYm
+    value: 0.0
+  - name: s0_boundaryYp
+    value: 0.0
+  - name: s0_boundaryZm
+    value: 0.0
+  - name: s0_boundaryZp
+    value: 0.0
+  - name: s0_diffusionRate
+    value: 0.0001
+  - name: s1_boundaryXm
+    value: 0.0
+  - name: s1_boundaryXp
+    value: 0.0
+  - name: s1_boundaryYm
+    value: 0.0
+  - name: s1_boundaryYp
+    value: 0.0
+  - name: s1_boundaryZm
+    value: 0.0
+  - name: s1_boundaryZp
+    value: 0.0
+  - name: s2_boundaryXm
+    value: 0.0
+  - name: s2_boundaryXp
+    value: 0.0
+  - name: s2_boundaryYm
+    value: 0.0
+  - name: s2_boundaryYp
+    value: 0.0
+  - name: s2_boundaryZm
+    value: 0.0
+  - name: s2_boundaryZp
+    value: 0.0
+  - name: s3_boundaryXm
+    value: 0.0
+  - name: s3_boundaryXp
+    value: 0.0
+  - name: s3_boundaryYm
+    value: 0.0
+  - name: s3_boundaryYp
+    value: 0.0
+  - name: s3_boundaryZm
+    value: 0.0
+  - name: s3_boundaryZp
+    value: 0.0
+  - name: s3_diffusionRate
+    value: 0.0001
+  - name: Voltage_m0
+    value: 0.0
+  - name: VolumePerUnitVolume_c0
+    value: 1.0
+  - name: VolumePerUnitVolume_c1
+    value: 1.0
+  - name: KFlux_m0_c0
+    subdomain: subdomain0_subdomain1_membrane
+    expression: (AreaPerUnitArea_m0 / VolumePerUnitVolume_c0)
+  - name: KFlux_m0_c1
+    subdomain: subdomain0_subdomain1_membrane
+    expression: (AreaPerUnitArea_m0 / VolumePerUnitVolume_c1)
+  boundary_conditions:
+  - kind: interface_flux
+    variable: s0
+    boundary: subdomain0_subdomain1_membrane
+    expression: ( - 1.0 * KFlux_m0_c0 * (((Kf_r1 * trace(s0)) - (Kr_r1 * s2))))
+  - kind: interface_flux
+    variable: s3
+    boundary: subdomain0_subdomain1_membrane
+    expression: (KFlux_m0_c1 * (((Kf_r2 * s2) - (Kr_r2 * trace(s3)))))

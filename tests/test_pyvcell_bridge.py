@@ -947,3 +947,126 @@ def test_normalize_to_geometry_frame_leaves_a_3d_model_unchanged() -> None:
     (eq,) = md2.equations
     assert isinstance(eq, TemplateEquation)
     assert eq.initial_condition == "geom.x[2]"
+
+
+def test_volume_region_equation_is_a_region_ode_fed_by_its_jump_condition() -> None:
+    # A well-mixed cytosolic species (VCell's VolumeRegionVariable + VolumeRegionEquation, §1.4.2 T5) is a
+    # `region`-space variable under `region_ode`; its membrane jump condition is its own-side flux BC —
+    # the membrane term of its region balance — and a membrane expression sees it through trace(·).
+    vcml = vm.MathDescription(
+        name="m",
+        variables=[vm.MathVariable(name="ca", var_type=vm.MathVariableType.volume_region, domain="cyto")],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(
+                name="cyto",
+                volume_region_equations=[
+                    vm.VolumeRegionEquation(name="ca", uniform_rate="0.0", volume_rate="-kd * ca", initial="0.1")
+                ],
+            )
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                jump_conditions=[vm.JumpCondition(name="ca", in_flux="j * (1.0 - ca)", out_flux="0.0")],
+            )
+        ],
+    )
+    md = import_math_description(vcml)
+    (ca,) = md.variables
+    assert (ca.name, ca.subdomain, ca.space) == ("ca", "cyto", "region")
+    (eq,) = md.equations
+    assert isinstance(eq, TemplateEquation) and eq.template == "region_ode"
+    assert eq.terms == {"region_rate": "-kd * ca"}  # the zero uniform rate is the default, left out
+    assert eq.initial_condition == "0.1" and eq.temporality == "time_dependent"
+    (bc,) = md.boundary_conditions
+    assert type(bc).__name__ == "BCNeumann" and (bc.variable, bc.boundary) == ("ca", "pm")
+    assert bc.expression == "j * (1.0 - trace(ca))"
+
+
+def test_membrane_region_equation_is_a_region_ode_on_the_membrane() -> None:
+    # The membrane potential (MembraneRegionVariable + MembraneRegionEquation): C dV/dt = -I on the
+    # membrane, a `region_ode` whose rate references the adjacent bulk species through trace(·).
+    vcml = vm.MathDescription(
+        name="m",
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="k", diffusion="1.0", initial="1")])
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                membrane_region_equations=[
+                    vm.MembraneRegionEquation(
+                        name="V", uniform_rate="0.0", membrane_rate="-g * (V - log(k)) / C", initial="-70.0"
+                    )
+                ],
+            )
+        ],
+    )
+    md = import_math_description(vcml)
+    v = next(var for var in md.variables if var.name == "V")
+    assert (v.subdomain, v.space) == ("pm", "region")
+    eq = next(e for e in md.equations if e.variable == "V")
+    assert isinstance(eq, TemplateEquation) and eq.template == "region_ode"
+    assert eq.terms == {"region_rate": "-g * (V - log(trace(k))) / C"}
+
+
+def test_a_function_used_only_by_a_region_equation_is_kept() -> None:
+    # A pure function referenced by nothing but a region equation's rate (a membrane potential's leak
+    # conductance, VCell's `Size_membr`) is live: the dead-function pruning must count region equations.
+    vcml = vm.MathDescription(
+        name="m",
+        constants=[vm.Constant(name="g0", exp="1.5")],
+        functions=[vm.MathFunction(name="g_leak", exp="(2.0 * g0)", domain="pm")],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="k", diffusion="1.0", initial="1")])
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                membrane_region_equations=[
+                    vm.MembraneRegionEquation(
+                        name="V", uniform_rate="0.0", membrane_rate="-g_leak * V", initial="-70.0"
+                    )
+                ],
+            )
+        ],
+    )
+    md = import_math_description(vcml)
+    assert "g_leak" in {p.name for p in md.parameters}
+
+
+def test_parameters_are_emitted_in_dependency_order() -> None:
+    # VCell's function order is not dependency order: a capacitance defined from the membrane's size comes
+    # before the size. The backends compile parameters in order, so the import must reorder them.
+    vcml = vm.MathDescription(
+        name="m",
+        constants=[vm.Constant(name="C_m", exp="0.01"), vm.Constant(name="AreaPerUnitArea_pm", exp="1.0")],
+        functions=[
+            vm.MathFunction(name="device_pm.Capacitance", exp="(C_m * Size_pm)", domain="pm"),
+            vm.MathFunction(name="Size_pm", exp="(AreaPerUnitArea_pm * vcRegionArea('pm'))", domain="pm"),
+        ],
+        compartment_subdomains=[
+            vm.CompartmentSubDomain(name="cyto", pde_equations=[vm.PdeEquation(name="k", diffusion="1.0", initial="1")])
+        ],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(
+                name="pm",
+                inside_compartment="cyto",
+                outside_compartment="ec",
+                membrane_region_equations=[
+                    vm.MembraneRegionEquation(
+                        name="V", uniform_rate="0.0", membrane_rate="-V / device_pm.Capacitance", initial="-70.0"
+                    )
+                ],
+            )
+        ],
+    )
+    names = [p.name for p in import_math_description(vcml).parameters]
+    assert names.index("Size_pm") < names.index("device_pm.Capacitance")
+    assert names.index("C_m") < names.index("device_pm.Capacitance")

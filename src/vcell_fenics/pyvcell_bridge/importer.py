@@ -55,9 +55,10 @@ import functools
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vcell_fenics.formalism.schema import (
+    REGION_SPACE,
     BCDirichlet,
     BCInterfaceFlux,
     BCNeumann,
@@ -153,8 +154,12 @@ def import_model(
     # of a membrane (which our per-variable BC cannot yet disambiguate).
     species_compartments: dict[str, set[str]] = {}
     for compartment in vcml.compartment_subdomains:
-        for pde in compartment.pde_equations:
-            species_compartments.setdefault(pde.name, set()).add(compartment.name)
+        # A volume-region variable (a well-mixed species) is bulk too: its membrane jump conditions feed
+        # its region balance from its own side, and a membrane expression sees it through its trace.
+        for name in [pde.name for pde in compartment.pde_equations] + [
+            eq.name for eq in compartment.volume_region_equations
+        ]:
+            species_compartments.setdefault(name, set()).add(compartment.name)
     bulk_species = set(species_compartments)
 
     subdomains: list[Subdomain] = []
@@ -249,9 +254,11 @@ def _collect_variable_names(vcml: VcmlMathDescription) -> set[str]:
     for compartment in vcml.compartment_subdomains:
         names.update(p.name for p in compartment.pde_equations)
         names.update(o.name for o in compartment.ode_equations)
+        names.update(r.name for r in compartment.volume_region_equations)
     for membrane in vcml.membrane_subdomains:
         names.update(p.name for p in membrane.pde_equations)
         names.update(o.name for o in membrane.ode_equations)
+        names.update(r.name for r in membrane.membrane_region_equations)
     return names
 
 
@@ -315,6 +322,37 @@ def _translate_subdomain_equations(
                 temporality="time_dependent",
                 terms={"rate": expr(ode.rate)},  # type: ignore[dict-item]
                 initial_condition=expr(ode.initial),
+            )
+        )
+
+    # Region variables (VCell's VolumeRegion/MembraneRegion equations: a well-mixed species, the membrane
+    # potential) — one value per connected region, the `region_ode` template (§1.4.2 T5). A zero rate is
+    # the template's default, so it is left out.
+    regions: list[tuple[str, str | None, str | None, str | None]] = (
+        [
+            (r.name, r.uniform_rate, r.volume_rate, r.initial)
+            for r in cast("CompartmentSubDomain", subdomain).volume_region_equations
+        ]
+        if kind == "volume"
+        else [
+            (r.name, r.uniform_rate, r.membrane_rate, r.initial)
+            for r in cast("MembraneSubDomain", subdomain).membrane_region_equations
+        ]
+    )
+    for name, uniform_rate, region_rate, initial in regions:
+        region_terms: dict[str, str] = {}
+        for slot, raw in (("uniform_rate", uniform_rate), ("region_rate", region_rate)):
+            if raw is not None and _as_float(raw) != 0.0:
+                region_terms[slot] = expr(raw)  # type: ignore[assignment]
+        variables.append(Variable(name=name, subdomain=subdomain.name, type="scalar", space=REGION_SPACE))
+        equations.append(
+            TemplateEquation(
+                template="region_ode",
+                variable=name,
+                subdomain=subdomain.name,
+                temporality="time_dependent",
+                terms=region_terms,
+                initial_condition=expr(initial),
             )
         )
 
@@ -410,10 +448,11 @@ def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) ->
     inlined into equations and surfaced as observables instead.
 
     Pure functions that nothing in the model references are *not* imported: VCell emits region-size
-    bookkeeping (``Size_<compartment>``, ``vobj_<region>_size``) calling geometric built-ins like
-    ``vcRegionVolume('domain')`` that our expression formalism does not model. They are provably dead
-    (no equation, boundary, or other parameter reaches them), so dropping them removes no model
-    semantics — and a *referenced* such function is still emitted and rejected loudly at validation."""
+    bookkeeping for every compartment (``Size_<compartment>``, ``vobj_<region>_size``), and they are
+    provably dead (no equation, boundary, or other parameter reaches them), so dropping them removes no
+    model semantics. A *referenced* one (a membrane potential's current is a density times
+    ``Size_membr``) is emitted, its ``vcRegionVolume('X')`` / ``vcRegionArea('X')`` translated to
+    ``region_size(X)`` (§1.8.4)."""
 
     reachable = _reachable_names(vcml)
     parameters: list[Parameter] = []
@@ -434,13 +473,40 @@ def _translate_parameters(vcml: VcmlMathDescription, res: FunctionResolution) ->
                     subdomain=function.domain,
                 )
             )
-    return parameters
+    return _dependency_ordered(parameters)
+
+
+def _dependency_ordered(parameters: list[Parameter]) -> list[Parameter]:
+    """``parameters`` with each one after the parameters its expression uses — the order the backends
+    compile them in (a forward reference is an unresolved name). VCell's function order is not
+    dependency order (e.g. ``device_membrane.Capacitance = C_membrane * Size_membrane`` before
+    ``Size_membrane``), so this is a stable topological sort: an order that already works is kept. A cycle
+    is left as is for the validator to report."""
+
+    by_name = {p.name: p for p in parameters}
+    placed: set[str] = set()
+    ordered: list[Parameter] = []
+
+    def place(parameter: Parameter, visiting: set[str]) -> None:
+        if parameter.name in placed or parameter.name in visiting:
+            return
+        visiting.add(parameter.name)
+        if isinstance(parameter, ParameterExpression):
+            for name in sorted(referenced_names(parameter.expression) & by_name.keys()):
+                place(by_name[name], visiting)
+        placed.add(parameter.name)
+        ordered.append(parameter)
+
+    for parameter in parameters:
+        place(parameter, set())
+    return ordered
 
 
 def _reachable_names(vcml: VcmlMathDescription) -> frozenset[str]:
     """The names transitively referenced by the model's equations, boundary values, and constant /
     function expressions — the live set. Used to drop dead pure functions (see
-    :func:`_translate_parameters`). Roots are every PDE/ODE rate, diffusion, and initial expression,
+    :func:`_translate_parameters`). Roots are every PDE/ODE/region-equation rate, diffusion, and initial
+    expression,
     each PDE velocity component (VCell routes a species velocity through functions, e.g.
     ``vobj_Cyt1_velX`` → ``vproc_1.velocityX``),
     each per-face boundary value, each membrane jump flux, and each constant expression; the closure
@@ -459,7 +525,12 @@ def _reachable_names(vcml: VcmlMathDescription) -> frozenset[str]:
                 roots += [getattr(pde.boundaries, face) for face in ("xm", "xp", "ym", "yp", "zm", "zp")]
         for ode in subdomain.ode_equations:
             roots += [ode.rate, ode.initial]
+    for compartment in vcml.compartment_subdomains:  # region equations (T5): their rates and initial values
+        for volume_region in compartment.volume_region_equations:
+            roots += [volume_region.uniform_rate, volume_region.volume_rate, volume_region.initial]
     for membrane in vcml.membrane_subdomains:
+        for membrane_region in membrane.membrane_region_equations:
+            roots += [membrane_region.uniform_rate, membrane_region.membrane_rate, membrane_region.initial]
         for jc in membrane.jump_conditions:
             roots += [jc.in_flux, jc.out_flux]
     roots += [constant.exp for constant in vcml.constants]

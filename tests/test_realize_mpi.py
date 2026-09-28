@@ -54,7 +54,12 @@ sphere = GeometryDescription(
                           expression="geom.x[0]**2 + geom.x[1]**2 + geom.x[2]**2 < 0.36"),
                 SubVolume(name="ext", type="analytic", expression="1.0")),
     surfaces=(SurfaceClass(name="pm", inside="cyto", outside="ext"),))
-for desc, h in ((disk, 0.1), (sphere, 0.3)):
+cut = GeometryDescription(  # a half disk on the box face x = -1: the label path (#187)
+    name="cut", dim=2, extent=(2.0, 2.0, 1.0), origin=(-1.0, -1.0, 0.0),
+    subvolumes=(SubVolume(name="cyto", type="analytic", expression="(geom.x[0] + 1)**2 + geom.x[1]**2 < 0.49"),
+                SubVolume(name="ext", type="analytic", expression="1.0")),
+    surfaces=(SurfaceClass(name="pm", inside="cyto", outside="ext"),))
+for desc, h in ((disk, 0.1), (sphere, 0.3), (cut, 0.1)):
     geom = realize(desc, h=h, comm=comm)
     for sd in sorted(geom.subdomains):
         record(f"{desc.name}/{sd}", geom.mesh_of(sd))

@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import dolfinx
+import numpy as np
 from mpi4py import MPI
 
 import vcell_fenics
@@ -47,6 +48,7 @@ from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
 from vcell_fenics.backend.realize import ImageGeometryWarning, realize
 from vcell_fenics.backend.remesh_3d import RemeshWarning
 from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_geometry_yaml, dump_yaml
+from vcell_fenics.formalism.schema import REGION_SPACE
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
 from vcell_fenics.results.schema import DomainKind
 from vcell_fenics.status import NullReporter, StatusReporter
@@ -130,6 +132,11 @@ def run_model(
     ``solver.overrides``); ``status`` hears progress during the solve and a data event per written row
     (ADR 011 §4) — starting/completed/failed are the caller's, since they bracket more than the solve."""
 
+    # The model's shape (and any refusal of it) is settled before anything is written.
+    moving = _moving_subdomains(model)
+    multi = not moving and _is_multi_compartment(model)
+    if not multi:
+        _refuse_region_variables(model.math)
     comm = MPI.COMM_WORLD
     bundle = out_dir / f"{prefix}.fenics"
     if comm.rank == 0:
@@ -153,18 +160,12 @@ def run_model(
     recorder = BundleRecorder(writer, comm=comm)
     reporter: StatusReporter = status if status is not None else NullReporter()
     recorder.on_row(lambda t, row: reporter.data(t, t / options.t_final))
-    moving = _moving_subdomains(model)
-    coupling = None if moving else _interface_coupling(model)
     run_info: dict[str, Any] = {
         "h": options.h,
         "t_final": options.t_final,
         "fe_degree": options.fe_degree,
         "mpi_ranks": comm.size,
-        "backend": "ale"
-        if moving
-        else ("membrane_coupled" if coupling.membrane_species else "interface_coupled")
-        if coupling is not None
-        else "single_mesh",
+        "backend": "ale" if moving else "multi_compartment" if multi else "single_mesh",
     }
     try:
         if moving:
@@ -176,11 +177,8 @@ def run_model(
                 "steps": steps,
                 "remeshes": remeshes,
             }
-        elif coupling is not None and coupling.membrane_species:
-            cells, steps = _run_membrane_coupled(model, coupling, options, recorder, reporter)
-            run_info |= {"time_integration": "method_of_lines", "steps": steps}
-        elif coupling is not None:
-            cells, steps = _run_interface_coupled(model, coupling, options, recorder, reporter)
+        elif multi:
+            cells, steps = _run_multi_compartment(model, options, recorder, reporter)
             run_info |= {"time_integration": "method_of_lines", "steps": steps}
         else:
             cells, steps, dt_used = _run_single_mesh(model, options, recorder, reporter)
@@ -213,6 +211,18 @@ def run_model(
     writer.write_provenance("summary.json", json.dumps(summary, indent=2) + "\n")
     writer.finalize("completed")
     return summary
+
+
+def _refuse_region_variables(math: MathDescription) -> None:
+    """Region variables (§1.4.2 T5: a well-mixed species, the membrane potential) are solved by the
+    multi-compartment solver. The single-mesh and moving paths refuse them before any bundle is started (#196)."""
+    unhosted = [f"{v.name!r} on {v.subdomain!r}" for v in math.variables if v.space == REGION_SPACE]
+    if unhosted:
+        raise RunError(
+            f"region variables are not solved yet here: {', '.join(unhosted)} — one value per region (a "
+            f"well-mixed species or a membrane potential); only the multi-compartment solver hosts them so far "
+            f"(a model with equations on two or more subdomains); see virtualcell/vcell-fenics#196"
+        )
 
 
 def _source_info(model: ModelInput) -> SourceInfo:
@@ -407,164 +417,81 @@ def _step_backward_euler(
 # -- the two-compartment path -------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Coupling:
-    """The two compartments and the membrane between them, for the interface-coupled path.
-    ``membrane_species``: the membrane carries equations of its own (the membrane-coupled path)."""
+def _is_multi_compartment(model: ModelInput) -> bool:
+    """Whether the model needs the multi-compartment solver: its equations (field species and region
+    variables) span two or more subdomains of a geometry with two or more subvolumes — two compartments, a
+    compartment and its membrane, a nucleus in a cytosol in extracellular space. One subdomain is the
+    single-mesh path's."""
 
-    inner: str
-    outer: str
-    membrane: str
-    background: str | None
-    membrane_species: bool = False
+    homes = {eq.subdomain for eq in model.math.equations}
+    return len(model.geometry.subvolumes) >= 2 and len(homes) >= 2
 
 
-def _run_interface_coupled(
-    model: ModelInput, coupling: Coupling, options: RunOptions, recorder: BundleRecorder, status: StatusReporter
+def _run_multi_compartment(
+    model: ModelInput, options: RunOptions, recorder: BundleRecorder, status: StatusReporter
 ) -> tuple[int, int]:
-    """Two compartments coupled by the membrane flux, any number of species in each (reactions within a
-    compartment may couple them); every output time recorded from the integrator's monitor. Returns
-    (cells, steps)."""
+    """Any number of compartments and membranes, any number of species and region variables on each,
+    coupled by the membrane fluxes (``integrate_multi_compartment``); every output time recorded from the
+    integrator's monitor. Returns (cells, steps)."""
 
-    from vcell_fenics.backend.interface_coupled import integrate_interface_coupled
-    from vcell_fenics.backend.realize import realize_interface_coupled
+    from vcell_fenics.backend.multi_compartment import integrate_multi_compartment, realize_multi_compartment
 
-    # The blocked two-mesh solve is P1 and adaptive-MOL by construction. Say so instead of accepting
-    # a flag and quietly solving something else.
     if options.fe_degree != 1:
-        raise RunError("the two-compartment solver is P1 only; drop --fe-degree for this model")
-    species: dict[str, list[str]] = {coupling.inner: [], coupling.outer: []}
-    for eq in model.math.equations:
-        species.setdefault(eq.subdomain, []).append(eq.variable)
+        raise RunError("the multi-compartment solver is P1 only; drop --fe-degree for this model")
     if options.time_integration != "method_of_lines":
-        log("note: the two-compartment solver is method-of-lines; --time-integration is ignored")
+        log("note: the multi-compartment solver is method-of-lines; --time-integration is ignored")
+    kinds = {sd.name: sd.kind for sd in model.math.subdomains}
+    variables: dict[str, list[str]] = {}
+    for eq in model.math.equations:
+        variables.setdefault(eq.subdomain, []).append(eq.variable)
+    regions = {v.name for v in model.math.variables if v.space == REGION_SPACE}
 
     comm = MPI.COMM_WORLD
     log(
-        f"realizing interface-coupled geometry {model.geometry.name!r}: inner {coupling.inner!r}, "
-        f"outer {coupling.outer!r}, membrane {coupling.membrane!r} at h = {options.h:g}"
+        f"realizing multi-compartment geometry {model.geometry.name!r} at h = {options.h:g}: "
+        + ", ".join(f"{name} ({kinds.get(name, '?')})" for name in variables)
     )
     with _logged_geometry_warnings():
-        geometry = realize_interface_coupled(
+        geometry = realize_multi_compartment(
             model.geometry,
-            inner_subdomain=coupling.inner,
-            outer_subdomain=coupling.outer,
-            membrane_subdomain=coupling.membrane,
-            interface=coupling.membrane,
-            background_subdomain=coupling.background,
             h=options.h,
+            compartments={name for name in variables if kinds.get(name) == "volume"},
             comm=comm,
         )
-    for name, mesh in ((coupling.inner, geometry.inner_mesh), (coupling.outer, geometry.outer_mesh)):
-        recorder.add_domain(name, "volume", mesh, [(variable, None) for variable in species[name]])
+    missing = sorted(name for name in variables if name not in geometry.compartments and name not in geometry.membranes)
+    if missing:
+        raise RunError(
+            f"subdomain(s) {missing} carry equations but geometry {model.geometry.name!r} realizes no "
+            f"cells or membrane facets for them at h = {options.h:g}"
+        )
+    for name, names in variables.items():
+        kind: DomainKind = "volume" if name in geometry.compartments else "membrane"
+        recorder.add_domain(name, kind, geometry.mesh_of(name), [(variable, None) for variable in names])
     recorder.open()
 
-    cells = mesh_cell_count(geometry.inner_mesh) + mesh_cell_count(geometry.outer_mesh)
-    log(f"integrating to t = {options.t_final:g} (interface-coupled method of lines, {cells} cells)")
+    cells = mesh_cell_count(geometry.parent_mesh)
+    log(
+        f"integrating to t = {options.t_final:g} (multi-compartment method of lines, {cells} cells; "
+        + "; ".join(f"{name}: {', '.join(names)}" for name, names in variables.items())
+        + ")"
+    )
+
+    def source(variable: str, field: Any) -> Any:
+        """A field as is; a region variable (one Real value, held by its owning rank) as a constant."""
+        if variable not in regions:
+            return field
+        n_owned = field.function_space.dofmap.index_map.size_local
+        value = comm.allreduce(float(np.sum(field.x.array[:n_owned].real)), op=MPI.SUM)
+        return lambda x: np.full(x.shape[1], value)
 
     def on_output(t: float, fields: dict[str, Any]) -> None:
         recorder.capture(
             t,
-            {name: [fields[variable] for variable in species[name]] for name in (coupling.inner, coupling.outer)},
+            {name: [source(v, fields[v]) for v in names] for name, names in variables.items()},
             progress=t / options.t_final,
         )
 
-    result = integrate_interface_coupled(
-        model.math,
-        geometry,
-        t_final=options.t_final,
-        rtol=options.rtol,
-        atol=options.atol,
-        output_times=options.output_times,
-        on_output_fields=on_output,
-        on_progress=lambda t: status.progress(t / options.t_final, t),
-    )
-    return cells, int(result.steps)
-
-
-def _run_membrane_coupled(
-    model: ModelInput, coupling: Coupling, options: RunOptions, recorder: BundleRecorder, status: StatusReporter
-) -> tuple[int, int]:
-    """Both compartments and the membrane between them, any number of species in each: bulk species in
-    each compartment, membrane species (receptor–ligand binding, membrane reactions) on the membrane,
-    coupled by the membrane fluxes. Adaptive method of lines (``integrate_membrane_coupled``); every
-    output time recorded from the integrator's monitor. Returns (cells, steps)."""
-
-    from vcell_fenics.backend.interface_coupled import integrate_membrane_coupled
-    from vcell_fenics.backend.realize import realize_interface_coupled
-
-    if options.fe_degree != 1:
-        raise RunError("the membrane-coupled solver is P1 only; drop --fe-degree for this model")
-    if options.time_integration != "method_of_lines":
-        log("note: the membrane-coupled solver is method-of-lines; --time-integration is ignored")
-    species: dict[str, list[str]] = {coupling.inner: [], coupling.outer: [], coupling.membrane: []}
-    for eq in model.math.equations:
-        species[eq.subdomain].append(eq.variable)
-    empty = [name for name in (coupling.inner, coupling.outer) if not species[name]]
-    if empty:
-        raise RunError(
-            "the membrane-coupled solver needs at least one species in each compartment; "
-            f"{', '.join(map(repr, empty))} has none"
-        )
-
-    comm = MPI.COMM_WORLD
-    log(
-        f"realizing membrane-coupled geometry {model.geometry.name!r}: inner {coupling.inner!r}, "
-        f"outer {coupling.outer!r}, membrane {coupling.membrane!r} at h = {options.h:g}"
-    )
-    with _logged_geometry_warnings():
-        geometry = realize_interface_coupled(
-            model.geometry,
-            inner_subdomain=coupling.inner,
-            outer_subdomain=coupling.outer,
-            membrane_subdomain=coupling.membrane,
-            interface=coupling.membrane,
-            background_subdomain=coupling.background,
-            h=options.h,
-            comm=comm,
-        )
-    regions: tuple[tuple[str, DomainKind, Any], ...] = (
-        (coupling.inner, "volume", geometry.inner_mesh),
-        (coupling.outer, "volume", geometry.outer_mesh),
-        (coupling.membrane, "membrane", geometry.membrane_mesh),
-    )
-    for name, kind, mesh in regions:
-        recorder.add_domain(name, kind, mesh, [(variable, None) for variable in species[name]])
-    recorder.open()
-
-    cells = sum(mesh_cell_count(mesh) for _, _, mesh in regions[:2])
-    log(
-        f"integrating to t = {options.t_final:g} (membrane-coupled method of lines, {cells} cells; species: "
-        + "; ".join(f"{name} {', '.join(species[name])}" for name, _, _ in regions)
-        + ")"
-    )
-
-    scalars: dict[int, Any] = {}
-
-    def components(field: Any, n: int) -> list[Any]:
-        """The integrator's fields are vector P1, one component per species. A one-component vector space
-        has no sub-spaces in DOLFINx, but its dof layout is scalar P1's, so that one is copied into a
-        scalar Function on the same mesh (made once per region)."""
-        if n > 1:
-            return [field.sub(k) for k in range(n)]
-        key = id(field.function_space.mesh)
-        if key not in scalars:
-            scalars[key] = dolfinx.fem.Function(dolfinx.fem.functionspace(field.function_space.mesh, ("Lagrange", 1)))
-        scalars[key].x.array[:] = field.x.array
-        return [scalars[key]]
-
-    def on_output(t: float, inner: Any, outer: Any, membrane: Any) -> None:
-        recorder.capture(
-            t,
-            {
-                coupling.inner: components(inner, len(species[coupling.inner])),
-                coupling.outer: components(outer, len(species[coupling.outer])),
-                coupling.membrane: components(membrane, len(species[coupling.membrane])),
-            },
-            progress=t / options.t_final,
-        )
-
-    result = integrate_membrane_coupled(
+    result = integrate_multi_compartment(
         model.math,
         geometry,
         t_final=options.t_final,
@@ -575,69 +502,6 @@ def _run_membrane_coupled(
         on_progress=lambda t: status.progress(t / options.t_final, t),
     )
     return cells, int(result.steps)
-
-
-def _interface_coupling(model: ModelInput) -> Coupling | None:
-    """Detect the two-compartment shape, or return None to take the single-mesh path.
-
-    The shape is read off the *geometry*, which is the source of truth for spatial structure
-    (ADR 007): a SurfaceClass whose `inside`/`outside` are exactly the two subdomains the math's
-    equations live on. A third subvolume that carries no equation is the surrounding background,
-    which the realizer drops so the outer compartment's own edge becomes the reservoir wall.
-    """
-
-    subdomains = {eq.subdomain for eq in model.math.equations}
-    if len(subdomains) == 3:
-        # two compartments plus the membrane between them, each carrying equations: the membrane-coupled
-        # shape — a SurfaceClass named after one of the subdomains, separating the other two
-        for surface in model.geometry.surfaces:
-            if surface.name in subdomains and {surface.inside, surface.outside} == subdomains - {surface.name}:
-                compartments = {surface.inside, surface.outside}
-                spare = sorted({sv.name for sv in model.geometry.subvolumes} - compartments)
-                if len(spare) > 1:
-                    raise RunError(
-                        f"geometry {model.geometry.name!r} has more unmodelled subvolumes than the coupled "
-                        f"solver can drop ({', '.join(spare)}); it supports two compartments plus one background"
-                    )
-                return Coupling(
-                    inner=surface.inside,
-                    outer=surface.outside,
-                    membrane=surface.name,
-                    background=spare[0] if spare else None,
-                    membrane_species=True,
-                )
-        return None
-    if len(subdomains) != 2:
-        return None
-    for surface in model.geometry.surfaces:
-        if surface.name in subdomains and (subdomains - {surface.name}) <= {surface.inside, surface.outside}:
-            # membrane species with bulk species on ONE side only (a receptor binding an extracellular ligand,
-            # nothing modelled in the cytosol): the membrane-coupled solver needs species in both compartments
-            (side,) = subdomains - {surface.name}
-            empty = ({surface.inside, surface.outside} - {side}).pop()
-            raise RunError(
-                f"membrane species on {surface.name!r} with bulk species only in {side!r}: the membrane-coupled "
-                f"solver needs species in both compartments it separates ({empty!r} has none) — not supported yet"
-            )
-    for surface in model.geometry.surfaces:
-        if {surface.inside, surface.outside} == subdomains:
-            volumes = {sv.name for sv in model.geometry.subvolumes}
-            spare = sorted(volumes - subdomains)
-            if len(spare) > 1:
-                raise RunError(
-                    f"geometry {model.geometry.name!r} has more unmodelled subvolumes than the coupled "
-                    f"solver can drop ({', '.join(spare)}); it supports two compartments plus one background"
-                )
-            return Coupling(
-                inner=surface.inside,
-                outer=surface.outside,
-                membrane=surface.name,
-                background=spare[0] if spare else None,
-            )
-    raise RunError(
-        f"the model's equations span subdomains {sorted(subdomains)}, but geometry {model.geometry.name!r} "
-        f"declares no membrane between them (surfaces: {[s.name for s in model.geometry.surfaces] or 'none'})"
-    )
 
 
 # -- small shared helpers ------------------------------------------------------------------------------
@@ -671,7 +535,6 @@ def log(message: str) -> None:
 
 
 __all__ = [
-    "Coupling",
     "ModelInput",
     "RunError",
     "RunOptions",

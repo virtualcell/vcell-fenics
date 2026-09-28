@@ -24,6 +24,7 @@ subvolume pair has no ``SurfaceClass``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,7 +34,7 @@ from scipy import ndimage
 from vcell_fenics.backend.implicit_fields import RealizationError, eval_field
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
 from vcell_fenics.formalism.parser import parse
-from vcell_fenics.formalism.rvachev import lower_predicate
+from vcell_fenics.formalism.rvachev import lower_predicate, subvolume_implicit_functions
 
 Labels = NDArray[np.int32]
 
@@ -54,6 +55,9 @@ class LabelGrid:
     # the smoothed indicator of each subvolume on this lattice (``None`` for one absent from the image),
     # when the grid came from smoothing: continuous, so the boundary between a and b is I_a = I_b
     indicators: tuple[NDArray[np.float32] | None, ...] | None = None
+    # the indicators as exact functions of points (n, dim), when known (an analytic geometry's): the
+    # boundary projection then lands on the true interface, not its trilinear interpolant
+    exact: tuple[Callable[[NDArray[np.float64]], NDArray[np.float64]], ...] | None = None
 
     @property
     def dim(self) -> int:
@@ -350,11 +354,103 @@ def label_geometry(description: GeometryDescription, *, h: float, sigma_pixels: 
             warnings.append(
                 f"subvolume {name!r} has {after[i]} connected piece(s) at h = {h:g} ({before[i]} in the image)"
             )
+    warnings.extend(_undeclared_membranes(description, smooth.labels))
+    return LabelGeometry(grid=smooth, components=tuple(after), warnings=tuple(warnings))
+
+
+def _undeclared_membranes(description: GeometryDescription, labels: Labels) -> list[str]:
+    """A warning for each touching subvolume pair that no ``SurfaceClass`` names (it gets no membrane)."""
+
+    names = [s.name for s in description.subvolumes]
     declared = {
         tuple(sorted((names.index(s.inside), names.index(s.outside))))
         for s in description.surfaces
         if s.inside in names and s.outside in names
     }
-    for p, q in sorted(adjacent_pairs(smooth.labels) - declared):
-        warnings.append(f"subvolumes {names[p]!r} and {names[q]!r} touch but no surface class names that membrane")
-    return LabelGeometry(grid=smooth, components=tuple(after), warnings=tuple(warnings))
+    return [
+        f"subvolumes {names[p]!r} and {names[q]!r} touch but no surface class names that membrane"
+        for p, q in sorted(adjacent_pairs(labels) - declared)
+    ]
+
+
+def has_junction(description: GeometryDescription, *, h: float) -> bool:
+    """Whether three or more of an analytic geometry's subvolumes meet (in one cell of the ``h`` lattice):
+    two cells touching in extracellular space, a cell split into two compartments. The marching path embeds
+    each subvolume's boundary as its own closed curve / surface, which can't share a junction, so such a
+    geometry is realized through its label field instead."""
+
+    dim = description.dim
+    extent = tuple(float(description.extent[i]) for i in range(dim))
+    origin = tuple(float(description.origin[i]) for i in range(dim))
+    fields = subvolume_implicit_functions(description)
+    counts = tuple(max(3, round(extent[i] / h) + 1) for i in range(dim))
+    axes = [np.linspace(origin[i], origin[i] + extent[i], counts[i]) for i in range(dim)]
+    coords = tuple(np.meshgrid(*axes, indexing="ij"))
+    labels = np.argmax(np.stack([-eval_field(fields[s.name], coords) for s in description.subvolumes]), axis=0)
+    # the distinct labels among each lattice cell's 2^dim corners
+    corners = [
+        labels[tuple(slice(o, o + n - 1) for o, n in zip(offset, labels.shape, strict=True))]
+        for offset in np.ndindex(*(2,) * dim)
+    ]
+    stack = np.sort(np.stack(corners), axis=0)
+    distinct = 1 + np.count_nonzero(np.diff(stack, axis=0), axis=0)
+    return bool((distinct >= 3).any())
+
+
+def analytic_label_geometry(description: GeometryDescription, *, h: float) -> LabelGeometry:
+    """The label field of an analytic geometry at mesh size ≈ ``h``, for the partitions the contour /
+    marching path can't body-fit — a subvolume that touches the box (#187). No smoothing: each node of a
+    lattice of spacing ≈ ``h`` whose nodes include the box faces takes the subvolume VCell's priority rule
+    gives it, and the indicators are the priority-resolved implicit functions themselves (``I_k = −φ_k``,
+    so the interface between two subvolumes, ``I_a = I_b``, is the analytic surface): the boundary
+    extraction then projects its vertices onto the exact shapes, not onto a smoothed staircase.
+
+    Raises :class:`RealizationError` for a subvolume thinner than the lattice (present on a 4× finer one,
+    absent at ``h``)."""
+
+    if h <= 0.0:
+        raise ValueError(f"h must be positive, got {h}")
+    dim = description.dim
+    extent = tuple(float(description.extent[i]) for i in range(dim))
+    origin = tuple(float(description.origin[i]) for i in range(dim))
+    fields = subvolume_implicit_functions(description)
+    names = [s.name for s in description.subvolumes]
+
+    def lattice(step: float) -> tuple[tuple[float, ...], list[NDArray[np.float32]]]:
+        counts = tuple(max(3, round(extent[i] / step) + 1) for i in range(dim))
+        spacing = tuple(extent[i] / (counts[i] - 1) for i in range(dim))
+        axes = [origin[i] + spacing[i] * np.arange(counts[i], dtype=np.float64) for i in range(dim)]
+        coords = tuple(np.meshgrid(*axes, indexing="ij"))
+        return spacing, [(-eval_field(fields[name], coords)).astype(np.float32) for name in names]
+
+    spacing, indicators = lattice(h)
+    # the owner is the subvolume whose resolved function is inside (φ ≤ 0): the largest indicator, the
+    # earliest (highest-priority) subvolume on a tie
+    labels = np.argmax(np.stack(indicators), axis=0).astype(np.int32)
+    labels = repair_pinches(labels)
+    counts = component_counts(labels, len(names))
+    missing = [i for i in range(len(names)) if counts[i] == 0]
+    if missing:
+        _, fine = lattice(h / 4.0)
+        owners = set(np.unique(np.argmax(np.stack(fine), axis=0)).tolist())
+        thin = [names[i] for i in missing if i in owners]
+        if thin:
+            raise RealizationError(
+                f"geometry {description.name!r}: subvolume(s) {thin} are thinner than the mesh size h = {h:g}; "
+                "use a smaller h"
+            )
+
+    def exact(name: str) -> Callable[[NDArray[np.float64]], NDArray[np.float64]]:
+        field = fields[name]
+        return lambda points: -eval_field(field, tuple(points[:, i] for i in range(dim)))
+
+    grid = LabelGrid(
+        labels=labels,
+        origin=origin,
+        spacing=spacing,
+        indicators=tuple(indicators),
+        exact=tuple(exact(name) for name in names),
+    )
+    return LabelGeometry(
+        grid=grid, components=tuple(counts), warnings=tuple(_undeclared_membranes(description, labels))
+    )

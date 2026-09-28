@@ -13,7 +13,7 @@ The driving design decisions, recorded in the project memory, are:
 5. **Moving geometry is first-class.** A subdomain's motion is either prescribed or solved-for by an equation in the same MathDescription. This is non-negotiable: mechanics-driven cell migration is the project's central use case.
 6. **Motion is a property of the subdomain**, not of any equation on it. The substrate velocity comes from `subdomain.motion`; species-relative drift comes from a per-equation `relative_advection` slot.
 
-Excluded from this v1 by design: VCell-style FastSystem (solver-side reduction), Events (discrete state transitions), region variables (compartment-aggregate piecewise constants), stochastic constructs, and pre-built constitutive templates for adhesion/slippage. Each is expressible-in-principle within the formalism or recoverable via change of variables; none ship in v1.
+Excluded from this v1 by design: VCell-style FastSystem (solver-side reduction), Events (discrete state transitions), stochastic constructs, and pre-built constitutive templates for adhesion/slippage. Each is expressible-in-principle within the formalism or recoverable via change of variables; none ship in v1. (Region variables — VCell's compartment-aggregate piecewise constants — were on this list; they are now template T5, §1.4.2.)
 
 ---
 
@@ -70,7 +70,7 @@ This document is the v1 design of the formalism. The headline deferrals are:
 - **Mechanics templates T5–T7** (Stokes / Navier-Stokes, linear elasticity, hyperelasticity).
 - **Constitutive templates for adhesion / slippage** at moving membrane-substrate interfaces.
 - **Three known topological limitations** of the class-based subdomain abstraction (squashed thin layers, per-cell connected components, same-class-on-both-sides interface ambiguity).
-- **FastSystem / Events / region variables / stochastic constructs** from the VCell heritage.
+- **FastSystem / Events / stochastic constructs** from the VCell heritage.
 - **Per-region term overrides (Tier 2)** for structural variation within a subdomain class.
 - **General-algebraic interface BCs** for couplings that the value-equality + single-sided flux kinds cannot express.
 - **Lift / extension operators** (surface → bulk) — explicitly *not planned*; cases that need such lifts express them structurally via auxiliary variables and BCs.
@@ -371,7 +371,26 @@ For `temporality = steady_state`, this collapses to the algebraic $r(u) = 0$.
 |---|---|---|---|
 | `rate` | scalar expression | yes | r — the right-hand side |
 
-Covers: non-spatial signalling-network models, lumped-compartment kinetics, any case where a variable is constant in space within its subdomain.
+Covers: non-spatial signalling-network models and lumped-compartment kinetics.
+
+**On a spatial subdomain** (a volume or a surface) T4 is a **field without transport**: the variable has a value at every point, governed by $\partial_t u = r(u, x, t)$ there, with no flux between points. That is VCell's `OdeEquation` on a spatial compartment or membrane — a species that does not diffuse (an immobile buffer, an ER-bound state, a channel gating variable). The solvers assemble it as the field template with no diffusion or advection and `source` $= r$: a P1 field whose nodes evolve independently. A variable that is *constant in space* within its subdomain (a well-mixed pool, a membrane potential) is not T4 but a region variable (T5). A non-diffusing species on a moving subdomain is not supported yet: VCell sweeps it with the front, and pure advection without diffusion needs a stabilized scheme.
+
+##### T5 — Region ODE (`region_ode`: one value per connected region)
+
+A **region variable** has a single value on each connected region $R$ of its subdomain — spatially constant within the region, but coupled to fields that are not. It is declared with `space: region` (the only space this template governs, and the only template a `region` variable accepts):
+
+$$\frac{du_R}{dt} \;=\; r_u \;+\; \frac{1}{|R|}\int_R r_R \, dx \;+\; \frac{1}{|R|}\int_{\partial R} j \, ds$$
+
+| Slot | Type | Required | Meaning |
+|---|---|---|---|
+| `uniform_rate` | scalar expression | no (default 0) | $r_u$ — a rate added directly (already uniform over the region) |
+| `region_rate` | scalar expression | no (default 0) | $r_R$ — a field averaged over the region ($|R|$ its volume or area) |
+
+The boundary term $j$ is the variable's own **flux boundary conditions** (`neumann`, `interface_flux`): for a volume-region variable these are the membrane fluxes into its region — VCell's jump conditions on a well-mixed species. A region variable takes no other BC kind (a `dirichlet` value has nothing to constrain). Always `time_dependent`. On a membrane, a *volume* region variable is referenced through `trace(·)` like any bulk variable (its trace is just its value).
+
+In weak form with a region-constant test function $w$ this is $\int_R \dot u\, w = \int_R (r_u + r_R)\, w + \int_{\partial R} j\, w$ — an extra per-region unknown in the same method-of-lines system as the fields it couples to (a Real space per region; `scifem`).
+
+Covers VCell's `VolumeRegionVariable` + `VolumeRegionEquation` (a **well-mixed species** in a spatial application; $r_R$ = its `VolumeRate`) and `MembraneRegionVariable` + `MembraneRegionEquation` (most often the **membrane potential**, $C\,dV/dt = -I_{\text{total}}$; $r_R$ = its `MembraneRate`). Both coupled solvers solve them — `integrate_interface_coupled` (two compartments) and `integrate_membrane_coupled` (two compartments plus membrane species): a region variable on either compartment or on the membrane between them is a scifem Real block in the method-of-lines system. The single-mesh and moving-boundary paths still refuse them (vcell-fenics #196). v1 is one region per subdomain: a subdomain realised as several disconnected regions needs per-region instancing (§1.2.6 (2)), so the solvers count the connected regions and refuse more than one.
 
 #### 1.4.3 Sketched for v2+
 
@@ -930,7 +949,7 @@ accessors derived from `geom.x` are listed under geometric quantities (§1.8.4).
 
 **Parameter resolution at evaluation time.** A bare-name reference to a parameter is replaced by the parameter's value at the current evaluation point. For **constant** parameters the value is the declared scalar. For **expression-valued** parameters (§2.2.3) the value is the parameter's body expression evaluated against the surrounding context — same `x`, same `t`, same subdomain. For **region-keyed** parameters the value is the entry corresponding to the current region. From the call-site's perspective the parameter is just a typed value at a point; the declaration form determines how that value is computed.
 
-Expression-valued parameters may carry an optional `subdomain:` scope (§2.2.3) and must declare one if their body references a subdomain-relative geometry quantity (anything under `geom.*` except `geom.x`). A reference from outside the scoping subdomain is a validation error (§1.11.10).
+Expression-valued parameters may carry an optional `subdomain:` scope (§2.2.3) and must declare one if their body references a subdomain-relative geometry quantity (anything under `geom.*` except `geom.x`). A reference from outside the scoping subdomain is a validation error (§1.11.10) **when the body — directly or through the parameters it uses — references such a quantity**: those quantities mean nothing off their subdomain. A scope on a body that uses only position, time, sizes and other parameters is advisory (the VCell import scopes every function that has a `Domain`, e.g. a clamped species' value); such a parameter may be used on the membrane next to its compartment, where VCell evaluates it.
 
 #### 1.8.4 Geometric quantities (`geom.*`)
 
@@ -943,6 +962,8 @@ Namespaced geometry quantities (ADR 006), addressed as `geom.<member>`. Availabl
 | `geom.curvature1`, `geom.curvature2` | Principal curvatures. | codim-1 surfaces in 3D |
 | `geom.tangent` | Tangent unit vector. | 1-curves in 2D, or codim-2 edges in 3D |
 | `geom.radius`, `geom.azimuth` | Polar accessors. Sugar for `sqrt(dot(geom.x, geom.x))` and `atan2(geom.x[1], geom.x[0])`. | any subdomain |
+
+**Region sizes.** `region_size(<subdomain>)` is the realized measure of a subdomain: its volume, or its area for a surface (an area and a length in 2D). Its argument is a subdomain *name* (like a measure's boundary label), not a value, and must be declared. It is a scalar, constant on a fixed geometry. It is VCell's `vcRegionVolume('X')` / `vcRegionArea('X')`, which VCell uses for sizes like `Size_cyt` — for example, a membrane potential's total current is a current density times `Size_membr`. The solvers bind it from their meshes on a fixed geometry; on a moving mesh a size changes in time, which is not modelled yet, so such a model is refused. With one region per subdomain (T5's v1) a subdomain's size is its region's.
 
 `geom.x` (position) is available everywhere; the quantities above are subdomain-relative. For subdomains with `motion.kind` of `prescribed` or `unknown` (§1.10.6), these are evaluated against the current (deformed) configuration at every time step. For `unknown` motion the $t = 0$ configuration comes from the motion variable's initial condition (§1.7, §1.10); for `prescribed` motion the $t = 0$ configuration is the reference configuration (no displacement has yet been applied). At any $t > 0$, `geom.normal`, `geom.mean_curvature`, the principal curvatures, and the tangent basis reflect the deformed shape — a moving membrane's outward normal is the *current* outward normal, not the reference one.
 
@@ -1777,6 +1798,8 @@ This section specifies which VCell `MathDescription` constructs map to which for
 | `PdeEquation` with `bSteady = false` | `Equation` template `bulk_radv_diff` or `surface_pde_with_dilution`, `temporality: time_dependent` |
 | `PdeEquation` with `bSteady = true` | Same template, `temporality: steady_state` |
 | `OdeEquation` | `Equation` template `lumped_ode`, `temporality: time_dependent` |
+| `vcRegionVolume('X')` / `vcRegionArea('X')` | `region_size(X)` (§1.8.4) — the subdomain's realized measure |
+| `VolumeRegionEquation` / `MembraneRegionEquation` (on a `VolumeRegionVariable` / `MembraneRegionVariable`) | `Variable` with `space: region` + `Equation` template `region_ode` (T5): `region_rate` ← `VolumeRate` / `MembraneRate`, `uniform_rate` ← `UniformRate`; a volume-region variable's jump conditions → its flux BCs |
 | Constant parameters | `Parameter` with plain `value` |
 | Initial expression on a PDE/ODE | `initial_condition` field on the equation |
 | `BoundaryConditionType` (DIRICHLET/NEUMANN/PERIODIC/ROBIN) on a compartment face | `BoundaryCondition` with corresponding `kind` |
@@ -1795,9 +1818,8 @@ This section specifies which VCell `MathDescription` constructs map to which for
 
 | VCell construct | Reason it does not map |
 |---|---|
-| `FastSystem`, `FastInvariant`, `FastRate` | Solver-side QSSA reduction; not part of this formalism (memory decision: "out of scope"). |
+| `FastSystem`, `FastInvariant`, `FastRate` | Solver-side QSSA reduction; not part of this formalism (memory decision: "out of scope"). pyvcell's reader drops the element, so the VCML and SimulationTask loaders read it from the XML and **refuse** the model: solving without it is silently wrong for the buffered species. It is common — 116 of 600 sampled public applications (19%), most of VCell's electrophysiology-with-calcium models. |
 | `Event` | Discrete state transitions are deferred to v2 (no template). |
-| `VolumeRegionVariable`, `MembraneRegionVariable` | Piecewise-constant region variables are deferred to v2. |
 | `ParticleMolecularType`, `StochVolVariable` | Stochastic dynamics are out of scope for this formalism entirely. |
 | `PostProcessingBlock` | Observables / derived outputs are out of scope for the formalism — they belong with the solver-configuration / output-spec object. |
 
@@ -2299,7 +2321,7 @@ A consolidated record of everything explicitly deferred to v2 (or beyond), pulle
 | **formalism → VCell converter** | §2.6.4 | Lossy in one direction; offered only for the subset that fits in VCell's quirks. |
 | **SBML Spatial converter** | §2.6.4 | Schemas diverge non-trivially (no weak-form, no first-class unknown motion, different per-face BC machinery). Substantial standalone project. |
 | **VCell `Event`** | §2.6.3 | Discrete state transitions; needs its own design pass. |
-| **`VolumeRegionVariable` / `MembraneRegionVariable`** | §2.6.3 | Piecewise-constant region variables (compartment-aggregate quantities). |
+| **Solving region variables everywhere** (`region_ode`, T5) | §1.4.2 | Both coupled solvers host them; the single-mesh and moving-boundary paths, and several regions per subdomain, are to come (vcell-fenics #196). |
 | **`FastSystem` / `FastInvariant` / `FastRate`** | §2.6.3 (memory decision) | Solver-side QSSA reduction; user's read is "could be done via change of variables, not worth it." |
 | **Particle / `StochVolVariable` / stochastic constructs** | §2.6.3 | Out of scope for this formalism entirely — different primitives. |
 | **`PostProcessingBlock`** | §2.6.3 | Observables / derived outputs belong with the solver-configuration / output-spec object. |

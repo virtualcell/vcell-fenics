@@ -29,10 +29,14 @@ the formalism.
   junctions where three or more subvolumes meet: the image's smoothed label field (`labels.py`), the
   conforming boundaries between its subvolumes (`label_surfaces.py`, VTK SurfaceNets with a sentinel
   label per box face), and a Netgen mesh with those boundaries embedded — Netgen's domain is the
-  region, so no classification is needed (:func:`_realize_image_partition`).
+  region, so no classification is needed (:func:`_realize_label_partition`).
+- **Analytic subvolumes touching the box (2D and 3D, #187)** take the same label route: the lattice is
+  rasterized by VCell's priority rule (no smoothing), and the boundary is projected onto the **exact**
+  priority-resolved implicit functions, so it lies on the analytic shapes (second-order in ``h``) while
+  the box faces close each region. Analytic geometries strictly inside the box keep the marching path.
 
-**Not yet here:** analytic subvolumes touching the box boundary, and the unfitted (level-set /
-cut-FEM) consumption of the same field. Unsupported descriptions raise :class:`NotImplementedError`.
+**Not yet here:** the unfitted (level-set / cut-FEM) consumption of the same field. Unsupported
+descriptions raise :class:`NotImplementedError`.
 """
 
 from __future__ import annotations
@@ -60,8 +64,8 @@ from vcell_fenics.backend.geometry import (
 )
 from vcell_fenics.backend.implicit_fields import RealizationError as RealizationError  # re-exported
 from vcell_fenics.backend.implicit_fields import eval_field as _eval_field
-from vcell_fenics.backend.label_surfaces import LabelBoundary, extract_boundary
-from vcell_fenics.backend.labels import label_geometry
+from vcell_fenics.backend.label_surfaces import LabelBoundary, element_measures, extract_boundary
+from vcell_fenics.backend.labels import LabelGeometry, analytic_label_geometry, has_junction, label_geometry
 from vcell_fenics.core.region_remesh_netgen import write_stl
 from vcell_fenics.formalism.expr import Expr
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
@@ -101,6 +105,11 @@ _SURFACE_LEVELS: tuple[tuple[int, bool, str], ...] = (
     (10, False, "Taubin-smoothed (unprojected)"),
     (0, False, "unsmoothed (voxel-scale)"),
 )
+
+
+class _TouchesBox(NotImplementedError):
+    """A subvolume's boundary reaches the box: the contour / marching path can't body-fit it, so the
+    partition is realized through the label pipeline instead (#187)."""
 
 
 class ImageGeometryWarning(UserWarning):
@@ -189,7 +198,7 @@ def _realize_2d_partition(
     retaining the submesh entity maps). Returns the parent mesh and its region / surface tagging."""
 
     if _is_image(description):
-        return _realize_image_partition(description, h=h, comm=comm)
+        return _realize_label_partition(description, h=h, comm=comm)
     subvolumes = description.subvolumes
     # Every subvolume but the last (the background / complement) defines an analytic shape we
     # body-fit to; the background owns whatever is left.
@@ -214,11 +223,16 @@ def _realize_2d_partition(
     # March each shape's own (raw, not priority-resolved) boundary so the mesh conforms to every
     # analytic surface; priority then decides each cell's owner. For nested shapes (nucleus in
     # cytosol in ecm) the contours nest; for disjoint shapes they sit side by side.
+    if has_junction(description, h=h):  # three subvolumes meet: closed per-subvolume contours can't share it
+        return _realize_label_partition(description, h=h, comm=comm, analytic=True)
     contours: list[NDArray[np.float64]] = []
-    for subvolume in subvolumes[:-1]:
-        assert subvolume.expression is not None  # checked above
-        raw_field = lower_predicate(parse(subvolume.expression))
-        contours.extend(_march_contours(raw_field, ox=ox, oy=oy, lx=lx, ly=ly, nx=nx, ny=ny, name=subvolume.name))
+    try:
+        for subvolume in subvolumes[:-1]:
+            assert subvolume.expression is not None  # checked above
+            raw_field = lower_predicate(parse(subvolume.expression))
+            contours.extend(_march_contours(raw_field, ox=ox, oy=oy, lx=lx, ly=ly, nx=nx, ny=ny, name=subvolume.name))
+    except _TouchesBox:
+        return _realize_label_partition(description, h=h, comm=comm, analytic=True)
     if not contours:
         raise RealizationError(f"2D geometry {description.name!r} has no interior contours to mesh")
 
@@ -278,7 +292,7 @@ def _geometry_from_partition(
         facets = tagging.facet_tags.find(_FACE_TAG_BASE + i)
         if comm.allreduce(facets.size, op=MPI.SUM):
             boundaries[face] = BoundaryGeometry(
-                subdomains=tagging.face_regions.get(_FACE_TAG_BASE + i, ()), facets=facets
+                subdomains=tagging.face_regions.get(_FACE_TAG_BASE + i, ()), facets=facets, exterior=True
             )
 
     return Geometry(
@@ -491,8 +505,8 @@ def _march_contours(
 ) -> list[NDArray[np.float64]]:
     """Sample ``field`` over the box on an ``nx × ny`` grid and march every ``φ = 0`` contour, each
     returned as physical (x, y) vertices. ``nx`` / ``ny`` are per-axis point counts (so the spacing is
-    ≈ h on each axis even for a non-square box). v1 requires each contour to be strictly inside the box
-    (a subvolume touching the box boundary is a later slice)."""
+    ≈ h on each axis even for a non-square box). Raises :class:`_TouchesBox` for a contour that reaches the
+    box (the label path realizes those)."""
 
     xs = np.linspace(ox, ox + lx, nx)
     ys = np.linspace(oy, oy + ly, ny)
@@ -510,10 +524,7 @@ def _march_contours(
             | np.isclose(xy[:, 1], oy + ly)
         )
         if on_edge.any():
-            raise NotImplementedError(
-                f"2D realization requires the boundary of {name!r} to be strictly inside the box "
-                "(a subvolume touching the box boundary is a later slice)"
-            )
+            raise _TouchesBox(f"the boundary of {name!r} reaches the box")
         out.append(xy)
     return out
 
@@ -744,7 +755,7 @@ def _realize_3d_partition(
     `_realize_2d_partition`."""
 
     if _is_image(description):
-        return _realize_image_partition(description, h=h, comm=comm)
+        return _realize_label_partition(description, h=h, comm=comm)
     subvolumes = description.subvolumes
     for subvolume in subvolumes[:-1]:
         if subvolume.type != "analytic" or subvolume.expression is None:
@@ -766,14 +777,19 @@ def _realize_3d_partition(
     else:
         counts = (resolution, resolution, resolution)
 
+    if has_junction(description, h=h):  # three subvolumes meet: closed per-subvolume surfaces can't share it
+        return _realize_label_partition(description, h=h, comm=comm, analytic=True)
     raw_fields: list[Expr] = []
     for subvolume in subvolumes[:-1]:
         assert subvolume.expression is not None  # checked above
         raw_fields.append(lower_predicate(parse(subvolume.expression)))
-    surfaces = [
-        _march_surface(field, origin=origin, extent=extent, counts=counts, name=sv.name)
-        for field, sv in zip(raw_fields, subvolumes[:-1], strict=True)
-    ]
+    try:
+        surfaces = [
+            _march_surface(field, origin=origin, extent=extent, counts=counts, name=sv.name)
+            for field, sv in zip(raw_fields, subvolumes[:-1], strict=True)
+        ]
+    except _TouchesBox:
+        return _realize_label_partition(description, h=h, comm=comm, analytic=True)
     parents = _surface_containment(raw_fields, origin=origin, extent=extent, counts=counts)
 
     parent, cell_face = _mesh_box_with_surfaces(
@@ -793,8 +809,8 @@ def _march_surface(
     name: str,
 ) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
     """Sample ``field`` on the box grid and marching-cubes its ``φ = 0`` isosurface, returned as physical
-    (verts, triangle faces). v1 requires the surface strictly inside the box (a subvolume touching the box
-    boundary is a later slice), mirroring :func:`_march_contours`."""
+    (verts, triangle faces). Raises :class:`_TouchesBox` for a surface that reaches the box, mirroring
+    :func:`_march_contours`."""
 
     ox, oy, oz = origin
     lx, ly, lz = extent
@@ -818,10 +834,7 @@ def _march_surface(
         | np.isclose(verts[:, 2], oz + lz)
     )
     if bool(on_edge.any()):
-        raise NotImplementedError(
-            f"3D realization requires the boundary of {name!r} to be strictly inside the box "
-            "(a subvolume touching the box boundary is a later slice)"
-        )
+        raise _TouchesBox(f"the boundary of {name!r} reaches the box")
     return verts.astype(np.float64), faces.astype(np.int64)
 
 
@@ -1102,17 +1115,22 @@ def _is_image(description: GeometryDescription) -> bool:
     return any(subvolume.type == "image" for subvolume in description.subvolumes)
 
 
-def _realize_image_partition(
-    description: GeometryDescription, *, h: float, comm: MPI.Comm
+def _realize_label_partition(
+    description: GeometryDescription, *, h: float, comm: MPI.Comm, analytic: bool = False
 ) -> tuple[dmesh.Mesh, _Tagging]:
-    """Body-fit and tag an image geometry (2D or 3D; any topology — nested, touching the box, junctions):
-    its smoothed label field (:func:`~vcell_fenics.backend.labels.label_geometry`), the conforming
-    boundaries between its subvolumes (:func:`~vcell_fenics.backend.label_surfaces.extract_boundary`),
-    and a Netgen mesh with those boundaries embedded, built on rank 0. Netgen's domain *is* the region
-    (subvolume index + 1), so no classification is needed — only the facet tagging. Topology changes at
-    this ``h`` are reported as :class:`ImageGeometryWarning`."""
+    """Body-fit and tag a geometry through its label field (2D or 3D; any topology — nested, touching the
+    box, junctions). An image geometry's is its smoothed label field
+    (:func:`~vcell_fenics.backend.labels.label_geometry`); an ``analytic`` one's the priority-rasterized
+    lattice whose boundary is projected onto the exact shapes
+    (:func:`~vcell_fenics.backend.labels.analytic_label_geometry`, for a subvolume touching the box).
+    Then the conforming boundaries between its subvolumes
+    (:func:`~vcell_fenics.backend.label_surfaces.extract_boundary`), and a Netgen mesh with those
+    boundaries embedded, built on rank 0. Netgen's domain *is* the region (subvolume index + 1), so no
+    classification is needed — only the facet tagging. Topology changes at this ``h`` are reported as
+    :class:`ImageGeometryWarning`."""
 
     dim = description.dim
+    kind = "analytic" if analytic else "image"
     origin = tuple(float(description.origin[i]) for i in range(dim))
     extent = tuple(float(description.extent[i]) for i in range(dim))
     if dim == 3:
@@ -1120,13 +1138,15 @@ def _realize_image_partition(
         if estimate > _MAX_IMAGE_TETS:
             coarsest = (6.0 * np.sqrt(2.0) * float(np.prod(extent)) / _MAX_IMAGE_TETS) ** (1.0 / 3.0)
             raise RealizationError(
-                f"image geometry {description.name!r} at h = {h:g} would need ~{estimate:.2g} tetrahedra "
+                f"{kind} geometry {description.name!r} at h = {h:g} would need ~{estimate:.2g} tetrahedra "
                 f"(the limit is {_MAX_IMAGE_TETS:.2g}); use h ≥ {coarsest:.3g}"
             )
     notes: list[str] = []
 
     def build() -> _NetgenArrays:
-        labels = label_geometry(description, h=h)
+        labels: LabelGeometry = (
+            analytic_label_geometry(description, h=h) if analytic else label_geometry(description, h=h)
+        )
         notes.extend(labels.warnings)
         mesher = _netgen_from_curves if dim == 2 else _netgen_from_surfaces
         failure: RealizationError | None = None
@@ -1147,7 +1167,7 @@ def _realize_image_partition(
 
     parent, material = _mesh_on_rank0(comm, build, cell="triangle" if dim == 2 else "tetrahedron", gdim=dim)
     for note in comm.bcast(notes, root=0):
-        warnings.warn(f"image geometry {description.name!r}: {note}", ImageGeometryWarning, stacklevel=3)
+        warnings.warn(f"{kind} geometry {description.name!r}: {note}", ImageGeometryWarning, stacklevel=3)
     cell_values = np.zeros(material.indices.size, dtype=np.int32)
     cell_values[material.indices] = material.values
     return parent, _tag_facets(parent, description, cell_values, origin=origin, extent=extent)
@@ -1167,6 +1187,7 @@ def _netgen_from_curves(boundary: LabelBoundary, h: float) -> _NetgenArrays:
     edges — with ``leftdomain`` / ``rightdomain`` the regions on its two sides (a segment's left normal
     points into ``pairs[:, 1]``). Returns points, triangles and each triangle's region tag."""
 
+    _check_not_degenerate(boundary, h)
     domains = _domains(boundary)
 
     def domain(side: int) -> int:
@@ -1186,6 +1207,7 @@ def _netgen_from_curves(boundary: LabelBoundary, h: float) -> _NetgenArrays:
     points = np.array([list(p.p)[:2] for p in ngmesh.Points()], dtype=np.float64)
     cells = np.array([[v.nr - 1 for v in el.vertices] for el in ngmesh.Elements2D()], dtype=np.int64)
     material = region_of_domain[np.array([el.index for el in ngmesh.Elements2D()], dtype=np.int64)]
+    _check_every_domain(material, region_of_domain, "triangulate", h)
     return points, cells, material
 
 
@@ -1196,6 +1218,7 @@ def _netgen_from_surfaces(boundary: LabelBoundary, h: float) -> _NetgenArrays:
     from / into, 0 outside the box), then ``GenerateVolumeMesh`` fills each domain. Returns points,
     tetrahedra and each tetrahedron's region tag."""
 
+    _check_not_degenerate(boundary, h)
     domains = _domains(boundary)
 
     def domain(side: int) -> int:
@@ -1226,7 +1249,30 @@ def _netgen_from_surfaces(boundary: LabelBoundary, h: float) -> _NetgenArrays:
     elements = mesh.Elements3D().NumPy()  # type: ignore[attr-defined]
     cells = np.array(elements["nodes"][:, :4], dtype=np.int64, copy=True) - 1
     material = region_of_domain[np.array(elements["index"], dtype=np.int64, copy=True)]
+    _check_every_domain(material, region_of_domain, "tetrahedralize", h)
     return points, cells, material
+
+
+def _check_not_degenerate(boundary: LabelBoundary, h: float) -> None:
+    """Refuse a boundary with (near-)collapsed elements before Netgen sees it: Netgen aborts the process on
+    one ("more elements on face", then a segfault), which no caller can catch — whereas a
+    :class:`RealizationError` here lets the caller fall back to a less-processed boundary."""
+
+    tiny = 1e-8 * h ** (boundary.dim - 1)
+    collapsed = int(np.count_nonzero(element_measures(boundary.points, boundary.elements) < tiny))
+    if collapsed:
+        raise RealizationError(f"the boundary has {collapsed} collapsed element(s) at h = {h:g}")
+
+
+def _check_every_domain(material: NDArray[np.int32], region_of_domain: NDArray[np.int32], verb: str, h: float) -> None:
+    """Netgen reports a failed domain on stdout and returns the others meshed: a region with no elements."""
+
+    empty = sorted(set(region_of_domain[1:].tolist()) - set(np.unique(material).tolist()))
+    if empty:
+        raise RealizationError(
+            f"Netgen could not {verb} region(s) {[r - 1 for r in empty]} at h = {h:g} "
+            "(an overlapping boundary); try another h"
+        )
 
 
 def _facets_of_region(

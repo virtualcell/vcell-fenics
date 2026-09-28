@@ -400,6 +400,107 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-28** — **The multi-compartment solver: any number of compartments and membranes.**
+  - **Why:** about a fifth of the saved spatial BioModels have three or more subvolumes (nucleus, ER, two
+    cells). The two-compartment paths refused them, or dropped a background subvolume to fit.
+  - **What:** `backend/multi_compartment.py`.
+    - **Geometry:** one parent partition with a submesh per compartment and membrane (`realize_multi_compartment`),
+      and each box face split by compartment.
+    - **Unknowns:** one scalar P1 block per species and a Real per region variable.
+    - **Coupling:** each membrane couples only its own two sides, through side-masked traces.
+    - **Newton:** matrix-free with membrane species, with the assembled Jacobian as preconditioner.
+  - **Routing:** the runner sends every fixed-geometry model whose equations span two or more subdomains to it,
+    replacing the two-compartment routing.
+  - **Where it differs from VCell's semantics, the new path follows VCell.** A box-face value acts only on the
+    compartment that touches that face. The old path applied an outer species' box values on its edge to a
+    dropped background.
+  - **Junctions:** an analytic geometry where three subvolumes meet (touching cells) is realized through its
+    label field.
+  - **Verified:**
+    - conservation to round-off across two membranes;
+    - the well-mixed three-pool limit;
+    - parity with `integrate_membrane_coupled` on the receptor model (1e-6);
+    - touching cells;
+    - MPI (n = 1, 2);
+    - **against fvsolver** on a nucleus | cytosol | outside cell with nuclear transport and a plasma-membrane
+      receptor: L2 of 0.11 % (nucleus), 0.05 % (cytosol) and 0.001 % (outside) at N = 256, converging, with
+      the substance total conserved to 1e-10 (`cross_validation/README.md`).
+  - **Coverage survey** (the 600-application sample, fresh pass): **154 run (26 %)**, up from 101 before this
+    solver and 51 in the first survey. No app that ran before fails now, except:
+    - three the old solvers "ran" only because FastSystem and region equations were ignored at the time;
+    - two 3D apps near the survey's 120 s limit (≈ 9 % slower, or faster, standalone).
+  - **Performance:** with membrane species the matrix-free Newton assembles the residual once per Krylov
+    iteration, so those species share one vector block per subdomain. Otherwise each species keeps its own
+    scalar block, so the exact Jacobian stays sparse. The Jacobian matrices are preallocated once. On the apps
+    the survey timed out on: 30 s vs 50 s against the old interface-coupled path, and 92 s vs 80 s against the
+    old membrane-coupled path.
+
+- **2026-09-27** — **Non-diffusing species (#186), and VCell's electrophysiology models run.**
+  - **T4 `lumped_ode` on a spatial subdomain** is a field without transport: VCell's non-diffusing species
+    (buffers, ER-bound states, channel gating variables). All three method-of-lines paths assemble it as a
+    transport-free field block (`backend/equations.as_field_equation`).
+  - **Latent bug fixed:** the membrane-coupled solver read only a membrane equation's `source`, so a
+    membrane ODE's `rate` (a gating variable's kinetics) was silently ignored.
+  - **`sim.t` is live** in both coupled solvers. It had crashed (`KeyError`), and parameters would have been
+    frozen at t = 0.
+  - **Reservoirs:** VCell's per-face Value BCs now work.
+    - The same value on every box face is a reservoir on the outer wall.
+    - An interior compartment's per-face BCs, which are boilerplate, are dropped.
+  - **Validated against fvsolver:**
+    - a Hodgkin–Huxley model (`120428417 / combined_spatial`) reproduces its repetitive firing: the same four
+      action potentials, V to 0.1 mV between spikes, Na⁺ per spike to 1%;
+    - a volt & calcium model's membrane potential matches to 0.002 mV over 10 s.
+  - **FastSystem found, and now refused:** the same volt & calcium model's *calcium* was wrong, because its
+    math has a `FastSystem` (rapid buffering) that pyvcell's reader drops. Both loaders now read it from the
+    XML and refuse it. That covers 20 of the 22 region-variable models that otherwise run, 116 of 600
+    sampled applications (19%), and 2 earlier survey "ran" results that were silently wrong.
+
+- **2026-09-27** — **Region sizes (#199) and cross-membrane scoping (#189).**
+  - **`region_size(<subdomain>)` (§1.8.4)** is a subdomain's realized measure. The bridge translates VCell's
+    `vcRegionVolume('X')` / `vcRegionArea('X')` to it. Both coupled solvers and the single-mesh path bind it
+    from their meshes; a moving mesh refuses it, because its sizes change in time (a follow-up).
+  - **Scoping (#189):** a compartment-scoped parameter whose body uses only position, time, sizes and other
+    parameters may be used on the adjacent membrane. Examples are VCell's clamped species and unit factors,
+    which a membrane potential's current uses. Subdomain-relative geometry (curvature, normals) stays
+    confined.
+  - **Bridge fix:** parameters are now emitted in dependency order; VCell's function order is not.
+  - **The 29 survey applications with region variables:**
+    - 20 now validate and integrate, then stop at #186 (non-diffusing species);
+    - 3 at per-face Dirichlet BCs in the membrane-coupled solver (#193);
+    - 5 are refused for region variables on 3+ compartments;
+    - 1 has one-sided membrane species (#185).
+
+- **2026-09-27** — **Region variables on the membrane-coupled solver too (#196, part 2).**
+  - **What runs:** a membrane potential (or a well-mixed species beside another species) now runs next to
+    membrane species. That is the shape of 23 of the survey's 29 region-variable applications.
+  - **Verified:**
+    - V matches its exact relaxation;
+    - V-gated receptor binding conserves total ligand to 1e-7;
+    - a receptor-model CLI run writes V on the membrane domain.
+  - **Guard:** the solvers count each subdomain's connected regions (MPI-safe vertex label propagation) and
+    refuse a region variable on several disconnected regions until per-region instancing exists.
+  - **Bridge fix:** functions used only by region equations were dropped as dead (e.g. `Size_membr` in a
+    membrane potential's current); region equations are now roots of the live-function scan.
+  - **What still blocks those 23 real models:**
+    - #189: clamped volume species in the membrane potential's rate;
+    - VCell's region-size built-ins, `vcRegionArea('…')` / `vcRegionVolume('…')`, which the formalism doesn't
+      model yet.
+
+- **2026-09-27** — **Region variables run on the two-compartment solver (#196, part 1).**
+  - **What runs:** a well-mixed species (VolumeRegionVariable) on either compartment, and a membrane
+    potential (MembraneRegionVariable) on the membrane between them. Each is a scifem Real block in
+    `integrate_interface_coupled`'s method-of-lines system and is written to the bundle as a constant field;
+    a potential gets a membrane domain.
+  - **Verified:**
+    - a well-mixed species matches its fast-diffusion (D = 1000) PDE twin to 5e-5;
+    - mass is conserved to 1e-14;
+    - C dV/dt = −g (V − E) matches its exact exponential, with an error that shrinks with the tolerance;
+    - serial and 2-rank runs agree.
+  - **Found and fixed on the way:** the interface-flux Jacobian was over-counted, because `membrane_trace`
+    aliases submesh arguments (the known DOLFINx 0.10 limitation). Side-masked traces (a 0/1 compartment
+    indicator per `dS` side) make it exact: Newton converges quadratically, and mass conservation tightened for
+    all two-compartment models (1e-12 → 3e-15).
+  - **Still refused:** region variables on the single-mesh and membrane-coupled paths.
 - **2026-09-26** — **Coverage survey of saved BioModels**
   ([`fenics-coverage-survey.md`](fenics-coverage-survey.md)).
   - **Result:** on a 600-application sample of the 3,423 spatial deterministic FV applications, run

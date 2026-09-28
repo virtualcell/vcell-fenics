@@ -34,14 +34,16 @@ import ufl
 from dolfinx import fem
 from dolfinx import mesh as dmesh
 from dolfinx.mesh import Mesh
+from mpi4py import MPI
 from numpy.typing import NDArray
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
-from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
 from vcell_fenics.backend.discrete import BackwardEuler, BoundaryTerm, DiscreteProblem, Term, TermKind, _MeshMotion
+from vcell_fenics.backend.equations import as_field_equation
 from vcell_fenics.backend.geometry import CoupledGeometry, Geometry, cross_validate
 from vcell_fenics.core import remap_bulk_function, remap_surface_function
 from vcell_fenics.formalism.parser import parse
@@ -88,7 +90,9 @@ def assemble(
 
     equations = _resolve_equations(md)
     mesh = geometry.mesh_of(equations[0].subdomain)
-    ctx = _compile_context(md, mesh)
+    # region sizes (§1.8.4) are fixed numbers only while nothing moves (a moving mesh changes them in time)
+    static = all(isinstance(sd.motion, MotionNone) for sd in md.subdomains)
+    ctx = _compile_context(md, mesh, region_sizes=_region_sizes(geometry, mesh) if static else None)
     problem = _build_problem(md, equations, mesh, ctx, dt=dt, fe_degree=fe_degree, geometry=geometry)
     _apply_initial_conditions(problem, equations, ctx, len(equations))
     return problem
@@ -257,7 +261,9 @@ def _build_boundary_conditions(
     refreshers a driver re-interpolates to track a time-dependent `g(t)`.
 
     Scope: Dirichlet / Neumann / Robin on a labelled boundary of *this* solve's subdomain,
-    external *or* an internal interface — a **one-sided** flux where the variable lives only in
+    external *or* an internal interface. A box face is external however many subvolumes reach it: a BC
+    there acts on this subdomain's share of the face, and one on a face it does not reach is dropped
+    (VCell's per-face boilerplate) — a **one-sided** flux where the variable lives only in
     this incident compartment is a Neumann/Robin on the compartment's submesh boundary (the
     facets are re-located onto the submesh). The two `BCInterface*` kinds (genuine cross-compartment
     coupling) and a Dirichlet on an internal interface still raise `NotImplementedError`.
@@ -300,6 +306,10 @@ def _build_boundary_conditions(
         if bgeo is None:  # cross_validate already guards this; belt-and-braces for direct callers
             raise NotImplementedError(f"BC boundary {bc.boundary!r} is not a labelled boundary of the geometry")
         if subdomain not in bgeo.subdomains:
+            if bgeo.exterior:
+                # VCell writes a BC per box face for every compartment's species; a face this subdomain does
+                # not reach is boilerplate with nothing to act on (as the multi-compartment solver drops it)
+                continue
             raise NotImplementedError(
                 f"BC boundary {bc.boundary!r} bounds {bgeo.subdomains}, not this solve's subdomain {subdomain!r}"
             )
@@ -454,7 +464,17 @@ def _apply_initial_conditions(
 
 def _resolve_equations(md: MathDescription) -> list[TemplateEquation]:
     equations: list[TemplateEquation] = []
-    for eq in md.equations:
+    subdomains_by_name = {sd.name: sd for sd in md.subdomains}
+    for original in md.equations:
+        eq = original
+        if isinstance(original, TemplateEquation) and original.template == "lumped_ode":
+            home = subdomains_by_name[original.subdomain]
+            if not isinstance(home.motion, MotionNone):
+                raise NotImplementedError(
+                    f"a non-diffusing species ({original.variable!r}) on a moving subdomain is not supported yet: "
+                    f"VCell sweeps it with the front, and pure advection without diffusion needs stabilization (#186)"
+                )
+            eq = as_field_equation(original, home.kind)  # a field without transport (T4 on a spatial subdomain)
         if not isinstance(eq, TemplateEquation) or eq.template not in _SUPPORTED_TEMPLATES:
             template = getattr(eq, "template", None)
             raise NotImplementedError(f"backend v1 supports templates {sorted(_SUPPORTED_TEMPLATES)}, not {template!r}")
@@ -506,7 +526,31 @@ def _motion_velocity(
     )
 
 
-def _compile_context(md: MathDescription, mesh: Mesh, *, seed: int = 0) -> CompileContext:
+def _region_sizes(geometry: Geometry, mesh: Mesh) -> dict[str, float]:
+    """A single-mesh geometry's measures for `region_size(...)` (§1.8.4): each subdomain's volume (area in
+    2D), and each labelled boundary's area (length in 2D) — a membrane that bounds the compartment is a
+    boundary here, named as its surface subdomain."""
+
+    def measure(form: UflExpr, on: Mesh) -> float:
+        return float(on.comm.allreduce(float(np.real(fem.assemble_scalar(fem.form(form)))), op=MPI.SUM))
+
+    sizes = {
+        name: measure(fem.Constant(sub.mesh, PETSc.ScalarType(1.0)) * ufl.dx(domain=sub.mesh), sub.mesh)  # type: ignore[operator]
+        for name, sub in geometry.subdomains.items()
+    }
+    if geometry.parent_mesh is None or geometry.parent_mesh is mesh:  # boundary facets index this mesh's
+        fdim = mesh.topology.dim - 1
+        for name, boundary in geometry.boundaries.items():
+            facets = np.unique(boundary.facets).astype(np.int32)
+            tags = dmesh.meshtags(mesh, fdim, facets, np.ones(facets.size, dtype=np.int32))
+            ds = ufl.Measure("ds", domain=mesh, subdomain_data=tags)(1)
+            sizes.setdefault(name, measure(fem.Constant(mesh, PETSc.ScalarType(1.0)) * ds, mesh))  # type: ignore[operator]
+    return sizes
+
+
+def _compile_context(
+    md: MathDescription, mesh: Mesh, *, seed: int = 0, region_sizes: dict[str, float] | None = None
+) -> CompileContext:
     # The namespaced built-ins (ADR 006): `geom.x` is the position field, `sim.t` a mutable time
     # Constant. Expressions outside the IC (which the validator forbids `sim.t` in) may reference
     # the time, and the driver advances it each step — e.g. a time-dependent Dirichlet value
@@ -515,6 +559,11 @@ def _compile_context(md: MathDescription, mesh: Mesh, *, seed: int = 0) -> Compi
     symbols: dict[str, UflExpr] = {
         "geom.x": ufl.SpatialCoordinate(mesh),
         "sim.t": fem.Constant(mesh, PETSc.ScalarType(0.0)),  # type: ignore[operator]
+        # `region_size(<subdomain>)` (§1.8.4), bound only on a fixed geometry
+        **{
+            region_size_symbol(name): fem.Constant(mesh, PETSc.ScalarType(value))  # type: ignore[operator]
+            for name, value in (region_sizes or {}).items()
+        },
     }
     ctx = CompileContext(mesh=mesh, symbols=symbols, rng=np.random.default_rng(seed))
     # A ParameterExpression compiles against the symbols defined so far (constants, coordinates, time,
