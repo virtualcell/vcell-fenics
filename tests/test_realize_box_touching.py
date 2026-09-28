@@ -177,3 +177,32 @@ def test_an_exchange_across_a_half_cells_membrane_conserves() -> None:
     assert start.fields is not None and end.fields is not None
     assert total(end.fields) == pytest.approx(total(start.fields), rel=1e-7)
     assert total({"u": end.fields["u"]}) > 0.1 * total(start.fields)  # it did cross
+
+
+def test_a_single_compartment_holds_a_value_on_its_share_of_a_shared_box_face() -> None:
+    # The half cell alone carries a species (the single-mesh path). VCell writes a BC per box face for it:
+    # - x_minus, which the cell shares with the outside: a box face, not an interface between them, so its
+    #   Dirichlet acts on the cell's share (it was refused as "a Dirichlet on an internal interface");
+    # - x_plus, which the cell never reaches: boilerplate, dropped (it was refused as "bounds another
+    #   subdomain").
+    from vcell_fenics.backend import assemble
+    from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
+    from vcell_fenics.formalism.schema import BCDirichlet
+
+    geometry = realize(_cut_cell(2), h=0.2)
+    assert geometry.boundaries["x_minus"].exterior and not geometry.boundaries["x_minus"].is_internal
+    assert geometry.boundaries["pm"].is_internal
+    md = MathDescription(
+        geometry="cut",
+        subdomains=[Subdomain(name="cell", kind="volume")],
+        variables=[Variable(name="c", subdomain="cell")],
+        equations=[_pde("c", "cell", "0.0")],
+        boundary_conditions=[
+            BCDirichlet(variable="c", boundary="x_minus", expression="1.0"),
+            BCDirichlet(variable="c", boundary="x_plus", expression="7.0"),
+        ],
+    )
+    problem = assemble(md, geometry, dt=0.05)
+    result = integrate_discrete_problem(problem, t_final=20.0)
+    # no flux through the membrane: the cell relaxes to its face's value, everywhere
+    assert np.allclose(result.solution.x.array, 1.0, atol=1e-4)

@@ -59,13 +59,16 @@ class BoundaryGeometry:
 
     subdomains: tuple[str, ...]
     facets: NDArray[np.int32]
+    # a box face: on the domain's exterior however many subvolumes reach it (a face both the cytosol and the
+    # extracellular space touch is still a `ds` boundary, not an interface between them)
+    exterior: bool = False
 
     @property
     def is_internal(self) -> bool:
         """An internal interface is incident to two compartments (`dS`-integrable);
-        an external boundary to one (`ds`-integrable)."""
+        an external boundary — a box face, or a boundary of one compartment — is `ds`-integrable."""
 
-        return len(self.subdomains) == 2
+        return not self.exterior and len(self.subdomains) == 2
 
 
 @dataclass(frozen=True)

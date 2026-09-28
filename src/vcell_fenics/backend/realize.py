@@ -292,7 +292,7 @@ def _geometry_from_partition(
         facets = tagging.facet_tags.find(_FACE_TAG_BASE + i)
         if comm.allreduce(facets.size, op=MPI.SUM):
             boundaries[face] = BoundaryGeometry(
-                subdomains=tagging.face_regions.get(_FACE_TAG_BASE + i, ()), facets=facets
+                subdomains=tagging.face_regions.get(_FACE_TAG_BASE + i, ()), facets=facets, exterior=True
             )
 
     return Geometry(
