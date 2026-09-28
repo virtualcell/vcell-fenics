@@ -261,7 +261,9 @@ def _build_boundary_conditions(
     refreshers a driver re-interpolates to track a time-dependent `g(t)`.
 
     Scope: Dirichlet / Neumann / Robin on a labelled boundary of *this* solve's subdomain,
-    external *or* an internal interface — a **one-sided** flux where the variable lives only in
+    external *or* an internal interface. A box face is external however many subvolumes reach it: a BC
+    there acts on this subdomain's share of the face, and one on a face it does not reach is dropped
+    (VCell's per-face boilerplate) — a **one-sided** flux where the variable lives only in
     this incident compartment is a Neumann/Robin on the compartment's submesh boundary (the
     facets are re-located onto the submesh). The two `BCInterface*` kinds (genuine cross-compartment
     coupling) and a Dirichlet on an internal interface still raise `NotImplementedError`.
@@ -304,6 +306,10 @@ def _build_boundary_conditions(
         if bgeo is None:  # cross_validate already guards this; belt-and-braces for direct callers
             raise NotImplementedError(f"BC boundary {bc.boundary!r} is not a labelled boundary of the geometry")
         if subdomain not in bgeo.subdomains:
+            if bgeo.exterior:
+                # VCell writes a BC per box face for every compartment's species; a face this subdomain does
+                # not reach is boilerplate with nothing to act on (as the multi-compartment solver drops it)
+                continue
             raise NotImplementedError(
                 f"BC boundary {bc.boundary!r} bounds {bgeo.subdomains}, not this solve's subdomain {subdomain!r}"
             )
