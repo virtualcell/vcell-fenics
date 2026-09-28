@@ -114,6 +114,38 @@ potential = region.fields["V"]
 n_owned = potential.function_space.dofmap.index_map.size_local
 out["region_V"] = comm.allreduce(float(potential.x.array[:n_owned].sum()), op=MPI.SUM)
 out["region_inner"], out["region_outer"] = total(region.inner), total(region.outer)
+
+# (d) the multi-compartment solver: a nucleus in a cytosol in extracellular space, a receptor on the plasma
+# membrane binding the outside ligand (matrix-free Newton, membrane-mesh and parent forms, three submeshes)
+from vcell_fenics.backend.multi_compartment import integrate_multi_compartment, realize_multi_compartment, species_mass
+three = GeometryDescription(
+    name="three", dim=2, extent=(2.0, 2.0, 1.0), origin=(-1.0, -1.0, 0.0),
+    subvolumes=(SubVolume(name="nuc", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 < 0.09"),
+                SubVolume(name="cyt", type="analytic", expression="geom.x[0]**2 + geom.x[1]**2 < 0.36"),
+                SubVolume(name="ec", type="analytic", expression="1.0")),
+    surfaces=(SurfaceClass(name="ne", inside="nuc", outside="cyt"),
+              SurfaceClass(name="pm", inside="cyt", outside="ec")))
+def pde(v, sd, ic, template="bulk_radv_diff", **terms):
+    return TemplateEquation(template=template, variable=v, subdomain=sd, temporality="time_dependent",
+                            terms={"diffusion": "1.0", **terms}, initial_condition=ic)
+multi = MathDescription(
+    geometry="three",
+    subdomains=[Subdomain(name=n, kind="volume") for n in ("nuc", "cyt", "ec")]
+    + [Subdomain(name=n, kind="surface") for n in ("ne", "pm")],
+    variables=[Variable(name="n", subdomain="nuc"), Variable(name="c", subdomain="cyt"),
+               Variable(name="e", subdomain="ec"), Variable(name="R", subdomain="pm")],
+    equations=[pde("n", "nuc", "2.0"), pde("c", "cyt", "0.0"), pde("e", "ec", "1.0"),
+               pde("R", "pm", "0.0", template="surface_pde_with_dilution", source="2.0 * trace(e) * (1.0 - R)")],
+    boundary_conditions=[
+        BCInterfaceFlux(variable="n", boundary="ne", expression="0.5 * (c - n)"),
+        BCInterfaceFlux(variable="c", boundary="ne", expression="0.5 * (n - c)"),
+        BCInterfaceFlux(variable="e", boundary="pm", expression="-2.0 * trace(e) * (1.0 - R)"),
+    ],
+)
+many = realize_multi_compartment(three, h=0.1, comm=comm)
+solved = integrate_multi_compartment(multi, many, t_final=0.5, rtol=1e-8, atol=1e-10)
+for name in ("n", "c", "e", "R"):
+    out[f"multi_{name}"] = species_mass(solved, name)
 if comm.rank == 0:
     print("PROBE " + json.dumps(out))
 """
@@ -143,3 +175,7 @@ def test_method_of_lines_solves_agree_under_mpi() -> None:
     assert parallel["region_inner"] + parallel["region_outer"] == pytest.approx(
         serial["region_inner"] + serial["region_outer"], rel=1e-9
     )
+    for run in (serial, parallel):  # nucleus + cytosol exchange; free + bound ligand: each conserved
+        assert run["multi_n"] + run["multi_c"] == pytest.approx(2.0 * 3.141592653589793 * 0.09, rel=2e-2)
+        assert run["multi_R"] > 0.1
+    assert parallel["multi_e"] + parallel["multi_R"] == pytest.approx(serial["multi_e"] + serial["multi_R"], rel=1e-9)

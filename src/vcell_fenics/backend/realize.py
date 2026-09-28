@@ -65,7 +65,7 @@ from vcell_fenics.backend.geometry import (
 from vcell_fenics.backend.implicit_fields import RealizationError as RealizationError  # re-exported
 from vcell_fenics.backend.implicit_fields import eval_field as _eval_field
 from vcell_fenics.backend.label_surfaces import LabelBoundary, element_measures, extract_boundary
-from vcell_fenics.backend.labels import LabelGeometry, analytic_label_geometry, label_geometry
+from vcell_fenics.backend.labels import LabelGeometry, analytic_label_geometry, has_junction, label_geometry
 from vcell_fenics.core.region_remesh_netgen import write_stl
 from vcell_fenics.formalism.expr import Expr
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
@@ -223,6 +223,8 @@ def _realize_2d_partition(
     # March each shape's own (raw, not priority-resolved) boundary so the mesh conforms to every
     # analytic surface; priority then decides each cell's owner. For nested shapes (nucleus in
     # cytosol in ecm) the contours nest; for disjoint shapes they sit side by side.
+    if has_junction(description, h=h):  # three subvolumes meet: closed per-subvolume contours can't share it
+        return _realize_label_partition(description, h=h, comm=comm, analytic=True)
     contours: list[NDArray[np.float64]] = []
     try:
         for subvolume in subvolumes[:-1]:
@@ -775,6 +777,8 @@ def _realize_3d_partition(
     else:
         counts = (resolution, resolution, resolution)
 
+    if has_junction(description, h=h):  # three subvolumes meet: closed per-subvolume surfaces can't share it
+        return _realize_label_partition(description, h=h, comm=comm, analytic=True)
     raw_fields: list[Expr] = []
     for subvolume in subvolumes[:-1]:
         assert subvolume.expression is not None  # checked above

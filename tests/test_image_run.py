@@ -47,7 +47,7 @@ def test_the_ran_model_runs_with_several_species_per_compartment(tmp_path: Path)
     argv = ["--math", str(_FIXTURES / "ran_math.yaml"), "--geometry", str(_GEOMETRY), "--t-final", "1.0"]
     assert main([*argv, "--output-dt", "0.5", "--h", "3.0", "--out", str(tmp_path)]) == 0
     summary = json.loads((tmp_path / "results.fenics" / "provenance" / "summary.json").read_text())
-    assert summary["run"]["backend"] == "interface_coupled"
+    assert summary["run"]["backend"] == "multi_compartment"
     assert sorted(summary["species"]) == ["C_cyt", "RanC_cyt", "RanC_nuc", "Ran_cyt"]
     rows = [row["species"] for row in summary["outputs"]]
     ran = [r["Ran_cyt"]["total"] + r["RanC_cyt"]["total"] + r["RanC_nuc"]["total"] for r in rows]
