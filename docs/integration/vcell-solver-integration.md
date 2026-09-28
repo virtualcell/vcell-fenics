@@ -425,6 +425,15 @@ Newest first. One entry per landed step or notable finding.
     - **against fvsolver** on a nucleus | cytosol | outside cell with nuclear transport and a plasma-membrane
       receptor: L2 of 0.11 % (nucleus), 0.05 % (cytosol) and 0.001 % (outside) at N = 256, converging, with
       the substance total conserved to 1e-10 (`cross_validation/README.md`).
+  - **Coverage survey** (the 600-application sample, fresh pass): **154 run (26 %)**, up from 101 before this
+    solver and 51 in the first survey. No app that ran before fails now, except:
+    - three the old solvers "ran" only because FastSystem and region equations were ignored at the time;
+    - two 3D apps near the survey's 120 s limit (≈ 9 % slower, or faster, standalone).
+  - **Performance:** with membrane species the matrix-free Newton assembles the residual once per Krylov
+    iteration, so those species share one vector block per subdomain. Otherwise each species keeps its own
+    scalar block, so the exact Jacobian stays sparse. The Jacobian matrices are preallocated once. On the apps
+    the survey timed out on: 30 s vs 50 s against the old interface-coupled path, and 92 s vs 80 s against the
+    old membrane-coupled path.
 
 - **2026-09-27** — **Non-diffusing species (#186), and VCell's electrophysiology models run.**
   - **T4 `lumped_ode` on a spatial subdomain** is a field without transport: VCell's non-diffusing species
