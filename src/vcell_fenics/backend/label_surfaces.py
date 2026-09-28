@@ -22,6 +22,7 @@ mesher (``realize.py``) embeds as conforming internal boundaries:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -231,7 +232,20 @@ def _smooth(boundary: LabelBoundary, lo: Floats, hi: Floats, passes: int, grid: 
             step[pinned] = 0.0
             points += step
     if grid.indicators is not None:
-        points = _guarded(points, _project(points, sides, pinned, grid), boundary.elements, grid)
+        projected = _project(points, sides, pinned, grid)
+        if grid.exact is not None:
+            # Exact projection moves interface vertices by up to a cell, which can overtake the unprojected
+            # vertices beside them (a box face's, next to where an interface meets it) and flip their
+            # elements; let those follow — Laplacian passes with the projected vertices held.
+            onto = np.array([2 <= len({label for label in labels if label >= 0}) <= 3 for labels in sides])
+            follow = movable & ~onto
+            for _ in range(passes):
+                mean = adjacency @ projected / np.maximum(degree, 1.0)[:, None]
+                step = 0.5 * (mean - projected)
+                step[~follow] = 0.0
+                step[pinned] = 0.0
+                projected += step
+        points = _guarded(points, projected, boundary.elements, grid)
     return LabelBoundary(dim=dim, points=points, elements=boundary.elements, pairs=boundary.pairs)
 
 
@@ -242,18 +256,40 @@ def _guarded(before: Floats, after: Floats, elements: Ints, grid: LabelGrid) -> 
     set can lie across the extracted surface), and the vertices of any element the projection turned
     over or twisted sharply (repeated until none is)."""
 
-    limit = 0.5 * float(min(grid.spacing))
+    # exact fields agree with the labels by construction, so only a jump past the neighbouring node is
+    # suspect; a box-face vertex's true crossing can lie up to a cell from where SurfaceNets put it
+    limit = (1.0 if grid.exact is not None else 0.5) * float(min(grid.spacing))
     out = after.copy()
     far = np.linalg.norm(after - before, axis=1) > limit
     out[far] = before[far]
     reference = _normals(before, elements)
-    for _ in range(10):
-        turned = np.einsum("ij,ij->i", _normals(out, elements), reference) < 0.5  # rotated by > 60°
+    # rotated by > 60° — or, onto exact fields, inverted (> 90°): an exact interface meeting a box face at a
+    # right angle legitimately turns the staircase's elements there by more than 60°
+    threshold = 0.0 if grid.exact is not None else 0.5
+    # onto exact fields a turned element's vertices back off halfway toward ``before`` each round (so they
+    # keep as much of the exact projection as the element allows); otherwise they revert at once
+    backoff = 0.5 if grid.exact is not None else 0.0
+    fraction = np.ones(len(out))
+    tiny = 1e-4 * float(min(grid.spacing)) ** (elements.shape[1] - 1)  # a collapsed element has no normal
+    for round in range(10):
+        turned = np.einsum("ij,ij->i", _normals(out, elements), reference) < threshold
+        turned |= element_measures(out, elements) < tiny
         if not turned.any():
             break
         revert = np.unique(elements[turned])
-        out[revert] = before[revert]
+        fraction[revert] = 0.0 if round == 9 else fraction[revert] * backoff
+        out[revert] = before[revert] + fraction[revert, None] * (after[revert] - before[revert])
     return out
+
+
+def element_measures(points: Floats, elements: Ints) -> Floats:
+    """The elements' lengths (2D) or areas (3D)."""
+
+    corners = points[elements]
+    if elements.shape[1] == 2:
+        return np.asarray(np.linalg.norm(corners[:, 1] - corners[:, 0], axis=1), dtype=np.float64)
+    cross = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    return np.asarray(0.5 * np.linalg.norm(cross, axis=1), dtype=np.float64)
 
 
 def _normals(points: Floats, elements: Ints) -> Floats:
@@ -277,6 +313,8 @@ def _project(points: Floats, sides: list[set[int]], pinned: NDArray[np.bool_], g
     assert grid.indicators is not None
     spacing = np.asarray(grid.spacing)
     origin = np.asarray(grid.origin)
+    top = origin + spacing * (np.asarray(grid.labels.shape) - 1)
+    inner_lo, inner_hi = origin + 0.25 * spacing, top - 0.25 * spacing
     out = points.copy()
     by_sides: dict[tuple[int, ...], list[int]] = {}
     for vertex, labels in enumerate(sides):
@@ -287,11 +325,15 @@ def _project(points: Floats, sides: list[set[int]], pinned: NDArray[np.bool_], g
         fields = [grid.indicators[r] for r in regions]
         if any(f is None for f in fields):
             continue
+        exact = [grid.exact[r] for r in regions] if grid.exact is not None else None
         idx = np.asarray(vertices)
         x = out[idx]
         free = ~pinned[idx]
         for _ in range(4):
-            values, gradients = zip(*(_sample(f, x, origin, spacing) for f in fields if f is not None), strict=True)
+            if exact is not None:
+                values, gradients = zip(*(_sample_exact(f, x, spacing) for f in exact), strict=True)
+            else:
+                values, gradients = zip(*(_sample(f, x, origin, spacing) for f in fields if f is not None), strict=True)
             # constraints g_k = I_k − I_{k+1}, Jacobian rows ∇g_k (pinned axes held)
             g = np.stack([values[k] - values[k + 1] for k in range(len(fields) - 1)], axis=1)
             jac = np.stack([gradients[k] - gradients[k + 1] for k in range(len(fields) - 1)], axis=1)
@@ -301,6 +343,11 @@ def _project(points: Floats, sides: list[set[int]], pinned: NDArray[np.bool_], g
             limit = 0.5 * float(spacing.min())
             length = np.linalg.norm(step, axis=1, keepdims=True)
             x = x + step * np.minimum(1.0, limit / np.maximum(length, 1e-300))
+            if exact is not None:
+                # an interface between two subvolumes never lies on a box face (that boundary is one
+                # subvolume's and the outside's), but an exact predicate's zero set can (``z >= z0`` with
+                # z0 the box's own face): keep free axes a quarter cell inside, or the vertex collapses there
+                x = np.where(free, np.clip(x, inner_lo, inner_hi), x)
         out[idx] = x
     return out
 
@@ -322,6 +369,18 @@ def _sample(field: NDArray[np.float32], x: Floats, origin: Floats, spacing: Floa
         delta = np.zeros(dim)
         delta[axis] = 0.25 * spacing[axis]
         gradient[:, axis] = (at(x + delta) - at(x - delta)) / (2.0 * delta[axis])
+    return value, gradient
+
+
+def _sample_exact(field: Callable[[Floats], Floats], x: Floats, spacing: Floats) -> tuple[Floats, Floats]:
+    """An exact field's value and gradient (central differences at a small fraction of a cell) at ``x``."""
+
+    value = np.asarray(field(x), dtype=np.float64)
+    gradient = np.empty_like(x)
+    for axis in range(x.shape[1]):
+        delta = np.zeros(x.shape[1])
+        delta[axis] = 1e-3 * spacing[axis]
+        gradient[:, axis] = (field(x + delta) - field(x - delta)) / (2.0 * delta[axis])
     return value, gradient
 
 

@@ -87,6 +87,14 @@ Image realization is a three-stage pipeline behind the existing seam (`_realize_
   - Netgen `STLGeometry` on the whole multi-label surface (it meshes one solid, with no domin/domout);
   - a voxel-staircase mesh (it inflates membrane areas by about 27% in 2D and 50% in 3D, and biases
     membrane fluxes).
+- **Later: analytic subvolumes that touch the box (#187)** reuse this pipeline. Their label grid is the
+  priority rasterization on an ``h`` lattice (`analytic_label_geometry`), with the priority-resolved
+  implicit functions as exact indicators, so the projection lands on the analytic surfaces. Three guards
+  came with it: a projected vertex stays a quarter cell off the box faces (a predicate such as
+  `z >= z0`, with `z0` the box's own face, has a zero set on the face that no interface can lie on); a
+  boundary with collapsed elements is refused before Netgen, which otherwise aborts the process; and a
+  Netgen result missing a region is an error rather than a silently empty compartment. Each refusal
+  falls back to the next surface level.
 - **Not yet:** images in moving-boundary applications (the ALE remesh path is analytic-free but
   untested on images), and mixed analytic + image geometries in VCell's own models. The rasterization
   supports them, but no fixture covers them yet.
