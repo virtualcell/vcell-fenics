@@ -59,6 +59,7 @@ from vcell_fenics.backend.equations import as_field_equation
 from vcell_fenics.backend.interface_coupled import (
     _RESERVOIR_PENALTY,
     _accumulate_ghosts,
+    _interpolate_component_ics,
     _interpolate_ic,
     _MatrixFreeShiftedJacobian,
     _param_symbols,
@@ -340,31 +341,55 @@ def integrate_multi_compartment(
         for name, m in geometry.membranes.items()
     }
 
-    # --- the blocks: one scalar P1 per species on its own mesh, then one Real per region variable ---------
-    spaces = [fem.functionspace(geometry.mesh_of(eq.subdomain), ("Lagrange", 1)) for eq in field_eqs]
+    # --- the blocks: P1 blocks for the species, then one Real per region variable. With membrane species the
+    # Newton is matrix-free and assembles the residual once per Krylov iteration, a cost that grows with the
+    # number of blocks: so one block per subdomain there, a component per species. Otherwise the Jacobian is
+    # assembled exactly, and one scalar block per species keeps it sparse (a subdomain's species that never
+    # meet have no block between them, where a vector block would couple every pair at every node).
+    matrix_free = any(eq.subdomain in geometry.membranes for eq in field_eqs)
+    members = {
+        sub: [eq for eq in field_eqs if eq.subdomain == sub] for sub in dict.fromkeys(e.subdomain for e in field_eqs)
+    }
+    groups = list(members.values()) if matrix_free else [[eq] for eq in field_eqs]
+
+    def field_space(group: list[TemplateEquation]) -> fem.FunctionSpace:
+        n = len(group)
+        element = ("Lagrange", 1, (n,)) if n > 1 else ("Lagrange", 1)
+        return fem.functionspace(geometry.mesh_of(group[0].subdomain), element)
+
+    spaces = [field_space(group) for group in groups]
     real = scifem.create_real_functionspace(parent)
     spaces += [real] * len(region_eqs)
+    n_fields = len(groups)
+    n_blocks = len(spaces)
     all_eqs = [*field_eqs, *region_eqs]
     names = [eq.variable for eq in all_eqs]
-    states = [fem.Function(V, name=name) for V, name in zip(spaces, names, strict=True)]
+    states = [fem.Function(V) for V in spaces]
     rates = [fem.Function(V) for V in spaces]
     tests = [ufl.TestFunction(V) for V in spaces]
-    sizes = [V.dofmap.index_map.size_local for V in spaces]
+    trials = [ufl.TrialFunction(V) for V in spaces]
+    sizes = [V.dofmap.index_map.size_local * V.dofmap.index_map_bs for V in spaces]
     offsets = [0]
     for size in sizes:
         offsets.append(offsets[-1] + size)
-    index_of = {name: k for k, name in enumerate(names)}
     subdomain_of = {eq.variable: eq.subdomain for eq in all_eqs}
-    n_fields = len(field_eqs)
-    species_in = {
-        sub: [k for k, eq in enumerate(field_eqs) if eq.subdomain == sub]
-        for sub in (*geometry.compartments, *geometry.membranes)
-    }
+    block_sub = [*(group[0].subdomain for group in groups), *(eq.subdomain for eq in region_eqs)]
+    where: dict[str, tuple[int, int | None]] = {}  # a variable's block, and its component (None: the block is it)
+    for blk, group in enumerate(groups):
+        for j, eq in enumerate(group):
+            where[eq.variable] = (blk, j if len(group) > 1 else None)
+    for r, eq in enumerate(region_eqs):
+        where[eq.variable] = (n_fields + r, None)
+
+    def part(functions: Sequence[UflExpr], name: str) -> UflExpr:
+        blk, j = where[name]
+        return functions[blk] if j is None else functions[blk][j]
+
     region_value = {eq.variable: states[n_fields + r] for r, eq in enumerate(region_eqs)}
     region_on_facet = {name: u("+") for name, u in region_value.items()}
 
     chi = {
-        name: _indicator(parent, geometry.cell_tags, part.region_tag) for name, part in geometry.compartments.items()
+        name: _indicator(parent, geometry.cell_tags, part_.region_tag) for name, part_ in geometry.compartments.items()
     }
 
     def trace(compartment: str, f: UflExpr) -> UflExpr:
@@ -372,8 +397,8 @@ def integrate_multi_compartment(
 
     def bulk_ctx(compartment: str) -> CompileContext:
         """A compartment's own species (the states) and every region variable, beside the parameters."""
-        own = {names[k]: states[k] for k in species_in[compartment]}
-        return CompileContext(parent, {**ctx.symbols, **region_value, **own})
+        own_species = {eq.variable: part(states, eq.variable) for eq in members.get(compartment, [])}
+        return CompileContext(parent, {**ctx.symbols, **region_value, **own_species})
 
     def membrane_ctx(membrane: str) -> CompileContext:
         """On a membrane's dS: both sides' species by their traces, its own species, every region variable."""
@@ -381,26 +406,32 @@ def integrate_multi_compartment(
         symbols: dict[str, UflExpr] = {**ctx.symbols, **region_on_facet}
         for side in (m.inside, m.outside):
             if side in geometry.compartments:
-                symbols |= {names[k]: trace(side, states[k]) for k in species_in[side]}
-        symbols |= {names[k]: states[k]("+") for k in species_in[membrane]}
+                symbols |= {eq.variable: trace(side, part(states, eq.variable)) for eq in members.get(side, [])}
+        symbols |= {eq.variable: part(states, eq.variable)("+") for eq in members.get(membrane, [])}
         return CompileContext(parent, symbols)
 
     # A block form integrates over ONE domain. So the residual is two blocked forms, assembled and summed:
     # `residual` on the parent (every bulk and region term, and every term on a membrane's dS) and `own` on a
-    # membrane species' own mesh (its mass, surface diffusion and drift). A block with no terms in one of them
-    # gets a structural zero there, so the two blocked vectors line up.
+    # membrane block's own mesh (its species' mass, surface diffusion and drift). A block with no terms in one
+    # of them gets a structural zero there, so the two blocked vectors line up.
     zero = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]
-    residual: list[UflExpr] = []
+    residual: list[UflExpr | None] = [None] * n_blocks
     own: dict[int, UflExpr] = {}
-    for k, eq in enumerate(field_eqs):
-        w, u = tests[k], states[k]
+
+    def add(blk: int, form: UflExpr) -> None:
+        current = residual[blk]
+        residual[blk] = form if current is None else current + form
+
+    for eq in field_eqs:
+        blk, _ = where[eq.variable]
+        w, u, rate = part(tests, eq.variable), part(states, eq.variable), part(rates, eq.variable)
         if eq.subdomain in geometry.compartments:
             dx = cells(geometry.compartments[eq.subdomain].region_tag)
             local = ctx
         else:
             dx = ufl.Measure("dx", domain=geometry.membranes[eq.subdomain].mesh)
             local = surface_ctx[eq.subdomain]
-        form = rates[k] * w * dx
+        form = rate * w * dx
         if "diffusion" in eq.terms:
             d = compile_expression(parse(eq.terms["diffusion"]), local)
             form += d * ufl.dot(ufl.grad(u), ufl.grad(w)) * dx
@@ -410,60 +441,60 @@ def integrate_multi_compartment(
         if eq.subdomain in geometry.compartments:
             if "source" in eq.terms:
                 form += -compile_expression(parse(eq.terms["source"]), bulk_ctx(eq.subdomain)) * w * dx
-            residual.append(form)
+            add(blk, form)
             continue
-        own[k] = form
+        own[blk] = own[blk] + form if blk in own else form
         dS = facets(geometry.membranes[eq.subdomain].facet_tag)
-        on_facets = zero * w("+") * dS
+        add(blk, zero * w("+") * dS)
         if "source" in eq.terms:  # a membrane reaction reads both sides' traces: on the parent's dS
-            on_facets += -compile_expression(parse(eq.terms["source"]), membrane_ctx(eq.subdomain)) * w("+") * dS
-        residual.append(on_facets)
+            add(blk, -compile_expression(parse(eq.terms["source"]), membrane_ctx(eq.subdomain)) * w("+") * dS)
 
     for r, eq in enumerate(region_eqs):
-        k = n_fields + r
-        w = tests[k]
+        blk = n_fields + r
+        w = tests[blk]
         if eq.subdomain in geometry.compartments:
             measure = cells(geometry.compartments[eq.subdomain].region_tag)
-            here, rate_here, rate_ctx = w, rates[k], bulk_ctx(eq.subdomain)
+            here, rate_here, rate_ctx = w, rates[blk], bulk_ctx(eq.subdomain)
         else:
             measure = facets(geometry.membranes[eq.subdomain].facet_tag)
-            here, rate_here, rate_ctx = w("+"), rates[k]("+"), membrane_ctx(eq.subdomain)
+            here, rate_here, rate_ctx = w("+"), rates[blk]("+"), membrane_ctx(eq.subdomain)
         form = rate_here * here * measure
         for slot in ("uniform_rate", "region_rate"):
             if slot in eq.terms:
                 form += -compile_expression(parse(eq.terms[slot]), rate_ctx) * here * measure
-        residual.append(form)
+        add(blk, form)
 
     # --- boundary conditions: membrane fluxes into their own side, box-face values and fluxes ------------
     face_names = _FACE_NAMES_3D if tdim == 3 else _FACE_NAMES_2D
     for bc in md.boundary_conditions:
-        if not isinstance(bc, (BCInterfaceFlux, BCNeumann, BCDirichlet)) or bc.variable not in index_of:
+        if not isinstance(bc, (BCInterfaceFlux, BCNeumann, BCDirichlet)) or bc.variable not in where:
             continue
-        k = index_of[bc.variable]
+        blk, _ = where[bc.variable]
         home = subdomain_of[bc.variable]
+        w = part(tests, bc.variable)
         if bc.boundary in geometry.membranes and not isinstance(bc, BCDirichlet):
             m = geometry.membranes[bc.boundary]
             dS = facets(m.facet_tag)
             flux = compile_expression(parse(bc.expression), membrane_ctx(m.name))  # D∇u·n = flux INTO u's side
-            if k >= n_fields or home == m.name:  # a region variable's (or a membrane quantity's) own balance
-                residual[k] += -flux * tests[k]("+") * dS
+            if blk >= n_fields or home == m.name:  # a region variable's (or a membrane quantity's) own balance
+                add(blk, -flux * w("+") * dS)
             elif home in (m.inside, m.outside):
-                residual[k] += -flux * trace(home, tests[k]) * dS
+                add(blk, -flux * trace(home, w) * dS)
             else:
                 raise NotImplementedError(
                     f"flux BC on {bc.variable!r} at membrane {m.name!r}: {home!r} is not beside that membrane "
                     f"({m.inside!r} | {m.outside!r})"
                 )
-        elif bc.boundary in face_names and home in geometry.compartments and k < n_fields:
-            part = geometry.compartments[home]
-            if bc.boundary not in part.faces:
+        elif bc.boundary in face_names and home in geometry.compartments and blk < n_fields:
+            compartment = geometry.compartments[home]
+            if bc.boundary not in compartment.faces:
                 continue  # VCell's per-face boilerplate for a compartment that does not reach this face
-            ds = box(part.faces[bc.boundary])
+            ds = box(compartment.faces[bc.boundary])
             value = compile_expression(parse(bc.expression), bulk_ctx(home))
             if isinstance(bc, BCDirichlet):  # a held value, weakly: β ∮ (u − g) w
-                residual[k] += _RESERVOIR_PENALTY * (states[k] - value) * tests[k] * ds
+                add(blk, _RESERVOIR_PENALTY * (part(states, bc.variable) - value) * w * ds)
             else:
-                residual[k] += -value * tests[k] * ds
+                add(blk, -value * w * ds)
         elif bc.boundary in face_names and home in geometry.membranes:
             continue  # a membrane's edge on the box: VCell's per-face values for membrane species, no-flux here
         else:
@@ -471,44 +502,43 @@ def integrate_multi_compartment(
                 f"{type(bc).__name__} on {bc.variable!r} at {bc.boundary!r}: the multi-compartment solver applies "
                 f"membrane fluxes ({sorted(geometry.membranes)}) and box-face values/fluxes ({list(face_names)})"
             )
+    parent_forms = [form for form in residual if form is not None]
+    assert len(parent_forms) == n_blocks  # every block has its mass (or a structural zero) on the parent
 
     # --- the Jacobian (exact but for DOLFINx's zero bulk × membrane-species block on dS) -----------------
-    n_blocks = len(states)
     shift = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]
     shift_surface = {
         name: fem.Constant(m.mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
         for name, m in geometry.membranes.items()
     }
 
-    trials = [ufl.TrialFunction(V) for V in spaces]
-
-    def structural_diagonal(i: int, on_parent: bool) -> UflExpr:
-        """A zero diagonal block, for a row with no terms in one group (DOLFINx deduces a row's test space
-        from its blocks): on the parent a membrane species' is on its dS, elsewhere any row's on the parent."""
-        if on_parent and i < n_fields and field_eqs[i].subdomain in geometry.membranes:
-            dS = facets(geometry.membranes[field_eqs[i].subdomain].facet_tag)
-            return zero * trials[i]("+") * tests[i]("+") * dS
-        return zero * trials[i] * tests[i] * home_cells(i)
-
-    def home_cells(i: int) -> ufl.Measure:
-        """Where a bulk species' (or a region variable's) block lives on the parent: its compartment's cells,
-        not the whole parent — its test function is defined only there."""
-        sub = subdomain_of[names[i]]
+    def home_cells(blk: int) -> ufl.Measure:
+        """Where a bulk block (or a region variable) lives on the parent: its compartment's cells, not the
+        whole parent — its test function is defined only there."""
+        sub = block_sub[blk]
         if sub in geometry.compartments:
             return cast(ufl.Measure, cells(geometry.compartments[sub].region_tag))
         return cast(ufl.Measure, ufl.dx(domain=parent))  # a Real on a membrane: one value, any cell
+
+    def structural_diagonal(blk: int, on_parent: bool) -> UflExpr:
+        """A zero diagonal block (DOLFINx places a row and a column by their blocks): on the parent a membrane
+        block's is on its dS, elsewhere any block's on its home cells."""
+        if on_parent and blk < n_fields and block_sub[blk] in geometry.membranes:
+            dS = facets(geometry.membranes[block_sub[blk]].facet_tag)
+            return zero * ufl.inner(trials[blk]("+"), tests[blk]("+")) * dS
+        return zero * ufl.inner(trials[blk], tests[blk]) * home_cells(blk)
 
     def blocks_of(forms: Sequence[UflExpr], on_parent: bool) -> list[list[UflExpr | None]]:
         rows: list[list[UflExpr | None]] = []
         for i in range(n_blocks):
             row: list[UflExpr | None] = []
             for j in range(n_blocks):
-                on_membrane = j < n_fields and field_eqs[j].subdomain in geometry.membranes
-                sigma = shift_surface[field_eqs[j].subdomain] if on_membrane else shift
+                on_membrane = j < n_fields and block_sub[j] in geometry.membranes
+                sigma = shift_surface[block_sub[j]] if on_membrane else shift
                 # each part expanded on its own (ufl.derivative is lazy: an unrelated block is empty only once
                 # expanded), or its zero integrals reach DOLFINx, compiled against the wrong mesh
                 parts = [expand_derivatives(ufl.derivative(forms[i], v)) for v in (rates[j], states[j])]
-                d_rate, d_state = (None if part.empty() else part for part in parts)
+                d_rate, d_state = (None if p.empty() else p for p in parts)
                 if d_rate is not None and d_state is not None:
                     row.append(sigma * d_rate + d_state)
                 elif d_rate is not None:
@@ -521,26 +551,39 @@ def integrate_multi_compartment(
         return rows
 
     emaps = geometry.entity_maps()
-    residual_form = fem.form(residual, entity_maps=emaps)
-    jacobian_form = fem.form(cast(Any, blocks_of(residual, True)), entity_maps=emaps)  # None: a zero block
+    residual_form = fem.form(parent_forms, entity_maps=emaps)
+    jacobian_form = fem.form(cast(Any, blocks_of(parent_forms, True)), entity_maps=emaps)  # None: a zero block
     own_residual_form = own_jacobian_form = None
     if own:
-        own_forms = [own.get(k, zero * tests[k] * home_cells(k)) for k in range(n_blocks)]
+        own_forms = [own.get(k, _zero_like(zero, tests[k]) * home_cells(k)) for k in range(n_blocks)]
         own_residual_form = fem.form(own_forms, entity_maps=emaps)
         own_jacobian_form = fem.form(cast(Any, blocks_of(own_forms, False)), entity_maps=emaps)
 
-    def assemble_jacobian() -> PETSc.Mat:
-        matrix: PETSc.Mat = petsc.assemble_matrix(jacobian_form, kind="mpi")
-        matrix.assemble()
-        if own_jacobian_form is not None:
-            own_matrix = petsc.assemble_matrix(own_jacobian_form, kind="mpi")
-            own_matrix.assemble()
-            matrix.axpy(1.0, own_matrix, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)  # type: ignore[arg-type]
-            own_matrix.destroy()
-        return matrix
+    # The matrices are made once (their sparsity is fixed) and assembled into in place: making one is a
+    # sparsity build, which cost as much as the assembly itself when done per Jacobian evaluation.
+    parent_matrix: PETSc.Mat = petsc.create_matrix(jacobian_form, kind="mpi")
+    own_matrix: PETSc.Mat | None = petsc.create_matrix(own_jacobian_form, kind="mpi") if own_jacobian_form else None
 
-    for k, eq in enumerate(field_eqs):
-        _interpolate_ic(states[k], eq, ctx if eq.subdomain in geometry.compartments else surface_ctx[eq.subdomain])
+    def assemble_jacobian(into: PETSc.Mat) -> None:
+        """The Jacobian into ``into``, whose sparsity holds both groups'."""
+        parent_matrix.zeroEntries()
+        petsc.assemble_matrix(parent_matrix, jacobian_form)  # type: ignore[arg-type]  # singledispatch: the Mat overload
+        parent_matrix.assemble()
+        into.zeroEntries()
+        into.axpy(1.0, parent_matrix, structure=PETSc.Mat.Structure.SUBSET_NONZERO_PATTERN)  # type: ignore[arg-type]
+        if own_matrix is not None and own_jacobian_form is not None:
+            own_matrix.zeroEntries()
+            petsc.assemble_matrix(own_matrix, own_jacobian_form)  # type: ignore[arg-type]  # singledispatch: the Mat overload
+            own_matrix.assemble()
+            into.axpy(1.0, own_matrix, structure=PETSc.Mat.Structure.SUBSET_NONZERO_PATTERN)  # type: ignore[arg-type]
+        into.assemble()
+
+    for blk, group in enumerate(groups):
+        ic_ctx = ctx if block_sub[blk] in geometry.compartments else surface_ctx[block_sub[blk]]
+        if len(group) > 1:
+            _interpolate_component_ics(states[blk], group, ic_ctx)
+        else:
+            _interpolate_ic(states[blk], group[0], ic_ctx)
     for r, eq in enumerate(region_eqs):
         states[n_fields + r].x.array[:] = _region_initial(eq, geometry, ctx, cells, facets)
 
@@ -575,9 +618,17 @@ def integrate_multi_compartment(
     shift.value = 1.0
     for constant in shift_surface.values():
         constant.value = 1.0
-    precond = assemble_jacobian()  # the full sparsity, off-diagonal blocks too
+    # the preconditioner holds the union of both groups' sparsity (off-diagonal blocks too); each matrix is
+    # assembled once first, so its sparsity is the full one (DOLFINx inserts every element entry)
+    petsc.assemble_matrix(parent_matrix, jacobian_form)  # type: ignore[arg-type]  # singledispatch: the Mat overload
+    parent_matrix.assemble()
+    precond = parent_matrix.duplicate(copy=True)
+    if own_matrix is not None:
+        petsc.assemble_matrix(own_matrix, own_jacobian_form)  # type: ignore[arg-type]  # singledispatch: the Mat overload
+        own_matrix.assemble()
+        precond.axpy(1.0, own_matrix, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)  # type: ignore[arg-type]
+    assemble_jacobian(precond)
 
-    matrix_free = any(eq.subdomain in geometry.membranes for eq in field_eqs)
     mf: _MatrixFreeShiftedJacobian | None = None
     operator = precond
     if matrix_free:
@@ -597,10 +648,7 @@ def integrate_multi_compartment(
         shift.value = sigma
         for constant in shift_surface.values():
             constant.value = sigma
-        fresh = assemble_jacobian()
-        fresh.copy(pre, structure=PETSc.Mat.Structure.SAME_NONZERO_PATTERN)  # type: ignore[arg-type]  # stub: int
-        pre.assemble()
-        fresh.destroy()
+        assemble_jacobian(pre)
 
     ts = PETSc.TS().create(parent.comm)
     ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
@@ -618,16 +666,18 @@ def integrate_multi_compartment(
     set_preconditioner(snes.getKSP(), pc_type)  # ILU → block-Jacobi/ILU(0) under MPI
     ts.setFromOptions()
 
+    # Each variable by name: a scalar P1 view of its block's component (a copy), or its Real.
+    views = _Views(names, where, spaces, n_fields)
     monitor: OutputMonitor | None = None
     work: PETSc.Vec | None = None
     if on_output is not None or on_progress is not None:
-        snaps = [fem.Function(V, name=name) for V, name in zip(spaces, names, strict=True)]
+        snaps = [fem.Function(V) for V in spaces]
         work = state_vec.duplicate()
 
         def emit(t: float, x: PETSc.Vec) -> None:
             scatter(x, snaps)
             if on_output is not None:
-                on_output(t, dict(zip(names, snaps, strict=True)))
+                on_output(t, views.of(snaps))
 
         monitor = OutputMonitor(
             output_times if on_output is not None else (),
@@ -644,12 +694,63 @@ def integrate_multi_compartment(
     if monitor is not None:
         monitor.finish(ts, final_time, state_vec)
     scatter(state_vec, states)
-    for obj in (ts, state_vec, precond, work):
+    for obj in (ts, state_vec, precond, parent_matrix, own_matrix, work):
         if obj is not None:
             obj.destroy()
     if operator is not precond:
         operator.destroy()
-    return MultiCompartmentResult(dict(zip(names, states, strict=True)), subdomain_of, steps, final_time)
+    final = {name: _copy(f) for name, f in views.of(states).items()}
+    return MultiCompartmentResult(final, subdomain_of, steps, final_time)
+
+
+def _zero_like(zero: fem.Constant, test: UflExpr) -> UflExpr:
+    """``0 · test`` summed over its components: a structural zero for a block of any shape."""
+    return zero * (sum(test[i] for i in range(test.ufl_shape[0])) if test.ufl_shape else test)
+
+
+class _Views:
+    """Each variable by name as its own Function: a scalar P1 copy of its block's component (the output
+    and the result speak per species), or a region variable's Real itself."""
+
+    def __init__(
+        self,
+        names: Sequence[str],
+        where: dict[str, tuple[int, int | None]],
+        spaces: Sequence[fem.FunctionSpace],
+        n_fields: int,
+    ) -> None:
+        self._where = where
+        self._scalar: dict[str, tuple[fem.Function, np.ndarray | None]] = {}
+        collapsed: dict[int, list[tuple[fem.FunctionSpace, np.ndarray]]] = {}
+        for name in names:
+            blk, j = where[name]
+            if blk >= n_fields:
+                continue
+            if j is None:
+                self._scalar[name] = (fem.Function(spaces[blk], name=name), None)
+                continue
+            if blk not in collapsed:
+                bs = spaces[blk].dofmap.index_map_bs
+                collapsed[blk] = [spaces[blk].sub(k).collapse() for k in range(bs)]
+            sub_space, dofs = collapsed[blk][j]
+            self._scalar[name] = (fem.Function(sub_space, name=name), np.asarray(dofs))
+
+    def of(self, blocks: Sequence[fem.Function]) -> dict[str, fem.Function]:
+        out: dict[str, fem.Function] = {}
+        for name, (blk, _) in self._where.items():
+            if name not in self._scalar:
+                out[name] = blocks[blk]  # a region variable: its Real
+                continue
+            view, dofs = self._scalar[name]
+            view.x.array[:] = blocks[blk].x.array if dofs is None else blocks[blk].x.array[dofs]
+            out[name] = view
+        return out
+
+
+def _copy(f: fem.Function) -> fem.Function:
+    g = fem.Function(f.function_space, name=f.name)
+    g.x.array[:] = f.x.array
+    return g
 
 
 def _region_initial(
