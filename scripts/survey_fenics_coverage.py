@@ -591,7 +591,27 @@ CATEGORIES: tuple[tuple[str, str, str], ...] = (
         r"(?i)csg|expression to be realized \(got type 'analytic'\)",
         "constructive solid geometry subvolumes (pyvcell reads them as expression-less analytic ones)",
     ),
-    ("1D geometry", r"dim=1|this one is 1D", "one-dimensional geometry"),
+    ("1D geometry", r"dim=1|1D geometry|this one is 1D", "one-dimensional geometry"),
+    (
+        "FastSystem",
+        r"the math has a FastSystem",
+        "VCell's rapid-equilibrium reduction (fast buffering): refused, not solved (a decision, not a gap)",
+    ),
+    (
+        "multiple domains (UFL)",
+        r"Found multiple domains",
+        "a form built on more than one mesh where UFL expects one (a solver bug to fix)",
+    ),
+    (
+        "JIT compile timeout",
+        r"JIT compilation timed out",
+        "the form compiler's cache lock timed out: a survey artifact of parallel runs, not a model gap",
+    ),
+    (
+        "mixed boolean/numeric predicate",
+        r"RvachevLoweringError",
+        "a geometry predicate that mixes booleans and numbers (e.g. '(x > 0) * 2')",
+    ),
     (
         "3+ compartments",
         r"more unmodelled subvolumes|span subdomains",
