@@ -13,6 +13,7 @@ The checks:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -347,3 +348,18 @@ def test_two_touching_cells_meet_at_junctions() -> None:
 
 def _field_integral(f: fem.Function) -> float:
     return float(fem.assemble_scalar(fem.form(f * ufl.dx(domain=f.function_space.mesh))).real)
+
+
+def test_a_membrane_species_nothing_else_reads(nested: MultiCompartmentGeometry) -> None:
+    # a surface species that only diffuses, beside a bulk exchange: its column has no coupling block, which
+    # DOLFINx can't place without a (structural) diagonal — found by the coverage survey (101449802)
+    md = replace(
+        _exchange(1.0),
+        variables=[*_exchange(1.0).variables, Variable(name="L", subdomain="ne")],
+        equations=[*_exchange(1.0).equations, _pde("L", "ne", "1.0 + geom.x[0]", diffusion="0.1")],
+    )
+    start = integrate_multi_compartment(md, nested, t_final=1e-9)
+    end = integrate_multi_compartment(md, nested, t_final=0.5, rtol=1e-8, atol=1e-11)
+    assert species_mass(end, "L") == pytest.approx(species_mass(start, "L"), rel=1e-10)
+    spread = end.fields["L"].x.array
+    assert float(spread.max() - spread.min()) < 0.6  # it diffused along the envelope (started 0.6 apart)

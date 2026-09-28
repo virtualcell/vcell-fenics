@@ -1,0 +1,32 @@
+name: nucleus
+dim: 2
+extent:
+- 2.0
+- 2.0
+- 1.0
+origin:
+- -1.0
+- -1.0
+- 0.0
+subvolumes:
+- name: nuc_dom
+  handle: 0
+  subvolume_type: analytic
+  analytic_expr: ((pow((x - 0.1),2.0) + pow((y - 0.0),2.0) + pow((z - 0.0),2.0)) <
+    pow(0.25,2.0))
+- name: cyto_dom
+  handle: 1
+  subvolume_type: analytic
+  analytic_expr: ((pow((x - 0.0),2.0) + pow((y - 0.0),2.0) + pow((z - 0.0),2.0)) <
+    pow(0.6,2.0))
+- name: ext_dom
+  handle: 2
+  subvolume_type: analytic
+  analytic_expr: '1.0'
+surface_classes:
+- name: ne_dom
+  subvolume_ref_1: cyto_dom
+  subvolume_ref_2: nuc_dom
+- name: pm_dom
+  subvolume_ref_1: cyto_dom
+  subvolume_ref_2: ext_dom

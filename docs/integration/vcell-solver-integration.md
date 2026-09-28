@@ -400,6 +400,32 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-09-28** — **The multi-compartment solver: any number of compartments and membranes.**
+  - **Why:** about a fifth of the saved spatial BioModels have three or more subvolumes (nucleus, ER, two
+    cells). The two-compartment paths refused them, or dropped a background subvolume to fit.
+  - **What:** `backend/multi_compartment.py`.
+    - **Geometry:** one parent partition with a submesh per compartment and membrane (`realize_multi_compartment`),
+      and each box face split by compartment.
+    - **Unknowns:** one scalar P1 block per species and a Real per region variable.
+    - **Coupling:** each membrane couples only its own two sides, through side-masked traces.
+    - **Newton:** matrix-free with membrane species, with the assembled Jacobian as preconditioner.
+  - **Routing:** the runner sends every fixed-geometry model whose equations span two or more subdomains to it,
+    replacing the two-compartment routing.
+  - **Where it differs from VCell's semantics, the new path follows VCell.** A box-face value acts only on the
+    compartment that touches that face. The old path applied an outer species' box values on its edge to a
+    dropped background.
+  - **Junctions:** an analytic geometry where three subvolumes meet (touching cells) is realized through its
+    label field.
+  - **Verified:**
+    - conservation to round-off across two membranes;
+    - the well-mixed three-pool limit;
+    - parity with `integrate_membrane_coupled` on the receptor model (1e-6);
+    - touching cells;
+    - MPI (n = 1, 2);
+    - **against fvsolver** on a nucleus | cytosol | outside cell with nuclear transport and a plasma-membrane
+      receptor: L2 of 0.11 % (nucleus), 0.05 % (cytosol) and 0.001 % (outside) at N = 256, converging, with
+      the substance total conserved to 1e-10 (`cross_validation/README.md`).
+
 - **2026-09-27** — **Non-diffusing species (#186), and VCell's electrophysiology models run.**
   - **T4 `lumped_ode` on a spatial subdomain** is a field without transport: VCell's non-diffusing species
     (buffers, ER-bound states, channel gating variables). All three method-of-lines paths assemble it as a

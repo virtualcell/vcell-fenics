@@ -86,12 +86,18 @@ pixi run -e dev vcell-fenics-export results/results.fenics paraview/      # → 
 docker build -f docker/Dockerfile -t vcell-fenics .     # same runner, containerised
 ```
 
-It drives the fixed-domain paths — a single mesh; two compartments across a membrane, any number of
-species in each; and both compartments plus **membrane species** on the membrane between them
-(receptor–ligand binding, `integrate_membrane_coupled`), and on the two-compartment path **region
-variables** (a well-mixed species, a membrane potential — T5 `region_ode`) — and VCell moving boundaries (a prescribed
-front, species inside it; ALE with remeshing, in 2D and 3D — the tracker's "Moving boundaries"
-section). Not yet: membrane species with bulk species on one side only, or on a moving front.
+It drives the fixed-domain paths:
+- **a single mesh**, for equations on one subdomain;
+- **the multi-compartment solver** (`backend/multi_compartment.py`) for everything whose equations span two or
+  more subdomains. That means any number of compartments and membranes (a nucleus in a cytosol in extracellular
+  space, touching cells) and any number of species on each, including membrane species (receptor–ligand
+  binding), **region variables** (a well-mixed species, a membrane potential — T5 `region_ode`) and box-face
+  values per compartment.
+
+It also drives VCell moving boundaries: a prescribed front with species inside it, ALE with remeshing, in 2D
+and 3D (the tracker's "Moving boundaries" section). Not yet: membrane species on a moving front. The older
+two-compartment integrators (`integrate_interface_coupled`, `integrate_membrane_coupled`) stay for their tests
+and cross-validation; the runner no longer routes to them.
 Stokes/FSI, phase field and unknown-motion mechanics keep their own drivers — extend the CLI
 deliberately rather than routing them through it. `docker/README.md`
 is the container reference (results mount, MPI, uid, discretisation defaults).

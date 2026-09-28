@@ -515,7 +515,7 @@ def integrate_multi_compartment(
                     row.append(sigma * d_rate)
                 else:
                     row.append(d_state)
-            if all(block is None for block in row):
+            if row[i] is None:  # every row and column needs a block (a decoupled species' column is empty)
                 row[i] = structural_diagonal(i, on_parent)
             rows.append(row)
         return rows
