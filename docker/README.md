@@ -186,8 +186,9 @@ point notices and uses a writable per-user cache seeded from it, the first writa
 2. `$TMPDIR/vcell-fenics-cache-<uid>` — VCell's Slurm jobs pass `--env TMPDIR=/solvertmp`, the job's
    scratch directory bound at `/solvertmp`, so the cache is on real disk;
 3. `/tmp/vcell-fenics-cache-<uid>` — the last resort. Under `--containall`, `/tmp` is Apptainer's
-   in-memory session tmpfs (`sessiondir max size`, 64 MB by default), small next to the seeded cache
-   plus whatever a big model compiles.
+   in-memory session tmpfs (`sessiondir max size`, 64 MB by default), shared with everything else the job
+   puts in `/tmp` and held in RAM. The seeded cache is only a few MB (3.8 MB, 173 files, after CI's P2
+   run), but it grows with every new form, and it is lost when the job ends.
 
 A candidate that is set but not writable (a `TMPDIR` whose bind is missing, say) is skipped with a note
 on stderr, not fatal. CI checks both shapes: the SIF under `--containall` compiling a form the image
