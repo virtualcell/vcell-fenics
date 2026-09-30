@@ -152,12 +152,15 @@ RUN mkdir -p /opt/cache \
 # the files written into the mounted results directory belong to you; nothing in the image
 # depends on this particular uid — which is why /work is world-writable rather than owned by
 # it: an un-mounted run must still be able to create ./out under any uid.
+# /usr/local/bin/vcell-solver-entrypoint is the entry point's name in every VCell solver image
+# (SOLVER-RELEASE.md); vcell-fenics-entrypoint stays for anything that already calls it.
 RUN useradd --create-home --uid 1001 vcell \
+ && ln -s vcell-fenics-entrypoint /usr/local/bin/vcell-solver-entrypoint \
  && mkdir -p /work \
  && chmod 1777 /work
 USER 1001:1001
 
 # Results land in ./out by default, so a bind mount at /work/out is all a run needs.
 WORKDIR /work
-ENTRYPOINT ["/usr/local/bin/vcell-fenics-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/vcell-solver-entrypoint"]
 CMD ["--help"]

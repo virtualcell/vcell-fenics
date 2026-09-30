@@ -169,6 +169,8 @@ bundle matches a serial one.
 
 CI (`.github/workflows/container.yml`) publishes, on `main` and release tags, the multi-arch image
 `ghcr.io/virtualcell/vcell-fenics:<tag>` and its SIF `oras://ghcr.io/virtualcell/vcell-fenics_singularity:<tag>`
+(`<tag>` is `sha-<short>` and `latest` from main, `X.Y.Z` and `vX.Y.Z` from a release tag — pin a release
+in VCell's site config; see `SOLVER-RELEASE.md`)
 — VCell's convention for solver images (`../vcell/docs/apptainer-image-build.md`), so the FluxCD
 pre-pull and `SlurmProxy` treat it like the other four. VCell runs it as
 
@@ -178,9 +180,20 @@ singularity run --containall --bind … $sif vcell-fenics --simtask /simdata/<us
 ```
 
 A SIF is read-only, so the pre-warmed FFCx cache in `/opt/cache` cannot take new kernels; the entry
-point notices and uses a writable per-user cache seeded from it — `$VCELL_FENICS_CACHE` if set (point it
-at shared storage to keep compiled kernels across jobs), else `$TMPDIR/vcell-fenics-cache-<uid>`.
-CI checks exactly this: the SIF runs under `--containall` and compiles a form the image never pre-warmed.
+point notices and uses a writable per-user cache seeded from it, the first writable of:
+
+1. `$VCELL_FENICS_CACHE` — point it at shared storage to keep compiled kernels across jobs;
+2. `$TMPDIR/vcell-fenics-cache-<uid>` — VCell's Slurm jobs pass `--env TMPDIR=/solvertmp`, the job's
+   scratch directory bound at `/solvertmp`, so the cache is on real disk;
+3. `/tmp/vcell-fenics-cache-<uid>` — the last resort. Under `--containall`, `/tmp` is Apptainer's
+   in-memory session tmpfs (`sessiondir max size`, 64 MB by default), small next to the seeded cache
+   plus whatever a big model compiles.
+
+A candidate that is set but not writable (a `TMPDIR` whose bind is missing, say) is skipped with a note
+on stderr, not fatal. CI checks both shapes: the SIF under `--containall` compiling a form the image
+never pre-warmed, and a run exactly as SlurmProxy writes it (`--bind …:/simdata --bind …:/solvertmp
+--env TMPDIR=/solvertmp`, a bare `vcell-fenics`, container paths, a trailing `-tid 0`), which must leave
+the cache in the scratch bind.
 
 ## Choosing the discretisation
 
