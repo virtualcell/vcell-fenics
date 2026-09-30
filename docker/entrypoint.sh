@@ -24,12 +24,32 @@ set -u
 # FFCx compiles each new form into $XDG_CACHE_HOME/fenics. The image pre-warms that cache in a
 # world-writable /opt/cache, but Apptainer/Singularity runs the image *read-only* (a SIF is a
 # squashfs), so a form the warm-up did not cover would fail to compile. When the cache is not
-# writable, move to a per-user one — $VCELL_FENICS_CACHE, else under $TMPDIR — seeded with the
-# pre-warmed kernels. Point VCELL_FENICS_CACHE at a shared directory to keep kernels across jobs.
+# writable, move to a per-user one seeded with the pre-warmed kernels: the first writable of
+#   $VCELL_FENICS_CACHE                         a shared directory keeps kernels across jobs
+#   $TMPDIR/vcell-fenics-cache-<uid>            VCell's Slurm jobs pass --env TMPDIR=/solvertmp, the
+#                                               job's scratch bind (real disk)
+#   /tmp/vcell-fenics-cache-<uid>               last resort: under --containall /tmp is a small
+#                                               in-memory tmpfs (Apptainer's sessiondir, ~64 MB)
+# A candidate that is set but unusable (say TMPDIR names a path that was never bound) is skipped
+# rather than aborting the job.
 cache="${XDG_CACHE_HOME:-/opt/cache}"
 if ! { mkdir -p "${cache}/fenics" && touch "${cache}/fenics/.writable"; } 2>/dev/null; then
-    writable="${VCELL_FENICS_CACHE:-${TMPDIR:-/tmp}/vcell-fenics-cache-$(id -u)}"
-    mkdir -p "${writable}"
+    writable=""
+    for candidate in "${VCELL_FENICS_CACHE-}" \
+                     "${TMPDIR:+${TMPDIR}/vcell-fenics-cache-$(id -u)}" \
+                     "/tmp/vcell-fenics-cache-$(id -u)"; do
+        if [ -n "${candidate}" ] && { mkdir -p "${candidate}" && touch "${candidate}/.writable"; } 2>/dev/null; then
+            writable="${candidate}"
+            break
+        fi
+        if [ -n "${candidate}" ]; then
+            echo "vcell-fenics-entrypoint: cache directory ${candidate} is not writable; trying the next" >&2
+        fi
+    done
+    if [ -z "${writable}" ]; then
+        echo "vcell-fenics-entrypoint: no writable FFCx cache directory (set VCELL_FENICS_CACHE or TMPDIR)" >&2
+        exit 1
+    fi
     if [ -d "${cache}/fenics" ]; then
         cp -R -n "${cache}/fenics" "${writable}/" 2>/dev/null || true
     fi

@@ -5,6 +5,12 @@
 #   ghcr.io/virtualcell/vcell-fenics:<tag>                      multi-arch Docker image (desktop runs)
 #   oras://ghcr.io/virtualcell/vcell-fenics_singularity:<tag>   Apptainer SIF (Slurm; pre-pulled by FluxCD)
 #
+# A release is a tag vX.Y.Z on main (SOLVER-RELEASE.md). It must equal the package version
+# (`vcell_fenics.__version__` and pyproject's [project].version) — the setup job fails the whole run
+# otherwise, and each image job checks the built image reports it — and publishes, besides the
+# commit's sha-<short>, the image and SIF tags X.Y.Z and vX.Y.Z, then a GitHub Release with notes.
+# `latest` follows main, not tags.
+#
 # Pull requests build and smoke-test only; nothing is pushed. arm64 is opt-in: set the repository
 # variable ARM64_RUNNER (e.g. `ubuntu-24.04-arm`) when the organization's plan provides hosted arm64
 # runners for this private repository — a matrix entry naming an unavailable runner would queue forever.
@@ -35,13 +41,46 @@ env:
   SIMTASK: /opt/vcell-fenics/examples/simtask/SimID_1585623750_0__0.simtask.xml
   BUNDLE: SimID_1585623750_0_.fenics
   PUBLISH: ${{ github.event_name != 'pull_request' }}
+  # docker/metadata-action tag rules, shared by the per-arch push (SIF tags) and the manifest job.
+  # A tag build is the same commit main already published as sha-<short>; re-tagging that sha with
+  # a rebuilt digest would leave one sha tag naming two images, so tag builds skip it.
+  TAG_RULES: |
+    type=semver,pattern={{version}}
+    type=ref,event=tag
+    type=sha,format=short,enable=${{ github.ref_type != 'tag' }}
+    type=raw,value=latest,enable={{is_default_branch}}
 
 jobs:
   setup:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # One version, three places: pyproject, the package, and (on a release) the tag — all must agree.
+      - id: version
+        run: |
+          set -euo pipefail
+          project=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          package=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/vcell_fenics/__init__.py)
+          echo "pyproject: ${project}  vcell_fenics.__version__: ${package}"
+          if [ "${project}" != "${package}" ]; then
+            echo "::error::pyproject.toml version ${project} != vcell_fenics.__version__ ${package}"; exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${GITHUB_REF_NAME}" != "v${package}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match the package version ${package} (expected v${package}); bump the version in a PR first"; exit 1
+            fi
+            if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+              echo "::error::tag ${GITHUB_REF_NAME} is not on main; releases are cut from main"; exit 1
+            fi
+          fi
+          echo "version=${package}" >> "$GITHUB_OUTPUT"
+
       - id: matrix
         env:
           ARM64_RUNNER: ${{ vars.ARM64_RUNNER }}
@@ -83,6 +122,16 @@ jobs:
           tags: vcell-fenics:ci
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: The image reports the package version
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euxo pipefail
+          test "$(docker run --rm vcell-fenics:ci --version)" = "vcell-fenics ${VERSION}"
+          test "$(docker run --rm vcell-fenics:ci python -c 'import vcell_fenics; print(vcell_fenics.__version__)')" = "${VERSION}"
+          test "$(docker run --rm vcell-fenics:ci python -c 'from importlib.metadata import version; print(version("vcell-fenics"))')" = "${VERSION}"
+          docker run --rm vcell-fenics:ci | grep -q "vcell-fenics ${VERSION}"   # no argument: help, with the version
 
       # The build itself already ran the SimulationTask warm-up; these repeat it the way VCell's
       # desktop client will launch the image (same-path bind mount, the caller's uid).
@@ -144,6 +193,31 @@ jobs:
           apptainer run --containall --bind "$work:$work" "$RUNNER_TEMP/vcell-fenics.sif" \
             python -m vcell_fenics.results "$work/$BUNDLE" --require-status completed
 
+      # Exactly SlurmProxy's shape: /simdata and the job's scratch bound at /solvertmp, TMPDIR pointed
+      # there, a bare executable name, container paths, a trailing -tid. The JIT cache must land in the
+      # scratch bind (real disk), not in --containall's small in-memory /tmp.
+      - name: Smoke — the SIF as VCell's Slurm job runs it (TMPDIR=/solvertmp)
+        if: matrix.arch == 'amd64'
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euxo pipefail
+          sif="$RUNNER_TEMP/vcell-fenics.sif"
+          apptainer run --containall "$sif" --help | grep -q "vcell-fenics ${VERSION}"
+          test "$(apptainer run --containall "$sif" --version)" = "vcell-fenics ${VERSION}"
+          simdata="$RUNNER_TEMP/simdata"; scratch="$RUNNER_TEMP/solvertmp"; mkdir -p "$simdata/user" "$scratch"
+          cp "tests/fixtures/simtask/$(basename "$SIMTASK")" "$simdata/user/"
+          apptainer run --containall --bind "$simdata:/simdata" --bind "$scratch:/solvertmp" \
+            --env TMPDIR=/solvertmp "$sif" \
+            vcell-fenics --simtask "/simdata/user/$(basename "$SIMTASK")" --out /simdata/user \
+              --fe-degree 2 --vc-print-status -tid 0 > "$simdata/markers.txt"
+          grep -q '\[\[\[progress:100.0%\]\]\]' "$simdata/markers.txt"
+          cache="$scratch/vcell-fenics-cache-$(id -u)/fenics"
+          test -d "$cache"
+          echo "JIT cache in the scratch bind: $(du -sh "$cache" | cut -f1), $(find "$cache" -type f | wc -l) files"
+          apptainer run --containall --bind "$simdata:/simdata" "$sif" \
+            python -m vcell_fenics.results "/simdata/user/$BUNDLE" --require-status completed
+
       # --- publishing (main and release tags only) -------------------------------------------------
       - name: Tags
         if: env.PUBLISH == 'true'
@@ -151,10 +225,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=sha,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
+          tags: ${{ env.TAG_RULES }}
 
       - name: Log in to GHCR
         if: env.PUBLISH == 'true'
@@ -221,10 +292,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=sha,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
+          tags: ${{ env.TAG_RULES }}
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -239,3 +307,35 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "${IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
+
+  release:
+    name: GitHub Release
+    if: github.ref_type == 'tag'
+    needs: [setup, manifest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Create (or update) the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          vcell-fenics ${VERSION}. The artifacts are container images (there are no archive assets: the solver
+          runs only in its container, see SOLVER-RELEASE.md):
+
+          | | |
+          |---|---|
+          | Docker image (multi-arch) | \`ghcr.io/virtualcell/vcell-fenics:${VERSION}\` (also \`:v${VERSION}\`) |
+          | Apptainer SIF (amd64) | \`oras://ghcr.io/virtualcell/vcell-fenics_singularity:${VERSION}\` (also \`:v${VERSION}\`) |
+
+          Built from ${GITHUB_SHA}.
+          EOF
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --notes-file notes.md
+          else
+            gh release create "${GITHUB_REF_NAME}" --title "vcell-fenics ${VERSION}" --notes-file notes.md --generate-notes --verify-tag
+          fi

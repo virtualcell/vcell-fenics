@@ -73,6 +73,27 @@ def test_vcell_fenics_cache_names_a_shared_cache(tmp_path: Path) -> None:
     assert result.stdout.startswith(f"{shared}|")
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through read-only permissions")
+def test_an_unusable_cache_candidate_falls_through_to_tmpdir(tmp_path: Path) -> None:
+    # VCell's Slurm jobs run `--containall --env TMPDIR=/solvertmp`: the cache must land in the job's
+    # scratch bind even when an earlier candidate cannot be created — and a bad one must not abort the job.
+    image_cache = tmp_path / "opt-cache"
+    image_cache.mkdir()
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    for path in (image_cache, blocked):
+        path.chmod(0o555)
+    try:
+        result = _run(tmp_path, _SHOW, XDG_CACHE_HOME=str(image_cache), VCELL_FENICS_CACHE=str(blocked / "cache"))
+    finally:
+        for path in (image_cache, blocked):
+            path.chmod(0o755)
+    assert result.returncode == 0, result.stderr
+    writable = tmp_path / "tmp" / f"vcell-fenics-cache-{os.getuid()}"
+    assert result.stdout == f"{writable}|{writable}/matplotlib"
+    assert "not writable" in result.stderr
+
+
 def test_an_activation_script_reading_unset_variables_does_not_abort(tmp_path: Path) -> None:
     result = _run(tmp_path, ["sh", "-c", 'printf "%s" "$VCELL_FENICS_ACTIVATED"'], XDG_CACHE_HOME=str(tmp_path / "c"))
     assert result.returncode == 0, result.stderr
@@ -83,3 +104,12 @@ def test_flags_go_to_the_runner(tmp_path: Path) -> None:
     result = _run(tmp_path, ["--help"], XDG_CACHE_HOME=str(tmp_path / "cache"))
     assert result.returncode == 0, result.stderr
     assert "--simtask" in result.stdout and "--vc-print-status" in result.stdout
+
+
+def test_help_and_version_name_the_package_version(tmp_path: Path) -> None:
+    import vcell_fenics
+
+    for flag in ("--help", "--version"):
+        result = _run(tmp_path, [flag], XDG_CACHE_HOME=str(tmp_path / "cache"))
+        assert result.returncode == 0, result.stderr
+        assert f"vcell-fenics {vcell_fenics.__version__}" in result.stdout
