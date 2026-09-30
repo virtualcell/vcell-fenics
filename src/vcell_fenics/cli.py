@@ -46,6 +46,7 @@ from typing import Any
 import yaml
 from mpi4py import MPI
 
+import vcell_fenics
 from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
 from vcell_fenics.backend.realize import RealizationError
 from vcell_fenics.formalism import (
@@ -420,7 +421,10 @@ def _resolve(model: ModelInput, args: argparse.Namespace) -> tuple[RunOptions, d
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vcell-fenics",
-        description="Solve a VCell or native vcell-fenics model with FEniCSx and write a results bundle (ADR 010).",
+        description=(
+            f"vcell-fenics {vcell_fenics.__version__}: solve a VCell or native vcell-fenics model with FEniCSx"
+            " and write a results bundle (ADR 010)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
@@ -429,6 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  vcell-fenics --math m_math.yaml --geometry m_geom.yaml --t-final 1.0 --out results\n"
         ),
     )
+    parser.add_argument("--version", action="version", version=f"vcell-fenics {vcell_fenics.__version__}")
     source = parser.add_argument_group("model input")
     source.add_argument(
         "--simtask", type=Path, help="a VCell SimulationTask document (SimID_<key>_<job>__<task>.simtask.xml)"
