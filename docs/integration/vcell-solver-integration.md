@@ -400,6 +400,13 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-10-01** — **Run phases in the status (ADR 011 §4).** A run sat at "0%" for a minute or two
+  while it meshed and JIT-compiled. The solver now reports its phase — `loading model`, `meshing`,
+  `compiling`, `solving`, `writing results` — as `[[[progress:<phase>:NN.N%]]]` locally and as
+  `WorkerEvent_StatusMsg=WORKEREVENT_PROGRESS|<phase>` on PROGRESS events on the cluster. Both are
+  read harmlessly by an older VCell (plain progress; the broker already deserializes that status
+  message). The VCell side that shows "meshing" / "solving 37%" is virtualcell/vcell
+  `fenics/phase-status`.
 - **2026-09-28** — **The multi-compartment solver: any number of compartments and membranes.**
   - **Why:** about a fifth of the saved spatial BioModels have three or more subvolumes (nucleus, ER, two
     cells). The two-compartment paths refused them, or dropped a background subvolume to fit.

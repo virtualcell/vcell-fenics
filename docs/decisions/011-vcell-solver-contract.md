@@ -92,7 +92,8 @@ The solver reports through a `StatusReporter` with these events:
 | event | stdout marker | REST WorkerEvent |
 |---|---|---|
 | starting | — | 999, persistent, TTL 600000 |
-| progress | `[[[progress:NN.N%]]]` | 1001, nonpersistent, TTL 60000 |
+| phase (entering one) | `[[[progress:<phase>:NN.N%]]]` | 1001 with `WorkerEvent_StatusMsg=WORKEREVENT_PROGRESS\|<phase>` |
+| progress | `[[[progress:<phase>:NN.N%]]]` (`[[[progress:NN.N%]]]` before any phase) | 1001, nonpersistent, TTL 60000 (with the phase's status message) |
 | data (an output row landed) | `[[[data:<t>]]]` | 1000, nonpersistent, TTL 60000 |
 | completed | `[[[progress:100%]]]` | **1003**, persistent, TTL 600000 |
 | failed | (stderr message) | 1002, persistent, TTL 600000 |
@@ -115,6 +116,18 @@ The solver reports through a `StatusReporter` with these events:
 - **Why the solver sends 1003 itself:** `SimulationStateMachine` completes a job only on 1003, and
   VCell's postprocessor sends only worker-exit.
 - **COMPLETED** is sent only after the bundle is finalized (manifest `status: completed`).
+- **Phases.** A run reports which phase it is in, in this order: `loading model`, `meshing`,
+  `compiling` (JIT-compiled kernels and assembly, up to the first time step), `solving` (progress is the
+  fraction of simulated time), `writing results` (at 100%). A phase is entered at once — never throttled
+  — and every later progress report carries it, so VCell can show "meshing" or "solving 37%" instead of a
+  bare "0%" during the minutes before the first step. The extension is compatible both ways:
+  - an older VCell parses `[[[progress:<phase>:NN.N%]]]` as plain progress (the number is still between
+    the last `:` and the `%`, so a phase never contains `:`, `%`, `[` or `]`), and an older broker
+    already turns `WORKEREVENT_PROGRESS|<phase>` into the job's status message
+    (`SimulationMessage.fromSerializedMessage` in `WorkerEventMessage`), which its client ignores while a
+    progress bar is shown;
+  - a VCell that shows phases falls back to the bare percentage when a solver sends none.
+  - Completion stays the plain `[[[progress:100.0%]]]`.
 - **`-tid N`** is accepted, since `HtcSimulationWorker` appends it; the CLI warns if it disagrees
   with `TaskId`.
 - **Exit codes:**

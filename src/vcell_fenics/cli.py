@@ -69,7 +69,15 @@ from vcell_fenics.pyvcell_bridge.simtask import (
 )
 from vcell_fenics.runner import ModelInput, RunError, RunOptions, run_model, uniform_output_times
 from vcell_fenics.runner import log as _log
-from vcell_fenics.status import Fanout, MessagingConfig, RestWorkerEvents, StatusReporter, StdoutMarkers, isolate_stdout
+from vcell_fenics.status import (
+    LOADING,
+    Fanout,
+    MessagingConfig,
+    RestWorkerEvents,
+    StatusReporter,
+    StdoutMarkers,
+    isolate_stdout,
+)
 
 # Errors that mean "the model or the request is wrong", not "the code is broken": reported as a
 # one-line `error: …` with exit status 2, no traceback.
@@ -522,6 +530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
     status.starting()
     try:
+        status.phase(LOADING, 0.0, 0.0)
         model = load_model(args)
         _log(f"loaded {model.source} model: {model.provenance}")
         task_id = model.provenance.get("task_id")
