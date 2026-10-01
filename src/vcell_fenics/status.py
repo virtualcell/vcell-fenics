@@ -13,6 +13,18 @@ VCell learns about a running solver in one of two ways:
   FAILURE 1002, COMPLETED 1003. A job is complete only on 1003 (``SimulationStateMachine``; VCell's
   postprocessor sends only worker-exit), so the solver sends it — after its results are finalized.
 
+**Phases.** A run passes through phases — :data:`PHASES`: loading the model, meshing, compiling (the
+JIT-compiled kernels and assembly, up to the first time step), solving, writing results — and a phase can
+take minutes before the first percent of progress. Each progress report names the phase it belongs to,
+on channels an older VCell already reads without harm:
+
+- locally ``[[[progress:<phase>:NN.N%]]]``: an older VCell still takes the number between the last ``:`` and
+  the ``%``; a newer one also shows the phase;
+- on the cluster the PROGRESS event carries ``WorkerEvent_StatusMsg=WORKEREVENT_PROGRESS|<phase>``, a
+  serialized ``SimulationMessage`` that every VCell broker already turns into the job's status message.
+
+A change of phase is reported at once (never throttled), with the progress so far.
+
 Messaging must never break a solve: every send failure is swallowed (and logged once).
 
 [ADR 011]: ../../docs/decisions/011-vcell-solver-contract.md
@@ -43,9 +55,21 @@ JOB_COMPLETED = 1003
 _PERSISTENT = {JOB_STARTING, JOB_FAILURE, JOB_COMPLETED}  # delivered even if the broker restarts
 _MESSAGE_LIMIT = 2048
 
+# The phases of a run, in the order they happen. The text is what a VCell user sees ("solving 37%").
+LOADING = "loading model"
+MESHING = "meshing"
+COMPILING = "compiling"
+SOLVING = "solving"
+WRITING = "writing results"
+PHASES = (LOADING, MESHING, COMPILING, SOLVING, WRITING)
+
+# VCell's SimulationMessage.DetailedState for a worker's progress; "<state>|<text>" is its serialized form.
+_PROGRESS_STATE = "WORKEREVENT_PROGRESS"
+
 
 class StatusReporter(Protocol):
     def starting(self) -> None: ...
+    def phase(self, name: str, fraction: float, t: float) -> None: ...
     def progress(self, fraction: float, t: float) -> None: ...
     def data(self, t: float, fraction: float) -> None: ...
     def completed(self, t: float) -> None: ...
@@ -56,6 +80,9 @@ class NullReporter:
     """Reports nothing (the default, and every rank but 0)."""
 
     def starting(self) -> None:
+        pass
+
+    def phase(self, name: str, fraction: float, t: float) -> None:
         pass
 
     def progress(self, fraction: float, t: float) -> None:
@@ -72,10 +99,11 @@ class NullReporter:
 
 
 class StdoutMarkers:
-    """``[[[progress:NN.N%]]]`` / ``[[[data:<t>]]]`` markers for VCell's local stdout scanner.
+    """``[[[progress:<phase>:NN.N%]]]`` / ``[[[data:<t>]]]`` markers for VCell's local stdout scanner.
 
     Progress is throttled to one marker per ``interval`` seconds (and to changes of ≥ 0.1%); data
-    markers are never throttled — each one tells VCell a new output row is readable."""
+    markers are never throttled — each one tells VCell a new output row is readable — and neither is a
+    change of phase. Completion is a plain ``[[[progress:100.0%]]]``."""
 
     def __init__(self, stream: TextIO, *, interval: float = 1.0, clock: Callable[[], float] = time.monotonic) -> None:
         self._stream = stream
@@ -83,6 +111,7 @@ class StdoutMarkers:
         self._clock = clock
         self._last_time = -float("inf")
         self._last_percent = -1.0
+        self._phase: str | None = None
 
     def _emit(self, message: str) -> None:
         self._stream.write(f"[[[{message}]]]\n")
@@ -90,6 +119,10 @@ class StdoutMarkers:
 
     def starting(self) -> None:
         self._progress_marker(0.0, force=True)
+
+    def phase(self, name: str, fraction: float, t: float) -> None:
+        self._phase = _marker_label(name)
+        self._progress_marker(fraction, force=True)
 
     def progress(self, fraction: float, t: float) -> None:
         self._progress_marker(fraction)
@@ -99,6 +132,7 @@ class StdoutMarkers:
         self._progress_marker(fraction)
 
     def completed(self, t: float) -> None:
+        self._phase = None
         self._progress_marker(1.0, force=True)
 
     def failed(self, message: str, t: float, fraction: float) -> None:
@@ -110,7 +144,8 @@ class StdoutMarkers:
         if not force and (now - self._last_time < self._interval or abs(percent - self._last_percent) < 0.1):
             return
         self._last_time, self._last_percent = now, percent
-        self._emit(f"progress:{percent:.1f}%")
+        phase = f"{self._phase}:" if self._phase else ""
+        self._emit(f"progress:{phase}{percent:.1f}%")
 
 
 @dataclass(frozen=True)
@@ -154,8 +189,9 @@ class MessagingConfig:
 class RestWorkerEvents:
     """POST VCell WorkerEvents to the broker's REST endpoint (``/api/message/workerEvent``), exactly as
     ``docker/build/batch/entrypoint.sh`` and Langevin's ``VCellMessagingRest`` do. Progress is throttled
-    to one event per ``interval`` seconds; data events to one per second; failures to send are logged
-    once to stderr and otherwise ignored."""
+    to one event per ``interval`` seconds (a change of phase is sent at once); data events to one per
+    second; failures to send are logged once to stderr and otherwise ignored. Progress events name the
+    current phase as ``WORKEREVENT_PROGRESS|<phase>``."""
 
     def __init__(
         self,
@@ -176,17 +212,29 @@ class RestWorkerEvents:
         self._last_progress = -float("inf")
         self._last_data = -float("inf")
         self._warned = False
+        self._phase: str | None = None
         token = base64.b64encode(f"{config.broker_username}:{config.broker_password}".encode()).decode()
         self._authorization = f"Basic {token}"
 
     def starting(self) -> None:
         self._send(JOB_STARTING, progress=0.0, t=0.0, message="Starting Job")
 
+    def phase(self, name: str, fraction: float, t: float) -> None:
+        self._phase = name
+        self._last_progress = self._clock()
+        self._send(JOB_PROGRESS, progress=fraction, t=t, message=self._phase_message())
+
     def progress(self, fraction: float, t: float) -> None:
         now = self._clock()
         if now - self._last_progress >= self._interval:
             self._last_progress = now
-            self._send(JOB_PROGRESS, progress=fraction, t=t)
+            self._send(JOB_PROGRESS, progress=fraction, t=t, message=self._phase_message())
+
+    def _phase_message(self) -> str | None:
+        """The serialized SimulationMessage VCell's broker makes the job's status message, or None (VCell
+        then shows the bare number)."""
+
+        return f"{_PROGRESS_STATE}|{self._phase}" if self._phase else None
 
     def data(self, t: float, fraction: float) -> None:
         now = self._clock()
@@ -252,6 +300,11 @@ class Fanout:
         for reporter in self._reporters:
             reporter.starting()
 
+    def phase(self, name: str, fraction: float, t: float) -> None:
+        self.last_t, self.last_fraction = t, fraction
+        for reporter in self._reporters:
+            reporter.phase(name, fraction, t)
+
     def progress(self, fraction: float, t: float) -> None:
         self.last_t, self.last_fraction = t, fraction
         for reporter in self._reporters:
@@ -283,6 +336,13 @@ def isolate_stdout() -> TextIO:
     return io.TextIOWrapper(os.fdopen(markers_fd, "wb", buffering=0), encoding="utf-8", line_buffering=True)
 
 
+def _marker_label(name: str) -> str:
+    """A phase as a stdout marker can carry it: VCell splits the marker at its last ``:`` and first
+    ``%``, and ``[[[``/``]]]`` delimit it."""
+
+    return " ".join(name.translate({ord(c): " " for c in ":%[]\n\r"}).split())
+
+
 def _sanitize(message: str) -> str:
     """The Langevin client's rule: at most 2048 characters, no newlines or quotes."""
 
@@ -291,11 +351,17 @@ def _sanitize(message: str) -> str:
 
 
 __all__ = [
+    "COMPILING",
     "JOB_COMPLETED",
     "JOB_DATA",
     "JOB_FAILURE",
     "JOB_PROGRESS",
     "JOB_STARTING",
+    "LOADING",
+    "MESHING",
+    "PHASES",
+    "SOLVING",
+    "WRITING",
     "Fanout",
     "MessagingConfig",
     "NullReporter",

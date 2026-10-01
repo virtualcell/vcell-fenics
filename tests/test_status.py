@@ -9,23 +9,32 @@ the broker.
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import subprocess
 import sys
 import threading
 import urllib.parse
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
+from vcell_fenics.runner import _PhasedProgress
 from vcell_fenics.status import (
+    COMPILING,
     JOB_COMPLETED,
     JOB_DATA,
     JOB_FAILURE,
     JOB_PROGRESS,
     JOB_STARTING,
+    LOADING,
+    MESHING,
+    PHASES,
+    SOLVING,
+    WRITING,
     Fanout,
     MessagingConfig,
     RestWorkerEvents,
@@ -72,6 +81,16 @@ def vcell_parse(message: str) -> tuple[str, float]:
     raise RuntimeError("unrecognized message")
 
 
+def vcell_phase(message: str) -> str | None:
+    """`FenicsSolver.progressPhase` (VCell with phase support): the text between `progress:` and the last
+    ':' of a progress marker, or None for a bare `progress:NN.N%`."""
+
+    if not message.startswith("progress:"):
+        return None
+    body = message[len("progress:") : message.rindex(":")] if message.count(":") > 1 else ""
+    return body or None
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -116,6 +135,121 @@ def test_progress_is_throttled_but_data_is_not() -> None:
     for k in range(5):
         markers.data(float(k), 0.5)
     assert sum(m.startswith("data") for m in vcell_scan(stream.getvalue())) == 5
+
+
+def test_phase_markers_parse_in_an_older_vcell_and_name_the_phase_in_a_newer_one() -> None:
+    """`[[[progress:<phase>:NN.N%]]]` is still a progress marker to a VCell that predates phases (it takes
+    the number between the last ':' and the '%'); a newer one also reads the phase."""
+
+    from io import StringIO
+
+    stream, clock = StringIO(), _Clock()
+    markers = StdoutMarkers(stream, clock=clock)
+    markers.starting()
+    markers.phase(LOADING, 0.0, 0.0)
+    markers.phase(MESHING, 0.0, 0.0)
+    markers.phase(COMPILING, 0.0, 0.0)
+    markers.phase(SOLVING, 0.0, 0.0)
+    clock.now = 2.0
+    markers.progress(0.37, 0.37)
+    markers.data(0.5, 0.5)  # its progress marker is throttled (within 1 s)
+    markers.phase(WRITING, 1.0, 1.0)
+    markers.completed(1.0)
+    messages = vcell_scan(stream.getvalue())
+    assert [vcell_parse(m) for m in messages] == [
+        ("progress", 0.0),
+        ("progress", 0.0),
+        ("progress", 0.0),
+        ("progress", 0.0),
+        ("progress", 0.0),
+        ("progress", 0.37),
+        ("data", 0.5),
+        ("progress", 1.0),
+        ("progress", 1.0),
+    ]
+    assert [vcell_phase(m) for m in messages] == [
+        None,
+        "loading model",
+        "meshing",
+        "compiling",
+        "solving",
+        "solving",
+        None,
+        "writing results",
+        None,  # completion is the plain 100% marker
+    ]
+
+
+def test_a_phase_change_is_never_throttled() -> None:
+    from io import StringIO
+
+    stream = StringIO()
+    markers = StdoutMarkers(stream, clock=_Clock())  # the clock never moves
+    for name in PHASES:
+        markers.phase(name, 0.0, 0.0)
+    assert [vcell_phase(m) for m in vcell_scan(stream.getvalue())] == list(PHASES)
+
+
+def test_a_phase_cannot_break_the_marker() -> None:
+    from io import StringIO
+
+    stream = StringIO()
+    StdoutMarkers(stream).phase("odd: 50% [x]]]\nname", 0.5, 0.0)
+    (message,) = vcell_scan(stream.getvalue())
+    assert vcell_parse(message) == ("progress", 0.5)
+    assert vcell_phase(message) == "odd 50 x name"
+
+
+def test_phased_progress_reports_phases_in_order() -> None:
+    """The runner's view: setup phases at 0%, the first step enters solving, progress is the fraction of
+    simulated time, writing results at 100%."""
+
+    events: list[tuple[str, object, float, float]] = []
+
+    class Recorder:
+        def starting(self) -> None:
+            events.append(("starting", None, 0.0, 0.0))
+
+        def phase(self, name: str, fraction: float, t: float) -> None:
+            events.append(("phase", name, fraction, t))
+
+        def progress(self, fraction: float, t: float) -> None:
+            events.append(("progress", None, fraction, t))
+
+        def data(self, t: float, fraction: float) -> None:
+            events.append(("data", None, fraction, t))
+
+        def completed(self, t: float) -> None:
+            events.append(("completed", None, 1.0, t))
+
+        def failed(self, message: str, t: float, fraction: float) -> None:
+            events.append(("failed", message, fraction, t))
+
+    status = _PhasedProgress(Recorder(), t_final=2.0)
+    status.phase(MESHING)
+    status.phase(COMPILING)
+    status.row(0.0)  # the initial state is written before any step
+    status.step(0.5)
+    status.step(1.0)
+    status.row(1.0)
+    status.step(2.0)
+    status.phase(WRITING)
+    assert events == [
+        ("phase", "meshing", 0.0, 0.0),
+        ("phase", "compiling", 0.0, 0.0),
+        ("data", None, 0.0, 0.0),
+        ("phase", "solving", 0.25, 0.5),
+        ("progress", None, 0.5, 1.0),
+        ("data", None, 0.5, 1.0),
+        ("progress", None, 1.0, 2.0),
+        ("phase", "writing results", 1.0, 2.0),
+    ]
+    rows_only: list[tuple[str, object, float, float]] = []
+    events = rows_only
+    status = _PhasedProgress(Recorder(), t_final=2.0)
+    status.row(0.0)
+    status.row(1.0)  # an integrator that reports only rows still enters solving
+    assert rows_only == [("data", None, 0.0, 0.0), ("phase", "solving", 0.5, 1.0), ("data", None, 0.5, 1.0)]
 
 
 def test_a_stray_close_token_silences_the_vcell_scanner() -> None:
@@ -170,6 +304,39 @@ def test_progress_url_matches_the_langevin_client() -> None:
         "2.0",
     )
     assert "WorkerEvent_StatusMsg" not in query
+
+
+def test_progress_events_carry_the_phase_as_a_serialized_simulation_message() -> None:
+    """`WORKEREVENT_PROGRESS|<phase>` is what VCell's `WorkerEventMessage` turns into the job's status
+    message (`SimulationMessage.fromSerializedMessage`), in every VCell that has the broker."""
+
+    sent: list[str] = []
+
+    def opener(request: urllib.request.Request, timeout: float) -> contextlib.nullcontext[None]:
+        sent.append(request.full_url)
+        return contextlib.nullcontext()
+
+    clock = _Clock()
+    events = RestWorkerEvents(_CONFIG, opener=opener, clock=clock, hostname="node07")
+    events.progress(0.0, 0.0)  # before any phase: the bare number, as before
+    for name in (LOADING, MESHING, COMPILING, SOLVING):
+        events.phase(name, 0.0, 0.0)  # never throttled
+    events.progress(0.2, 0.2)  # within 5 s of the last: throttled
+    clock.now = 10.0
+    events.progress(0.37, 0.37)
+    events.phase(WRITING, 1.0, 1.0)
+    events.completed(1.0)
+    queries = [dict(_query(url)) for url in sent]
+    assert [(q["WorkerEvent_Status"], q.get("WorkerEvent_StatusMsg"), q["WorkerEvent_Progress"]) for q in queries] == [
+        ("1001", None, "0.0"),
+        ("1001", "WORKEREVENT_PROGRESS|loading model", "0.0"),
+        ("1001", "WORKEREVENT_PROGRESS|meshing", "0.0"),
+        ("1001", "WORKEREVENT_PROGRESS|compiling", "0.0"),
+        ("1001", "WORKEREVENT_PROGRESS|solving", "0.0"),
+        ("1001", "WORKEREVENT_PROGRESS|solving", "0.37"),
+        ("1001", "WORKEREVENT_PROGRESS|writing results", "1.0"),
+        ("1003", None, "1.0"),
+    ]
 
 
 def test_failure_message_is_sanitized_and_truncated() -> None:
@@ -281,6 +448,8 @@ def test_print_status_stdout_is_markers_only(tmp_path: Path) -> None:
     parsed = [vcell_parse(m) for m in messages]  # VCell would throw on anything unrecognized
     assert [t for kind, t in parsed if kind == "data"] == pytest.approx([0.0, 0.005, 0.01])
     assert parsed[0] == ("progress", 0.0) and parsed[-1] == ("progress", 1.0)
+    phases = [p for p in (vcell_phase(m) for m in messages) if p is not None]
+    assert list(dict.fromkeys(phases)) == list(PHASES)  # every phase, in order
     assert "wrote" in result.stderr  # the log went to stderr
 
 
@@ -291,6 +460,9 @@ def test_send_status_reports_the_run_to_the_broker(tmp_path: Path, broker: int) 
     statuses = [int(dict(_query(path))["WorkerEvent_Status"]) for _, path, _ in _Broker.received]
     assert statuses[0] == JOB_STARTING and statuses[-1] == JOB_COMPLETED
     assert JOB_DATA in statuses and JOB_FAILURE not in statuses
+    messages = [dict(_query(path)).get("WorkerEvent_StatusMsg") for _, path, _ in _Broker.received]
+    phases = [m.split("|", 1)[1] for m in messages if m and m.startswith("WORKEREVENT_PROGRESS|")]
+    assert list(dict.fromkeys(phases)) == list(PHASES)
     last = dict(_query(_Broker.received[-1][1]))
     assert (last["SimKey"], last["JobIndex"], last["WorkerEvent_TimePoint"]) == ("1585623750", "0", "0.01")
 
@@ -300,7 +472,8 @@ def test_a_refused_task_reports_failure_and_exits_2(tmp_path: Path, broker: int)
     result = _cli("--simtask", str(_REFUSED), "--out", str(tmp_path), f"--vc-send-status-config={config}")
     assert result.returncode == 2
     statuses = [int(dict(_query(path))["WorkerEvent_Status"]) for _, path, _ in _Broker.received]
-    assert statuses == [JOB_STARTING, JOB_FAILURE]
+    assert statuses == [JOB_STARTING, JOB_PROGRESS, JOB_FAILURE]  # refused while loading the model
+    assert dict(_query(_Broker.received[1][1]))["WorkerEvent_StatusMsg"] == "WORKEREVENT_PROGRESS|loading model"
     assert "non-spatial" in dict(_query(_Broker.received[-1][1]))["WorkerEvent_StatusMsg"]
 
 

@@ -51,7 +51,7 @@ from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_ge
 from vcell_fenics.formalism.schema import REGION_SPACE
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
 from vcell_fenics.results.schema import DomainKind
-from vcell_fenics.status import NullReporter, StatusReporter
+from vcell_fenics.status import COMPILING, MESHING, SOLVING, WRITING, NullReporter, StatusReporter
 
 
 class RunError(Exception):
@@ -129,8 +129,9 @@ def run_model(
 ) -> dict[str, Any]:
     """Realize, integrate, and write the bundle ``out_dir/<prefix>.fenics``. Returns the summary.
     ``flag_overrides`` records which settings an explicit flag took over from the model (manifest
-    ``solver.overrides``); ``status`` hears progress during the solve and a data event per written row
-    (ADR 011 §4) — starting/completed/failed are the caller's, since they bracket more than the solve."""
+    ``solver.overrides``); ``status`` hears each phase (meshing, compiling, solving, writing results),
+    progress during the solve and a data event per written row (ADR 011 §4) — starting/completed/failed
+    are the caller's, since they bracket more than the solve."""
 
     # The model's shape (and any refusal of it) is settled before anything is written.
     moving = _moving_subdomains(model)
@@ -158,8 +159,8 @@ def run_model(
         write_fields=write_fields,
     )
     recorder = BundleRecorder(writer, comm=comm)
-    reporter: StatusReporter = status if status is not None else NullReporter()
-    recorder.on_row(lambda t, row: reporter.data(t, t / options.t_final))
+    reporter = _PhasedProgress(status if status is not None else NullReporter(), options.t_final)
+    recorder.on_row(lambda t, row: reporter.row(t))
     run_info: dict[str, Any] = {
         "h": options.h,
         "t_final": options.t_final,
@@ -192,6 +193,7 @@ def run_model(
         writer.finalize("failed", f"{type(error).__name__}: {error}")
         raise
 
+    reporter.phase(WRITING)
     records = recorder.records
     summary: dict[str, Any] = {
         "source": model.provenance,
@@ -211,6 +213,40 @@ def run_model(
     writer.write_provenance("summary.json", json.dumps(summary, indent=2) + "\n")
     writer.finalize("completed")
     return summary
+
+
+class _PhasedProgress:
+    """The run's status, in phases: setup phases report no progress; the first time step — or the first
+    output row past t = 0, for an integrator that reports nothing else — enters *solving*, whose progress
+    is the fraction of simulated time; writing results comes at 100%."""
+
+    def __init__(self, status: StatusReporter, t_final: float) -> None:
+        self._status = status
+        self._t_final = t_final
+        self._solving = False
+
+    def phase(self, name: str) -> None:
+        fraction = 1.0 if name == WRITING else 0.0
+        self._status.phase(name, fraction, fraction * self._t_final)
+
+    def step(self, t: float) -> None:
+        """A time step reached ``t``."""
+        if self._enter_solving(t):
+            return
+        self._status.progress(t / self._t_final, t)
+
+    def row(self, t: float) -> None:
+        """An output row at ``t`` was written."""
+        if t > 0.0:
+            self._enter_solving(t)
+        self._status.data(t, t / self._t_final)
+
+    def _enter_solving(self, t: float) -> bool:
+        if self._solving:
+            return False
+        self._solving = True
+        self._status.phase(SOLVING, t / self._t_final, t)
+        return True
 
 
 def _refuse_region_variables(math: MathDescription) -> None:
@@ -242,16 +278,18 @@ def _source_info(model: ModelInput) -> SourceInfo:
 
 
 def _run_single_mesh(
-    model: ModelInput, options: RunOptions, recorder: BundleRecorder, status: StatusReporter
+    model: ModelInput, options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
 ) -> tuple[int, int, float]:
     """realize → assemble → integrate, writing a row at every output time. Returns (cells, steps, dt)."""
 
     comm = MPI.COMM_WORLD
+    status.phase(MESHING)
     log(f"realizing geometry {model.geometry.name!r} (dim {model.geometry.dim}) at h = {options.h:g}")
     with _logged_geometry_warnings():
         geometry: Geometry = realize(model.geometry, h=options.h, comm=comm)
     domain = model.math.equations[0].subdomain
     cells = mesh_cell_count(geometry.mesh_of(domain))
+    status.phase(COMPILING)
     log(f"assembling (fe_degree {options.fe_degree}, {cells} cells)")
     problem = assemble(model.math, geometry, dt=options.dt, fe_degree=options.fe_degree)
     if not isinstance(problem, DiscreteProblem):  # a CoupledGeometry cannot come out of `realize`
@@ -280,7 +318,7 @@ def _run_single_mesh(
             atol=options.atol,
             output_times=options.output_times,
             on_output=on_output,
-            on_progress=lambda t: status.progress(t / options.t_final, t),
+            on_progress=status.step,
         )
         return cells, int(result.steps), float("nan")
 
@@ -289,7 +327,7 @@ def _run_single_mesh(
         problem,
         options,
         lambda t: recorder.capture(t, progress=t / options.t_final),
-        on_step=lambda t: status.progress(t / options.t_final, t),
+        on_step=status.step,
     )
     return cells, steps, dt_max
 
@@ -305,7 +343,7 @@ def _moving_subdomains(model: ModelInput) -> list[str]:
 
 
 def _run_moving(
-    model: ModelInput, moving: list[str], options: RunOptions, recorder: BundleRecorder, status: StatusReporter
+    model: ModelInput, moving: list[str], options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
 ) -> tuple[int, int, float, int]:
     """Backward Euler through the ALE driver on the moving volume: the mesh moves with the prescribed
     velocity every step (the conservative ALE time term keeps each species' mass), remeshing when it
@@ -327,10 +365,12 @@ def _run_moving(
         raise RunError(f"the moving-boundary path is P1 (its remesh transfer is); got fe_degree {options.fe_degree}")
     if options.time_integration != "backward_euler":
         log(f"moving mesh: backward Euler with dt = {options.dt:g} (the method of lines has no moving-output path)")
+    status.phase(MESHING)
     log(f"realizing geometry {model.geometry.name!r} (dim {model.geometry.dim}) at h = {options.h:g}")
     with _logged_geometry_warnings():
         geometry: Geometry = realize(model.geometry, h=options.h, comm=comm)
     cells = mesh_cell_count(geometry.mesh_of(domain))
+    status.phase(COMPILING)
     log(f"assembling a moving problem on {domain!r} (fe_degree {options.fe_degree}, {cells} cells)")
     problem = assemble(model.math, geometry, dt=options.dt, fe_degree=options.fe_degree)
     if not isinstance(problem, DiscreteProblem) or problem.motion_velocity is None:
@@ -365,7 +405,7 @@ def _run_moving(
                         {domain: (state.problem.V.mesh, _channels(state.problem.unknown, len(names)))}
                     )
                 steps += 1
-                status.progress(state.t / options.t_final, state.t)
+                status.step(state.t)
             t, dt_max = t_out, max(dt_max, dt)
             recorder.capture(t_out, progress=t_out / options.t_final)
     except (StepTooLarge, MeshQualityError) as error:
@@ -428,7 +468,7 @@ def _is_multi_compartment(model: ModelInput) -> bool:
 
 
 def _run_multi_compartment(
-    model: ModelInput, options: RunOptions, recorder: BundleRecorder, status: StatusReporter
+    model: ModelInput, options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
 ) -> tuple[int, int]:
     """Any number of compartments and membranes, any number of species and region variables on each,
     coupled by the membrane fluxes (``integrate_multi_compartment``); every output time recorded from the
@@ -447,6 +487,7 @@ def _run_multi_compartment(
     regions = {v.name for v in model.math.variables if v.space == REGION_SPACE}
 
     comm = MPI.COMM_WORLD
+    status.phase(MESHING)
     log(
         f"realizing multi-compartment geometry {model.geometry.name!r} at h = {options.h:g}: "
         + ", ".join(f"{name} ({kinds.get(name, '?')})" for name in variables)
@@ -464,6 +505,7 @@ def _run_multi_compartment(
             f"subdomain(s) {missing} carry equations but geometry {model.geometry.name!r} realizes no "
             f"cells or membrane facets for them at h = {options.h:g}"
         )
+    status.phase(COMPILING)  # the integrator compiles and assembles its forms before the first step
     for name, names in variables.items():
         kind: DomainKind = "volume" if name in geometry.compartments else "membrane"
         recorder.add_domain(name, kind, geometry.mesh_of(name), [(variable, None) for variable in names])
@@ -499,7 +541,7 @@ def _run_multi_compartment(
         atol=options.atol,
         output_times=options.output_times,
         on_output=on_output,
-        on_progress=lambda t: status.progress(t / options.t_final, t),
+        on_progress=status.step,
     )
     return cells, int(result.steps)
 
