@@ -106,7 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The image is ~3 GB and the SIF built from it ~1 GB; the hosted runner's free disk is tight.
+      # The image and the SIF built from it, side by side, strain the hosted runner's free disk.
       - name: Free disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
 
@@ -122,6 +122,24 @@ jobs:
           tags: vcell-fenics:ci
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      # Size is a deliverable too: VCell's cluster pulls the SIF onto every node, the desktop client
+      # pulls the image. Print both numbers (and the largest packages) so a PR shows what it costs.
+      - name: Image size
+        run: |
+          set -euo pipefail
+          docker image ls vcell-fenics:ci --format 'image vcell-fenics:ci {{.Size}}'
+          docker image inspect vcell-fenics:ci --format 'image bytes (uncompressed) {{.Size}}'
+          docker run --rm --entrypoint bash vcell-fenics:ci -c '
+            du -sh /app/.pixi/envs/default /opt/cache
+            echo "largest site-packages:"; du -sm /app/.pixi/envs/default/lib/python3*/site-packages/* | sort -rn | head -8
+            echo "largest lib/ entries:"; du -sm /app/.pixi/envs/default/lib/* | sort -rn | head -8'
+          {
+            echo "### Image size (${{ matrix.arch }})"
+            echo
+            echo "- image: $(docker image ls vcell-fenics:ci --format '{{.Size}}')"
+            echo "- pixi env: $(docker run --rm --entrypoint du vcell-fenics:ci -sh /app/.pixi/envs/default | cut -f1)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: The image reports the package version
         env:
@@ -182,6 +200,8 @@ jobs:
           set -euxo pipefail
           apptainer build "$RUNNER_TEMP/vcell-fenics.sif" docker-daemon://vcell-fenics:ci
           apptainer inspect "$RUNNER_TEMP/vcell-fenics.sif" > /dev/null
+          echo "SIF size: $(du -h "$RUNNER_TEMP/vcell-fenics.sif" | cut -f1)"
+          echo "- SIF: $(du -h "$RUNNER_TEMP/vcell-fenics.sif" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
           work="$RUNNER_TEMP/sif"; mkdir -p "$work"
           apptainer run --containall --bind "$work:$work" "$RUNNER_TEMP/vcell-fenics.sif" \
             vcell-fenics --simtask "$SIMTASK" --out "$work" --vc-print-status > "$work/markers.txt"
