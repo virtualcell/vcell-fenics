@@ -85,7 +85,7 @@ def test_the_cell_translates_with_its_front_and_keeps_its_mass(
 
     # stdout carries status markers only (VCell's scanner), one data marker per row; the CLI writes them
     # to a duplicate of file descriptor 1, so capture at that level
-    out = capfd.readouterr().out.split()
+    out = capfd.readouterr().out.splitlines()
     assert out
     assert all(line.startswith("[[[") and line.endswith("]]]") for line in out)
     assert sum(line.startswith("[[[data:") for line in out) == 11
