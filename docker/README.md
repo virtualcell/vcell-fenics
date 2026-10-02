@@ -13,7 +13,7 @@ x86-64 and on arm64 (Apple silicon, Graviton); both platforms are in the lock.
 
 ### If the build fails part-way through the download
 
-The environment is ~700 conda packages, and a flaky or filtered egress path shows up as a
+The environment is ~260 conda packages plus a few PyPI wheels, and a flaky or filtered egress path shows up as a
 *late* `failed to fetch <some package>` / `tcp connect error` rather than an immediate error —
 a different package each time, which is the tell that the lock is fine and the network is not.
 The build already limits itself to 8 concurrent connections and retries four times, resuming
@@ -212,6 +212,39 @@ was chosen:
   Euler. It integrates nonlinear reactions directly and controls its own time error, but has
   no output-time hook, so it writes the final state only.
 - `--fe-degree 2` — quadratic elements.
+
+## What the image carries
+
+The image is the `default` pixi environment and nothing else: no apt layer, no pixi binary.
+It used to be 5.5 GB, nearly all of it a graphics stack the solver never touched. Three
+dependency choices keep it out (see the comments in `pyproject.toml`):
+
+- **VTK from PyPI, not conda-forge.** conda-forge's `vtk-base` is built only against Qt, and
+  pulls in Qt 6, viskores → mesalib → LLVM, and `vtk-io-ffmpeg` → ffmpeg and its codecs: about
+  3 GB in all. The solver uses only VTK's data model, SurfaceNets (image geometries) and the VTU
+  writer (the results bundle). The PyPI wheel links nothing beyond glibc/libstdc++ (it would
+  dlopen X/EGL/OSMesa only to render). The `dev` environment uses the same wheel; its pyvista
+  comes from PyPI too, so no environment ever holds two VTKs.
+- **Netgen's OpenCASCADE is the `novtk` build.** The default `occt` build depends on conda VTK,
+  which would bring the whole stack above back.
+- **No plotting at run time.** pyvista and full `matplotlib` (whose conda package pulls pyside6
+  → Qt 6 + libclang/LLVM) are `dev`-only. `matplotlib-base` stays, without Qt, because the PyPI
+  `vtk` wheel declares matplotlib as a requirement.
+
+After installing, the build also deletes files nothing at run time reads
+(`docker/prune_runtime_env.py`):
+
+- **VTK libraries the solver doesn't load.** The script scans `src/` for `vtkmodules.*` imports,
+  imports them in a fresh interpreter, keeps every VTK shared object the loader mapped
+  (`/proc/self/maps`) and deletes the rest of the wheel's (~640 → ~260 MB). It then re-imports
+  them against the pruned tree, so a new `vtkmodules` import in `src/` is picked up by the next
+  build, and a miss fails the build instead of a run.
+- **The Boost and OpenCASCADE C++ headers.** FFCx JIT-compiles *C* kernels that include only
+  `ufcx.h` and the C library. The compiler toolchain (gcc, binutils, the sysroot) stays, because
+  DOLFINx compiles forms at run time.
+
+`vcell_fenics.viz` still imports in the image (its XDMF writers work); only `quick_plot` needs
+pyvista. The image-build CI job prints the image size and the environment's `du` for each build.
 
 ## Scope
 

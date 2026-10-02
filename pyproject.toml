@@ -56,6 +56,14 @@ vcell-fenics = { path = ".", editable = true }
 # (VolumeRegionEquation / MembraneRegionEquation: well-mixed species, membrane potential; #188)
 # and the species-mapping WellMixed/ForceConstant flags.
 pyvcell = ">=0.4.1,<0.5"
+# VTK from PyPI, not conda-forge. We use only data-model, filter and XML-writer modules
+# (vtkSurfaceNets2D/3D for image geometries in backend/label_surfaces.py, vtkXMLUnstructuredGridWriter
+# for the bundle's VTU meshes in results/vtu.py). conda-forge's vtk-base is built only against Qt
+# (plus viskores/mesalib/LLVM and ffmpeg); the PyPI wheel links nothing beyond glibc and libstdc++
+# (it dlopens X/EGL/OSMesa only when something actually renders). One VTK for every environment:
+# the dev feature's pyvista is also from PyPI, so it reuses this wheel — never add conda
+# `vtk`/`vtk-base`/`pyvista` alongside it (two VTKs in one env). See docker/README.md.
+vtk = "==9.6.*"
 
 [tool.pixi.dependencies]
 # Pin Python >= 3.12 across platforms (it is otherwise unconstrained, so platforms
@@ -81,9 +89,11 @@ dolfinx_mpc = "*"                  # multi-point constraints (periodic BCs, slip
 # remesher, none of which are on the pyvcell-integration path.
 meshio = "*"
 
-# Visualization
-matplotlib = "*"
-pyvista = "*"
+# Plotting/visualization (pyvista, full matplotlib) is NOT here: nothing the runner imports needs
+# it, and conda-forge's `matplotlib` drags in pyside6 → Qt 6 + libclang/LLVM. It lives in the dev
+# feature below. `matplotlib-base` (no Qt) is here only because PyPI `vtk` declares matplotlib as a
+# requirement — this satisfies it from conda-forge without a GUI toolkit.
+matplotlib-base = "*"
 
 # Numerics
 numpy = "*"
@@ -97,8 +107,12 @@ scikit-image = "*"
 # package so pyvcell's pydantic requirement resolves from conda-forge, not a PyPI wheel.
 pydantic = ">=2.10,<3"
 netgen = ">=6.2.2602,<7"
+# Netgen's OpenCASCADE, the build *without* VTK: the default ("all") occt build depends on
+# conda-forge VTK, which exists there only as a Qt build (vtk-base → qt6-main, viskores → mesalib →
+# LLVM, vtk-io-ffmpeg → ffmpeg …) — most of the container image. Netgen uses OCC's geometry kernel,
+# never its VTK bridge.
+occt = { version = "*", build = "novtk*" }
 zarr = ">=3.1,<4"
-vtk = "9.6.*"
 
 [tool.pixi.feature.dev.dependencies]
 pytest = "*"
@@ -113,10 +127,19 @@ mypy = "*"
 gmsh = "*"
 python-gmsh = "*"
 types-pyyaml = ">=6.0.12.20260518,<7"
+# Plotting: full matplotlib (with its Qt backend, for interactive use). Dev-only, like pyvista
+# (PyPI, below): the runner imports neither.
+matplotlib = "*"
 # For running the demo notebooks in docs/notebooks/ (`pixi run -e dev notebooks`).
 # ipykernel makes the dev env's Python the notebook kernel.
 jupyterlab = "*"
 ipykernel = "*"
+
+[tool.pixi.feature.dev.pypi-dependencies]
+# In-process rendering (vcell_fenics.viz, the notebooks, examples). From PyPI, on the default env's
+# PyPI VTK wheel — conda-forge pyvista would pull conda vtk-base (Qt) back in next to it. See the
+# `vtk` comment in [tool.pixi.pypi-dependencies].
+pyvista = ">=0.48,<0.50"
 
 # Approach D (cut/trace FEM via CutFEMx) is intentionally NOT defined here yet.
 # CutFEMx v0.1.0 targets DOLFINx 0.9 (not 0.10) and is source-only; it will

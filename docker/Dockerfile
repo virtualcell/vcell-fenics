@@ -33,16 +33,16 @@ WORKDIR /app
 RUN printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
 
 # Manifest + lock only, plus a stub package so the editable `vcell-fenics` pypi-dependency has
-# something to install against. This keeps the expensive layer (~2 GB of conda packages) keyed
-# on the lock alone: editing solver code rebuilds in seconds, not minutes.
+# something to install against. This keeps the expensive layer (the conda packages and PyPI
+# wheels) keyed on the lock alone: editing solver code rebuilds in seconds, not minutes.
 COPY pyproject.toml pixi.lock README.md LICENSE.md ./
 RUN mkdir -p src/vcell_fenics && touch src/vcell_fenics/__init__.py src/vcell_fenics/py.typed
 
 # The cache mount keeps downloaded packages across builds; `--locked` fails loudly if
 # pyproject.toml and pixi.lock have drifted apart, rather than silently re-solving.
 #
-# `--concurrent-downloads 8` (pixi defaults to 50): this environment is ~700 packages and
-# several GB, and 50 simultaneous connections is enough to trip connection limits on corporate
+# `--concurrent-downloads 8` (pixi defaults to 50): this environment is ~260 packages and
+# ~2 GB, and 50 simultaneous connections is enough to trip connection limits on corporate
 # NAT/proxies and on Docker Desktop's VM network — which surfaces as a *late* `tcp connect
 # error` partway through, not as an immediate failure. The retry loop then resumes from the
 # cache mount rather than re-downloading, and a genuinely broken build still fails after the
@@ -64,15 +64,24 @@ RUN pixi shell-hook --environment default --shell bash > /opt/activate.sh
 # time, so replacing the tree here is all that is needed — no reinstall.
 COPY src/ ./src/
 
+# Drop what the solver never loads: the VTK shared libraries outside what src/'s vtkmodules
+# imports actually map (the PyPI wheel is all of VTK; we use SurfaceNets and the XML writer), and
+# the Boost/OpenCASCADE C++ headers (FFCx's JIT compiles C kernels that never include them; the
+# compiler toolchain stays). The script re-imports every VTK module src/ uses after pruning, so a
+# miss fails here. It runs after `COPY src/` because the VTK keep-list is derived from the source.
+COPY docker/prune_runtime_env.py /tmp/prune_runtime_env.py
+RUN /app/.pixi/envs/default/bin/python /tmp/prune_runtime_env.py /app/.pixi/envs/default /app/src \
+ && du -sh /app/.pixi/envs/default
+
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime.
 # ---------------------------------------------------------------------------
 FROM ubuntu:${UBUNTU_VERSION} AS runtime
 
-# No apt layer on purpose. The pixi environment is self-contained down to the X/GL shared
-# objects VTK links against (conda-forge ships libglvnd/libgl/xorg-libx11 as dependencies of
-# pyvista), so the base image supplies nothing but glibc and the build needs no package
-# repository beyond conda-forge.
+# No apt layer on purpose. The pixi environment is self-contained: VTK is the PyPI wheel, which
+# links nothing beyond glibc/libstdc++ (no X, GL or Qt — it would dlopen those only to render,
+# which the solver never does), so the base image supplies nothing but glibc and the build needs no
+# package repository beyond conda-forge and PyPI.
 
 COPY --from=build /opt/activate.sh /opt/activate.sh
 COPY --from=build /app/.pixi/envs/default /app/.pixi/envs/default

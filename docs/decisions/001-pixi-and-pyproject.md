@@ -47,3 +47,11 @@ Use **Pixi** with the manifest embedded in `pyproject.toml`:
 - `.pixi/` is gitignored. `pixi.lock` is committed.
 - Pixi version at decision time: 0.68.1 (upgraded from 0.62.2 before the first install).
 - The decision to migrate from a hypothetical `environment.yml` flow was made before any environment file was written; this ADR is a forward decision, not a migration.
+- **2026-10-01 — VTK comes from PyPI, not conda-forge** (a use of the mixed conda + PyPI support
+  above). conda-forge's VTK 9.6 exists only as a Qt build, and with its viskores/mesalib/LLVM and
+  ffmpeg dependencies it made up about 3 GB of the 5.5 GB runtime image. The solver needs only
+  VTK's data model, SurfaceNets and the VTU writer, so the runtime env takes the PyPI `vtk` wheel
+  (glibc + libstdc++ only), Netgen's `occt` is pinned to its `novtk` build, and pyvista (also from
+  PyPI, on the same wheel) and full matplotlib move to the `dev` feature. Rule: never put conda
+  `vtk`/`vtk-base`/`pyvista` in an environment next to the PyPI wheel. Details: `docker/README.md`,
+  "What the image carries".

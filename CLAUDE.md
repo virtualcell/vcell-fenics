@@ -42,7 +42,7 @@ When a user asks about libraries or approaches, check the research snapshot for 
 
 ## Environment
 
-Managed by **[Pixi](https://pixi.sh/)** (≥ 0.68) with the manifest embedded in `pyproject.toml` under `[tool.pixi.*]`. Dependencies come from **conda-forge** (`fenics-dolfinx=0.10.*`, `mpich`, `petsc4py`, `scifem`, `dolfinx_mpc`, `netgen`, `zarr`, `vtk`, `pyvista`, etc.). The package is installed editably via `[tool.pixi.pypi-dependencies]` so `import vcell_fenics` works from any Pixi-run process.
+Managed by **[Pixi](https://pixi.sh/)** (≥ 0.68) with the manifest embedded in `pyproject.toml` under `[tool.pixi.*]`. Dependencies come from **conda-forge** (`fenics-dolfinx=0.10.*`, `mpich`, `petsc4py`, `scifem`, `dolfinx_mpc`, `netgen`, `zarr`, etc.); VTK (and, in `dev`, pyvista) come from **PyPI** — conda-forge VTK is Qt-only and roughly tripled the container image (see `docker/README.md`, "What the image carries"). The package is installed editably via `[tool.pixi.pypi-dependencies]` so `import vcell_fenics` works from any Pixi-run process.
 
 Platforms locked: `osx-arm64`, `linux-64`, `linux-aarch64` (the last for the container build on Apple-silicon Docker). Add platforms in `[tool.pixi.workspace].platforms` and re-solve as needed.
 

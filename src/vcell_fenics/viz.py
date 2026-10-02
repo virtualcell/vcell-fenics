@@ -8,17 +8,23 @@ Function from whatever residual expression they want.
 Long-term these will likely live under ``core/io.py`` and ``core/viz.py``
 per the architecture sketch in ``docs/modeling/approaches.md``; placed at
 the package root for now to avoid creating ``core/`` for a single file.
+
+PyVista is a dev-environment dependency only (the runtime image does not ship it), so it is
+imported inside the functions that render; the XDMF writers work in either environment.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pyvista
 from dolfinx import fem, plot
 from dolfinx.io import XDMFFile
 from mpi4py import MPI
+
+if TYPE_CHECKING:
+    import pyvista
 
 
 def _function_to_pyvista(field: fem.Function) -> pyvista.UnstructuredGrid:
@@ -27,6 +33,8 @@ def _function_to_pyvista(field: fem.Function) -> pyvista.UnstructuredGrid:
     Uses ``dolfinx.plot.vtk_mesh`` so higher-order elements are linearized
     in a viz-only sense; values at the linear vertices are correct.
     """
+    import pyvista
+
     # vtk_mesh accepts a FunctionSpace at runtime; the stub only types Mesh.
     topology, cell_types, geometry = plot.vtk_mesh(field.function_space)  # type: ignore[arg-type]
     grid = pyvista.UnstructuredGrid(topology, cell_types, geometry)
@@ -53,6 +61,8 @@ def quick_plot(
     Returns the Plotter so callers can compose additional actors before
     re-rendering if needed.
     """
+    import pyvista
+
     grid = _function_to_pyvista(field)
     off_screen = bool(screenshot) and not show
     plotter = pyvista.Plotter(off_screen=off_screen, window_size=list(window_size))
