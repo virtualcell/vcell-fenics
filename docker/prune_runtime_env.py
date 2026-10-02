@@ -54,7 +54,9 @@ def vtk_modules_used(src: Path) -> list[str]:
 
 
 def loaded_vtk_objects(python: Path, modules: list[str]) -> set[Path]:
-    out = subprocess.run([str(python), "-c", _PROBE, *modules], check=True, capture_output=True, text=True)
+    out = subprocess.run([str(python), "-c", _PROBE, *modules], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit(f"importing {modules} failed (exit {out.returncode}):\n{out.stderr}")
     return {Path(line).resolve() for line in out.stdout.splitlines() if line}
 
 
@@ -64,10 +66,15 @@ def mib(n: int) -> str:
 
 def prune_vtk(env: Path, src: Path) -> None:
     python = env / "bin" / "python"
-    vtk_dirs = sorted(env.glob("lib/python3*/site-packages/vtkmodules"))
-    if len(vtk_dirs) != 1:
-        raise SystemExit(f"expected exactly one vtkmodules package in {env}, found {vtk_dirs}")
-    vtk_dir = vtk_dirs[0]
+    # Ask the interpreter where vtkmodules is, rather than globbing lib/python3*: conda's python
+    # also ships a lib/python3.1 → python3.12 compatibility symlink, which a glob sees twice.
+    where = subprocess.run(
+        [str(python), "-c", "import os, vtkmodules; print(os.path.dirname(vtkmodules.__file__))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    vtk_dir = Path(where.stdout.strip()).resolve()
     modules = vtk_modules_used(src)
     if not modules:
         raise SystemExit(f"no vtkmodules imports found under {src} — refusing to prune all of VTK")
