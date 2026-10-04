@@ -7,95 +7,203 @@ The translation pipeline is
 
 The `formalism` package (schema / parser / validator) stays pure-Python with no
 FEniCSx dependency; this package is where DOLFINx enters.
+
+Submodules load lazily (PEP 562). Importing one piece, e.g. ``vcell_fenics.backend.realize`` for
+geometry realization, no longer imports the whole backend and the dependencies only its solvers
+need (e.g. ``scifem``). ``from vcell_fenics.backend import X`` works as before and loads only
+the submodule that defines ``X``. Type checkers and IDEs still see every name through the
+``TYPE_CHECKING`` imports.
 """
 
-from vcell_fenics.backend.ale import (
-    ALEState,
-    StepTooLarge,
-    run_moving_with_remeshing,
-    run_with_remeshing,
-    step_with_remeshing,
-    stride_with_remeshing,
-)
-from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
-from vcell_fenics.backend.cahn_hilliard import (
-    cahn_hilliard_free_energy,
-    iter_cahn_hilliard,
-    run_cahn_hilliard,
-    solve_cahn_hilliard,
-)
-from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
-from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
-from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
-from vcell_fenics.backend.discrete import (
-    BackwardEuler,
-    BoundaryTerm,
-    DiscreteProblem,
-    MeshQualityError,
-    Term,
-    TermKind,
-)
-from vcell_fenics.backend.fsi import (
-    enclosed_volume,
-    step_force_balance_fsi,
-    step_prescribed_fsi,
-    step_two_phase_fsi,
-    step_two_phase_fsi_with_nonlinear_species,
-    step_two_phase_fsi_with_reacting_species,
-    step_two_phase_fsi_with_species,
-)
-from vcell_fenics.backend.geometry import (
-    BoundaryGeometry,
-    CoupledGeometry,
-    Geometry,
-    InterfaceCoupledGeometry,
-    SubdomainGeometry,
-    clear_geometries,
-    cross_validate,
-    load_geometry,
-    make_disk_geometry,
-    make_disk_membrane_geometry,
-    make_nested_disk_geometry,
-    make_structured_box_geometry,
-    make_two_bulk_membrane_geometry,
-    membrane_trace,
-    register_geometry,
-)
-from vcell_fenics.backend.interface_coupled import (
-    ForceBalanceMeshMotion,
-    InterfaceCoupledProblem,
-    InterfaceCoupledResult,
-    MembraneCoupledMeshMotion,
-    MembraneCoupledProblem,
-    MembraneCoupledResult,
-    assemble_interface_coupled,
-    assemble_membrane_coupled,
-    integrate_interface_coupled,
-    integrate_membrane_coupled,
-)
-from vcell_fenics.backend.multiphase import (
-    solve_two_phase_overdamped,
-    solve_two_phase_stokes,
-    solve_two_phase_stokes_surface_tension,
-)
-from vcell_fenics.backend.reaction_diffusion import (
-    IntegrationResult,
-    integrate_discrete_problem,
-    integrate_discrete_problem_moving,
-    integrate_discrete_problem_stride,
-    integrate_reaction_diffusion,
-)
-from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
-from vcell_fenics.backend.solver import SolverConfiguration, run
-from vcell_fenics.backend.stokes import (
-    solve_incompressible_stokes,
-    solve_incompressible_stokes_slip,
-    solve_incompressible_stokes_surface_tension,
-    solve_incompressible_stokes_traction,
-)
-from vcell_fenics.backend.stokes_hdiv import solve_incompressible_stokes_hdiv_slip
-from vcell_fenics.backend.unknown_motion import UnknownMotionProblem, assemble_unknown_motion
-from vcell_fenics.backend.weakform import WeakFormProblem, assemble_weak_form
+from __future__ import annotations
+
+import importlib
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vcell_fenics.backend.ale import (
+        ALEState,
+        StepTooLarge,
+        run_moving_with_remeshing,
+        run_with_remeshing,
+        step_with_remeshing,
+        stride_with_remeshing,
+    )
+    from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
+    from vcell_fenics.backend.cahn_hilliard import (
+        cahn_hilliard_free_energy,
+        iter_cahn_hilliard,
+        run_cahn_hilliard,
+        solve_cahn_hilliard,
+    )
+    from vcell_fenics.backend.compiler import CompileContext, CompileError, compile_expression
+    from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
+    from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
+    from vcell_fenics.backend.discrete import (
+        BackwardEuler,
+        BoundaryTerm,
+        DiscreteProblem,
+        MeshQualityError,
+        Term,
+        TermKind,
+    )
+    from vcell_fenics.backend.fsi import (
+        enclosed_volume,
+        step_force_balance_fsi,
+        step_prescribed_fsi,
+        step_two_phase_fsi,
+        step_two_phase_fsi_with_nonlinear_species,
+        step_two_phase_fsi_with_reacting_species,
+        step_two_phase_fsi_with_species,
+    )
+    from vcell_fenics.backend.geometry import (
+        BoundaryGeometry,
+        CoupledGeometry,
+        Geometry,
+        InterfaceCoupledGeometry,
+        SubdomainGeometry,
+        clear_geometries,
+        cross_validate,
+        load_geometry,
+        make_disk_geometry,
+        make_disk_membrane_geometry,
+        make_nested_disk_geometry,
+        make_structured_box_geometry,
+        make_two_bulk_membrane_geometry,
+        membrane_trace,
+        register_geometry,
+    )
+    from vcell_fenics.backend.interface_coupled import (
+        ForceBalanceMeshMotion,
+        InterfaceCoupledProblem,
+        InterfaceCoupledResult,
+        MembraneCoupledMeshMotion,
+        MembraneCoupledProblem,
+        MembraneCoupledResult,
+        assemble_interface_coupled,
+        assemble_membrane_coupled,
+        integrate_interface_coupled,
+        integrate_membrane_coupled,
+    )
+    from vcell_fenics.backend.multiphase import (
+        solve_two_phase_overdamped,
+        solve_two_phase_stokes,
+        solve_two_phase_stokes_surface_tension,
+    )
+    from vcell_fenics.backend.reaction_diffusion import (
+        IntegrationResult,
+        integrate_discrete_problem,
+        integrate_discrete_problem_moving,
+        integrate_discrete_problem_stride,
+        integrate_reaction_diffusion,
+    )
+    from vcell_fenics.backend.slip import nitsche_normal_slip, solve_overdamped_slip
+    from vcell_fenics.backend.solver import SolverConfiguration, run
+    from vcell_fenics.backend.stokes import (
+        solve_incompressible_stokes,
+        solve_incompressible_stokes_slip,
+        solve_incompressible_stokes_surface_tension,
+        solve_incompressible_stokes_traction,
+    )
+    from vcell_fenics.backend.stokes_hdiv import solve_incompressible_stokes_hdiv_slip
+    from vcell_fenics.backend.unknown_motion import UnknownMotionProblem, assemble_unknown_motion
+    from vcell_fenics.backend.weakform import WeakFormProblem, assemble_weak_form
+
+# public name -> defining submodule
+_EXPORTS: dict[str, str] = {
+    "ALEState": "vcell_fenics.backend.ale",
+    "BackwardEuler": "vcell_fenics.backend.discrete",
+    "BoundaryGeometry": "vcell_fenics.backend.geometry",
+    "BoundaryTerm": "vcell_fenics.backend.discrete",
+    "CompileContext": "vcell_fenics.backend.compiler",
+    "CompileError": "vcell_fenics.backend.compiler",
+    "CoupledGeometry": "vcell_fenics.backend.geometry",
+    "CoupledProblem": "vcell_fenics.backend.coupled",
+    "DiscreteProblem": "vcell_fenics.backend.discrete",
+    "ForceBalanceMeshMotion": "vcell_fenics.backend.interface_coupled",
+    "Geometry": "vcell_fenics.backend.geometry",
+    "IntegrationResult": "vcell_fenics.backend.reaction_diffusion",
+    "InterfaceCoupledGeometry": "vcell_fenics.backend.geometry",
+    "InterfaceCoupledProblem": "vcell_fenics.backend.interface_coupled",
+    "InterfaceCoupledResult": "vcell_fenics.backend.interface_coupled",
+    "MembraneCoupledMeshMotion": "vcell_fenics.backend.interface_coupled",
+    "MembraneCoupledProblem": "vcell_fenics.backend.interface_coupled",
+    "MembraneCoupledResult": "vcell_fenics.backend.interface_coupled",
+    "MeshQualityError": "vcell_fenics.backend.discrete",
+    "NonlinearTermError": "vcell_fenics.backend.diagnostics",
+    "SolveError": "vcell_fenics.backend.diagnostics",
+    "SolverConfiguration": "vcell_fenics.backend.solver",
+    "StepTooLarge": "vcell_fenics.backend.ale",
+    "SubdomainGeometry": "vcell_fenics.backend.geometry",
+    "Term": "vcell_fenics.backend.discrete",
+    "TermKind": "vcell_fenics.backend.discrete",
+    "UnknownMotionProblem": "vcell_fenics.backend.unknown_motion",
+    "WeakFormProblem": "vcell_fenics.backend.weakform",
+    "assemble": "vcell_fenics.backend.assemble",
+    "assemble_coupled": "vcell_fenics.backend.coupled",
+    "assemble_interface_coupled": "vcell_fenics.backend.interface_coupled",
+    "assemble_membrane_coupled": "vcell_fenics.backend.interface_coupled",
+    "assemble_unknown_motion": "vcell_fenics.backend.unknown_motion",
+    "assemble_weak_form": "vcell_fenics.backend.weakform",
+    "cahn_hilliard_free_energy": "vcell_fenics.backend.cahn_hilliard",
+    "clear_geometries": "vcell_fenics.backend.geometry",
+    "compile_expression": "vcell_fenics.backend.compiler",
+    "cross_validate": "vcell_fenics.backend.geometry",
+    "enclosed_volume": "vcell_fenics.backend.fsi",
+    "integrate_discrete_problem": "vcell_fenics.backend.reaction_diffusion",
+    "integrate_discrete_problem_moving": "vcell_fenics.backend.reaction_diffusion",
+    "integrate_discrete_problem_stride": "vcell_fenics.backend.reaction_diffusion",
+    "integrate_interface_coupled": "vcell_fenics.backend.interface_coupled",
+    "integrate_membrane_coupled": "vcell_fenics.backend.interface_coupled",
+    "integrate_reaction_diffusion": "vcell_fenics.backend.reaction_diffusion",
+    "iter_cahn_hilliard": "vcell_fenics.backend.cahn_hilliard",
+    "load_geometry": "vcell_fenics.backend.geometry",
+    "make_disk_geometry": "vcell_fenics.backend.geometry",
+    "make_disk_membrane_geometry": "vcell_fenics.backend.geometry",
+    "make_nested_disk_geometry": "vcell_fenics.backend.geometry",
+    "make_structured_box_geometry": "vcell_fenics.backend.geometry",
+    "make_two_bulk_membrane_geometry": "vcell_fenics.backend.geometry",
+    "membrane_trace": "vcell_fenics.backend.geometry",
+    "nitsche_normal_slip": "vcell_fenics.backend.slip",
+    "rebuild_on_mesh": "vcell_fenics.backend.assemble",
+    "register_geometry": "vcell_fenics.backend.geometry",
+    "run": "vcell_fenics.backend.solver",
+    "run_cahn_hilliard": "vcell_fenics.backend.cahn_hilliard",
+    "run_moving_with_remeshing": "vcell_fenics.backend.ale",
+    "run_with_remeshing": "vcell_fenics.backend.ale",
+    "solve_cahn_hilliard": "vcell_fenics.backend.cahn_hilliard",
+    "solve_incompressible_stokes": "vcell_fenics.backend.stokes",
+    "solve_incompressible_stokes_hdiv_slip": "vcell_fenics.backend.stokes_hdiv",
+    "solve_incompressible_stokes_slip": "vcell_fenics.backend.stokes",
+    "solve_incompressible_stokes_surface_tension": "vcell_fenics.backend.stokes",
+    "solve_incompressible_stokes_traction": "vcell_fenics.backend.stokes",
+    "solve_overdamped_slip": "vcell_fenics.backend.slip",
+    "solve_two_phase_overdamped": "vcell_fenics.backend.multiphase",
+    "solve_two_phase_stokes": "vcell_fenics.backend.multiphase",
+    "solve_two_phase_stokes_surface_tension": "vcell_fenics.backend.multiphase",
+    "step_force_balance_fsi": "vcell_fenics.backend.fsi",
+    "step_prescribed_fsi": "vcell_fenics.backend.fsi",
+    "step_two_phase_fsi": "vcell_fenics.backend.fsi",
+    "step_two_phase_fsi_with_nonlinear_species": "vcell_fenics.backend.fsi",
+    "step_two_phase_fsi_with_reacting_species": "vcell_fenics.backend.fsi",
+    "step_two_phase_fsi_with_species": "vcell_fenics.backend.fsi",
+    "step_with_remeshing": "vcell_fenics.backend.ale",
+    "stride_with_remeshing": "vcell_fenics.backend.ale",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module), name)
+    globals()[name] = value  # cache: later lookups bypass __getattr__
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
+
 
 __all__ = [
     "ALEState",
