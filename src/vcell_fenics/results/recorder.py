@@ -55,13 +55,22 @@ class BundleRecorder:
         self._on_row: list[Callable[[float, int], None]] = []
 
     def add_domain(
-        self, name: str, kind: DomainKind, mesh: Mesh, channels: Sequence[tuple[str, Any]], *, moving: bool = False
+        self,
+        name: str,
+        kind: DomainKind,
+        mesh: Mesh,
+        channels: Sequence[tuple[str, Any]],
+        *,
+        moving: bool = False,
+        sides: tuple[str, ...] | None = None,
     ) -> None:
         """Register a domain and its ``(variable name, default source)`` channels (collective). ``moving``:
-        an ALE domain whose mesh moves in place (see the module docstring)."""
+        an ALE domain whose mesh moves in place (see the module docstring). ``sides``: a membrane's adjacent
+        compartments, so the bundle maps its points onto theirs (:meth:`BundleWriter.add_domain`).
+        A domain may have no channels: a membrane written only for its mesh and its maps."""
 
         space = fem.functionspace(mesh, ("Lagrange", 1))
-        self._writer.add_domain(name, kind, space, moving=moving)
+        self._writer.add_domain(name, kind, space, moving=moving, sides=sides)
         for variable, _ in channels:
             self._writer.add_variable(name, variable)
         self._domains.append(self._channels(name, space, [v for v, _ in channels], [s for _, s in channels], moving))

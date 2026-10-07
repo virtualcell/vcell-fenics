@@ -2,7 +2,7 @@
 columns — the canonical P1 layout (`results/gather.py`, ADR 010 §6(f)) at work end to end.
 
 Runs the same realization + write at n=1, 2 and 3 in subprocesses (a disk with its membrane, so a
-volume *and* a surface domain) and compares the bundles.
+volume *and* a surface domain) and compares the bundles, the membrane's maps onto its sides included.
 """
 
 from __future__ import annotations
@@ -36,7 +36,8 @@ writer = BundleWriter(sys.argv[1], comm=comm, planned_times=times, source=Source
 recorder = BundleRecorder(writer, comm=comm)
 recorder.add_domain("cyto", "volume", geometry.mesh_of("cyto"), [("u", lambda x: x[0] + 2 * x[1])])
 recorder.add_domain("ext", "volume", geometry.mesh_of("ext"), [("v", lambda x: x[0] * x[1])])
-recorder.add_domain("pm", "membrane", geometry.mesh_of("pm"), [("r", lambda x: x[0] - x[1] ** 2)])
+recorder.add_domain("pm", "membrane", geometry.mesh_of("pm"), [("r", lambda x: x[0] - x[1] ** 2)],
+                    sides=("cyto", "ext"))
 recorder.open()
 for t in times:
     s = 1.0 + t
@@ -77,6 +78,12 @@ def test_bundle_is_independent_of_rank_count(tmp_path: Path, n: int) -> None:
         assert np.allclose(
             serial.stats(domain, variable.name), parallel.stats(domain, variable.name), rtol=1e-12, atol=1e-13
         )
+    # The membrane's maps onto its compartments are the serial ones, and pair coinciding points.
+    for compartment in ("cyto", "ext"):
+        serial_map, parallel_map = serial.adjacent("pm", compartment), parallel.adjacent("pm", compartment)
+        assert serial_map is not None and parallel_map is not None
+        assert np.array_equal(serial_map, parallel_map), compartment
+        assert np.array_equal(parallel.mesh(compartment).points[parallel_map], parallel.mesh("pm").points)
     # The VTU is byte-identical, not merely equal after parsing.
     for name, domain_info in serial.manifest.domains.items():
         assert (serial.path / domain_info.mesh).read_bytes() == (parallel.path / domain_info.mesh).read_bytes(), name

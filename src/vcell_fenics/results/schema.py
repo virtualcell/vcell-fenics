@@ -31,6 +31,29 @@ Profile: TypeAlias = Literal["fixed", "segmented"]
 Motion: TypeAlias = Literal["none", "ale"]
 
 
+ADJACENT_VERSION = 1
+ADJACENT_DIR = "_adjacent"  # a membrane's point maps: <prefix><membrane>/_adjacent/<compartment>
+
+
+@dataclass(frozen=True, slots=True)
+class Adjacency:
+    """A membrane's adjacent compartments and its point maps onto them (ADR 010 §3, "Membrane adjacency";
+    optional, added after schema 1 shipped — absent from older bundles).
+
+    ``compartments`` are the two compartments the membrane separates. ``maps[compartment]``, present only
+    for a compartment that is a domain of the bundle, is the segment-relative path of an int32 array
+    ``(n_points,)``: the membrane's point ``i`` is point ``map[i]`` of that compartment's mesh in the same
+    segment — the same vertex of the parent mesh, so the coordinates are identical — or ``-1`` if none.
+
+    Which compartment is VCell's "inside" or "outside" is the VCell math's (its MembraneSubDomain); the
+    bundle names compartments, not sides, so a reader resolves ``X_INSIDE`` / ``X_OUTSIDE`` there."""
+
+    __pydantic_config__ = _IGNORE_EXTRA
+    compartments: tuple[str, ...]
+    maps: dict[str, str] = field(default_factory=dict)
+    version: int = ADJACENT_VERSION
+
+
 @dataclass(frozen=True, slots=True)
 class DomainInfo:
     """One VCell domain (a CompartmentSubDomain or MembraneSubDomain) and its mesh file."""
@@ -43,6 +66,7 @@ class DomainInfo:
     n_points: int
     n_cells: int
     cell_type: int  # VTK cell type: 3 line, 5 triangle, 10 tetra
+    adjacent: Adjacency | None = None  # a membrane's sides and its point maps onto them
 
 
 @dataclass(frozen=True, slots=True)

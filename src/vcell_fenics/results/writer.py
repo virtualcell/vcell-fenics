@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import tempfile
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -38,8 +39,10 @@ from numpy.typing import NDArray
 
 from vcell_fenics.results.gather import P1Layout
 from vcell_fenics.results.schema import (
+    ADJACENT_DIR,
     SCHEMA_VERSION,
     STATS_COLUMNS,
+    Adjacency,
     DomainInfo,
     DomainKind,
     Manifest,
@@ -62,6 +65,7 @@ class _Domain:
     layout: P1Layout
     variables: list[str]
     moving: bool = False
+    sides: tuple[str, ...] | None = None  # a membrane's adjacent compartments
 
 
 COORDS = "_coords"  # a moving domain's per-row point coordinates, (T_seg, N, 3)
@@ -95,15 +99,28 @@ class BundleWriter:
 
     # -- set-up -------------------------------------------------------------------------------------
 
-    def add_domain(self, name: str, kind: DomainKind, space: fem.FunctionSpace, *, moving: bool = False) -> P1Layout:
+    def add_domain(
+        self,
+        name: str,
+        kind: DomainKind,
+        space: fem.FunctionSpace,
+        *,
+        moving: bool = False,
+        sides: tuple[str, ...] | None = None,
+    ) -> P1Layout:
         """Register a domain by its VCell name and its scalar P1 output space (collective). ``moving``: the
-        mesh moves in place (ALE) and each row records its point coordinates."""
+        mesh moves in place (ALE) and each row records its point coordinates. ``sides``: a membrane's two
+        adjacent compartments — each segment then records, for every one that is a domain of the bundle, the
+        map from the membrane's points to that compartment's (ADR 010 §3, "Membrane adjacency"). The
+        membrane and its compartments must be submeshes of one parent mesh."""
 
         if name in self._domains:
             raise ValueError(f"domain {name!r} added twice")
         _check_name(name)
+        if sides is not None and kind != "membrane":
+            raise ValueError(f"only a membrane has sides; {name!r} is a {kind}")
         layout = P1Layout(space)
-        self._domains[name] = _Domain(kind=kind, layout=layout, variables=[], moving=moving)
+        self._domains[name] = _Domain(kind=kind, layout=layout, variables=[], moving=moving, sides=sides)
         return layout
 
     @property
@@ -200,7 +217,34 @@ class BundleWriter:
                     _create(group, field_path, (n_rows, n_points), ("time", "point"), numcodecs)
                 _create(group, stats_path, (n_rows, len(STATS_COLUMNS)), ("time", "statistic"), numcodecs)
                 array_paths[(name, variable)] = (field_path, stats_path)
+            for compartment in self._adjacent(name):
+                _write_map(group, f"{prefix}{_map_path(name, compartment)}", self._map(name, compartment), numcodecs)
         return array_paths
+
+    def _adjacent(self, membrane: str) -> list[str]:
+        """The membrane's adjacent compartments that are domains of the bundle."""
+
+        sides = self._domains[membrane].sides or ()
+        return [c for c in sides if c in self._domains and self._domains[c].kind == "volume"]
+
+    def _map(self, membrane: str, compartment: str) -> NDArray[np.int32]:
+        """Each membrane point's index among the compartment's points — the point with the same parent-mesh
+        input index, so the same vertex — or -1 (rank 0)."""
+
+        keys = self._domains[membrane].layout.keys()
+        targets = self._domains[compartment].layout.keys()
+        assert keys is not None and targets is not None
+        where = np.searchsorted(targets, keys)
+        found = where < targets.size
+        found[found] = targets[where[found]] == keys[found]
+        mapped = np.where(found, where, -1).astype(np.int32)
+        if not found.all():
+            warnings.warn(
+                f"{int((~found).sum())} of {keys.size} points of membrane {membrane!r} are not points of "
+                f"{compartment!r}; they map to -1",
+                stacklevel=2,
+            )
+        return mapped
 
     def _bind_arrays(self, group: Any, array_paths: Mapping[tuple[str, str], tuple[str | None, str]]) -> None:
         for (domain, variable), (field_path, stats_path) in array_paths.items():
@@ -299,6 +343,7 @@ class BundleWriter:
                 n_points=domain.layout.n_points,
                 n_cells=domain.layout.n_cells,
                 cell_type=domain.layout.vtk_type,
+                adjacent=self._adjacency(name),
             )
             for name, domain in self._domains.items()
         }
@@ -322,6 +367,12 @@ class BundleWriter:
             updated=_now(),
         )
 
+    def _adjacency(self, name: str) -> Adjacency | None:
+        sides = self._domains[name].sides
+        if sides is None:
+            return None
+        return Adjacency(compartments=sides, maps={c: _map_path(name, c) for c in self._adjacent(name)})
+
     def _require_manifest(self) -> Manifest:
         if self._manifest is None:
             raise RuntimeError("BundleWriter.open() must be called before write()")
@@ -343,7 +394,8 @@ class BundleWriter:
 
         manifest = self._require_manifest()
         directory = self.path if root is None else root
-        document = json.dumps(manifest_to_attrs(manifest), indent=1, sort_keys=True)
+        # Not sorted: `domains` keeps registration order, which readers take as the default (compartments first).
+        document = json.dumps(manifest_to_attrs(manifest), indent=1)
         handle, temp = tempfile.mkstemp(dir=directory, prefix=".zattrs.", suffix=".tmp")
         try:
             with os.fdopen(handle, "w") as stream:
@@ -352,6 +404,27 @@ class BundleWriter:
         except BaseException:
             Path(temp).unlink(missing_ok=True)
             raise
+
+
+def _map_path(membrane: str, compartment: str) -> str:
+    return f"{membrane}/{ADJACENT_DIR}/{compartment}"
+
+
+def _write_map(group: Any, path: str, values: NDArray[np.int32], numcodecs: Any) -> None:
+    """A membrane's point map onto one side: int32 ``(n_points,)`` in one chunk, written at once."""
+
+    array = group.create_array(
+        path,
+        shape=values.shape,
+        chunks=values.shape if values.size else (1,),
+        dtype="<i4",
+        compressors=numcodecs.Zlib(level=1),
+        fill_value=-1,
+        order="C",
+    )
+    array.attrs["_ARRAY_DIMENSIONS"] = ["point"]
+    if values.size:
+        array[:] = values
 
 
 def _create(group: Any, path: str, shape: tuple[int, ...], dims: tuple[str, ...], numcodecs: Any) -> None:
@@ -375,7 +448,7 @@ def _check_name(name: str) -> None:
         not name
         or "/" in name
         or name.startswith(".")
-        or name in ("mesh", "stats", "provenance", COORDS)
+        or name in ("mesh", "stats", "provenance", COORDS, ADJACENT_DIR)
         or _SEGMENT_DIR.match(name)
     ):
         raise ValueError(f"{name!r} cannot name a bundle domain or variable")

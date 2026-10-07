@@ -58,6 +58,7 @@ class P1Layout:
         gathered_cells = self._comm.gather(key[dofs[:n_cells_owned]], root=0)
 
         self._order: NDArray[np.int64] | None = None
+        self._keys: NDArray[np.int64] | None = None
         self._points: NDArray[np.float64] | None = None
         self._cells: NDArray[np.int64] | None = None
         n_points = n_cells = 0
@@ -68,6 +69,7 @@ class P1Layout:
             sorted_keys = keys[self._order]
             if sorted_keys.size > 1 and not np.all(np.diff(sorted_keys) > 0):
                 raise RuntimeError("P1 point keys are not unique across ranks")
+            self._keys = sorted_keys
             self._points = np.concatenate(gathered_coords)[self._order]
             cell_keys = np.concatenate(gathered_cells)
             positions = np.searchsorted(sorted_keys, cell_keys)
@@ -85,6 +87,12 @@ class P1Layout:
         """(n_points, gdim) coordinates in canonical order — rank 0 only."""
 
         return self._points
+
+    def keys(self) -> NDArray[np.int64] | None:
+        """(n_points,) each point's mesh-input index, in canonical (increasing) order — rank 0 only. Two
+        submeshes of one parent mesh share the parent's input indices, so equal keys are the same vertex."""
+
+        return self._keys
 
     def cells(self) -> NDArray[np.int64] | None:
         """(n_cells, tdim + 1) canonical point indices — rank 0 only."""

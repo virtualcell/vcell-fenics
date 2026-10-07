@@ -87,6 +87,19 @@ class Bundle:
             points = np.pad(points, ((0, 0), (0, 3 - points.shape[1])))
         return points
 
+    def adjacent(self, membrane: str, compartment: str, row: int | None = None) -> NDArray[np.int32] | None:
+        """The membrane's point map onto an adjacent ``compartment``, for the segment holding ``row``
+        (default: the first): point ``i`` of the membrane is point ``map[i]`` of the compartment's mesh, or
+        -1. ``None`` when the bundle records no such map (an older writer, or the compartment is not a domain
+        of the bundle)."""
+
+        adjacency = self.manifest.domains[membrane].adjacent
+        if adjacency is None or compartment not in adjacency.maps:
+            return None
+        prefix = self.segment_of(row)[0].prefix if row is not None else self.manifest.segments[0].prefix
+        values: NDArray[np.int32] = np.asarray(self._array(prefix + adjacency.maps[compartment])[:], dtype=np.int32)
+        return values
+
     def field(self, domain: str, variable: str, row: int) -> NDArray[np.float64]:
         """The P1 values of ``variable`` at output row ``row`` (the point order of that row's mesh)."""
 
