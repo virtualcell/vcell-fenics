@@ -68,6 +68,13 @@ VCell's geometry.** The concrete mesh is a *derived realization*, not the SOT.
    free from OCC booleans on primitives. Image-to-mesh, when it lands, uses an existing tool or
    libvcell, not bespoke code.
 
+   *Implementation note (2026-10-08):* the engine became **Netgen** (LGPL) under ADR 008; the
+   decision above stands with that substitution. Analytic and CSG subvolumes are realized not by
+   OCC booleans but by lowering the predicate to a Rvachev implicit field, extracting its boundary
+   (marched in 2D, marching cubes in 3D, or rasterized by VCell's priority rule and projected onto
+   the exact implicit functions when a shape touches the box) and meshing body-fitted with Netgen;
+   image subvolumes go through the smoothed label field of ADR 012. `src/` is gmsh-free.
+
 4. **The formalism is the committed SOT now; capabilities grow incrementally.** We do not build
    every realization backend at once (image meshing in particular is deferred), but the *spec* and
    its VCell importer are built first, so the geometry side mirrors the math side: a validated,

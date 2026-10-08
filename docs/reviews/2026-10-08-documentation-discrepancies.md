@@ -58,6 +58,14 @@ spatial T4 is a field without transport, not necessarily a well-mixed pool; regi
 path and connected-region restrictions; the single-mesh affine BE lowering still rejects nonlinear terms.
 “Nonlinear backward Euler is impossible” would be incorrect: the dedicated FSI driver has a Newton BE path.
 
+**Closure (2026-10-08, PR #213):** §3.6.1's list is now “Outside the DOLFINx backend as of 2026-10-08”
+with only true items (T3; point-subdomain T4; T6–T8; nonlinear sources under backward Euler only;
+value-equality; membrane species on a moving membrane; prescribed displacement; region maps; the full
+SolverConfiguration). The false “no `t` handle” and “output snapshots punted” statements are replaced
+by what exists, the multi-compartment solver is named as the runner's route, and §3.6.2's conformance
+statement matches the overview's matrix. Open: none for the document; the backend gaps it lists are
+roadmap items.
+
 ## D03 — T5 has two meanings in the same formalism
 
 **Location:** [declarative formalism](../modeling/declarative-formalism.md), §1.4.2 names T5
@@ -68,7 +76,13 @@ path and connected-region restrictions; the single-mesh affine BE lowering still
 the proposed mechanics templates are not registered there.
 
 **Action:** use stable semantic names for proposed mechanics families until numbering is settled; then
-update all numeric references together. This review does not rename schema keys or allocate new IDs.
+update all numeric references together.
+
+**Closure (2026-10-08, PR #213):** the user chose to renumber. The proposed mechanics templates are
+**T6 Stokes / Navier–Stokes, T7 linear elasticity, T8 hyperelasticity** in every formalism reference
+(§1.1.5, §1.2.3, §1.4.3, §1.5.1, §1.8.5, §1.10, §1.11.9, §3.5, §3.6, Appendices A and B), in the
+overview, in ADR 004 (dated note), and in the `schema.py` / `weakform.py` docstrings. T5 is `region_ode`
+only. No schema key changed; `cahn_hilliard` stays un-numbered and is now listed with the templates.
 
 ## D04 — Production meshing descriptions still name gmsh
 
@@ -87,6 +101,14 @@ The former gmsh region mesher lives under [tests/gmsh_meshers](../../tests/gmsh_
 **Action:** update operational recipes and source paths to Netgen; annotate historical ADRs with dated
 implementation follow-ups. Retain the specific `fix_boundary_nodes` limitation rather than promising
 all gmsh fast paths. This finding concerns repository dependency policy, not a new legal assessment.
+
+**Closure (2026-10-08, PR #213):** the geometric formalism's §1 table, §3.2, §5 and §6 now describe
+the realization as built (Rvachev implicit field → extracted boundary → Netgen; `csg` trees not yet
+realized, which the old text hid behind “gmsh OCC”); `approaches.md`'s tree and remesher paragraph
+name `region_remesh_netgen.py` and `remesh_3d.py` and state that `fix_boundary_nodes` is unavailable;
+the ALE driver note's pseudocode, subtlety 3 and dependency table say Netgen; ADR 007 carries an
+implementation note and ADR 008 dated follow-ups (§4 migration complete, §6 pinch robustness settled,
+3D productized, consequences updated). ADR 007's and 008's decisions are unchanged.
 
 ## D05 — Remeshing scope has outgrown the original notes
 
@@ -109,6 +131,14 @@ The [integration tracker](../integration/vcell-solver-integration.md), “3D mov
 interpolation plus global mass correction. The 3D path is not a 3D conservative surface-supermesh
 implementation. `_remesh` explicitly refuses a moving 3D surface mesh; genuine topology changes and
 Approach-A trace physics must not be inferred from bulk remeshing support.
+
+**Closure (2026-10-08, PR #213):** the ALE driver note's status paragraph lists the three built cases
+(2D membrane, 2D bulk, 3D bulk) with their transfer mechanisms and what is not built (moving 3D
+surface, BCs across a remesh, the Approach-A trace); its dependency table gains the 3D remesher and 3D
+transfer rows and the test files; the verification plan names the tests that implement it. The
+surface-remap note and `approaches.md` no longer defer the driver and state that the 3D bulk transfer
+is interpolation plus a global rescale (supermesh deferred). Open: the 3D supermesh and the
+Approach-A trace physics, both design work.
 
 ## D06 — The multiphase note calls implemented dynamic FSI work outstanding
 
@@ -141,6 +171,12 @@ for relative advection, and an integrated-by-parts lab-frame flux using carrier 
 **Action:** specify carrier velocity, mesh velocity, concentration measure and boundary flux convention
 together. Preserve ADR 009's decision to defer unifying FSI's inline transport with `assemble()`;
 conceptual agreement does not mean the discrete time terms or drivers are interchangeable.
+
+**Closure (2026-10-08, PR #213):** §3.6.1's `relative_advection` bullet is replaced by a “Transport
+on a moving mesh” bullet that declares carrier, mesh velocity, measure and boundary-flux convention
+together, documents both slots (`relative_advection` in conservation form; lab-frame `advection`, T1
+single-mesh only, exclusive with the former), where the dilution lives on the backward-Euler path, and
+why the FSI inline transport stays separate. §1.4.2 T1 already had the slot semantics and is unchanged.
 
 ## D08 — Diagnostics are described as unbuilt despite implemented checks
 

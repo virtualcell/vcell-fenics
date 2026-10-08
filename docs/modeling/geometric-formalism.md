@@ -41,8 +41,8 @@ A subvolume is a named volume region. Its membership is defined by one of four *
 | type | defined by | realization |
 |---|---|---|
 | `compartmental` | nothing — the whole (non-spatial) domain | a trivial well-mixed cell (§3.2) |
-| `analytic` | `expression` — a **boolean predicate** over `geom.x` (the region where it is *true*), e.g. `geom.x[0]**2 + geom.x[1]**2 < 1` | gmsh OCC if it is a primitive/CSG shape, else a level-set via the Rvachev lowering (§3.2, §3.5) |
-| `csg` | a constructive-solid-geometry tree of primitives + booleans | gmsh OCC (§3.2) |
+| `analytic` | `expression` — a **boolean predicate** over `geom.x` (the region where it is *true*), e.g. `geom.x[0]**2 + geom.x[1]**2 < 1` | the Rvachev lowering to an implicit field, its boundary extracted and meshed body-fitted with Netgen (§3.2, §3.5); the same field is the input for a future unfitted path |
+| `csg` | a constructive-solid-geometry tree of primitives + booleans | imports and validates; not realized yet (§3.2) |
 | `image` | `pixel_value` — the voxels of `image` carrying that class value | smoothed label field → conforming mesh (§3.2, ADR 012) |
 
 Fields: `name`, `type`, and the type-specific payload (`expression` for analytic, a `csg` tree for
@@ -138,17 +138,23 @@ for multi-compartment domains. For unfitted approaches it is a background mesh p
 
 - **`compartmental` / `dim = 0`** → a trivial single-cell domain (a well-mixed "point"): no real
   mesh, the `lumped_ode` / well-mixed templates need none. Covers ~50% of the corpus immediately.
-- **`csg`, and `analytic` expressions that *are* a primitive or boolean of primitives** (disk,
-  sphere, box, half-space, cylinder; unions/intersections/differences) → **gmsh with the OCC
-  kernel**. OCC gives CSG booleans for free; we tag each resulting region with its subvolume name,
-  each shared interface with its surface name, and each outer face with its face name → a conforming
-  `Geometry`. This is the common spatial case (simple 1–2-region topologies).
-- **arbitrary `analytic`** (a boolean predicate that is not a tidy primitive) → lower it to a
-  single real-valued **implicit function** `φ` via the Rvachev lowering below, then either sample
-  `φ` onto a **background mesh** as a level-set (the natural input to **cut / trace FEM**, Approach
-  D, CutFEMx — unfitted) *or* reinitialise it to a signed distance and **mesh it body-fitted**
-  (marching + remesh). The implicit function is an approach-independent **pre-mesh intermediate**,
-  not a commitment to unfitted methods.
+- **`analytic`** (any boolean predicate, primitive or not) → lower it to a single real-valued
+  **implicit function** `φ` via the Rvachev lowering below (`formalism/rvachev.py`), extract its
+  boundary — marched with scikit-image in 2D, marching cubes in 3D, or, for shapes that touch the
+  bounding box, rasterized by VCell's priority rule and projected onto the exact implicit functions
+  — and embed it as a conforming internal boundary in a **Netgen** model that partitions the box
+  (`backend/realize.py`; nested shapes nest, disjoint shapes sit side by side, junctions go through
+  the label route of ADR 012). Each region is tagged with its subvolume name, each shared interface
+  with its surface name, and each outer face with its face name → a conforming `Geometry`. *(As
+  originally planned this was gmsh OCC booleans for the primitive/CSG subset and a level-set for the
+  rest; ADR 008 replaced gmsh with Netgen, and the implicit-field route turned out to serve every
+  analytic shape, so there is no separate primitive path.)* The implicit function is an
+  approach-independent **pre-mesh intermediate**: sampled onto a background mesh it is also the
+  natural input to **cut / trace FEM** (Approach D, CutFEMx — unfitted), which is not built.
+- **`csg`** (a constructive-solid-geometry tree) → imports and validates (VCell csg geometries round-
+  trip through `pyvcell_bridge/geometry.py`), but is **not realized yet**: `realize()` refuses it
+  with a `RealizationError` (only `analytic`, `image` and `compartmental` subvolumes are meshed). The intended route is the same implicit-field lowering (a CSG tree is
+  a boolean of primitives).
 - **`image`** → a **smoothed label field** on an ≈ h lattice (`backend/labels.py`: per-subvolume
   Gaussian-smoothed indicators, argmax, speck and pinch clean-up), its **conforming multi-label
   boundaries** (`backend/label_surfaces.py`: VTK SurfaceNets with one sentinel label per box face,
@@ -178,7 +184,7 @@ matches VCell and is preserved by the importer; it is carried implicitly by list
 explicit `priority` field.
 
 **Tooling — VTK / pyvista for the implicit-field pipeline.** The 2D realizer marches with
-scikit-image (`find_contours`) and meshes the box body-fitted with gmsh OCC. **VTK** is an alternative
+scikit-image (`find_contours`) and meshes the box body-fitted with Netgen (originally gmsh OCC; ADR 008). **VTK** is an alternative
 with a deeper geometry-processing toolbox — contouring / marching cubes, distance fields, implicit
 modelling, surface extraction and reconstruction — and is **already in the environment via pyvista**
 (a dependency), so it needs no new package. Worth evaluating as the pipeline grows to 3D, non-shrink
@@ -203,7 +209,7 @@ The same description realizes differently per FE approach, but exposes the same 
 
 | approach | realization of the geometry |
 |---|---|
-| ALE / body-fitted (Approach A) | conforming gmsh mesh; the boundary moves and is remeshed |
+| ALE / body-fitted (Approach A) | conforming Netgen mesh; the boundary moves and is remeshed |
 | separate-mesh / mixed-dim (Approach B) | conforming mesh + extracted submeshes per region/surface |
 | phase-field (Approach C) | a fixed background mesh; the interface is a field, no body-fitting |
 | cut / trace FEM (Approach D) | a fixed background mesh + the subvolume's level-set (from `analytic`) |
@@ -215,8 +221,8 @@ realization layer chooses how to honour those names.
 
 For a moving boundary the **spec defines the initial configuration and the names; the realization is
 the live SOT during simulation**. In the body-fitted path the deformed mesh is authoritative and the
-existing remesh machinery (`backend/ale.py`, `core/region_remesh.py`) regenerates it from the
-deformed boundary polyline with gmsh — it does *not* re-evaluate the analytic spec. In the unfitted
+existing remesh machinery (`backend/ale.py`, `core/region_remesh_netgen.py`, `backend/remesh_3d.py`)
+regenerates it from the deformed boundary with Netgen — it does *not* re-evaluate the analytic spec. In the unfitted
 path the level-set evolves on the fixed background mesh. The geometric formalism is not a live
 description of a moving domain; it is the initial-and-naming SOT.
 
@@ -250,9 +256,10 @@ Framing:
 
 - **We are not bound to either pipeline, and can do better.** What we *share* with VCell is the
   declarative geometric *formalism* (§1–§2) — imported faithfully. The *realization* is ours to
-  improve: from the same spec, FEniCSx can build an **exact conforming mesh** via gmsh OCC (no
-  staircase, no sampling error for an analytic/CSG shape), or a **clean level-set** for cut/trace
-  FEM. The SOT is the formalism, not VCell's realized grid.
+  improve: from the same spec, FEniCSx can build a **body-fitted conforming mesh** (no staircase;
+  the boundary lies on the analytic shape to second order in `h`, and image boundaries are smoothed
+  and projected, ADR 012), or a **clean level-set** for cut/trace FEM. The SOT is the formalism, not
+  VCell's realized grid.
 - **But match the baseline to the comparison.** For a *fixed-grid, implicit-geometry* problem, the
   apples-to-apples baseline is **fvsolver**, and our nearest realization is the **structured-grid +
   implicit-surface (cut/embedded) path** — discrepancies there may come from fvsolver's
@@ -284,16 +291,18 @@ Survey of the 5615 parsed corpus geometries (`scripts/`, the geometry analogue o
 
 - **dim 0 / compartmental — 50%.** Realizable now (trivial domain). The whole non-spatial,
   well-mixed-ODE half of the corpus.
-- **analytic, spatial — the dominant spatial type** (4139 subvolume occurrences). The primitive/CSG
-  subset realizes body-fitted via gmsh OCC now; arbitrary analytic awaits the level-set/cut-FEM path.
+- **analytic, spatial — the dominant spatial type** (4139 subvolume occurrences). Every analytic
+  predicate realizes body-fitted through the implicit-field route with Netgen (2D and 3D, any nesting,
+  shapes touching the box); the unfitted level-set/cut-FEM consumption of the same field is not built.
 - **image — 16%** (926 geometries). Imports losslessly (voxels included); realized body-fitted (ADR 012).
 - **topology is simple** — 1–2 subvolumes in 86% of geometries, 0–1 membranes in 89%. The common
   realization targets are: a single region (no membrane), and one cell inside extracellular space
   with one membrane — both already prototyped by `make_disk_geometry` /
   `make_cell_extracellular_geometry`.
 
-So the realization priority is: **non-spatial (free) → primitive/CSG analytic (gmsh OCC) → arbitrary
-analytic (level-set) → image (mesh).** This realizes the majority of importable models early.
+So the realization priority was: **non-spatial (free) → primitive/CSG analytic → arbitrary
+analytic → image (mesh).** As built (2026-10-08): non-spatial, analytic (all of it, body-fitted
+Netgen) and image are realized; `csg` trees are not.
 
 ## 6. Roadmap
 
@@ -303,9 +312,11 @@ analytic (level-set) → image (mesh).** This realizes the majority of importabl
    counterpart of the math import layer and is independently useful (a validated geometry pool)
    before anything is meshed. **Done** (`formalism/geometry_*.py`, `pyvcell_bridge/geometry.py`,
    `scripts/survey_parsed_geom.py`): **98.6% of the 5615 corpus geometries import + validate clean.**
-2. **Realization v1** — `compartmental`/dim-0 (trivial) + `csg`/primitive-analytic via gmsh OCC →
-   a `Geometry` with tagged regions, surfaces, and **named external faces**. Subsumes today's
-   imperative `make_*` helpers as recipes over the formalism.
+2. **Realization v1 — Done** (`backend/realize.py`): `compartmental`/dim-0 (trivial) + every
+   `analytic` subvolume via the implicit-field route and Netgen (ADR 008; originally planned as gmsh
+   OCC for the primitive/CSG subset) → a `Geometry` with tagged regions, surfaces, and **named
+   external faces**. Subsumes the imperative `make_*` helpers as recipes over the formalism. `csg`
+   trees are still refused (`RealizationError`).
 3. **Per-face boundary conditions** — the §2.6.2 `Xm/Xp/…` → `x_minus/x_plus/…` mapping on the named
    faces from step 2, lifting the import layer's `reject_not_implemented` bucket (44.7%).
 4. **Interface (jump-condition) BCs** — `SurfaceClass` + `JumpCondition` → single-sided `interface_flux`
@@ -316,7 +327,7 @@ analytic (level-set) → image (mesh).** This realizes the majority of importabl
 
 ## 7. Non-goals (for now)
 
-- **A full CSG-tree authoring surface** beyond what gmsh OCC and VCell's csg trees need.
+- **A full CSG-tree authoring surface** beyond what VCell's csg trees need.
 - **1D geometries** as a first-class realization (39 in the corpus; revisit if a real model needs
   one).
 - **Live re-evaluation of a moving analytic boundary** — moving domains are handled by the
