@@ -157,6 +157,58 @@ solution; use analytical or manufactured checks where possible.
 Do not carry claims such as “exact conservation” between solver paths. State which invariant, whether
 it is continuous or discrete, what tolerance/order is expected, and how remeshing changes the evidence.
 
+### Exact and manufactured solutions for moving domains
+
+The ChatGPT discussion titled “Moving Boundary Methods” provides a useful design pattern for
+extending the repository's existing symbolic manufactured-solution work. The transcript is a source
+of hypotheses and implementation guidance; repository tests and independently derived residuals
+remain the evidence for a passing result.
+
+Manufacture an exact **geometry–field pair**, rather than only a field on a changing mesh. Keep these
+velocities distinct throughout the model and test harness: physical carrier velocity `v`,
+boundary/interface velocity `v_b`, and computational mesh velocity `w`.
+
+For a bulk concentration `c` per current volume, the local physical-coordinate residual remains the
+usual substitution into the intended conservation law. The moving boundary changes the boundary
+balance: the exact outward flux relative to the boundary is
+`q_rel = (c (v − v_b) + j) · n`. An impermeable boundary therefore requires `q_rel = 0`; setting
+only the diffusive flux to zero is valid only when the carrier has no normal motion relative to the
+boundary. Surface species require the analogous material-surface derivative and area-dilation term.
+
+Use a staged construction strategy:
+
+1. **Unforced analytical checks.** Start with invariant states, Laplace-pressure circle/sphere
+   equilibria, and simple translating or uniformly expanding geometries. A one-dimensional expanding
+   interval with material velocity and a cosine mode is a useful first check because it exposes
+   dilution, diffusion, no-flux boundaries and total-mass conservation without a large source term.
+2. **Direct physical-coordinate MMS.** Choose a smooth implicit boundary `φ(x,t)=0`, derive its
+   normal and normal speed, choose smooth fields on a neighborhood of the evolving domain, and derive
+   bulk, initial, boundary, interface and exchange residuals by substitution. Preserve the numerical
+   coupling law and add only the manufactured residual; replacing the law by its exact value bypasses
+   the coupling being tested.
+3. **Affine and general-map MMS.** For `x = χ(X,t)`, transform the complete conservative operator,
+   including the Jacobian `J`, metric diffusion tensor, transformed normals and mesh velocity. A
+   mapped fixed-domain field with unchanged coefficients is generally not a solution of the original
+   physical model. Progress from translation to isotropic expansion, shear and spatially varying maps,
+   while checking invertibility and the geometric conservation law.
+4. **Coupled motion-law MMS.** If the interface speed depends on concentration, curvature or membrane
+   state, manufacture a residual for that motion law too. Prescribing the exact interface position at
+   every step tests transport on a moving domain, but not feedback between fields and geometry.
+5. **Convergence without a closed form.** Use static/moving twins, independent mesh motions, separate
+   spatial and temporal refinement, exact cell averages for finite volume, and geometry-error tracking
+   for finite elements. Add mass, phase-volume and boundary-flux checks, but do not treat conservation
+   or cross-solver agreement as proof of pointwise accuracy.
+
+For phase-field problems, pair these tests with unforced diffuse-interface equilibria (for example a
+planar Cahn–Hilliard profile or a curved droplet with the expected chemical-potential/curvature
+relation). Then manufacture a coupled species field and test its partition ratio, total amount,
+phase-dependent flux and interface affinity as the diffuse width is resolved. This connects the
+existing Cahn–Hilliard phase generation to the new inside/outside species-partitioning physics.
+
+The first implementation should extend the existing MMS machinery with exact geometry, relative
+boundary-flux residuals and optional motion-law residuals. Coordinate transformations should be an
+additional exact-pair generator, not a replacement for direct physical-coordinate residual generation.
+
 ## 6. Modeling representation and transformation into the formalism
 
 The biological modeling layer describes concepts such as materials, species, constitutive behavior,
