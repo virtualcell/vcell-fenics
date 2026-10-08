@@ -31,8 +31,14 @@ method-of-lines integration; [ale.py](../../src/vcell_fenics/backend/ale.py) sup
 
 **Action:** replace the introductory capability list with a dated, entry-point-specific matrix;
 keep the early translation diagram as a labelled single-mesh example. Do not imply that all dedicated
-mechanics drivers are reachable through the CLI. Navigation pointers are added in this PR; the rewrite
-is still open.
+mechanics drivers are reachable through the CLI.
+
+**Closure (2026-10-08, PR #213):** both documents rewritten. The overview's “What runs today” matrix
+separates the three CLI routes (single mesh, multi-compartment, moving front) from the backend-only
+drivers and names the refusals; the architecture's diagrams, pipeline (backward Euler *and* method of
+lines), validation flow and module map now cover the whole `src/vcell_fenics` tree. Still true and now
+stated: the CLI's moving path is backward-Euler only, and the diagnostics translation covers only the
+single-mesh paths.
 
 ## D02 — The formalism's implementation summary contradicts its newer sections
 
