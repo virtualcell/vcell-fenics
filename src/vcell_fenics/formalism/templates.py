@@ -1,4 +1,4 @@
-"""Operator-template registry for v1 (T1–T4).
+"""Operator-template registry: T1–T5 and `cahn_hilliard` (the mechanics templates T6–T8 are proposed, §1.4.3).
 
 The validator checks each `TemplateEquation` against the spec registered here:
 the governed variable's type and home-subdomain kind, the allowed

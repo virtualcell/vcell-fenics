@@ -286,7 +286,8 @@ class TemplateEquation:
     """An equation instantiated from a named operator template (§1.4).
 
     `template` is the template's registered name (e.g. `bulk_radv_diff`,
-    `surface_pde_with_dilution`). v1 template set: T1–T4 (T5–T7 are v2).
+    `surface_pde_with_dilution`). Registered set: T1–T5 and `cahn_hilliard` (the mechanics
+    templates T6–T8 are proposed, §1.4.3).
     The template is intentionally typed as `str`: extending the registry in
     v2 should not require a schema change. Unknown names are caught by the
     validator.

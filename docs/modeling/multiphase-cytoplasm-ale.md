@@ -1,6 +1,19 @@
 # Multiphase cytoplasm on a moving membrane — an ALE design sketch
 
-**Status:** design note, not implemented. Captures the architecture decision for the
+> **Documentation review (2026-10-08):** See the [documentation map](../README.md) and
+> [discrepancy register](../reviews/2026-10-08-documentation-discrepancies.md) for distinctions
+> between historical plans and current implementation. New modeling discussion lives in the
+> [cell-mechanics workspace](../modeling/cell-mechanics/README.md).
+
+**Status (2026-10-08):** design note whose staged path (§10) is built through step 4 as
+Python drivers — `backend/slip.py`, `multiphase.py`, `stokes.py`, `stokes_hdiv.py` and the
+dynamic FSI loops in `fsi.py` (prescribed motion, single-phase surface-tension force balance,
+two-phase force balance, co-moving / reacting / nonlinear species), each verified in
+`tests/test_backend_*.py` (§9 has the component-by-component record). None of it is reachable
+from the CLI or expressed as a formalism template. Step 5 (the poroelastic swap: a reference
+configuration and a hyperelastic `P(F)`) is not started, and the two-phase closure leaves the
+per-phase closed-cell normal matching open (§9, "Open seam"). The design discussion below is kept
+as written. Captures the architecture decision for the
 eventual use case of a **two-phase cytoplasm** — a mechanically active cytoskeleton
 plus an overdamped fluid — inside a moving, mechanically-coupled membrane. The goal of
 this note is to choose a skeleton that keeps the **simplicity we already have** (one
@@ -219,7 +232,7 @@ needs now.
 | Two coupled velocity blocks + interphase drag | **done** — `backend/multiphase.py` (`solve_two_phase_overdamped`), monolithic mixed-element block; verified (`test_backend_multiphase.py`) |
 | **Interface velocity BCs** (normal-match / tangential slip), Nitsche or rotated frame | **first piece done** — `backend/slip.py` (`nitsche_normal_slip`, `solve_overdamped_slip`): perfect-slip `v·n = g`, free tangential, via Nitsche; **symmetric (L2-optimal) and non-symmetric penalty-free (no β to tune — robust for cut/weak-coercivity) variants** both verified (`test_backend_slip.py`). Stokes-traction / pressure variants pending |
 | Incompressible-mixture **pressure** (saddle point, stable elements e.g. Taylor–Hood) | **done** — `backend/stokes.py` (`solve_incompressible_stokes`, Taylor–Hood P2/P1 + MUMPS) and the slip-with-Stokes-traction variant (`solve_incompressible_stokes_slip`); the **two-phase incompressible mixture** `solve_two_phase_stokes` (one mixture pressure enforcing `∇·(v_n+v_s)=0`, per-phase slip carrying the shared pressure). All verified (`test_backend_stokes.py`, `test_backend_multiphase.py`) |
-| Membrane force balance loaded by cortex traction | **static coupling done** — `solve_incompressible_stokes_traction` (traction/Neumann BC); Laplace's law verified (`test_backend_stokes.py`). The *dynamic* moving-membrane loop is the remaining integration |
+| Membrane force balance loaded by cortex traction | **static coupling done** — `solve_incompressible_stokes_traction` (traction/Neumann BC); Laplace's law verified (`test_backend_stokes.py`). The *dynamic* moving-membrane loop followed — the three "Dynamic FSI loop" rows below |
 | **Exact mass conservation on a moving boundary** (the dynamic-FSI blocker) | **done** — `backend/stokes_hdiv.py` (`solve_incompressible_stokes_hdiv_slip`): the Taylor–Hood Nitsche slip leaks ~3% `div` on a *moving* boundary (the pressure-test in the Nitsche boundary term breaks `∫q∇·u=0`), even on H(div). Fix: an **H(div)** (BDM/DG) element — `∇·u=0` *pointwise* — with the slip BC `v·n=g` imposed **strongly** on the normal dofs (no Nitsche on the normal ⇒ no divergence pollution), tangential free. Interior-penalty DG for the (tangentially-discontinuous) viscous operator. Verified: `div` at round-off on the `cos2θ` bulging boundary at every `h`, and the fluid still slips (`test_backend_stokes_hdiv.py`). This is the "div-conforming flow element" targeted fix (`approaches.md`, discretization axis), not the full DG backend |
 | **Dynamic FSI loop** (prescribed-motion foundation) | **done** — `backend/fsi.py` (`step_prescribed_fsi`): a moving membrane drives the conservative H(div) bulk (`v·n=w·n`), the ALE mesh follows (boundary by `dt·w`, interior harmonic). `∇·v` at round-off at *every* step of a deforming loop, and the enclosed volume conserved to O(dt) (vs ~3% for the leaky bulk; `test_backend_fsi.py`). **Consistency finding:** the prescribed motion must be volume-conserving on the *current* geometry (`∮w·n=0`) — a divergence-free `w` guarantees it; `cos2θ·n` (volume-conserving only on the circle) loses it once the boundary deforms and the incompressible solve becomes inconsistent. The force-balance closure (normal motion *solved*) sidesteps this — see the next row |
 | **Dynamic FSI loop** (force-balance closure) | **done** — `backend/fsi.py` (`step_force_balance_fsi`) + `solve_incompressible_stokes_surface_tension` (`backend/stokes.py`): the membrane moves under its *own* surface tension `−γ∮_Γ∇_Γ·v ds` (curvature-free Laplace–Beltrami load, works on a piecewise-linear boundary) plus the bulk pressure — *no* prescribed motion. The pressure (the `∇·v=0` multiplier) enforces `∮v·n=0` itself, so the volume is conserved **automatically**; the consistency arrangement of the prescribed loop vanishes. On **Taylor–Hood** (continuous velocity), so the ALE mesh moves by the solved `v` directly with `∮v·n=0` exact (an H(div) velocity loses that when interpolated for mesh motion — measured 4% area drift vs Taylor–Hood's <1%). Verified (`test_backend_fsi.py`): a circle is a Laplace fixed point (`p=γ/R`, `v≈0`); a perturbed ellipse relaxes monotonically toward the minimal-perimeter circle at conserved area |
@@ -283,9 +296,13 @@ Each step is a known-answer check before the next is added:
    level. Verified by **Laplace's law**: a tense membrane's curvature traction `−γ κ n`
    leaves the fluid at rest with the exact internal pressure `p = γ/R` (`test_backend_stokes.py`,
    to round-off across radii and tensions) — the membrane–bulk mechanical balance.
-   With the bulk pressure now set by membrane tension, the staged momentum path is complete;
-   the remaining work is the *dynamic* coupling (the moving-membrane ALE loop driving the
-   two-phase bulk) and the constitutive/frame seams (§5–§6).
+   With the bulk pressure now set by membrane tension, the staged momentum path is complete.
+   **The *dynamic* coupling is also done** (`backend/fsi.py`, the three "Dynamic FSI loop" rows
+   of §9): the membrane moves under its own tension and the bulk pressure with no prescribed
+   motion, on a single phase and on the two-phase mixture (the `frame` kwarg is the §6 fork),
+   with co-moving, reacting and nonlinear species carried through the moving cell. Still open
+   from this step: the per-phase closed-cell normal matching (§9 "Open seam") and the
+   constitutive seams (§5).
 5. **(Later) Poroelastic swap** — reference configuration + `P(F)`, mesh pinned to the
    network frame. Verify: a poroelastic relaxation / Biot consolidation known solution.
 

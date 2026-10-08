@@ -31,9 +31,11 @@ design rationale.
 | DOLFINx `Function` bridge | `core/surface_remap_mesh.py` | `tests/test_core_surface_remap_mesh.py` |
 | Approach-A trace correction | `core/surface_remap_trace.py` | `tests/test_core_surface_remap_trace.py` |
 
-**Deferred:** P0 variant, MPI / multi-rank, higher-order spaces, open arcs, the 3D
-triangle-surface supermesh, and the ALE remesh *driver* that would call the trace
-correction (depends on Approach A mesh-motion-with-remeshing, not yet built).
+**Deferred:** P0 variant, MPI / multi-rank, higher-order spaces, open arcs, and the 3D
+triangle-surface supermesh. The ALE remesh *driver* (`backend/ale.py`, built 2026-06-11; see the
+driver note) calls `remap_surface_function` directly on the membrane's own DOFs; the trace
+correction stays built-and-waiting for the Approach-A trace physics (ρ as a bulk boundary trace),
+which is not implemented.
 
 ## Why the 2D-bulk trick does not port directly
 
@@ -217,5 +219,5 @@ signatures generalize.
   `approaches.md` "Related finite-volume / front-tracking work".
 - `docs/research/2026-06-06-cutcell-fronttracking-chatgpt.md` — the cut-cell /
   front-tracking survey that surfaced the conservative-remap-on-remeshing problem.
-- `docs/modeling/ale-remesh-driver.md` — the forward-looking sketch of the ALE remesh
-  loop that calls `correct_surface_trace` as its boundary post-pass.
+- `docs/modeling/ale-remesh-driver.md` — the ALE remesh loop (built), whose Approach-A
+  variant would call `correct_surface_trace` as its boundary post-pass.

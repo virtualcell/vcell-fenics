@@ -23,8 +23,8 @@ velocity (now strong); everything else (the saddle-point MUMPS solve, the screen
 over.
 
 Verified (`tests/test_backend_stokes_hdiv.py`): `∇·u` is zero to round-off on a *moving*
-boundary (where Taylor–Hood leaked 3%), the fluid genuinely slips, and a manufactured
-divergence-free solution is recovered.
+boundary at every `h` (where Taylor–Hood leaked 3%), and the fluid genuinely slips. No
+manufactured-solution test exists for this element yet.
 """
 
 from __future__ import annotations

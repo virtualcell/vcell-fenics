@@ -92,7 +92,8 @@ def mesh_region_netgen(
         raise NotImplementedError(
             "fix_boundary_nodes is not available in the high-level Netgen mesher "
             "(it resamples the boundary at h); it needs the low-level Element1D path "
-            "(deferred, ADR 008). Use the gmsh mesh_region for the interior-only fast path."
+            "(deferred, ADR 008); the full resample-and-remap path is the supported one. The GPL gmsh "
+            "mesh_region that has this fast path is test-only (tests/gmsh_meshers/)."
         )
 
     # Netgen's `SplineGeometry` meshes the region to the **left** of each directed segment (default

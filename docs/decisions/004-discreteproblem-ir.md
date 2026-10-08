@@ -56,7 +56,7 @@ The concrete decisions:
 **Negative:**
 
 - One more layer to maintain, with a risk of drifting toward a redundant mirror of UFL/DOLFINx. Mitigated by keeping the IR to translation *decisions* (tagged terms + scheme + lifecycle) with UFL forms as leaves, and by using a closed term enum rather than an open term-algebra.
-- The term enum is fixed for v1's templates (T1/T2). New templates (T3/T4, the mechanics templates T5–T7) will extend it — a deliberate, incremental growth driven by real assemblers, not a general framework specified up front.
+- The term enum is fixed for v1's templates (T1/T2). New templates (T3/T4, the mechanics templates T5–T7) will extend it — a deliberate, incremental growth driven by real assemblers, not a general framework specified up front. *(2026-10-08: T5 became `region_ode`; the proposed mechanics templates are now numbered T6–T8, formalism §1.4.3. The enum did grow by `ADVECTION` and by boundary terms, as this predicted.)*
 
 ## Notes
 

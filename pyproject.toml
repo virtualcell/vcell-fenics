@@ -84,9 +84,9 @@ dolfinx_mpc = "*"                  # multi-point constraints (periodic BCs, slip
 # Meshing and I/O.
 # NOTE: gmsh (GPL-2.0-or-later) is intentionally NOT a runtime dependency — it is
 # dev-only (see [tool.pixi.feature.dev.dependencies] below and LICENSING.md). The
-# production geometry path (backend/realize.py) uses Netgen (LGPL-2.1); gmsh is only
-# imported (lazily) by the approaches/* prototypes and the opt-in region_remesh
-# remesher, none of which are on the pyvcell-integration path.
+# production geometry path (backend/realize.py, core/region_remesh_netgen.py, backend/remesh_3d.py)
+# uses Netgen (LGPL-2.1); nothing under src/ imports gmsh. The only gmsh code is the
+# former region remesher under tests/gmsh_meshers/, used by its own tests.
 meshio = "*"
 
 # Plotting/visualization (pyvista, full matplotlib) is NOT here: nothing the runner imports needs
@@ -120,8 +120,8 @@ ipython = "*"
 ruff = "*"
 mypy = "*"
 # gmsh (GPL-2.0-or-later) lives here, NOT in runtime deps, so it never enters the
-# distributed/default environment. It is only needed to run the approaches/* prototype
-# meshers and the opt-in region_remesh remesher (tests, examples, dev work). Keeping it
+# distributed/default environment. It is only needed by the former gmsh region remesher
+# kept under tests/gmsh_meshers/ and its tests (nothing in src/ imports it). Keeping it
 # dev-only lets vcell-fenics itself ship permissively (MIT) without a copyleft runtime
 # dependency. See LICENSING.md. Do NOT move gmsh back to [tool.pixi.dependencies].
 gmsh = "*"

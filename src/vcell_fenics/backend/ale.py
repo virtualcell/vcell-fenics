@@ -7,14 +7,17 @@ monitors mesh quality and, before a step would tangle, swaps to a fresh mesh and
 re-interpolates state conservatively, turning "fail loudly on tangling" into
 "remesh at the step boundary and continue."
 
-It composes the three pieces built earlier: the region remesher (`mesh_region`)
-makes a fresh mesh of the deformed configuration, `rebuild_on_mesh` reassembles the
-build-once IR on it with conservative state transfer, and the per-step
-backward-Euler solve is unchanged.
+It composes the three pieces built earlier: the region remesher (`mesh_region_netgen`
+in 2D, `remesh_region_3d` in 3D) makes a fresh mesh of the deformed configuration,
+`rebuild_on_mesh` reassembles the build-once IR on it with conservative state transfer,
+and the per-step backward-Euler solve is unchanged.
 
-**Scope: a moving 2D region, either a codim-0 bulk or a codim-1 membrane.** A moving
+**Scope: a moving 2D region, either a codim-0 bulk or a codim-1 membrane, and a moving
+3D bulk region** (rebuilt by `remesh_region_3d` and transferred by non-matching
+interpolation with a global mass correction; a moving 3D *surface* mesh raises
+`NotImplementedError`). A moving
 *bulk* (its interior nodes carried by harmonic-extension mesh-motion) is remeshed
-directly — the deformed boundary loop becomes the boundary of a fresh `mesh_region`
+directly — the deformed boundary loop becomes the boundary of a fresh `mesh_region_netgen`
 mesh, and the bulk field is transferred conservatively (`remap_bulk_function`). A
 moving *membrane* is remeshed as the boundary of a freshly meshed region, with ρ
 carried by the conservative surface remap. `_remesh` dispatches on codimension. The

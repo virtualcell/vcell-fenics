@@ -145,23 +145,30 @@ src/vcell_fenics/
     surface_remap_trace.py    #   Approach-A bulk-trace correction              [done]
     bulk_remap.py             #   conservative bulk (2D area) remap kernel      [done]
     bulk_remap_mesh.py        #   DOLFINx Function bridge for bulk fields       [done]
-    region_remesh.py          #   gmsh region remesher (polyline -> fresh mesh) [done]
+    region_remesh_netgen.py   #   Netgen region remesher (polyline -> fresh mesh) [done; the gmsh one is tests/gmsh_meshers/, ADR 008]
     bgn_curve.py              #   BGN tangential redistribution (curvature flow) [done]
     bgn_curve_mesh.py         #   DOLFINx Mesh bridge for BGN redistribution    [done]
-    biochemistry.py           #   surface ρ RHS: surface Laplacian + reaction + dilution  [planned]
+    biochemistry.py           #   surface ρ RHS: surface Laplacian + reaction + dilution  [never built: the formalism's T2 + assemble() took this role]
     mechanics/                #   constitutive laws                            [planned]
-    time_integrators.py       #   [planned]
-    geometry.py               #   [planned]
-    io.py                     #   [planned]
-  approaches/
+    time_integrators.py       #   [never built: solver.py (BE) + reaction_diffusion.py (MOL)]
+    geometry.py               #   [never built: formalism/geometry_schema + backend/realize]
+    io.py                     #   [never built: results/]
+  approaches/                 # [never built as a package — see the note below]
     ale/                      # A
     submesh/                  # B  <- start here
     phase_field/              # C
     cut_fem/                  # D  <- separate Pixi feature, DOLFINx 0.9
-  benchmarks/                 # identical canonical problems run across approaches
-  pyvcell_bridge/             # eventual integration with VCell's pyvcell project
+  benchmarks/                 # [the role is filled by mms/ and cross_validation/ at the repo root]
+  pyvcell_bridge/             # eventual integration with VCell's pyvcell project  [done]
   tests/
 ```
+
+*As of 2026-10-08:* this sketch is the original plan, kept for its rationale. The `approaches/` package
+was never created: the approach-specific code grew as drivers under `backend/` instead — Approach A/B
+machinery in `discrete.py`, `ale.py` + `remesh_3d.py`, `coupled.py`, `interface_coupled.py` and
+`multi_compartment.py`; Approach C's resolved Cahn–Hilliard in `cahn_hilliard.py`; Approach D not
+started. `core/` holds the approach-agnostic kernels as planned. The current layout is in
+[`docs/architecture.md`](../architecture.md).
 
 `core/` now exists; its first occupants are the conservative surface-density remap (below), not the `biochemistry.py` the original sketch imagined — that primitive was forced first by the remesh problem, and is orthogonal to the formalism backend that holds the receptor-density physics today.
 
@@ -181,18 +188,18 @@ What DG buys (and why it keeps tempting us): **exact local mass conservation** (
 - `surface_remap_mesh.py` — the **DOLFINx bridge**. `ordered_membrane_loop(V)` orders a closed P1 membrane's dofs into a loop by walking the cell→dof edge list; `remap_surface_function(u_old, V_new, conserve=True)` reads ρ off `u_old`, remaps in the old mesh's arc-length frame, writes ρ_new into a new `Function`, and (with `conserve=True`) rescales so the surface integral on the new mesh equals the old exactly.
 - `surface_remap_trace.py` — the **Approach-A trace correction**. Because ρ in A is a bulk *trace*, a conservative bulk (volume) remap does not conserve the surface integral. `BulkBoundaryTrace` maps bulk-boundary DOFs ↔ a boundary surface space; `correct_surface_trace(u_old, u_new)` gathers the old trace, surface-remaps it, and scatters the result over the new bulk function's boundary DOFs (interior untouched). With independent surface DOFs (Approach B) this step is unnecessary.
 
-  *Scope:* serial, P1, single closed 2D membrane. Deferred: MPI/multi-rank, higher-order spaces, open arcs, P0 variant, 3D triangle-surface supermesh, and the ALE remesh *driver* that would call `correct_surface_trace` (depends on Approach A mesh-motion-with-remeshing, not yet built).
+  *Scope:* serial, P1, single closed 2D membrane. Deferred: MPI/multi-rank, higher-order spaces, open arcs, P0 variant, 3D triangle-surface supermesh. The ALE remesh *driver* (`backend/ale.py`) is built (2026-06-11) and remaps the membrane's own DOFs directly; `correct_surface_trace` waits on the Approach-A trace physics (ρ as a bulk boundary trace), which is not built.
 
 **The conservative bulk remap (implemented).** The area sibling of the surface remap — it carries a P1 cytosolic field *c* from one 2D triangulation to another while preserving ∫_Ω c dx. This is the `transfer_bulk` prerequisite the ALE remesh driver sketch (`docs/modeling/ale-remesh-driver.md`) names on its critical path:
 
 - `bulk_remap.py` — the **kernel**. Pure NumPy + scipy.sparse, no DOLFINx: `supermesh_project_2d(old_verts, old_tris, c_old, new_verts, new_tris)` builds the supermesh by clipping each new triangle against bbox-overlapping old triangles (Sutherland–Hodgman), integrates the P1×P1 products with a degree-2 edge-midpoint rule, and returns `c_new = M⁻¹ B c_old` (M = true new-mesh mass matrix, B = mixed mass matrix). Conservation is structural (partition of unity), exact to round-off when the two meshes triangulate the same polygon. Isolated from DOLFINx so it can be tested on plain arrays.
 - `bulk_remap_mesh.py` — the **DOLFINx bridge**. Much simpler than the surface bridge: no loop-ordering, because for a P1 space on a triangle mesh the dof index *is* the vertex-array row and `V.dofmap.list` *is* the (n_cells, 3) triangle list. `remap_bulk_function(u_old, V_new, conserve=True)` reads `c_old` and `(verts, tris)` straight off `u_old`'s mesh, runs the kernel, writes `c_new` into a new `Function` on `V_new`, and (with `conserve=True`) rescales so the volume integral on the new mesh equals the old exactly — closing the geometric gap when the two meshes approximate the same domain (e.g. a disk) at different resolutions.
 
-  *Scope:* serial, P1, 2D triangle mesh. Deferred: MPI/multi-rank, higher-order spaces, 3D tetrahedra, broad-phase acceleration for large meshes.
+  *Scope:* serial, P1, 2D triangle mesh. Deferred: MPI/multi-rank, higher-order spaces, a 3D supermesh (3D tetrahedral fields are transferred by `remap_bulk_function_3d`: DOLFINx non-matching interpolation plus one global mass rescale — globally, not locally, conservative), broad-phase acceleration for large meshes.
 
-**The region remesher (implemented).** `region_remesh.py` — `mesh_region(loop, h)` drives gmsh (geo kernel: one point per loop vertex, straight segments, one plane surface) to produce a fresh uniform-quality 2D mesh of the region a closed polyline encloses. This is step (b) of the ALE remesh routine (`docs/modeling/ale-remesh-driver.md`) — meshing an *arbitrary deformed* boundary, not just the analytic disk the geometry helpers build. Because the boundary segments are straight, any nodes gmsh inserts along them stay on the polyline, so the meshed region is exactly the input polygon and its area is preserved to round-off. `fix_boundary_nodes=True` forces exactly the input vertices onto the boundary (Γ_new ⊂ Γ_old) — the interior-only fast path that lets `correct_surface_trace` be skipped (subtlety 3 of the driver sketch). `h` is the authoritative uniform size (gmsh's extend-from-boundary / from-points / from-curvature sizing is disabled, so a deformed boundary's non-uniform spacing is not inherited). The deformed loop itself is recovered from a live mesh via `BulkBoundaryTrace.boundary_loop()`.
+**The region remesher (implemented, Netgen).** `core/region_remesh_netgen.py` — `mesh_region_netgen(loop, h)` hands the closed polyline to Netgen's 2D `SplineGeometry` (one straight segment per edge, one domain) and produces a fresh uniform-quality 2D mesh of the region it encloses. This is step (b) of the ALE remesh routine (`docs/modeling/ale-remesh-driver.md`) — meshing an *arbitrary deformed* boundary, not just the analytic disk the geometry helpers build. Because the boundary segments are straight, the nodes Netgen inserts along them stay on the polyline, so the meshed region is exactly the input polygon and its area is preserved to round-off. Netgen always resamples the boundary at `h`, so the `fix_boundary_nodes=True` fast path (Γ_new ⊂ Γ_old, which would let `correct_surface_trace` be skipped — subtlety 3 of the driver sketch) is **not available** and raises `NotImplementedError` (ADR 008 §5); the full resample-and-remap path is the one in use. The original gmsh remesher (`mesh_region`, with that fast path) is GPL and lives under `tests/gmsh_meshers/`, test-only (ADR 008). The deformed loop itself is recovered from a live mesh via `BulkBoundaryTrace.boundary_loop()`. In 3D the counterpart is `backend/remesh_3d.py`: the deformed region is rebuilt implicitly (signed distance on a lattice → SurfaceNets → Netgen volume fill → projection and exact-volume restore), with a fallback ladder of surfaces and a `PinchOffError` for necks thinner than the mesh can resolve.
 
-  *Scope:* serial, 2D, a single simple closed loop; the caller owns the self-intersection / pinch-off guard. Deferred: holes / multiple loops, 3D, MPI.
+  *Scope:* serial, 2D (one simple closed loop) and 3D (one closed surface); the caller owns the self-intersection / pinch-off guard in 2D. Deferred: holes / multiple loops, MPI.
 
 **BGN tangential mesh redistribution (implemented).** `bgn_curve.py` — `bgn_curvature_flow_step(points, mobility=m, dt=dt)` advances a closed membrane polyline by one semi-implicit **Barrett–Garcke–Nürnberg** step of mean-curvature flow (V = −m κ from the surface-tension force balance η v + σ H n = 0, mobility m = σ/η). The defining feature is *intrinsic tangential redistribution*: the new positions and the curvature are solved **together**, with only each node's *normal* velocity pinned to the physical law, so the *tangential* node motion is free and is set by the discrete curvature-vector identity (the same ∫κ·φ = ∫∇_Γ X : ∇_Γ φ projection the curvature-force path uses) to keep nodes asymptotically equidistributed. Because the geometry (normals, the 1D Laplace–Beltrami stiffness, the lumped mass) is taken from the old polyline, the (position, curvature) system is **linear** — semi-implicit and unconditionally stable. This is the missing piece that lets curvature flow run at usable `dt`: pure normal motion crowds nodes at high-curvature tips until the mesh tangles (the `MeshQualityError` the unknown-motion curvature path hits), whereas BGN holds the edge-length ratio bounded. Verified on geometry alone (pure NumPy): a circle shrinks per the exact `r² = r₀² − 2 m t` and stays round; *any* convex curve loses area at the constant curve-shortening rate `dA/dt = −2π m`; and on an ellipse the BGN edge ratio improves where a naive normal-only step bunches it an order of magnitude worse.
 

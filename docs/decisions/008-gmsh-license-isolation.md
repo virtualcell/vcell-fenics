@@ -84,6 +84,12 @@ tests) passes with gmsh and Netgen coexisting in one process. The `approaches/*/
 prototypes still use gmsh (separate, low-priority migrations). Until fully migrated, keep gmsh-based
 paths and Netgen in **separate processes** (§3).
 
+*Follow-up (2026-10-08):* the migration is complete. `realize()` is Netgen in 2D and 3D (the 3D
+multi-region path is productized, and image geometries follow ADR 012); the ALE driver's remesh
+call went to `mesh_region_netgen` and, in 3D, `backend/remesh_3d.py`; the `approaches/*` prototypes
+were removed from `src/` (their gmsh meshers live under `tests/gmsh_meshers/`); `src/` imports no
+gmsh, so the separate-process rule applies only to the dev/test suite.
+
 ### 5. `fix_boundary_nodes` fast path is not available from high-level Netgen
 
 Netgen's high-level 2D mesher always resamples the boundary at `h` (verified: 48 boundary nodes from a
@@ -98,6 +104,12 @@ than silently resampling. Deferred; the default resample-and-full-remap path is 
 Netgen is a mature mesher, but its behavior on the ALE driver's hardest inputs (very thin necks /
 near-pinch-off boundaries) has not been stressed here. Gate any switch of the ALE driver's remesh call
 from gmsh to Netgen on that check.
+
+*Follow-up (2026-10-08):* the switch happened and the check was done the hard way on the 3D
+cleavage-furrow runs (integration tracker, "3D moving boundaries"): a neck thinner than the mesh can
+resolve raises `PinchOffError` (2D: `local_thickness` in `region_remesh_netgen`; 3D: `remesh_3d`), a
+partial Netgen fill is rejected by an enclosed-volume check, and the 3D remesher falls back through
+surfaces of decreasing fidelity before giving up with a dated, located message.
 
 ### 7. Contingency: the gmsh-isolation design (retained, not primary)
 
@@ -147,7 +159,8 @@ multi-region case that first appeared to be a blocker:
 
   **Decision:** Netgen is the mesher for **2D, 3D single-region, and 3D multi-region** — in-process,
   LGPL, no gmsh needed for 3D. gmsh stays only as the §7 contingency. (Follow-up: the multi-region 3D
-  path above is spiked, not yet productionized in `realize()`; that is the next 3D implementation task.)
+  path above is spiked, not yet productionized in `realize()`; that is the next 3D implementation task.
+  *Done since* — `realize()` meshes 3D multi-region analytic and image geometries with Netgen, ADR 012.)
 
 ## Consequences
 
@@ -166,7 +179,9 @@ multi-region case that first appeared to be a blocker:
   the gmsh/Netgen non-coexistence rule are all real constraints to respect.
 - **`realize()` must migrate off gmsh** (§4) to actually drop gmsh and to avoid the coexistence
   hazard; until then two meshers exist in the codebase and must be kept in separate processes.
-- **`fix_boundary_nodes` gap** (§5) and **unverified near-pinch robustness** (§6) are open.
+  *(Done — see the §4 follow-up; `src/` is gmsh-free.)*
+- **`fix_boundary_nodes` gap** (§5) is open and costs nothing today (the driver never takes that
+  path); **near-pinch robustness** (§6) was settled by the pinch-off guards and fallbacks.
 
 **Neutral:**
 
