@@ -10,11 +10,12 @@ Three solver paths, chosen by the model rather than by a flag:
 
 - equations on **one** subdomain → ``realize`` → ``assemble`` → backward Euler (dt snapped per output
   interval) or adaptive method of lines (outputs recorded from the integrator's own monitor);
-- equations on **two** compartments joined by a membrane → ``realize_interface_coupled`` →
-  ``integrate_interface_coupled`` (adaptive method of lines over the blocked two-mesh system); with
-  **membrane species** as well (equations on the membrane between them — receptor–ligand binding,
-  membrane reactions), ``integrate_membrane_coupled`` over both compartments and the membrane, any number
-  of species in each;
+- equations on **two or more** subdomains of a fixed geometry → ``realize_multi_compartment`` →
+  ``integrate_multi_compartment`` (adaptive method of lines over one scalar P1 block per species per
+  region and a Real per region variable): any number of compartments and membranes, **membrane
+  species** (receptor–ligand binding, membrane reactions), **region variables**, box-face values per
+  compartment. This replaced the two-compartment routing to ``integrate_interface_coupled`` /
+  ``integrate_membrane_coupled`` on 2026-09-28; those stay for their tests and cross-validation;
 - a **moving** subdomain (a VCell moving-boundary front: prescribed-velocity motion of the volume it
   encloses) → ``realize`` → ``assemble`` → backward Euler through the ALE driver, remeshing when the
   moving mesh degrades; the bundle records the mesh's coordinates every row and a new segment per

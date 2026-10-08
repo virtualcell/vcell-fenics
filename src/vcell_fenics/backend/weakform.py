@@ -7,7 +7,7 @@ directly as a UFL-style `form` (the equation is `form = 0` for all admissible te
 functions), giving up the template guardrails for full expressiveness (§1.5.1).
 
 This is the route for **membrane mechanics** in v1, since the mechanics templates
-(T5–T7) are v2. A surface force balance such as the §1.10.8 viscous membrane is
+(T6–T8) are proposed, not registered. A surface force balance such as the §1.10.8 viscous membrane is
 written as a weak form over the membrane.
 
 What this assembler handles: one weak-form equation governing one scalar or vector
