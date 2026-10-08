@@ -6,6 +6,12 @@ overview” discussion has not been fully recovered; its unavailable equations a
 reconstructed here. [Workspace guide](README.md) ·
 [Documentation discrepancies](../../reviews/2026-10-08-documentation-discrepancies.md).
 
+This iteration focuses on the new continuum physics: kinematics, bulk/surface balances, phase
+coupling, constitutive laws, interfaces and verification. Earlier ideas about cytoskeletal and motor
+mechanics, 0D fiduciaries or vesicle/adhesion domains, and deformable-atlas distance/vector metrics
+are recorded as deferred context in the [workspace guide](README.md#deferred-context-from-earlier-modeling-discussions)
+and are outside the first model family's scope.
+
 ## 1. Modeling goals before solver choices
 
 Develop examples that distinguish the following biological questions:
@@ -168,6 +174,8 @@ remain in the backend/configuration layer.
 - Identify the existing entry point and missing capabilities, then select acceptance benchmarks.
 - Decide whether a local representation/transformation prototype would resolve an open modeling question;
   define its input/output contract and eventual VCell integration boundary before expanding it.
+- Keep deferred point-domain, motor/adhesion and atlas-metric ideas out of the first physics milestone
+  unless a concrete example demonstrates that they are required for closure.
 
 Record decisions here with date, rationale and review PR as they are accepted. No choice in this list is
 settled by the initial proposal.

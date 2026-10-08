@@ -55,6 +55,17 @@ alone, using the following responsibilities:
 These are proposed filenames, not existing deliverables. Until a split occurs, link to sections of the
 framework. After a split, move the substantive text and leave a pointer; avoid parallel copies.
 
+## Deferred context from earlier modeling discussions
+
+Earlier planning also considered mechanical representations of cytoskeletal networks and molecular
+motors; zero-dimensional fiduciaries or domains such as vesicles and possible adhesion sites; and a
+deformable atlas or geometric metrics that expose distance/vector fields to the nearest membrane,
+cell centroid, or fiduciary point. These ideas remain useful context for the eventual VCell modeling
+layer, but they are deliberately deferred from the current physics work. They should not expand the
+first continuum model's scope or its acceptance criteria. Revisit them when a concrete biological use
+case requires point-domain coupling, motor mechanics, adhesion geometry, or motion-aware spatial
+queries.
+
 ## Boundaries with existing documentation
 
 - [Declarative formalism](../declarative-formalism.md): existing mathematical language and proposed
