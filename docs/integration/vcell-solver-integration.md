@@ -8,8 +8,13 @@
 **Started:** 2026-09-22 · **Status:** the vcell-fenics side (steps 0–10, PRs #147–#156) and the
 VCell Java side **V0–V5** (vcell #2084–#2091) are merged, and the image is multi-arch and public on
 GHCR. FEniCSx runs from the VCell desktop (Docker Quick Run → the browser field viewer) and on the
-cluster (Slurm/Apptainer, single rank), behind `vcell.fenics.enabled`. **Next: moving boundaries
-([M1–M5](#moving-boundaries-m1m5)).** The VCell-side plan is
+cluster (Slurm/Apptainer, single rank), behind `vcell.fenics.enabled`. Since then (status as of
+2026-10-08): **moving boundaries in 2D and 3D** ([M1–M5](#moving-boundaries-m1m5),
+[3M1–3M3](#3d-moving-boundaries-3m13m3-v-3d)), **image geometries** ([I1–I6](#image-geometries-i1i6)),
+the **multi-compartment solver** with membrane species and region variables (progress entries of
+2026-09-27/28), and **run phases in the status** (2026-10-01) are merged on both sides; the opening
+summaries below are the 2026-09-22 design and are superseded where the progress log says so. Open
+threads are in the risks section and the log. The VCell-side plan is
 [`../vcell/docs/plan-fenics.md`](https://github.com/virtualcell/vcell/blob/master/docs/plan-fenics.md).
 This is a living document: update the status table and the progress log as steps land.
 
@@ -127,8 +132,11 @@ mpiexec -n N vcell-fenics …                                          # inside 
     finalized.
 - **Exit codes:**
   - 0: success.
-  - 2: model or user errors — unsupported features, nonlinear backward Euler, moving-boundary
-    simtasks, field data, StartTime ≠ 0, steady tasks. These also send FAILURE.
+  - 2: model or user errors — unsupported features, nonlinear backward Euler, FastSystem (since
+    2026-09-27), field data, StartTime ≠ 0, steady tasks, and moving-boundary simtasks outside the
+    supported scope (originally all of them; see "Moving boundaries" below). These also send FAILURE.
+  - 1: a crash (also sends FAILURE; `comm.Abort(1)` under MPI). 143: SIGTERM, the manifest marked
+    failed.
   - 1: crashes (`comm.Abort` under MPI).
 - **Solver name:** if the simtask's `Solver` isn't FEniCSx, warn but run, so finite-volume simtasks
   can be cross-validated.
@@ -298,8 +306,12 @@ The original list follows for reference.
 
 VCell moving-boundary applications list only VCell's MovingBoundary solver. The ALE backend solves
 these problems (cross-validated against mbsolver: `cross_validation/mb_translation.py`,
-`mb_expansion.py`), but the SimulationTask path refuses them (`simtask.check_supported`), so they
-aren't solved on the initial shape.
+`mb_expansion.py`); at the start of this work the SimulationTask path refused them all
+(`simtask.check_supported`), so they weren't solved on the initial shape. **As of 2026-10-08 the
+scoped set below runs through the CLI in 2D and 3D** (M1–M5, 3M1–3M3). `simtask._check_moving_boundary`
+still refuses: no membrane `<Velocity>`, a dimension other than 2 or 3, image subvolumes, more than
+one moving front, membrane species, and species outside the moving compartment; boundary conditions
+are not refused up front but fail at the first remesh (`assemble.rebuild_on_mesh`).
 
 **First-pass scope** (decided 2026-09-22):
 - 2D, with species in the **moving interior volume** only (the fixture `SimID_274641196`: three
@@ -311,7 +323,7 @@ aren't solved on the initial shape.
 
 | Step | What | State |
 |---|---|---|
-| M1 | **Bridge.** Read `MathDescription/MembraneSubDomain/<Velocity>` (pyvcell drops it) into a `FrontVelocity` for `importer._front_motion` (prescribed motion on the inside compartment, v = v_b). Specific refusals: no velocity, 3D, more than one moving membrane, variables on the membrane or exterior, Dirichlet on the moving interior. Classify the velocity as prescribed or species-coupled. Fix `inlining._IDENT_RE`: `findall("sin(t)") → ['si','t']`. | ✅ #160 |
+| M1 | **Bridge.** Read `MathDescription/MembraneSubDomain/<Velocity>` (pyvcell drops it) into a `FrontVelocity` for `importer._front_motion` (prescribed motion on the inside compartment, v = v_b). Specific refusals: no velocity, 3D (lifted by 3M1), more than one moving membrane, variables on the membrane or exterior, Dirichlet on the moving interior (as built, BCs fail at the first remesh rather than up front). Classify the velocity as prescribed or species-coupled. Fix `inlining._IDENT_RE`: `findall("sin(t)") → ['si','t']`. | ✅ #160 |
 | M2 | **Bundle** (ADR 010 §2–3, schema 1). Per-row `_coords` `(T_seg, N, 3)` for an ALE domain, `profile: segmented`, and a new `seg000N/` segment per remesh. The recorder re-assembles the measure per row. Reader: segments and coords. PVD export with moving points and per-segment meshes. ADR amendment. | ✅ #161 |
 | M3 | **Runner.** A `_run_moving` branch (backend `ale`, forced to backward Euler because MOL moving has no output hooks). It uses `ale.step_with_remeshing` with `set_time` before each step and again after each remesh (the drivers never advanced `sim.t`, and `rebuild_on_mesh` resets it). A new recorder segment per remesh. Mesh-quality failures become user errors. | ✅ #162 |
 | M4 | **Cross-validation vs mbsolver.** The fixture simtask (translation); an expansion forcing remeshes; a species-dependent velocity. README and tracker; a new image. | ✅ #163. `cross_validation/mb_swept*.py`: the real fixture through the CLI vs mbsolver. Translation agrees to 0.41 % → 0.22 % under refinement (carried control 14 %); deforming fronts converge toward ours as mbsolver refines (our front is within 0.02 of exact); the remeshing case separates the conventions 5× (mbsolver limited to mesh 31 there). | Image `sha-bfdf853` (multi-arch, plus SIF).

@@ -62,6 +62,9 @@ the native pair.
   - `StartTime ≠ 0`;
   - a missing `MeshSpecification`;
   - any math the bridge cannot represent.
+
+  *Amended — see [Amendments](#amendments) below: moving-boundary tasks in a defined scope have been
+  accepted since 2026-09-23, and FastSystem is refused since 2026-09-27.*
 - **Solver name:** if `Solver` isn't the FEniCSx database name, log a warning and run anyway, so
   finite-volume simtasks can be cross-validated.
 
@@ -158,7 +161,8 @@ Not implemented by this ADR; listed so the contract above has a known consumer.
 - **Solver definition:**
   - `SolverDescription.FEniCSx` (database name `FEniCSx`; features Spatial and Deterministic;
     uniform and explicit output times; analytic geometries only for now; no moving boundary,
-    stochastic, fast system, field data or periodic boundaries);
+    stochastic, fast system, field data or periodic boundaries) — *as implemented, `Feature_Moving`
+    and image geometries were added later (vcell #2093, #2094; Amendments below)*;
   - a `SolverFactory` maker;
   - a `FenicsSolver` class: `initialize()` writes `SimID_*_.fenicsMessagingConfig`, and the argv is
     `vcell-fenics --simtask <file> --out <dir> [--vc-send-status-config=…|--vc-print-status]`.
@@ -200,3 +204,27 @@ Not implemented by this ADR; listed so the contract above has a known consumer.
   simtask can be solved by FEniCSx for comparison.
 - The CLI owns stdout hygiene and messaging robustness. Both are tested by porting VCell's parsers
   and a captive HTTP server (`tests/test_status.py`).
+
+## Amendments
+
+The contract above is the 2026-09-22 decision. Later work changed the refusal list in §1 without
+changing the principle (refuse what would be mis-solved); the integration tracker's status tables and
+progress log are the record.
+
+- **2026-09-23 — moving-boundary tasks accepted in a defined scope** (tracker M1–M5; VCell side
+  vcell #2093, `Feature_Moving`). `Solver="MovingB"` / `<MovingBoundarySolverOptions>` tasks run when
+  the math has one moving front with a membrane `<Velocity>`, species only inside the moving
+  compartment, and no membrane species; the velocity may depend on the species (one-step lag). Each
+  of those conditions is a specific exit-2 refusal in `simtask._check_moving_boundary`. Boundary
+  conditions on the moving compartment are not refused up front; they fail at the first remesh.
+- **2026-09-24 — 3D moving boundaries** (tracker 3M1–3M3; vcell `fenicsx/mb-3d`): the 2D-only
+  refusal is lifted for analytic geometries; image subvolumes on a moving front stay refused.
+- **2026-09-23 — image geometries accepted** (tracker I1–I6, ADR 012; vcell #2094 lifts the Java-side
+  image refusal, keeping it for moving-boundary applications).
+- **2026-09-27 — FastSystem refused** (progress entry of that date): pyvcell's reader drops the
+  `FastSystem` element, so the simtask and VCML loaders read it from the XML and refuse with exit 2
+  rather than solving the unbuffered species wrongly.
+- **2026-09-28 — multi-compartment routing**: every fixed model whose equations span two or more
+  subdomains runs through the multi-compartment solver (membrane species, region variables, box-face
+  values per compartment); region variables on the single-mesh and moving paths are refused.
+- **2026-10-01 — run phases** in the status protocol (§4, edited in place that day).

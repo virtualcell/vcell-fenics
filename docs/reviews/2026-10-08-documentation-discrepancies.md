@@ -223,7 +223,15 @@ the bridge: boundary conditions on a moving model fail only when a remesh occurs
 
 **Action:** update current summaries, retain dated discovery logs, and amend the old contract's refusal
 list. Supported moving tasks are scoped: one front, interior species, and geometry restrictions, with
-BCs unsupported across a remesh; this does not make the mechanics/FSI drivers general CLI modes. VCell Java deployment claims remain
+BCs unsupported across a remesh; this does not make the mechanics/FSI drivers general CLI modes.
+
+**Closure (2026-10-08, PR #213):** the tracker's header states what has landed since 2026-09-22 and
+that the opening summaries are superseded where the log says so; its CLI section lists exit 1 and 143
+and the scoped moving-boundary acceptance; the “Moving boundaries” paragraph and the M1 row carry the
+as-built refusal list (BCs fail at the first remesh, 3D lifted by 3M1). ADR 011 keeps its 2026-09-22
+refusal list and gains an **Amendments** section (moving boundaries 2D/3D, image geometries,
+FastSystem, multi-compartment routing, run phases) with pointers from §1 and §6. The VCell Java side
+is cited from the tracker and the vcell PR numbers, not re-inspected. VCell Java deployment claims remain
 reported history here; this audit did not inspect the sibling checkout or a running deployment.
 
 ## D10 — Notebook snapshots use old names and capability claims
