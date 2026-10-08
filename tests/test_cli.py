@@ -237,7 +237,17 @@ def test_run_couples_two_compartments_across_a_membrane(tmp_path: Path) -> None:
     )
     assert status == 0
     bundle = Bundle.open(out / "results.fenics")
-    assert set(bundle.manifest.domains) == {"cyto_dom", "ext_dom"}  # the VCell compartment names
+    # the VCell compartment names, and the membrane between them -- no species of its own, but written with
+    # its maps onto both sides, so a membrane function of the two concentrations can be drawn on it
+    assert set(bundle.manifest.domains) == {"cyto_dom", "ext_dom", "mem_dom"}
+    membrane = bundle.manifest.domains["mem_dom"]
+    assert membrane.kind == "membrane" and membrane.adjacent is not None
+    assert set(membrane.adjacent.compartments) == set(membrane.adjacent.maps) == {"cyto_dom", "ext_dom"}
+    assert not [v for v in bundle.manifest.variables if v.domain == "mem_dom"]
+    for compartment in ("cyto_dom", "ext_dom"):
+        mapped = bundle.adjacent("mem_dom", compartment)
+        assert mapped is not None and (mapped >= 0).all()
+        assert np.array_equal(bundle.mesh(compartment).points[mapped], bundle.mesh("mem_dom").points)
     assert bundle.times == pytest.approx((0.0, 0.05, 0.1, 0.15, 0.2))  # every output, incl. the IC
 
     summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
@@ -298,7 +308,7 @@ def test_run_couples_several_species_per_compartment(tmp_path: Path) -> None:
     status = main([*argv, "--output-dt", "0.1", "--h", "0.12", "--out", str(out)])
     assert status == 0
     bundle = Bundle.open(out / "results.fenics")
-    assert set(bundle.manifest.domains) == {"cyto_dom", "ext_dom"}
+    assert list(bundle.manifest.domains) == ["cyto_dom", "ext_dom", "mem_dom"]  # the species-less membrane last
     summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
     assert summary["run"]["backend"] == "multi_compartment"
     assert sorted(summary["species"]) == ["p_cyto", "q_ext", "s_cyto", "s_ext"]

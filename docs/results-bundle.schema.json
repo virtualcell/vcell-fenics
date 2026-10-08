@@ -1,8 +1,48 @@
 {
   "$defs": {
+    "Adjacency": {
+      "description": "A membrane's adjacent compartments and its point maps onto them (ADR 010 \u00a73, \"Membrane adjacency\";\noptional, added after schema 1 shipped \u2014 absent from older bundles).\n\n``compartments`` are the two compartments the membrane separates. ``maps[compartment]``, present only\nfor a compartment that is a domain of the bundle, is the segment-relative path of an int32 array\n``(n_points,)``: the membrane's point ``i`` is point ``map[i]`` of that compartment's mesh in the same\nsegment \u2014 the same vertex of the parent mesh, so the coordinates are identical \u2014 or ``-1`` if none.\n\nWhich compartment is VCell's \"inside\" or \"outside\" is the VCell math's (its MembraneSubDomain); the\nbundle names compartments, not sides, so a reader resolves ``X_INSIDE`` / ``X_OUTSIDE`` there.",
+      "properties": {
+        "compartments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Compartments",
+          "type": "array"
+        },
+        "maps": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Maps",
+          "type": "object"
+        },
+        "version": {
+          "default": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "compartments"
+      ],
+      "title": "Adjacency",
+      "type": "object"
+    },
     "DomainInfo": {
       "description": "One VCell domain (a CompartmentSubDomain or MembraneSubDomain) and its mesh file.",
       "properties": {
+        "adjacent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Adjacency"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "cell_type": {
           "title": "Cell Type",
           "type": "integer"

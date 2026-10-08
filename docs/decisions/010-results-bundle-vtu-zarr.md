@@ -124,6 +124,33 @@ Why this over VTKHDF, the strongest standard:
     segments, `_coords` `(T_seg, N, 3)` as in 2D, a new `seg000N/` per 3D remesh. Nothing in the
     reader, writer or viewer is dimension-specific.
   - **Reserved names:** `_coords` and `seg\d{4}` cannot name a domain or a variable.
+- **Membrane adjacency** (added 2026-10-07, additive: still schema 1; older readers ignore it). A membrane
+  function of the volume concentrations on either side (a flux `P*(c_cyt - c_ec)`, or `c_INSIDE`/`c_OUTSIDE`)
+  is evaluated at each membrane point from each adjacent compartment's value at that point. The bundle
+  records, per membrane, which compartment point that is:
+  - `domains[<membrane>].adjacent = {version: 1, compartments: [a, b], maps: {<compartment>: "<membrane>/_adjacent/<compartment>"}}`.
+    `compartments` are the two compartments the membrane separates. `maps` lists only those that are
+    domains of the bundle. Volumes have `adjacent: null`, and a bundle from an older writer has no key.
+  - `<prefix><membrane>/_adjacent/<compartment>` is an int32 `(n_points,)` zarr array, one chunk, zlib,
+    fill `-1`. Membrane point `i` is point `map[i]` of the compartment's VTU **in the same segment**. Each
+    segment has its own maps: a remesh renumbers every point, while ALE motion keeps the topology, so one map
+    serves the whole segment.
+  - **Exact, not a nearest-point search.** Every compartment and membrane submesh is cut from one parent mesh
+    (`create_submesh`), and the canonical point order already keys each point by the parent's
+    `input_global_indices` (§6(f)). Equal keys are the same parent vertex, so the map is a key join, the
+    coordinates are bit-identical, and the result is independent of the MPI rank count. On a body-fitted
+    mesh every membrane facet is a facet of a cell on each side, so no membrane point is unmatched (`-1`
+    would mark one, with a warning).
+  - **Inside/outside are VCell's, not the bundle's.** The maps are keyed by compartment name. Which one is
+    the MembraneSubDomain's "inside" belongs to the VCell math, which the reader has; the formalism's
+    `SurfaceClass.inside` follows the geometry's `subvolume_ref_1` and need not agree.
+  - **Membranes without species are written too** (multi-compartment runs): a membrane between written
+    compartments becomes a domain with no variables, carrying only its mesh and maps. A membrane flux is
+    usually a function on such a membrane, for example the nuclear envelope of a Ran-transport model.
+    The **compartments come first** in `domains` (the manifest keeps registration order, not sorted keys):
+    readers take the first domain as a default, and a membrane without variables must never be it. A
+    reader must also not assume that every domain has a variable.
+  - **Reserved name:** `_adjacent`.
 - **Reader rules:**
   - Refuse a `schema` newer than you know.
   - Ignore unknown keys.

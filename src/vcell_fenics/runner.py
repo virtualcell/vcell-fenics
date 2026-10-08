@@ -35,7 +35,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import dolfinx
 import numpy as np
@@ -53,6 +53,9 @@ from vcell_fenics.formalism.schema import REGION_SPACE
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
 from vcell_fenics.results.schema import DomainKind
 from vcell_fenics.status import COMPILING, MESHING, SOLVING, WRITING, NullReporter, StatusReporter
+
+if TYPE_CHECKING:
+    from vcell_fenics.backend.multi_compartment import MultiCompartmentGeometry
 
 
 class RunError(Exception):
@@ -507,9 +510,17 @@ def _run_multi_compartment(
             f"cells or membrane facets for them at h = {options.h:g}"
         )
     status.phase(COMPILING)  # the integrator compiles and assembles its forms before the first step
-    for name, names in variables.items():
+    # Compartments first: a reader takes the first domain as its default, and a membrane (above all one with no
+    # species, below) should never be it.
+    for name, names in sorted(variables.items(), key=lambda item: item[0] not in geometry.compartments):
         kind: DomainKind = "volume" if name in geometry.compartments else "membrane"
-        recorder.add_domain(name, kind, geometry.mesh_of(name), [(variable, None) for variable in names])
+        sides = _sides(geometry, name)
+        recorder.add_domain(name, kind, geometry.mesh_of(name), [(variable, None) for variable in names], sides=sides)
+    # A membrane without species beside a compartment with some: written for its mesh and its maps onto its
+    # sides, so a membrane function of the adjacent volume values (a flux) can be drawn on it (ADR 010 §3).
+    for name, membrane in geometry.membranes.items():
+        if name not in variables and (membrane.inside in variables or membrane.outside in variables):
+            recorder.add_domain(name, "membrane", membrane.mesh, [], sides=_sides(geometry, name))
     recorder.open()
 
     cells = mesh_cell_count(geometry.parent_mesh)
@@ -545,6 +556,13 @@ def _run_multi_compartment(
         on_progress=status.step,
     )
     return cells, int(result.steps)
+
+
+def _sides(geometry: MultiCompartmentGeometry, name: str) -> tuple[str, ...] | None:
+    """A realized membrane's two adjacent compartments; ``None`` for a compartment."""
+
+    membrane = geometry.membranes.get(name)
+    return None if membrane is None else (membrane.inside, membrane.outside)
 
 
 # -- small shared helpers ------------------------------------------------------------------------------

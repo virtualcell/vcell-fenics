@@ -12,6 +12,7 @@ from vcell_fenics.results.recorder import BundleRecorder
 from vcell_fenics.results.schema import (
     SCHEMA_VERSION,
     STATS_COLUMNS,
+    Adjacency,
     BundleSchemaError,
     DomainInfo,
     Manifest,
@@ -25,6 +26,7 @@ from vcell_fenics.results.writer import BundleWriter
 __all__ = [
     "SCHEMA_VERSION",
     "STATS_COLUMNS",
+    "Adjacency",
     "Bundle",
     "BundleRecorder",
     "BundleSchemaError",

@@ -106,6 +106,11 @@ authoritative), `planned_times`, `segments`,
   entries with `prefix: "seg0001/"`, each with its own `<prefix>mesh/<domain>.vtu` and
   `<prefix><domain>/<var>`. `motion: "ale"` means `<prefix><domain>/_coords` exists with shape
   `(T_seg, N, 3)`.
+- **Membrane adjacency** (optional, 2026-10-07): a membrane domain carries
+  `adjacent{version, compartments, maps{compartment: path}}`, and `<prefix><membrane>/_adjacent/<compartment>`
+  is an int32 `(n_points,)` map of each membrane point onto that compartment's point (the same vertex).
+  Multi-compartment runs also write species-less membranes (mesh and maps only), after the compartments.
+  ADR 010 §3 has the details.
 - **Reader rules:** reject an unknown `schema`; ignore unknown keys; take row counts from `times` /
   `count`, never from array shapes.
 - **Mid-run safety:** a row is written before its time is appended to `times`, so a reader polling
@@ -416,6 +421,22 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 ## Progress
 
 Newest first. One entry per landed step or notable finding.
+
+- **2026-10-07** — **Membrane-to-volume point maps in the bundle (ADR 010 §3, "Membrane adjacency").**
+  - **Why:** VCell's field viewer refused membrane functions of the adjacent volume values, such as a flux
+    `P*(c_cyt - c_ec)` or `c_INSIDE`. The bundle had no way to find, at a membrane vertex, each side's value.
+  - **What:**
+    - Each membrane domain records, per segment, an int32 map from its points to each adjacent compartment's
+      points.
+    - The maps are an exact key join on the parent mesh's `input_global_indices`, which the canonical point
+      order already uses. They are rank-count independent and pair bit-identical coordinates: checked in 2D,
+      in 3D, and at n = 3.
+    - Multi-compartment runs now also write membranes that have no species, as mesh-and-maps domains (a
+      nuclear envelope carrying only a flux).
+    - Domains are written compartments-first; the manifest is no longer key-sorted.
+  - **Additive:** still schema 1, so older readers ignore the new key and arrays.
+  - **VCell side:** virtualcell/vcell `fieldviewer/fenics-membrane-adjacent`. It reads the maps and evaluates
+    those functions, and asks for a re-run on older bundles.
 
 - **2026-10-01** — **Run phases in the status (ADR 011 §4).** A run sat at "0%" for a minute or two
   while it meshed and JIT-compiled. The solver now reports its phase — `loading model`, `meshing`,

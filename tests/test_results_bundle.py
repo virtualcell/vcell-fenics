@@ -362,6 +362,6 @@ def test_reserved_bundle_names(tmp_path: Path) -> None:
     )
     mesh = create_unit_square(MPI.COMM_WORLD, 2, 2)
     writer.add_domain("cyto", "volume", fem.functionspace(mesh, ("Lagrange", 1)))
-    for bad in ("_coords", "seg0001"):
+    for bad in ("_coords", "_adjacent", "seg0001"):
         with pytest.raises(ValueError, match="cannot name"):
             writer.add_variable("cyto", bad)
