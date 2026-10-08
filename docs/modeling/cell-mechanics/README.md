@@ -1,8 +1,9 @@
 # Cell kinematics and mechanics workspace
 
-**Status:** proposed organization and initial discussion draft, 2026-10-08. Review with Claude Code
-Fable before treating proposed physics or representation choices as accepted. The repository ownership
-direction below records the user's architectural clarification; it is not a new solver capability.
+**Status:** proposed organization and initial discussion draft, 2026-10-08; reviewed the same day in
+PR #213 (corrections applied in the framework document). The physics and representation choices remain
+proposals until a worked example is accepted. The repository ownership direction below records the
+user's architectural clarification; it is not a new solver capability.
 
 The goal is to identify biological modeling goals and abstractions, derive the mathematical problem
 families they require, verify suitable solution methods, and map the proven concepts into VCell and
@@ -89,7 +90,7 @@ queries.
 2. Mark each capability as **proposed**, **source-inspected**, **previously reported verified**, or
    **verified in this work**; include the relevant entry point and evidence. Test existence alone does
    not establish a passing result at the current revision.
-3. Review the modeling and mathematical closure independently (initial reviewer: Claude Code Fable).
+3. Review the modeling and mathematical closure independently of the author (first review: PR #213).
 4. Prototype representations or transformations here when useful, in a scoped change with explicit
    input/output examples and tests. Record what should eventually move into VCell and what remains
    backend-specific.
@@ -97,6 +98,5 @@ queries.
    a separate change before advertising new formalism or solver capabilities.
 
 The repository ownership direction above is recorded from the user. The proposed organization,
-physics and representation choices remain review items. A later implementation handoff (including
-to Opus) should use the reviewed document and acceptance tests, rather than reconstructing intent
-from chat history.
+physics and representation choices remain review items. A later implementation handoff should use
+the reviewed document and acceptance tests, rather than reconstructing intent from chat history.

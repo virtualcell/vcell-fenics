@@ -1,9 +1,11 @@
 # Cell kinematics and mechanics: modeling framework
 
-**Status:** initial proposal for discussion, 2026-10-08. This records the next modeling work, not a
-complete constitutive theory or an implementation specification. The earlier “Constitutive laws
-overview” discussion has not been fully recovered; its unavailable equations and examples are not
-reconstructed here. [Workspace guide](README.md) ·
+**Status:** initial proposal, 2026-10-08, reviewed the same day in PR #213 (the review's corrections
+are applied in place and marked *Review note* where a claim changed). This records the next modeling
+work, not a complete constitutive theory or an implementation specification. The earlier “Constitutive
+laws overview” discussion has not been fully recovered (it is not in the repository or the transcript
+archive); its unavailable equations and examples are not reconstructed here.
+[Workspace guide](README.md) ·
 [Documentation discrepancies](../../reviews/2026-10-08-documentation-discrepancies.md).
 
 This iteration focuses on the new continuum physics: kinematics, bulk/surface balances, phase
@@ -113,10 +115,19 @@ which abstractions deserve first-class support.
 
 ### Diffuse phases and species affinity
 
-The existing Cahn–Hilliard support should be treated as a source of physically diffuse phases, not as
-an automatic sharp membrane. Its conserved order parameter `φ` separates into wells with a resolved
-interface of finite width. The phase field can then provide material coefficients and localization for
-other species, but the coupling law must be chosen explicitly.
+The existing Cahn–Hilliard support is a source of physically diffuse phases, not a sharp membrane.
+This is already the repository's position: [approaches.md](../approaches.md#c-phase-field--diffuse-membrane-regularizing--sharp-interface-limit)
+§C separates the *regularizing* phase field (Approach C, a numerical device for a sharp membrane,
+`ε → 0`) from the *resolved* diffuse-interface model (`ε` a physical length, kept finite), and
+`backend/cahn_hilliard.py` implements the resolved one. Its conserved order parameter `φ` separates
+into wells with a resolved interface of finite width. The phase field can then provide material
+coefficients and localization for other species, but the coupling law must be chosen explicitly.
+
+*Review note (2026-10-08):* the phase-field side of this family is already verified in
+`tests/test_backend_cahn_hilliard.py`: order-parameter conservation, unconditional energy decrease
+(convex splitting), the analytic tanh profile and its convergence under refinement, the linear
+dispersion relation, and a droplet obeying Gibbs–Thomson with mesh-converged curvature. The *new*
+modeling work in this family is only the species side below.
 
 Candidate species descriptions include a concentration `c` with a phase-dependent free-energy density
 or chemical potential, for example `g(c, φ)` with distinct preferred solubilities in the two wells;
@@ -127,9 +138,9 @@ per phase volume, or as a conserved amount. A simpler first prototype can use a 
 coefficient or smooth interpolation between inside/outside affinities, provided its assumptions and
 conservation law are explicit.
 
-The first useful test is a stationary planar diffuse interface with a species initially out of
-equilibrium: verify the predicted inside/outside partition ratio, total species conservation under
-no-flux boundaries, and convergence as the interface is resolved more finely. Follow that with a
+The first useful test is a stationary planar diffuse interface (the verified tanh equilibrium) with a
+species initially out of equilibrium: verify the predicted inside/outside partition ratio, total
+species conservation under no-flux boundaries, and convergence as the interface is resolved more finely. Follow that with a
 moving or coarsening phase field to test whether transport, reactions and changing phase volumes remain
 consistent. This is a separate problem family from the sharp moving-membrane T2 equation: `φ` defines
 the phase geometry and `c` is a bulk field coupled to it, rather than a surface density living on a
@@ -143,7 +154,7 @@ than duplicating them in a new framework.
 | Example | What it distinguishes | Evidence to reuse or produce |
 |---|---|---|
 | Static diffusion and prescribed expansion | Transport accuracy versus dilution and geometric conservation | Existing eigenmodes, moving/static MMS twins and mass checks |
-| Different mesh and carrier velocities | Numerical frame motion versus physical transport | Existing rotating-mesh/lab-frame tests; include a compressible-carrier case |
+| Different mesh and carrier velocities | Numerical frame motion versus physical transport | Existing rotating-mesh/lab-frame tests (`test_backend_lab_frame_advection.py`, `test_backend_advection.py`, `test_backend_slip_moving.py`) and the existing compressible-carrier cases (`test_fsi_species_mms.py`, `mms/cases/bulk_compressible_advection_*`) |
 | Tense circle/sphere and perturbed shape | Mechanical equilibrium versus relaxation | Existing Laplace and ellipse FSI tests; derive dimension-specific expectations |
 | Two-phase drag | Independent flow versus phase locking | Existing manufactured mixture and drag tests; examine boundary closure and fraction weighting |
 | Elastic/poroelastic relaxation | Stored energy, history and fluid-network coupling | Proposed benchmark such as Biot consolidation, after assumptions and BCs are fixed |
@@ -159,10 +170,15 @@ it is continuous or discrete, what tolerance/order is expected, and how remeshin
 
 ### Exact and manufactured solutions for moving domains
 
-The ChatGPT discussion titled “Moving Boundary Methods” provides a useful design pattern for
-extending the repository's existing symbolic manufactured-solution work. The transcript is a source
-of hypotheses and implementation guidance; repository tests and independently derived residuals
-remain the evidence for a passing result.
+A ChatGPT discussion titled “Moving Boundary Methods” provided the design pattern below for extending
+the repository's manufactured-solution suite. *Review note (2026-10-08):* that transcript is **not
+archived** in this repository or the transcript archive (the only captured session is
+[2026-06-06, cut-cell and front tracking](../../research/2026-06-06-cutcell-fronttracking-chatgpt.md));
+if it is recovered, add it under `docs/research/` with the same provenance header. Also, the existing
+suite is not symbolic: each `mms/cases/*.yaml` carries a hand-derived forcing term in its `source`
+string ([mms/README.md](../../../mms/README.md)), the mesh moves Lagrangian by `dt·v` with no exact-geometry
+snapping, and `dt ∝ h²`. The transcript is a source of hypotheses and implementation guidance;
+repository tests and independently derived residuals remain the evidence for a passing result.
 
 Manufacture an exact **geometry–field pair**, rather than only a field on a changing mesh. Keep these
 velocities distinct throughout the model and test harness: physical carrier velocity `v`,
@@ -206,8 +222,12 @@ phase-dependent flux and interface affinity as the diffuse width is resolved. Th
 existing Cahn–Hilliard phase generation to the new inside/outside species-partitioning physics.
 
 The first implementation should extend the existing MMS machinery with exact geometry, relative
-boundary-flux residuals and optional motion-law residuals. Coordinate transformations should be an
-additional exact-pair generator, not a replacement for direct physical-coordinate residual generation.
+boundary-flux residuals and optional motion-law residuals; a symbolic (sympy) forcing derivation would
+be new infrastructure, worth adding once the hand-derived cases become error-prone. Coordinate
+transformations should be an additional exact-pair generator, not a replacement for direct
+physical-coordinate residual generation. Uniformly expanding domains with closed-form decay already
+exist as unforced checks (`mms/cases/mb_expansion_dilution.yaml`, `tests/test_backend_mol_moving.py`,
+`tests/test_backend_dilution.py`); the 1D expanding interval proposed in step 1 does not.
 
 ## 6. Modeling representation and transformation into the formalism
 
@@ -235,9 +255,11 @@ After a family and its verification are reviewed, map the generated mathematical
 
 Make gaps explicit: multiple physical velocities, phase-weighted storage, reference/history tensors,
 interface mechanics, and coupled quasi-static/evolving systems may require new semantics or templates.
-Use semantic template names while the [T5 naming collision](../../reviews/2026-10-08-documentation-discrepancies.md#d03--t5-has-two-meanings-in-the-same-formalism)
-is unresolved. Promoting a working driver into a supported template needs a defined problem envelope,
-validation rules, diagnostics and conformance examples.
+The proposed mechanics templates are T6 (Stokes / Navier–Stokes), T7 (linear elasticity) and T8
+(hyperelasticity); T5 is `region_ode` (the
+[T5 naming collision](../../reviews/2026-10-08-documentation-discrepancies.md#d03--t5-has-two-meanings-in-the-same-formalism)
+was resolved by renumbering in PR #213). Promoting a working driver into a supported template needs a
+defined problem envelope, validation rules, diagnostics and conformance examples.
 
 A transformation test should check the generated mathematical structure independently of a numerical
 solve; a companion conformance example should check the solution. This gives eventual VCell integration

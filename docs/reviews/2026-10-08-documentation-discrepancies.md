@@ -1,8 +1,10 @@
 # Documentation discrepancies identified on 2026-10-08
 
-**Status:** initial review for independent review by Claude Code Fable; findings remain open unless
-explicitly marked otherwise. This PR records discrepancies and adds navigation, rather than rewriting
-all historical documents or changing solver behavior.
+**Status:** reviewed 2026-10-08 (PR #213, second session). Every finding's cited evidence was checked
+against the source at the baseline below; all ten hold in substance. Corrections to the register's own
+wording are applied in place, additional stale spots the first pass missed are listed under
+[Further stale spots](#further-stale-spots-found-in-review), and each finding carries a **Closure** line
+recording what this PR corrected and what remains open.
 
 **Baseline:** `4dab281e1ed3f7c2b2bb60c6c2d1a8ccb251ca17` (local `main`, merge of PR #211).
 Evidence below is documentation and source inspection. Test files identify existing checks; **the
@@ -14,11 +16,13 @@ Use the [documentation map](../README.md) for navigation and the
 
 ## D01 — The overview and architecture describe an early subset as the current backend
 
-**Locations:** [overview](../overview.md), “What v1 implements” and “What's deferred”;
-[architecture](../architecture.md), “Coupled multi-species assembly” and module map.
+**Locations:** [overview](../overview.md), “What v1 implements” and the “What's deferred” bullet under
+“Where to go next” (it is a bullet, not a section); [architecture](../architecture.md), the formalism
+box (“templates (T1–T4)”), “Coupled multi-species assembly” and the module map.
 
-They describe zero-Neumann-only boundaries, deferred bulk–surface coupling, no remeshing, and a
-largely backward-Euler-only pipeline. Those descriptions are useful history but understate the checkout.
+They describe zero-Neumann-only boundaries, deferred bulk–surface coupling, no remeshing, the weak-form
+escape hatch and unknown motion as deferred, and a backward-Euler / direct-LU-only pipeline. Those
+descriptions are useful history but understate the checkout.
 [assemble.py](../../src/vcell_fenics/backend/assemble.py) builds Dirichlet/Neumann/Robin conditions and
 transport terms; [reaction_diffusion.py](../../src/vcell_fenics/backend/reaction_diffusion.py) supplies
 method-of-lines integration; [ale.py](../../src/vcell_fenics/backend/ale.py) supplies remeshing.
@@ -85,9 +89,13 @@ only and bulk still a sketch, while its later table says both are built;
 [surface-remap note](../modeling/conservative-surface-remap.md) still defers the driver.
 
 **Evidence:** [ale.py](../../src/vcell_fenics/backend/ale.py) dispatches by dimension/codimension;
-[remesh_3d.py](../../src/vcell_fenics/backend/remesh_3d.py) handles 3D bulk rebuilds;
-[ALE tests](../../tests/test_backend_ale.py) and
-[moving-boundary tests](../../tests/test_moving_boundary_run.py) cover relevant paths.
+[remesh_3d.py](../../src/vcell_fenics/backend/remesh_3d.py) rebuilds the 3D *mesh* (lattice, signed
+distance, SurfaceNets, Netgen fill, exact-volume restore), while the 3D field transfer is
+`remap_bulk_function_3d` in [bulk_remap_mesh.py](../../src/vcell_fenics/core/bulk_remap_mesh.py)
+(non-matching interpolation plus one global rescale, called from `assemble._remap_scalar`).
+[Membrane ALE tests](../../tests/test_backend_ale.py), [bulk ALE tests](../../tests/test_backend_ale_bulk.py),
+[3D ALE tests](../../tests/test_backend_ale_3d.py) and
+[moving-boundary tests](../../tests/test_moving_boundary_run.py) cover the three paths.
 The [integration tracker](../integration/vcell-solver-integration.md), “3D moving boundaries,” records
 3D results and limitations.
 
@@ -101,8 +109,10 @@ Approach-A trace physics must not be inferred from bulk remeshing support.
 **Location:** [multiphase cytoplasm](../modeling/multiphase-cytoplasm-ale.md), opening “not implemented”
 status and §10 step 4's “remaining” dynamic coupling. Its own §9 table records dynamic FSI as done.
 
-**Evidence:** [fsi.py](../../src/vcell_fenics/backend/fsi.py) exposes prescribed, single-phase and
-two-phase force-balance steps, plus single, reacting and nonlinear species variants.
+**Evidence:** [fsi.py](../../src/vcell_fenics/backend/fsi.py) exposes prescribed-motion, single-phase
+force-balance and two-phase force-balance steps, plus three *two-phase* species variants (one or more
+linear species, linearly reacting species, nonlinear reactions via Newton); there is no single-phase
+species step.
 [FSI tests](../../tests/test_backend_fsi.py) include Laplace equilibrium, ellipse relaxation, frame
 selection, drag locking and species invariants. [stokes_hdiv.py](../../src/vcell_fenics/backend/stokes_hdiv.py)
 and [its tests](../../tests/test_backend_stokes_hdiv.py) cover a distinct strong-normal-BC flow path.
@@ -146,14 +156,20 @@ a parsed template still needs admissible coefficients and compatible boundary da
 boundaries,” CLI exit-code description, and historical two-compartment descriptions;
 [ADR 011](../decisions/011-vcell-solver-contract.md), initial blanket MovingB rejection.
 
-**Evidence:** the tracker's M1–M5, 3M1–3M3 and September 28 entries;
-[simtask.py](../../src/vcell_fenics/pyvcell_bridge/simtask.py), moving-task checks;
+**Evidence:** the tracker's M1–M5 and 3M1–3M3 status-table rows and its September 28 progress entry
+(the progress log itself has no moving-boundary entries);
+[simtask.py](../../src/vcell_fenics/pyvcell_bridge/simtask.py), `_check_moving_boundary` (refuses: no
+`<Velocity>`, a dimension other than 2 or 3, image subvolumes, more than one front, membrane species,
+species outside the moving compartment; warns on a species-dependent velocity);
 [runner.py](../../src/vcell_fenics/runner.py), `_run_moving` and `_run_multi_compartment`;
-[multi-compartment tests](../../tests/test_multi_compartment.py).
+[multi-compartment tests](../../tests/test_multi_compartment.py). The tracker's M1 row also lists “3D”
+(lifted by 3M1) and an up-front “Dirichlet on the moving interior” refusal that has no counterpart in
+the bridge: boundary conditions on a moving model fail only when a remesh occurs
+(`assemble.rebuild_on_mesh` raises `NotImplementedError`), so a run that never remeshes is not refused.
 
 **Action:** update current summaries, retain dated discovery logs, and amend the old contract's refusal
-list. Supported moving tasks are scoped: one front, interior species, and geometry/BC restrictions;
-this does not make the mechanics/FSI drivers general CLI modes. VCell Java deployment claims remain
+list. Supported moving tasks are scoped: one front, interior species, and geometry restrictions, with
+BCs unsupported across a remesh; this does not make the mechanics/FSI drivers general CLI modes. VCell Java deployment claims remain
 reported history here; this audit did not inspect the sibling checkout or a running deployment.
 
 ## D10 — Notebook snapshots use old names and capability claims
@@ -173,6 +189,52 @@ current conservative time stepper.
 in the pinned dev environment, and report numerical tolerances explicitly. Do not edit saved results
 without executing the revised examples.
 
+## Further stale spots found in review
+
+Found while verifying D01–D10 against the source (2026-10-08); each is corrected in this PR unless marked
+*open*.
+
+- [runner.py](../../src/vcell_fenics/runner.py)'s module docstring says two-compartment models route to
+  `integrate_interface_coupled` / `integrate_membrane_coupled`; the code routes every fixed model whose
+  equations span two or more subdomains to `integrate_multi_compartment`. The formalism's §1.4.2 T5 and
+  Appendix B region-variable notes (“both coupled solvers”) omit that solver too.
+- Source docstrings carry the old template set: [templates.py](../../src/vcell_fenics/formalism/templates.py)
+  (“T1–T4”, while it registers T1–T5 and `cahn_hilliard`), [schema.py](../../src/vcell_fenics/formalism/schema.py)
+  and [weakform.py](../../src/vcell_fenics/backend/weakform.py) (“T5–T7 are v2”, the mechanics meaning of
+  the D03 clash). `cahn_hilliard` is a registered template with no T-number and no entry in the formalism's
+  template list.
+- [ale.py](../../src/vcell_fenics/backend/ale.py)'s docstring says “a moving 2D region” and names the gmsh
+  `mesh_region`; `_remesh` handles 3D and calls `mesh_region_netgen`.
+  [region_remesh_netgen.py](../../src/vcell_fenics/core/region_remesh_netgen.py)'s `fix_boundary_nodes`
+  error tells the user to “use the gmsh mesh_region”, which lives only under `tests/`.
+- [pyproject.toml](../../pyproject.toml)'s gmsh comments cite `approaches/*` prototypes; that package no
+  longer exists in `src/`.
+- [ADR 008](../decisions/008-gmsh-license-isolation.md) §4 still says the `approaches/*/geometry.py`
+  prototypes use gmsh and that two meshers coexist “until fully migrated”; §6 gates the ALE remesher's
+  switch to Netgen on a pinch check (the switch happened); the 3D path is called “spiked, not yet
+  productionized” (it is `remesh_3d.py`, with `PinchOffError` and a fallback ladder of surfaces).
+- [approaches.md](../modeling/approaches.md) lists “3D tetrahedra” as deferred for the bulk remap; the
+  interpolation-plus-rescale transfer exists (an exact 3D supermesh remains deferred). Its package tree
+  shows an `approaches/` layout (ale / submesh / phase_field / cut_fem) that was never built; the
+  drivers live in `backend/`.
+- The formalism's §3.6 says the backend has “no `t` handle”; `assemble()` binds `sim.t` to a time
+  Constant that `solver.run` and the method-of-lines driver advance, and Dirichlet data refresh from it.
+- [overview.md](../overview.md) says “direct LU”; the method-of-lines paths default to GMRES + ILU
+  ([linear_solvers.py](../../src/vcell_fenics/backend/linear_solvers.py)).
+- The runtime-failure translation in [diagnostics.py](../../src/vcell_fenics/backend/diagnostics.py) wraps
+  only the single-mesh backward-Euler and method-of-lines paths; the multi-compartment and
+  interface-coupled solvers call `ts.solve` untranslated, and the CLI's own backward-Euler loop in
+  `runner.py` bypasses `solver.run`'s `SolveError` wrapper. *Open* (code change).
+- The CLI's moving path is hard-wired to backward Euler (`runner._run_moving`) although a method-of-lines
+  moving stepper exists; that part of the “BE-only” description is still true for the CLI. *Open*.
+- [stokes_hdiv.py](../../src/vcell_fenics/backend/stokes_hdiv.py)'s docstring says a manufactured
+  divergence-free solution is recovered; its two tests check `div` at round-off on a bulging boundary
+  and that the fluid still slips, not a manufactured solution.
+- Nonlinear sources under backward Euler are rejected at two sites (`discrete._compose_backward_euler`
+  and the membrane-coupled assembler in `interface_coupled.py`), not one; the method of lines accepts them.
+- Region-variable connectivity is enforced by the solvers (`connected_region_count`), not the validator,
+  which checks only the region/template pairing. Spatial T4 is also refused on a moving subdomain.
+
 ## Questions to carry into the new modeling work
 
 These are design questions, not verified defects:
@@ -185,11 +247,13 @@ These are design questions, not verified defects:
 
 ## Follow-up and closure
 
-First review this register and the proposed organization. Then make focused corrections: orientation and
-status summaries; transport semantics and template identifiers; meshing/remeshing scope; executable
-notebooks. Close each D-number with the correction commit/PR and validation performed. This initial PR
-only supplies the register and navigation, so all substantive D01–D10 corrections remain open.
+The register was reviewed and the corrections were made in the same PR (#213), one commit per group of
+findings: orientation (D01), the formalism (D02, D03, D07), meshing and remeshing (D04, D05), the
+multiphase note (D06), the validation strategy (D08), the integration tracker and solver contract (D09),
+the notebooks (D10), and the source docstrings listed above. Each finding's **Closure** line names what
+was corrected and what stays open; open items are design or code work, not documentation.
 
-Fable's review should challenge the evidence and scope of each finding, check that historical decisions
-are not mistaken for code defects, and assess whether the proposed modeling workspace preserves the
-separation between biological assumptions, mathematical problems and numerical methods.
+Historical decisions were not treated as defects: ADR 007's gmsh choice and ADR 011's original refusal
+list were right when written and are annotated with dated follow-ups rather than rewritten. The
+modeling workspace keeps biological assumptions, mathematical problems and numerical methods separate;
+the review's corrections to it are recorded in the framework document itself.
