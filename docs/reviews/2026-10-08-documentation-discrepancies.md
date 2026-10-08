@@ -157,6 +157,12 @@ and [its tests](../../tests/test_backend_stokes_hdiv.py) cover a distinct strong
 and hyperelastic machinery are deferred; the natural-traction two-phase closure does not impose each
 phase's closed-cell normal matching. Do not equate existing viscous FSI with a general poroelastic solver.
 
+**Closure (2026-10-08, PR #213):** the note's status line now says the staged path is built through
+step 4 as Python drivers (named, with their test files), not reachable from the CLI or as templates,
+with step 5 (poroelastic swap) not started and the per-phase normal-matching seam open; the §9 traction
+row and §10 step 4 no longer call the dynamic loop “remaining”. Open: step 5 and the seam, both design
+work.
+
 ## D07 — Transport descriptions omit newer carrier/frame semantics
 
 **Location:** [declarative formalism](../modeling/declarative-formalism.md), §3.6's description of
@@ -191,6 +197,12 @@ velocity/pressure-space warnings; [diagnostic tests](../../tests/test_backend_di
 **Action:** reconcile the status table with those implemented checks. Keep units inference and remaining
 null-space checks separate. A structural warning is not a proof of conservation or inf-sup stability;
 a parsed template still needs admissible coefficients and compatible boundary data.
+
+**Closure (2026-10-08, PR #213):** the status line and the §3 table now record what is built
+(validator warnings for dilution and inf-sup, `NonlinearTermError`, the `diagnostics.py` translation on
+the single-mesh paths) and what is not (units; translation on the multi-compartment and
+interface-coupled solvers and the CLI's backward-Euler loop; element/BC and BC ↔ solution-class
+checks). Open: those gaps, which are code work.
 
 ## D09 — Integration summaries and the original solver contract retain superseded refusals
 

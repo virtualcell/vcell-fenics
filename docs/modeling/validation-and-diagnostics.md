@@ -5,9 +5,15 @@
 > between historical plans and current implementation. New modeling discussion lives in the
 > [cell-mechanics workspace](../modeling/cell-mechanics/README.md).
 
-**Status:** design note, no code beyond what already exists (`formalism/validator.py`).
-Captures the strategy and a growing registry of known failure modes; the build order in
-§7 is the implementation plan.
+**Status (2026-10-08):** strategy note, partly built. The build-time layers exist
+(`formalism/validator.py`, including the weak-form dilution and inf-sup warnings of §6 rows 1
+and 6), backward Euler refuses nonlinear sources by name (`NonlinearTermError`, row 7), and the
+runtime-failure translation of §5 is `backend/diagnostics.py` (`SolveError`: the non-finite
+residual localised to a term at the initial condition, `TS` and linear-step failures named) —
+but only on the single-mesh backward-Euler and method-of-lines paths; the multi-compartment and
+interface-coupled solvers still surface raw PETSc errors. Units inference (§4) is not built.
+The table in §3 and the *done* notes in §5–§7 record the state. Captures the strategy and a
+growing registry of known failure modes; the build order in §7 is the implementation plan.
 
 ## 1. The problem, and why it is harder for us than for VCell
 
@@ -123,13 +129,13 @@ guarantees and must be served by the lower (runtime) layers.
 |---|---|---|---|
 | Schema / parser | malformed documents, syntax errors | build | **have** (`formalism/schema`, `expr`) |
 | Typed AST + vocabulary | undefined names, arity, type mismatch, reserved-name collisions | build | **have** (`formalism/validator.py` §2.5) |
-| Template structural consistency | the VCell-style guarantee, *for templated equations* | build | **partial** — T1/T2 are consistent by construction; not all templates exist |
+| Template structural consistency | the VCell-style guarantee, *for templated equations* | build | **partial** — T1–T5 and `cahn_hilliard` are consistent by construction; the mechanics templates T6–T8 do not exist |
 | **Dimensional / units** | unit mismatches (a huge class of silent modeling errors) | build | **not built** |
-| **Discretization compatibility** | inf-sup, element/BC mismatch, missing conservation term, BC ↔ solution-class consistency | build (+ geometry) | **ad hoc** — flagged by hand (CLAUDE.md flags the dilution trap) |
-| **Runtime-failure translation** | SNES divergence, singular/ill-conditioned Jacobian, mesh tangling, NaN/Inf, step collapse | solve | **not built** — failures surface as raw PETSc/FFCx errors |
+| **Discretization compatibility** | inf-sup, element/BC mismatch, missing conservation term, BC ↔ solution-class consistency | build (+ geometry) | **partial** (2026-10-08) — validator warnings for a moving weak-form density without a dilution term and for a non-inf-sup velocity/pressure pair (§6 rows 1, 6); `NonlinearTermError` for a nonlinear source under backward Euler (row 7); the templates add the dilution term themselves. Element/BC mismatch and BC ↔ solution-class checks are still by hand |
+| **Runtime-failure translation** | SNES divergence, singular/ill-conditioned Jacobian, mesh tangling, NaN/Inf, step collapse | solve | **built for the single-mesh paths** (2026-10-08) — `backend/diagnostics.py` (`SolveError`, `preflight_failure_message`, `ts_failure_message`, `linear_step_failure_message`), used by `solver.run` and `reaction_diffusion`; mesh tangling is `MeshQualityError` / `StepTooLarge` in the ALE driver. The multi-compartment and interface-coupled solvers and the CLI's own backward-Euler loop still surface raw PETSc errors |
 
 The first two layers exist and are solid (the `Diagnostic` / `validate_or_raise`
-machinery). The three bold rows are the work this note is about.
+machinery). The three bold rows are the work this note is about; two of them are partly built.
 
 ## 4. Build-time validation — extending the existing pass
 
