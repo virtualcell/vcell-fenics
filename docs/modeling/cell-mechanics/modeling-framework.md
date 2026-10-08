@@ -272,8 +272,10 @@ remain in the backend/configuration layer.
 this document lacks (a compressible single-phase active gel with no pressure, shared by the 2017
 motile cell and the 2019/2022 endocytic patch), two boundary-motion-law kinds the formalism cannot
 express (a law derived on the boundary from traces, the normal and a global functional; a rigid
-motion of part of the boundary driven by a functional), axisymmetry, membrane sub-regions, and
-functionals of the state that drive motion. They also give exact acceptance tests for the ladder.*
+motion of part of the boundary driven by a functional), membrane sub-regions, functionals of the
+state that drive motion, and a membrane force balance on an open patch against a compressible gel
+(the deformable invagination the 2019/2022 papers approximated as a rigid, axisymmetric body for
+cost). They also give exact acceptance tests for the ladder.*
 
 - Choose the first biological example: passive shape relaxation, active viscous mixture, or active-gel migration.
 - Define concentration measures and boundary permeability for that example.

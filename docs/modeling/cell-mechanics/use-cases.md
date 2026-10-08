@@ -11,13 +11,16 @@ supplemental methods and COMSOL file) are not in the repository, and the gaps th
 |---|---|---|
 | **UC-A** Motile cell | Nickaeen, Novak, Pulford, Rumack, Brandon, Slepchenko, Mogilner, *PLoS Comput Biol* 2017 | a free boundary whose velocity is *derived* from bulk mechanics, a compressible single-phase active gel, substrate drag, emergent symmetry breaking |
 | **UC-B** Prescribed moving domain | Novak & Slepchenko, *J Comput Phys* 2014 (the MovingBoundary solver's algorithm) | VCell's own moving-boundary semantics: lab-frame species, Rankine–Hugoniot front condition, exact conservation; the comparison baseline |
-| **UC-C** Endocytic actin patch | Nickaeen et al., *MBoC* 2019 and 2022 | axisymmetric nanometre-scale mechanics, density-dependent rheology, ~15-species kinetics on a translating rigid boundary, surface species on ring sub-regions, a force functional driving the motion |
+| **UC-C** Endocytic actin patch | Nickaeen et al., *MBoC* 2019 and 2022 | nanometre-scale mechanics, density-dependent rheology, ~15-species kinetics in a domain whose membrane invagination moves, surface species on ring sub-regions, a force functional driving the motion. The authors solved it axisymmetric with a rigid invagination; both were tractability approximations, not the model (see UC-C) |
 
 The short version: **every one of the three needs something the formalism cannot say or the backend
 cannot run today, and two of the three (A and C) need the same missing thing** — a compressible,
 single-phase, pressure-free active gel with its velocity solved on a moving *volume* and a boundary
 motion law derived from it. The framework's §4 "active viscous mixture" family (two phases, mixture
-incompressibility, a pressure) is not what either paper does. Details follow.
+incompressibility, a pressure) is not what either paper does. One reading rule throughout: a paper's
+*numerical* choices (an axisymmetric reduction, a rigid boundary, a fitted resistance curve) are
+recorded as approximations with the model they stand in for, so the framework targets the model and
+the papers' numbers become acceptance tests of the approximated case. Details follow.
 
 ## 1. The three models in the framework's vocabulary
 
@@ -68,11 +71,15 @@ each phase `v_a`, the carrier of each species `v_c`, the mesh velocity `w`, and 
 
 ### UC-C — Nickaeen et al. 2019 / 2022
 
-- **Domain.** A cylinder of cytoplasm (sub-micron) under a flat plasma membrane, with a **rigid
-  invagination** (2019: spherocylinder of radius 30 nm; 2022: a head–neck "flask" with neck radius 3–10
-  nm) protruding into it along the symmetry axis. Solved **axisymmetric in (r, z)**. The invagination
-  **translates rigidly** along the axis; the flat membrane and the far field stay put, so `Γ` grows
-  and `Ω` shrinks.
+- **Domain.** A cylinder of cytoplasm (sub-micron) under a flat plasma membrane, with a membrane
+  invagination (2019: spherocylinder of radius 30 nm; 2022: a head–neck "flask" with neck radius 3–10
+  nm) protruding into it. **Two approximations the authors made for tractability, not as modeling
+  statements:** the problem was solved **axisymmetric in (r, z)**, and the invagination was treated
+  as a **rigid body** of fixed shape that translates along the axis against a prescribed turgor
+  resistance (membrane mechanics is listed by the authors as future work). The *model* is a 3D
+  cytoplasmic gel pushing a deformable membrane invagination against turgor pressure, membrane
+  tension and the coat's elasticity; the papers' numbers are what the approximations produced. Under
+  the approximations the flat membrane and the far field stay put, so `Γ` grows and `Ω` shrinks.
 - **Unknowns.** Network velocity `v` (bulk, vector, compressible); ~8 bulk species of the Berro 2010
   patch kinetics (new, aged and cofilin-bound filament subunits, active and capped barbed ends,
   pointed ends, bound and active Arp2/3) with the polymerized density `ρ` as their sum; 3 membrane
@@ -89,9 +96,12 @@ each phase `v_a`, the carrier of each species `v_c`, the mesh velocity `w`, and 
 - **Boundary conditions.** No-slip `v = u e_z` on the invagination, `v = 0` on the flat membrane
   (a velocity jump at the junction), zero stress far away, axis conditions on r = 0; zero relative
   species flux (automatic under no-slip); the Arp2/3 influx as a flux condition on the rings.
-- **Motion law.** `u(t) = μ ⟨f_z(t) − f_c(t)⟩₊` with `f_z = ∫_S e_z·σ·n ds` over the invagination
-  and `f_c(t)` a prescribed (logistic-in-time) turgor resistance; a rigid translation, not a shape
-  equation. Membrane mechanics are explicitly not solved.
+- **Motion law (as approximated).** `u(t) = μ ⟨f_z(t) − f_c(t)⟩₊` with `f_z = ∫_S e_z·σ·n ds` over
+  the invagination and `f_c(t)` a prescribed (logistic-in-time) turgor resistance; a rigid translation
+  standing in for a shape equation. **The modeling intent** is a membrane force balance on the
+  invagination — the gel's traction `σ·n` against turgor pressure, membrane tension/bending and the
+  clathrin coat — with the shape solved; the 2022 paper's time-varying resistance is a hand-fitted
+  surrogate for the neck narrowing that such a balance would produce.
 - **Velocities.** `v_a = v_c = v` for every bulk species (carried by the network); `v_b = u e_z` on
   the invagination, `0` elsewhere; `w` free in the interior. The rings are *geometric* regions that
   translate rigidly, so `∇_Γ·v_Γ = 0` on them and no surface dilution arises — but only because they
@@ -201,7 +211,7 @@ it discriminates swept from carried as cleanly as the dilution case does for car
 
 | Ingredient | Formalism construct | Backend today | CLI |
 |---|---|---|---|
-| Axisymmetric (r, z) formulation | **none** (Cartesian 2D/3D only); the alternative is full 3D on a 0.3 µm cylinder with 20-nm rings and a 3-nm neck — a severe multi-scale mesh | ✗ no `r`-weighted measure or `ε_θθ = v_r/r` | ✗ |
+| Axisymmetric (r, z) reduction — the authors' cost-saving approximation | **none** (Cartesian 2D/3D only); the faithful formulation is 3D, which the formalism and the 3D body-fitted realization support | ◐ 3D is available; the cost is resolution (a 0.3 µm domain with 20-nm rings and a 3–10 nm neck needs local refinement the remesher does not yet do). An `r`-weighted measure with `ε_θθ = v_r/r` would be an optional backend optimisation to reproduce the papers' runs cheaply, not a modeling requirement | ◐ |
 | Compressible force balance with `η(ρ, L)`, `σ_a = κ ρ²`, no pressure | `weak_form` on a bulk governing `v`, coefficients from other variables | ◐ as UC-A, plus **degenerate viscosity** where `ρ → 0` (a floor is presumably in the COMSOL file; must be chosen and shown insensitive) and the lhs/rhs split cannot take `η(ρ)` as a lagged coefficient without a `Function` parameter | ✗ |
 | ~8 bulk species, conservative advection by `v`, Berro kinetics with `(1 − ρ/ρ_max)` factors | T1 with the lab-frame `advection` slot (`v` the carrier) and nonlinear `source`s; `ρ` as a derived expression (a parameter in the species) | ◐ the MOL single-mesh path runs stiff nonlinear kinetics on a fixed mesh; **on the translating domain it needs the moving MOL stepper**, which has no CLI/output route; pure advection needs stabilisation (unspecified in the paper) | ✗ |
 | Local diffusion `D(x)` near the rings so an influx is well posed | T1 `diffusion` as an expression in `geom.x` | ✓ | ✓ |
@@ -209,22 +219,32 @@ it discriminates swept from carried as cleanly as the dilution case does for car
 | Arp2/3 influx into the bulk from the rings | Neumann on the bulk species referencing the ring variable (the §1.6.6 composable pattern) | ✓ on a fixed geometry (`coupled.py`) | ✗ |
 | No-slip `v = u e_z` on the invagination, `v = 0` on the flat membrane, zero stress far away | Dirichlet on a weak-form variable, per labelled boundary | ✗ (as UC-A); the velocity jump at the junction is a lid-driven corner — refine there | ✗ |
 | Force functional `f_z = ∫_S e_z·σ·n ds` | T5 `region_ode`'s boundary term `∫_∂R j ds` is the region variable's own flux BCs (`neumann` / `interface_flux` expressions), so the traction would have to be written as a flux expression in `grad(v)`, `geom.normal` and the stress law on one labelled boundary | ◐ region variables are hosted only by the multi-compartment solver on a **fixed** geometry; a flux expression in the gradient of a vector variable is not an existing integrand | ✗ |
-| Rigid translation `u(t) = μ⟨f_z − f_c(t)⟩₊ e_z` of **part** of the boundary | `motion: prescribed` with an expression in a region variable and `sim.t`, piecewise on the boundary | ◐ the prescribed velocity is evaluated on boundary nodes and extended harmonically, so a piecewise `if(on invagination, u e_z, 0)` expression would move the right nodes; nothing names "this labelled boundary moves rigidly, that one does not" | ✗ |
+| Rigid translation `u(t) = μ⟨f_z − f_c(t)⟩₊ e_z` of **part** of the boundary — the authors' approximation | `motion: prescribed` with an expression in a region variable and `sim.t`, piecewise on the boundary | ◐ the prescribed velocity is evaluated on boundary nodes and extended harmonically, so a piecewise `if(on invagination, u e_z, 0)` expression would move the right nodes; nothing names "this labelled boundary moves rigidly, that one does not" | ✗ |
+| The modeled law: a **membrane force balance** on the invagination (gel traction vs turgor, tension/bending, coat) with the shape solved | `motion: unknown` on a `surface` subdomain with a weak-form force balance referencing the bulk traction and `geom.mean_curvature` / `geom.normal` (§1.10.8), coupled to the bulk's motion | ◐ the membrane-mechanics machinery exists for a *closed* membrane around an **incompressible** interior (`unknown_motion.py`, `fsi.step_force_balance_fsi`: tension, projected curvature, BGN redistribution); here the membrane is an open patch pinned to a flat wall, loaded by a *compressible* gel from one side and turgor from the other, with a coat stiffness — none of which is built | ✗ |
 | Prescribed inputs | `WASp0(t)` bell curve, rate constants, `D(x)` support, `Ω` size, viscosity floor, mesh and time step | **not in the main texts** (supplements, `Figure2.mph`); Berro 2010 is a VCell model, so the kinetics exist as VCML | — |
 
 **Impedance mismatches (UC-C).**
 
-1. *Axisymmetry.* The one hard blocker. A native axisymmetric measure is a modest, well-understood
-   addition to a UFL backend (weight `2πr`, the hoop strain), but the formalism has no way to declare
-   it, and the geometry formalism has no 2D-axisymmetric domain kind. Running it in 3D is not a
-   workaround at a 3-nm neck.
+1. *Separate the model from the papers' approximations.* Axisymmetry and the rigid invagination
+   reduced the authors' computational cost; they are not biology. The faithful formulation is 3D
+   with a deformable invagination under a membrane force balance. The framework's stance ("the
+   existing solver is a foundation, not a constraint on how biology must be described") says to
+   model the former and treat the latter as (a) acceptance tests for the papers' numbers and (b)
+   optional cost reductions. Consequences: 3D at nanometre scale needs **local refinement** (the
+   remesher rebuilds the whole region at one `h`); an axisymmetric measure is a worthwhile backend
+   optimisation, not a formalism construct; and the membrane mechanics the framework's §3 lists
+   (traction balance, tension, bending) *is* on this use case's path, with a twist — an open membrane
+   patch pinned to a wall, a compressible gel on one side, turgor and a coat on the other.
 2. *The mechanics has no solvent and no pressure* — the same gap as UC-A, with the added degeneracy
    that `η` and `σ_a` vanish with `ρ`. The framework's §3 remark "mixture incompressibility is not
    automatically incompressibility of each phase" is beside the point here: there is no mixture.
-3. *The membrane is a rigid, partially moving boundary driven by a functional.* No shape equation,
-   no tension, no bending; the "resistance" is a fitted logistic in time. The framework's §3 interface
-   laws (traction balance, tension, bending) are what the authors list as future work. For a worked
-   example this is a *feature*: it isolates gel mechanics from membrane mechanics.
+3. *Two tiers of motion law.* The papers' tier is a rigid translation of part of the boundary driven
+   by a force functional against a prescribed resistance — reproducible with a piecewise prescribed
+   velocity plus a region variable, and the right first target because it isolates gel mechanics
+   from membrane mechanics and has published numbers. The model's tier is a solved membrane shape;
+   for it the existing closed-membrane force-balance machinery is the nearest piece but assumes an
+   incompressible interior and a closed curve. Both tiers need a functional of the bulk stress
+   (`f_z`, or the traction field) available to the motion.
 4. *Scales and units.* Lengths 3–300 nm, forces 10²–3·10³ pN, densities to 18 mM with `n_A` factors
    inside the coefficients; two typos in the papers (`μ` 0.4 vs 0.04, "µm/s/pN" vs nm/(s·pN)) that a
    dimensional check catches. The framework asks for units and dimensionless groups up front; this
@@ -254,9 +274,11 @@ Where the [modeling framework](modeling-framework.md) is confirmed, and where it
   condition all three use.
 - §2's warning that compressible carriers dilute by their own divergence is load-bearing in A and C
   (both have `∇·v ≠ 0` as the mechanism).
-- §3's "a constitutive law is not always an algebraic stress substitution" is not exercised: none of
-  the three has memory, a reference configuration or elasticity. The poroelastic row of §4 and the
-  Biot benchmark of §5 are not justified by these use cases; they stay proposed.
+- §3's "a constitutive law is not always an algebraic stress substitution" is not exercised in the
+  bulk: none of the three has memory, a reference configuration or elasticity in the gel. The
+  poroelastic row of §4 and the Biot benchmark of §5 are not justified by these use cases; they stay
+  proposed. §3's *interface* laws (traction balance, tension, bending) **are** exercised by UC-C's
+  modeling intent — the deformable invagination the papers approximated away — and by nothing else.
 - §5's ladder rows "different mesh and carrier velocities" and "static diffusion and prescribed
   expansion" are what UC-B tests; UC-B adds two closed forms to them.
 
@@ -280,9 +302,12 @@ Where the [modeling framework](modeling-framework.md) is confirmed, and where it
    of the solution that feed the motion. `region_size` exists but is refused on moving meshes; T5's
    boundary-integral slot exists but only on fixed geometries and for scalar fluxes. The framework
    should name "functionals of the state that drive motion" as a first-class need.
-4. **Axisymmetry** belongs in §1's "state whether 2D is a planar model, a cross-section, or a
-   thickness-averaged approximation": UC-A is a thin-film 2D model, UC-C is an axisymmetric
-   cross-section of 3D. The second needs a domain kind and a measure the formalism lacks.
+4. **Dimensional reductions are approximations to record, not domain kinds to add.** §1's "state
+   whether 2D is a planar model, a cross-section, or a thickness-averaged approximation" should also
+   say *what the reduction costs and why it was made*: UC-A's thin-film 2D is part of the model
+   (the lamellipodium is flat); UC-C's axisymmetry is a cost reduction of a 3D model. The formalism
+   should keep describing the 3D model; an axisymmetric measure is a backend optimisation to add
+   when reproducing the papers' runs cheaply matters.
 5. **Sub-regions of a membrane** (UC-C's rings) need a geometry construct: labelled patches of one
    surface class, each a subdomain for surface equations.
 6. **The verification ladder** should gain, in this order: the UC-A 1D instability threshold (exact,
@@ -334,8 +359,12 @@ Where the [modeling framework](modeling-framework.md) is confirmed, and where it
    solution and the fixed-circle instability.
 4. The boundary-law motion kind with `region_size` on moving meshes — then UC-A's phase-diagram
    points through remeshing, and the mbsolver question settled.
-5. Axisymmetry and membrane sub-regions — then UC-C's prescribed-density force test, then the full
-   patch with the Berro kinetics imported from VCML.
+5. Membrane sub-regions and local 3D refinement (or, as a shortcut to the papers' numbers, an
+   axisymmetric measure) — then UC-C's prescribed-density force test with the rigid invagination,
+   then the full patch with the Berro kinetics imported from VCML, against the papers' numbers.
+6. The deformable invagination: a membrane force balance on an open patch (gel traction, turgor,
+   tension/bending, coat stiffness) with the shape solved — the framework's §3 interface laws, built
+   on the closed-membrane force-balance machinery but for a compressible interior.
 
-The poroelastic family, membrane mechanics (tension, bending) and the two-phase mixture are not on
-this path; none of the three published models needs them.
+The poroelastic family and the two-phase mixture are not on this path; none of the three published
+models needs them. Membrane mechanics is — at step 6, as the thing UC-C's authors approximated away.
