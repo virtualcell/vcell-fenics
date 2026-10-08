@@ -22,6 +22,8 @@ Develop examples that distinguish the following biological questions:
 - Which observations require elastic memory, stress relaxation, turnover or remodeling?
 - What generates directed cell migration: active stress, polymerization, substrate interactions,
   chemical polarity, or their coupling?
+- How do additional species partition between the two phases of a demixing material, and how does
+  their affinity vary across the diffuse interface?
 
 For each example specify measurable outputs: shape and centroid, phase velocities, pressure or
 traction, species profiles and totals, and relevant relaxation or migration time scales. State whether
@@ -103,10 +105,35 @@ a “poroelastic swap” is a direction to investigate, not evidence that these 
 | Active viscous mixture | Coupled phase momentum, mixture constraint, phase/species transport | Two-phase drag/FSI foundations exist; define volume fractions, active stress and phase boundary conditions |
 | Viscoelastic or poroelastic cytoplasm | Momentum plus elastic/history state and fluid/mixture constraints | A proposed extension; choose reference/state evolution and verification before promising a constitutive plug-in |
 | Actin–myosin migration | Compressible active-gel force balance, myosin transport and polymerizing free boundary | Planned in the [migration note](../active-protrusion-migration.md); substrate coupling and symmetry breaking distinguish it from passive relaxation |
+| Cahn–Hilliard phase separation with partitioning species | Conserved order parameter with a resolved diffuse interface, coupled to reaction–diffusion/transport and phase-dependent affinity | Existing Cahn–Hilliard prototype and `cahn_hilliard` template provide phase generation; species chemical potential, partition law and cross-interface flux closure are the next modeling work |
 
 “Exists” here means source-inspected infrastructure, not full formalism or CLI support and not a new
 numerical validation. The family boundaries are provisional; worked biological examples should decide
 which abstractions deserve first-class support.
+
+### Diffuse phases and species affinity
+
+The existing Cahn–Hilliard support should be treated as a source of physically diffuse phases, not as
+an automatic sharp membrane. Its conserved order parameter `φ` separates into wells with a resolved
+interface of finite width. The phase field can then provide material coefficients and localization for
+other species, but the coupling law must be chosen explicitly.
+
+Candidate species descriptions include a concentration `c` with a phase-dependent free-energy density
+or chemical potential, for example `g(c, φ)` with distinct preferred solubilities in the two wells;
+phase-dependent diffusivity `D(φ)`; reaction rates `r(c, φ)`; and an interfacial gradient or adsorption
+term when the species has affinity for the diffuse interface itself. A thermodynamically consistent
+model should derive flux from the chemical potential and state whether `c` is measured per total volume,
+per phase volume, or as a conserved amount. A simpler first prototype can use a prescribed partition
+coefficient or smooth interpolation between inside/outside affinities, provided its assumptions and
+conservation law are explicit.
+
+The first useful test is a stationary planar diffuse interface with a species initially out of
+equilibrium: verify the predicted inside/outside partition ratio, total species conservation under
+no-flux boundaries, and convergence as the interface is resolved more finely. Follow that with a
+moving or coarsening phase field to test whether transport, reactions and changing phase volumes remain
+consistent. This is a separate problem family from the sharp moving-membrane T2 equation: `φ` defines
+the phase geometry and `c` is a bulk field coupled to it, rather than a surface density living on a
+zero-thickness boundary.
 
 ## 5. A verification ladder for the examples
 
