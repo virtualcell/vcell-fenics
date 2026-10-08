@@ -236,10 +236,13 @@ interfaces and interactions. Its transformation derives a closed mathematical pr
 choices. This is distinct from the solver's translation of that math into UFL and a discrete problem.
 
 The expected production home of the biological representation and model-to-math transformation is
-`virtualcell/vcell`, following the current architecture (user clarification, 2026-10-08). This workspace
+`virtualcell/vcell`, following the current architecture (user clarification, 2026-10-08): VCell owns the
+math-generation phase and emits **templated equations** — including the mechanics — whose solutions
+this repository verifies; weak forms are for developing the numerics, and VCell's interface targets
+well-defined, modular templates with verified forms (second clarification, same day, in the
+[ownership guidance](README.md#repository-ownership-and-the-purpose-of-this-workspace)). This workspace
 centralizes the design and can host prototypes of both layers while the concepts are being developed;
 it does not propose moving permanent ownership of VCell's modeling layer into the solver repository.
-See the [ownership guidance](README.md#repository-ownership-and-the-purpose-of-this-workspace).
 
 For a candidate representation, record a biological input example, assumptions supplied by the user,
 the equations/constraints and interface conditions generated from it, and unresolved choices that

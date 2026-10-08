@@ -36,6 +36,17 @@ This direction distinguishes two transformations: **biological model → mathema
 expected in VCell, and **mathematical description → discrete numerical problem**, performed by the
 solver backend. The latter already has its own architecture and verification responsibilities.
 
+**Second clarification (2026-10-08, after the [worked use cases](use-cases.md)):** VCell will supply
+geometry, kinematics and membrane velocity laws *and* the high-level description of all modeling,
+cell mechanics included, and will own the **math-generation phase** that translates modeling
+concepts into **templated equations** whose solutions this repository verifies. The weak-form escape
+hatch is for developing numerics here; VCell's external interface should map to well-defined,
+somewhat modular templates with verified forms. Realizing new high-level modeling therefore needs a
+representation in VCell. Whether equation templates (equation-based modeling) will suffice for the
+mechanics, or a physics code will be needed, is not yet known; the preference is equation-based
+modeling with particular, well-verified forms. Drivers built here are stepping stones to such
+templates, not the deliverable.
+
 ## Reading and writing here
 
 Start with the [modeling framework](modeling-framework.md). It is the working discussion document,

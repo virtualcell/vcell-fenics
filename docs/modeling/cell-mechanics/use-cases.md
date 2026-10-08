@@ -334,14 +334,22 @@ Where the [modeling framework](modeling-framework.md) is confirmed, and where it
   the same kind instead of to a prescribed volume velocity.
 - **`region_size` on moving meshes** and **region variables outside the multi-compartment solver** are
   prerequisites of the above; both are recorded follow-ups already.
-- **Ownership.** The workspace expects the biological model → mathematical description transformation
-  to live in VCell. UC-B is VCell math already. UC-A and UC-C are *not expressible* in VCell's
-  MathDescription (no vector unknowns, no mechanics, membrane velocity only as an expression).
-  Either VCell's math grows mechanics constructs (vector variables, force-balance templates, the
-  boundary-law motion kind — a large change to the Java platform), or the contract is: VCell supplies
-  geometry, kinetics and membrane velocity laws; the mechanics families are declared in this
-  formalism and solved here. The second is the realistic near-term split, and it should be stated in
-  the workspace README rather than left implicit.
+- **Ownership (the user's direction, 2026-10-08).** VCell supplies geometry, kinetics and membrane
+  velocity laws **and the high-level description of all modeling, cell mechanics included**, and
+  VCell owns the **math-generation phase**: the translation of modeling concepts into *templated
+  equations* whose solutions this repository verifies. UC-B is VCell math already. UC-A and UC-C are
+  not expressible in VCell's MathDescription today (no vector unknowns, no mechanics, membrane
+  velocity only as an expression), so realizing them means **giving them a representation in
+  VCell** — vector variables, the force-balance templates (T6–T8 and the compressible-gel family
+  above), the boundary-law motion kind — and generating those templates from VCell's modeling
+  layer. The weak-form escape hatch is a tool for *developing* the numerics here; the external
+  interface VCell targets should be well-defined, somewhat modular templates with verified
+  envelopes, not free weak forms. Whether equation templates (equation-based modeling) suffice for
+  the mechanics or a physics code is needed is undecided; the stated preference is equation-based
+  modeling with particular, well-verified forms. Consequence for this list: every driver in §5
+  below is a stepping stone to a template with a declared envelope, validation rules and
+  conformance examples (framework §6), and the template — not the driver — is what VCell's math
+  generation will emit.
 - **mbsolver as baseline.** For UC-B the baseline is exact. For UC-A, confirm what the production
   MovingBoundary solver can run (the 2017 code is separate). For UC-C the authors used COMSOL's ALE
   solver; the only baseline is the paper's numbers and the `.mph` file.
@@ -353,10 +361,13 @@ Where the [modeling framework](modeling-framework.md) is confirmed, and where it
 2. UC-A's 1D instability threshold on a fixed interval — the first test of the compressible-gel
    operator coupled to transport; needs the weak-form lowering to accept a lagged `Function` parameter
    and a Dirichlet BC, nothing else.
-3. The compressible single-phase gel driver on a bulk (vector Laplacian / symmetric gradient,
+3. The compressible single-phase gel on a bulk (vector Laplacian / symmetric gradient,
    species-dependent `σ_a` and `η` with a floor, drag, ZV/ZS boundary conditions), staggered with T1
    transport by the lab-frame `advection` slot under the method of lines; verified by a manufactured
-   solution and the fixed-circle instability.
+   solution and the fixed-circle instability. Developed as a weak form first, then **promoted to a
+   template** (a declared slot envelope — viscosity law, active stress law, drag, boundary kind —
+   with validation rules and conformance examples), because the template is the form VCell's math
+   generation will target.
 4. The boundary-law motion kind with `region_size` on moving meshes — then UC-A's phase-diagram
    points through remeshing, and the mbsolver question settled.
 5. Membrane sub-regions and local 3D refinement (or, as a shortcut to the papers' numbers, an
