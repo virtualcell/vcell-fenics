@@ -1,5 +1,10 @@
 # vcell-fenics — overview
 
+> **Documentation review (2026-10-08):** See the [documentation map](README.md) and
+> [discrepancy register](reviews/2026-10-08-documentation-discrepancies.md) for distinctions
+> between historical plans and current implementation. New modeling discussion lives in the
+> [cell-mechanics workspace](modeling/cell-mechanics/README.md).
+
 A short tour for someone new to the codebase. For the deep design, read
 [`docs/modeling/declarative-formalism.md`](modeling/declarative-formalism.md);
 for the code structure, [`docs/architecture.md`](architecture.md); to see it run,

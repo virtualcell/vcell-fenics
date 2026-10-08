@@ -1,5 +1,10 @@
 # Model validation and runtime diagnostics — a strategy
 
+> **Documentation review (2026-10-08):** See the [documentation map](../README.md) and
+> [discrepancy register](../reviews/2026-10-08-documentation-discrepancies.md) for distinctions
+> between historical plans and current implementation. New modeling discussion lives in the
+> [cell-mechanics workspace](../modeling/cell-mechanics/README.md).
+
 **Status:** design note, no code beyond what already exists (`formalism/validator.py`).
 Captures the strategy and a growing registry of known failure modes; the build order in
 §7 is the implementation plan.

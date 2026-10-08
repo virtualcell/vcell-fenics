@@ -1,5 +1,10 @@
 # A declarative formalism for cell-biology PDE/ODE systems
 
+> **Documentation review (2026-10-08):** See the [documentation map](../README.md) and
+> [discrepancy register](../reviews/2026-10-08-documentation-discrepancies.md) for distinctions
+> between historical plans and current implementation. New modeling discussion lives in the
+> [cell-mechanics workspace](../modeling/cell-mechanics/README.md).
+
 **Status:** complete first draft as of 2026-05-22. All three parts are drafted: **Part 1 (Mathematical formalism)** covers §1.1–§1.11; **Part 2 (Data model)** covers §2.1–§2.7; **Part 3 (Solver contract)** covers §3.1–§3.6. The document is now a discussion artifact for review and revision rather than an outline with TBD sections.
 
 This document describes a declarative data model for capturing a well-posed mathematical problem — partial and ordinary differential equations on labelled geometric domains — *without* encoding how to solve it. It is the formalism that `vcell-fenics` will use to drive its DOLFINx backend, and it is intended to remain importable from VCell `MathDescription` artifacts while not inheriting VCell's historical quirks (Cartesian box faces, Neumann-only internal interfaces, single-velocity-per-subdomain restrictions).

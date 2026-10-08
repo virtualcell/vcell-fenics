@@ -1,5 +1,10 @@
 # Plan: active actin–myosin gel migration
 
+> **Documentation review (2026-10-08):** See the [documentation map](../README.md) and
+> [discrepancy register](../reviews/2026-10-08-documentation-discrepancies.md) for distinctions
+> between historical plans and current implementation. New modeling discussion lives in the
+> [cell-mechanics workspace](../modeling/cell-mechanics/README.md).
+
 **Status:** planned, not started. Grounded in the VCell moving-boundary cell-migration model
 (Nickaeen, Novak, Pulford, Rumack, Brandon, Slepchenko, Mogilner, *PLoS Comput Biol* 2017 — in
 `docs/papers/`, gitignored), which is exactly what `../vcell-mbsolver` runs. Supersedes the earlier

@@ -1,5 +1,10 @@
 # Multiphase cytoplasm on a moving membrane — an ALE design sketch
 
+> **Documentation review (2026-10-08):** See the [documentation map](../README.md) and
+> [discrepancy register](../reviews/2026-10-08-documentation-discrepancies.md) for distinctions
+> between historical plans and current implementation. New modeling discussion lives in the
+> [cell-mechanics workspace](../modeling/cell-mechanics/README.md).
+
 **Status:** design note, not implemented. Captures the architecture decision for the
 eventual use case of a **two-phase cytoplasm** — a mechanically active cytoskeleton
 plus an overdamped fluid — inside a moving, mechanically-coupled membrane. The goal of

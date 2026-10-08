@@ -1,5 +1,10 @@
 # vcell-fenics — architecture
 
+> **Documentation review (2026-10-08):** See the [documentation map](README.md) and
+> [discrepancy register](reviews/2026-10-08-documentation-discrepancies.md) for distinctions
+> between historical plans and current implementation. New modeling discussion lives in the
+> [cell-mechanics workspace](modeling/cell-mechanics/README.md).
+
 How the code is organised and how a model flows from text to a solve. Diagrams
 are [Mermaid](https://mermaid.js.org/) (renders on GitHub and most viewers). For
 the *why*, see `docs/decisions/` (ADR 004 = the DiscreteProblem IR, ADR 005 =

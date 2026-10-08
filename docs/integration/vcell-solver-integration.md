@@ -1,5 +1,10 @@
 # vcell-fenics as a VCell solver — design and progress
 
+> **Documentation review (2026-10-08):** See the [documentation map](../README.md) and
+> [discrepancy register](../reviews/2026-10-08-documentation-discrepancies.md) for distinctions
+> between historical plans and current implementation. New modeling discussion lives in the
+> [cell-mechanics workspace](../modeling/cell-mechanics/README.md).
+
 **Started:** 2026-09-22 · **Status:** the vcell-fenics side (steps 0–10, PRs #147–#156) and the
 VCell Java side **V0–V5** (vcell #2084–#2091) are merged, and the image is multi-arch and public on
 GHCR. FEniCSx runs from the VCell desktop (Docker Quick Run → the browser field viewer) and on the
