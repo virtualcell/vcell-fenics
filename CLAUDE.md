@@ -14,7 +14,7 @@ zarr bundle (`results/`). Verification is standing infrastructure: `mms/` (manuf
 order-regression gate) and `cross_validation/` (numerical comparison against VCell's fvsolver/mbsolver);
 each has a README that is the source of truth.
 
-Orientation: `docs/overview.md` (short tour) and `docs/architecture.md` (code structure + data flow).
+Orientation: `docs/README.md` (the documentation map: which document owns what, and which are design history), `docs/overview.md` (short tour, with the dated capability matrix) and `docs/architecture.md` (code structure + data flow).
 Live progress on the VCell-solver work: `docs/integration/vcell-solver-integration.md`.
 
 ## Project intent

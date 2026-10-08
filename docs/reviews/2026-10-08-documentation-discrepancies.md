@@ -251,6 +251,14 @@ current conservative time stepper.
 in the pinned dev environment, and report numerical tolerances explicitly. Do not edit saved results
 without executing the revised examples.
 
+**Closure (2026-10-08, PR #213):** all three notebooks use `geom.azimuth` / `geom.x` / `geom.radius`,
+notebook 03's lesson names `assemble()` as the rejecting entry point and `assemble_weak_form` /
+`assemble_unknown_motion` as the weak-form routes, notebook 02 prints the relative drift, and all three
+were re-executed with `nbconvert --execute` in the pixi dev env at this PR's head: the two-species
+expansion conserves total mass to 8e-15 (was 0.43 % in the 2026-05-25 snapshot, before the conservative
+time term), and the cos(2θ) decay matches the analytical amplitude to four digits. The saved outputs
+are those runs.
+
 ## Further stale spots found in review
 
 Found while verifying D01–D10 against the source (2026-10-08); each is corrected in this PR unless marked
