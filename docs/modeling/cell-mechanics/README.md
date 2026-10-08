@@ -40,7 +40,10 @@ solver backend. The latter already has its own architecture and verification res
 
 Start with the [modeling framework](modeling-framework.md). It is the working discussion document,
 containing the initial vocabulary, problem families, verification ladder and unresolved decisions.
-For limitations in the inherited documentation, see the
+Then read the [worked use cases](use-cases.md): three published models (Nickaeen–Novak–Mogilner
+2017, Novak–Slepchenko 2014, Nickaeen et al. 2019/2022) mapped onto the framework, the formalism and
+the backend, with the missing constructs and the impedance mismatches they expose — the input for
+hardening the plan. For limitations in the inherited documentation, see the
 [discrepancy register](../../reviews/2026-10-08-documentation-discrepancies.md).
 
 Keep one working document initially. Split it only when a topic has enough reviewed substance to stand

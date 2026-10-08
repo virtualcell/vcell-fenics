@@ -7,7 +7,7 @@ acceptance, a backend implementation, and availability through the CLI are separ
 |---|---|
 | Project orientation | [Overview](overview.md) (with the dated capability matrix by entry point) and [architecture](architecture.md) (current module map); both rewritten 2026-10-08 |
 | Documentation discrepancies and evidence | [2026-10-08 review](reviews/2026-10-08-documentation-discrepancies.md): ten findings, their evidence, and what PR #213 corrected |
-| New cell kinematics and mechanics work | [Cell-mechanics workspace](modeling/cell-mechanics/README.md) |
+| New cell kinematics and mechanics work | [Cell-mechanics workspace](modeling/cell-mechanics/README.md): the [framework](modeling/cell-mechanics/modeling-framework.md) and the [worked use cases](modeling/cell-mechanics/use-cases.md) (three published models mapped to it) |
 | Mathematical language and geometry | [Declarative formalism](modeling/declarative-formalism.md) and [geometric formalism](modeling/geometric-formalism.md) |
 | Numerical representations | [Approaches](modeling/approaches.md), [surface remap](modeling/conservative-surface-remap.md), [ALE remeshing](modeling/ale-remesh-driver.md) |
 | Existing mechanics designs | [Multiphase cytoplasm](modeling/multiphase-cytoplasm-ale.md) and [active migration](modeling/active-protrusion-migration.md) |
