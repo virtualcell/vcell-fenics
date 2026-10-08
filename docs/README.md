@@ -21,7 +21,10 @@ acceptance, a backend implementation, and availability through the CLI are separ
 
 ## Keeping the documents useful
 
-- New biological modeling concepts and their mathematical mapping belong in the cell-mechanics workspace.
+- For this development effort, biological modeling concepts, mathematical mapping and solver examples
+  are collected in the cell-mechanics workspace. The expected production home of the modeling
+  representation and model-to-math transformation is `virtualcell/vcell`, consistent with the current
+  VCell architecture; local prototypes here support that eventual integration.
 - Accepted language changes belong in the formalism; consequential implementation decisions belong in ADRs.
 - Reproducible numerical results belong with the MMS or cross-validation harness that produced them.
 - Keep old rationale in place and link to its replacement. Label historical scope instead of silently

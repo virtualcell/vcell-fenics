@@ -1,11 +1,39 @@
 # Cell kinematics and mechanics workspace
 
 **Status:** proposed organization and initial discussion draft, 2026-10-08. Review with Claude Code
-Fable before treating any new modeling choice as accepted. Implementation is a later, separate step.
+Fable before treating proposed physics or representation choices as accepted. The repository ownership
+direction below records the user's architectural clarification; it is not a new solver capability.
 
 The goal is to identify biological modeling goals and abstractions, derive the mathematical problem
 families they require, verify suitable solution methods, and map the proven concepts into VCell and
 vcell-fenics. The existing solver is a foundation, not a constraint on how biology must be described.
+
+## Repository ownership and the purpose of this workspace
+
+**Architectural direction, clarified 2026-10-08:** the modeling representation and transformation from
+biological models into a declarative math description will likely live in `virtualcell/vcell`,
+consistent with the current VCell architecture. The conceptual pipeline is:
+
+```text
+Biological modeling representation → declarative mathematical problem → numerical solver
+Expected production home: VCell     → shared model/solver contract    → vcell-fenics backend
+```
+
+For now, centralize the full development story here: biological goals, candidate representations,
+model-to-math transformations, mathematical closure, numerical methods and verification. Keeping these
+together lets a worked example test the entire chain before deciding how to integrate it into VCell.
+Prototypes of modeling representations and transformations may live here when they help settle a
+concrete question. Their location does not decide the eventual production architecture.
+
+A useful prototype should keep the biological representation, transformation and backend distinct,
+record assumptions and unsupported cases, and pair an input model with its expected declarative math
+and a verification example. Preserve that input/output contract and its tests for eventual integration
+into VCell; implementation language and packaging can be decided then. Do not require a production
+model representation to depend on DOLFINx, UFL or ALE mesh objects merely because its prototype is here.
+
+This direction distinguishes two transformations: **biological model → mathematical description**,
+expected in VCell, and **mathematical description → discrete numerical problem**, performed by the
+solver backend. The latter already has its own architecture and verification responsibilities.
 
 ## Reading and writing here
 
@@ -51,9 +79,13 @@ framework. After a split, move the substantive text and leave a pointer; avoid p
    **verified in this work**; include the relevant entry point and evidence. Test existence alone does
    not establish a passing result at the current revision.
 3. Review the modeling and mathematical closure independently (initial reviewer: Claude Code Fable).
-4. Record accepted decisions with date and PR. Implement and verify in a separate change before
-   advertising new formalism or solver support.
+4. Prototype representations or transformations here when useful, in a scoped change with explicit
+   input/output examples and tests. Record what should eventually move into VCell and what remains
+   backend-specific.
+5. Record accepted modeling decisions with date and PR. Implement and verify production support in
+   a separate change before advertising new formalism or solver capabilities.
 
-No decisions are accepted by this initial scaffold. Its organization and starting questions are the
-first review items. A later implementation handoff (including to Opus) should use the reviewed document
-and acceptance tests, rather than reconstructing intent from chat history.
+The repository ownership direction above is recorded from the user. The proposed organization,
+physics and representation choices remain review items. A later implementation handoff (including
+to Opus) should use the reviewed document and acceptance tests, rather than reconstructing intent
+from chat history.

@@ -124,9 +124,24 @@ solution; use analytical or manufactured checks where possible.
 Do not carry claims such as “exact conservation” between solver paths. State which invariant, whether
 it is continuous or discrete, what tolerance/order is expected, and how remeshing changes the evidence.
 
-## 6. Mapping into the formalism
+## 6. Modeling representation and transformation into the formalism
 
-After a family and its verification are reviewed, map its concepts to:
+The biological modeling layer describes concepts such as materials, species, constitutive behavior,
+interfaces and interactions. Its transformation derives a closed mathematical problem from those
+choices. This is distinct from the solver's translation of that math into UFL and a discrete problem.
+
+The expected production home of the biological representation and model-to-math transformation is
+`virtualcell/vcell`, following the current architecture (user clarification, 2026-10-08). This workspace
+centralizes the design and can host prototypes of both layers while the concepts are being developed;
+it does not propose moving permanent ownership of VCell's modeling layer into the solver repository.
+See the [ownership guidance](README.md#repository-ownership-and-the-purpose-of-this-workspace).
+
+For a candidate representation, record a biological input example, assumptions supplied by the user,
+the equations/constraints and interface conditions generated from it, and unresolved choices that
+must be diagnosed rather than silently defaulted. A prototype here can make that transformation
+concrete before the production representation or implementation language is settled.
+
+After a family and its verification are reviewed, map the generated mathematical problem to:
 
 - named compartments and interfaces in `GeometryDescription`;
 - variables, equations, parameters and motion in `MathDescription`;
@@ -139,6 +154,11 @@ Use semantic template names while the [T5 naming collision](../../reviews/2026-1
 is unresolved. Promoting a working driver into a supported template needs a defined problem envelope,
 validation rules, diagnostics and conformance examples.
 
+A transformation test should check the generated mathematical structure independently of a numerical
+solve; a companion conformance example should check the solution. This gives eventual VCell integration
+both a model-to-math contract and solver-independent expected behavior, while discretization choices
+remain in the backend/configuration layer.
+
 ## 7. First decisions for review
 
 - Choose the first biological example: passive shape relaxation, active viscous mixture, or active-gel migration.
@@ -146,6 +166,8 @@ validation rules, diagnostics and conformance examples.
 - Decide which phase fractions and velocities are prescribed versus solved.
 - Identify the simplest constitutive law that can answer the biological question, and whether it needs memory.
 - Identify the existing entry point and missing capabilities, then select acceptance benchmarks.
+- Decide whether a local representation/transformation prototype would resolve an open modeling question;
+  define its input/output contract and eventual VCell integration boundary before expanding it.
 
 Record decisions here with date, rationale and review PR as they are accepted. No choice in this list is
 settled by the initial proposal.
