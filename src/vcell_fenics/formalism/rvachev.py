@@ -28,7 +28,13 @@ predicate node              implicit function
 ==========================  ==========================================
 
 As in VCell, an **all-boolean** ``*`` is read as AND and ``+`` as OR (the boolean-as-arithmetic
-idiom common in imported models); a ``*`` / ``+`` mixing boolean and numeric operands is rejected.
+idiom common in imported models); a ``*`` / ``+`` mixing boolean and numeric operands is rejected
+where a predicate is expected.
+
+The **operands of a comparison** are numeric functions, not predicates: a boolean inside one is a
+0/1 indicator (VCell's arithmetic meaning), e.g. the bump ``y > 0.08 + 0.08*sin(x)*(x > 0)*(x <
+0.6)``. They are kept as they are (relational and logical nodes included), and
+``backend.implicit_fields.eval_field`` evaluates such an indicator to 0 or 1.
 """
 
 from __future__ import annotations
@@ -119,10 +125,11 @@ def subvolume_implicit_functions(geometry: GeometryDescription) -> dict[str, Exp
 def _lower(expr: Expr) -> Expr:
     if isinstance(expr, BinaryOp):
         op = expr.op
+        # a comparison's operands are numeric (booleans in them are 0/1 indicators): not lowered
         if op in ("<", "<="):
-            return BinaryOp("-", _lower(expr.left), _lower(expr.right))
+            return BinaryOp("-", expr.left, expr.right)
         if op in (">", ">="):
-            return BinaryOp("-", _lower(expr.right), _lower(expr.left))
+            return BinaryOp("-", expr.right, expr.left)
         if op in ("==", "!="):
             raise RvachevLoweringError(f"{op!r} is not allowed in a Rvachev implicit function (measure-zero set)")
         if op == "&&":
