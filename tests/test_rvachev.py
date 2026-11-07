@@ -148,6 +148,23 @@ def test_mixed_boolean_numeric_rejected() -> None:
         lower_predicate(parse("(geom.x[0] < 1) * 2"))
 
 
+def test_boolean_indicator_inside_a_comparison_operand_is_numeric() -> None:
+    # VCell's bump idiom: a comparison's operand is a number, a boolean in it a 0/1 indicator
+    # (biomodel 35512127's ER), so the mixed `*` there is arithmetic, not an AND
+    import numpy as np
+
+    from vcell_fenics.backend.implicit_fields import eval_field
+
+    src = "(geom.x[1] > 0.5 + 0.5 * (geom.x[0] > 0) * (geom.x[0] < 1)) && (geom.x[1] < 2)"
+    phi = lower_predicate(parse(src))
+    xs, ys = np.meshgrid(np.linspace(-2, 2, 41), np.linspace(-2, 2, 41))
+    values = eval_field(phi, (xs.ravel(), ys.ravel()))
+    bump = 0.5 + 0.5 * ((xs.ravel() > 0) & (xs.ravel() < 1))
+    inside = (ys.ravel() > bump) & (ys.ravel() < 2)
+    clear = np.abs(values) > _BOUNDARY_TOL
+    assert np.array_equal((values < 0)[clear], inside[clear])
+
+
 # -- sign correctness (predicate is the ground truth) ---------------------------
 
 

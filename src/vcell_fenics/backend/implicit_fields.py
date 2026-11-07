@@ -18,11 +18,32 @@ class RealizationError(ValueError):
     spatial topology v1 does not yet mesh)."""
 
 
+# a relational / logical node in a numeric position: 0/1 (VCell's arithmetic reading of a boolean)
+def _indicator(op: str, a: NDArray[np.float64], b: NDArray[np.float64]) -> NDArray[np.float64]:
+    if op == "<":
+        mask = a < b
+    elif op == "<=":
+        mask = a <= b
+    elif op == ">":
+        mask = a > b
+    elif op == ">=":
+        mask = a >= b
+    elif op == "&&":
+        mask = (a != 0.0) & (b != 0.0)
+    else:  # "||"
+        mask = (a != 0.0) | (b != 0.0)
+    return mask.astype(np.float64)
+
+
+_INDICATOR = frozenset({"<", "<=", ">", ">=", "&&", "||"})
+
+
 def eval_field(expr: Expr, coords: tuple[NDArray[np.float64], ...]) -> NDArray[np.float64]:
     """Vectorised numeric evaluation of a (lowered, geom.x-only) implicit-function expression over a
     coordinate grid. `coords` is one array per spatial axis (2 in 2D, 3 in 3D); ``geom.x[i]`` reads
     ``coords[i]``. Handles the arithmetic / min / max / elementary-function subset an implicit function
-    contains; relational or unbound nodes (which a lowered field never has) raise."""
+    contains, plus a relational / logical node inside a comparison's operand, which is a 0/1
+    indicator (``formalism.rvachev``); an equality or an unbound node raises."""
 
     if isinstance(expr, Number):
         return np.full_like(coords[0], expr.value, dtype=np.float64)
@@ -30,6 +51,9 @@ def eval_field(expr: Expr, coords: tuple[NDArray[np.float64], ...]) -> NDArray[n
         return coords[int(_constant(expr.index))]
     if isinstance(expr, UnaryOp):
         value = eval_field(expr.operand, coords)
+        if expr.op == "!":
+            negated: NDArray[np.float64] = (value == 0.0).astype(np.float64)
+            return negated
         return -value if expr.op == "-" else value
     if isinstance(expr, BinaryOp):
         left, right = eval_field(expr.left, coords), eval_field(expr.right, coords)
@@ -43,6 +67,8 @@ def eval_field(expr: Expr, coords: tuple[NDArray[np.float64], ...]) -> NDArray[n
             return left / right
         if expr.op == "**":
             return left**right
+        if expr.op in _INDICATOR:
+            return _indicator(expr.op, left, right)
         raise RealizationError(f"operator {expr.op!r} is not valid in an implicit function")
     if isinstance(expr, FunctionCall):
         args = [eval_field(a, coords) for a in expr.args]
