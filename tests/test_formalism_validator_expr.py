@@ -426,3 +426,69 @@ def test_region_size_takes_a_declared_subdomain() -> None:
     assert any("'nucleus' is not a declared subdomain" in m for m in _errors(unknown))
     not_a_name = _cyto_membrane(parameters=[], membrane_source="region_size(2.0) - rho")
     assert any("region_size(...) takes one argument, a subdomain name" in m for m in _errors(not_a_name))
+
+
+def _two_volumes(*, parameters: Sequence[Parameter], nucleus_source: str) -> MathDescription:
+    """A cytosolic species and a nuclear species whose source is ``nucleus_source``."""
+    return MathDescription(
+        geometry="g",
+        subdomains=[
+            Subdomain(name="cyto", kind="volume"),
+            Subdomain(name="nucleus", kind="volume"),
+            Subdomain(name="envelope", kind="surface"),
+        ],
+        variables=[Variable(name="c", subdomain="cyto"), Variable(name="n", subdomain="nucleus")],
+        parameters=list(parameters),
+        equations=[
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="c",
+                subdomain="cyto",
+                temporality="time_dependent",
+                terms={"diffusion": "0.5", "source": "laser - c"},
+                initial_condition="1.0",
+            ),
+            TemplateEquation(
+                template="bulk_radv_diff",
+                variable="n",
+                subdomain="nucleus",
+                temporality="time_dependent",
+                terms={"diffusion": "0.5", "source": nucleus_source},
+                initial_condition="0.0",
+            ),
+        ],
+    )
+
+
+# a conservation-reduced species: a time-invariant field on the cytosol (its value may vary in space)
+_LASER = ParameterExpression(name="laser", expression="2.0 * geom.x[0]", subdomain="cyto")
+
+
+def test_a_scoped_parameter_is_a_field_on_its_subdomain_not_a_global_scalar() -> None:
+    # readable in the cytosol (the cytosol's own equation reads it); not in another volume
+    assert _errors(_two_volumes(parameters=[_LASER], nucleus_source="-n")) == []
+    md = _two_volumes(parameters=[_LASER], nucleus_source="laser - n")
+    assert any(
+        "parameter 'laser' is defined on subdomain 'cyto' only and cannot be used from an expression evaluated "
+        "on 'nucleus'" in m
+        for m in _errors(md)
+    )
+
+
+def test_a_scope_reaches_through_an_unscoped_parameter() -> None:
+    wrapped = ParameterExpression(name="dose", expression="3.0 * laser")
+    md = _two_volumes(parameters=[_LASER, wrapped], nucleus_source="dose - n")
+    assert any("parameter 'laser' (through 'dose') is defined on subdomain 'cyto' only" in m for m in _errors(md))
+
+
+def test_a_scoped_parameter_is_not_readable_from_another_scoped_parameter_elsewhere() -> None:
+    other = ParameterExpression(name="dose", expression="3.0 * laser", subdomain="nucleus")
+    md = _two_volumes(parameters=[_LASER, other], nucleus_source="dose - n")
+    assert any("parameter 'laser' is defined on subdomain 'cyto' only" in m for m in _errors(md))
+
+
+def test_a_volume_scoped_parameter_is_not_readable_on_a_volume_from_a_surface_scope() -> None:
+    # dimension rule: a membrane-scoped value means nothing in a volume
+    membrane_only = ParameterExpression(name="area_factor", expression="1.5", subdomain="envelope")
+    md = _two_volumes(parameters=[_LASER, membrane_only], nucleus_source="area_factor - n")
+    assert any("parameter 'area_factor' is defined on subdomain 'envelope' only" in m for m in _errors(md))
