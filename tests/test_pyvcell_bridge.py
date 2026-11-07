@@ -866,6 +866,41 @@ def test_membrane_receptor_model_imports_geometry_and_math_end_to_end() -> None:
     assert problem.total_mass() == pytest.approx(total0, abs=1e-9)
 
 
+# --- 3b. surface classes VCell derived (older geometries declare none) -------------------
+
+
+def test_complete_surfaces_adds_the_membranes_the_math_names() -> None:
+    # An older VCell geometry declares no <SurfaceClass>; VCell derives `cyto_ec_membrane` from its
+    # membrane regions and names it in the math, sided inside/outside. The import must carry it, or
+    # the membrane subdomain has no surface to bind (validation §1.11.10).
+    from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume
+    from vcell_fenics.pyvcell_bridge import complete_surfaces
+
+    gd = GeometryDescription(
+        name="cell",
+        dim=2,
+        extent=(2.0, 2.0, 1.0),
+        origin=(0.0, 0.0, 0.0),
+        subvolumes=(
+            SubVolume(name="cyto", type="analytic", expression="geom.x[0] < 1"),
+            SubVolume(name="ec", type="analytic", expression="1"),
+        ),
+    )
+    vcml = vm.MathDescription(
+        name="cell",
+        compartment_subdomains=[vm.CompartmentSubDomain(name="cyto"), vm.CompartmentSubDomain(name="ec")],
+        membrane_subdomains=[
+            vm.MembraneSubDomain(name="cyto_ec_membrane", inside_compartment="cyto", outside_compartment="ec"),
+            # a membrane whose sides are not two subvolumes of the geometry is left to the validator
+            vm.MembraneSubDomain(name="stray", inside_compartment="cyto", outside_compartment="nowhere"),
+        ],
+    )
+    (surface,) = complete_surfaces(gd, vcml).surfaces
+    assert (surface.name, surface.inside, surface.outside) == ("cyto_ec_membrane", "cyto", "ec")
+    # a declared surface is kept as is, not duplicated
+    assert complete_surfaces(complete_surfaces(gd, vcml), vcml).surfaces == (surface,)
+
+
 # --- 4. geometry-frame normalization (the VCell z-in-2D quirk) ------------------
 
 

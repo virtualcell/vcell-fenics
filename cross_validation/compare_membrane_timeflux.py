@@ -32,7 +32,8 @@ import pyvcell.vcml.models_math as mmod
 import yaml
 from compare_fenics_vs_fv import _eval_on_grid
 
-from vcell_fenics.backend import SolverConfiguration, assemble, make_disk_geometry, run
+from vcell_fenics.backend import SolverConfiguration, make_disk_geometry, run
+from vcell_fenics.backend.assemble import assemble
 from vcell_fenics.formalism.schema import MathDescription
 from vcell_fenics.pyvcell_bridge import import_math_description
 

@@ -13,6 +13,7 @@ be *meshed* (the realization layer's concern), so the data imports losslessly.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from vcell_fenics.formalism.geometry_schema import (
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from pyvcell.vcml.models_geometry import Geometry as VcmlGeometry
     from pyvcell.vcml.models_geometry import Image as VcmlImage
     from pyvcell.vcml.models_geometry import SubVolume as VcmlSubVolume
+    from pyvcell.vcml.models_math import MathDescription as VcmlMathDescription
 
 
 def import_geometry(vcml: VcmlGeometry, *, name: str | None = None) -> GeometryDescription:
@@ -47,6 +49,30 @@ def import_geometry(vcml: VcmlGeometry, *, name: str | None = None) -> GeometryD
         ),
         image=_image(vcml.image) if vcml.image is not None else None,
     )
+
+
+def complete_surfaces(gd: GeometryDescription, vcml_math: VcmlMathDescription) -> GeometryDescription:
+    """``gd`` with a surface class for every membrane subdomain of ``vcml_math`` it does not declare.
+
+    An older VCell geometry declares no ``<SurfaceClass>``: VCell derives each one from the geometry's
+    membrane regions (``SurfaceClass.createName``), and its generated math names the derived class as a
+    ``MembraneSubDomain`` with its ``inside_compartment`` / ``outside_compartment`` -- the two
+    subvolumes, in the order that fixes the normal. pyvcell's geometry model carries no regions, so the
+    math is where the derived classes are recorded; without them a membrane subdomain has no matching
+    surface in the geometry and the model fails validation (§1.11.10). A membrane whose sides are not
+    two subvolumes of ``gd`` is left alone (the validator reports it)."""
+
+    have = {sc.name for sc in gd.surfaces}
+    subvolumes = {sv.name for sv in gd.subvolumes}
+    extra = tuple(
+        SurfaceClass(name=m.name, inside=m.inside_compartment, outside=m.outside_compartment)
+        for m in vcml_math.membrane_subdomains
+        if m.name not in have
+        and m.inside_compartment in subvolumes
+        and m.outside_compartment in subvolumes
+        and m.inside_compartment != m.outside_compartment
+    )
+    return replace(gd, surfaces=gd.surfaces + extra) if extra else gd
 
 
 def _subvolume(sv: VcmlSubVolume) -> SubVolume:

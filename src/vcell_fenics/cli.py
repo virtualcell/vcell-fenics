@@ -321,9 +321,15 @@ def _import_vcell(
     geometry's origin is what makes the imported model realizable.
     """
 
-    from vcell_fenics.pyvcell_bridge import import_geometry, import_math_description, normalize_to_geometry_frame
+    from vcell_fenics.pyvcell_bridge import (
+        complete_surfaces,
+        import_geometry,
+        import_math_description,
+        normalize_to_geometry_frame,
+    )
 
-    gd = import_geometry(vcml_geometry)
+    # an older geometry declares no surface classes: the math names the ones VCell derived
+    gd = complete_surfaces(import_geometry(vcml_geometry), vcml_math)
     md = import_math_description(vcml_math, geometry=gd.name, dim=gd.dim, front_velocity=front_velocity)
     return normalize_to_geometry_frame(gd, md)
 
