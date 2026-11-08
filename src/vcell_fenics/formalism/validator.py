@@ -952,23 +952,54 @@ class _Validator:
                 )
 
     def _check_param_use_site(self, nm: str, ctx: _ExprContext) -> None:
-        # §1.11.10 confines a parameter whose body uses *subdomain-relative* geometry (curvature, normals, …
-        # — `geom.*` other than the position `geom.x`) to its subdomain: those quantities mean nothing
-        # elsewhere. A scope on a body that uses only position, time, sizes and other parameters (VCell's
-        # `Domain` on a clamped species or a unit factor) is advisory: the value is meaningful on the
-        # adjacent membrane too, where VCell evaluates it (#189).
-        p = self._param_by_name.get(nm)
-        if (
-            isinstance(p, ParameterExpression)
-            and p.subdomain is not None
-            and p.subdomain != ctx.eval_subdomain
-            and self._uses_scoped_geometry(nm, set())
-        ):
-            self._error(
-                ctx.path,
-                f"parameter {nm!r} is scoped to subdomain {p.subdomain!r} (it uses geometric helpers) and cannot "
-                f"be used from an expression evaluated on {ctx.eval_subdomain!r} (§1.11.10)",
-            )
+        # §1.11.10: a parameter scoped to a subdomain is a field *on that subdomain*, not a scalar valid
+        # everywhere (VCell's `Domain` on a function -- a clamped or conservation-reduced species, a unit
+        # factor). It is readable on its own subdomain and, with trace semantics, on a lower-dimensional
+        # one (the membrane next to its compartment, where VCell evaluates it, #189) -- the variables'
+        # rule (§1.8.2); never on another subdomain of the same or higher dimension. A body that uses
+        # subdomain-relative geometry (curvature, normals, ... -- `geom.*` other than `geom.x`) means
+        # nothing off its subdomain, so it is confined to exactly that one. The scopes of the parameters
+        # it reads (transitively) apply too. A use from an unscoped parameter's body is checked where
+        # that parameter is used.
+        s = ctx.eval_subdomain
+        if s is None:
+            return
+        for name, scope in self._scopes_reached(nm, set()):
+            if scope == s:
+                continue
+            via = "" if name == nm else f" (through {nm!r})"
+            if self._uses_scoped_geometry(name, set()):
+                self._error(
+                    ctx.path,
+                    f"parameter {name!r}{via} is scoped to subdomain {scope!r} (it uses geometric helpers) and "
+                    f"cannot be used from an expression evaluated on {s!r} (§1.11.10)",
+                )
+            elif self._rank(s) >= self._rank(scope):
+                self._error(
+                    ctx.path,
+                    f"parameter {name!r}{via} is defined on subdomain {scope!r} only and cannot be used from an "
+                    f"expression evaluated on {s!r}; a scoped parameter is readable on its own subdomain and "
+                    f"on a lower-dimensional one (§1.11.10)",
+                )
+
+    def _scopes_reached(self, name: str, seen: set[str]) -> list[tuple[str, str]]:
+        """(parameter, scope) for ``name`` and every parameter its body reads, transitively, that
+        carries a ``subdomain:`` scope."""
+        if name in seen:
+            return []  # a cycle is reported by its own check
+        seen.add(name)
+        p = self._param_by_name.get(name)
+        if not isinstance(p, ParameterExpression):
+            return []
+        out = [(name, p.subdomain)] if p.subdomain is not None else []
+        try:
+            tree = parse(p.expression)
+        except ExpressionSyntaxError:
+            return out  # reported where the parameter's own expression is checked
+        for other in sorted(_names_in(tree)):
+            if other in self._param_by_name:
+                out.extend(self._scopes_reached(other, seen))
+        return out
 
     def _uses_scoped_geometry(self, name: str, seen: set[str]) -> bool:
         """Whether parameter ``name``'s body, or any parameter it references, uses subdomain-relative
