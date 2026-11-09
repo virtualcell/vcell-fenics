@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,13 @@ def _run(tmp_path: Path, argv: list[str], **env: str) -> subprocess.CompletedPro
     activate = tmp_path / "activate.sh"
     # Like the image's real activation (pixi shell-hook), which sources conda's bash-completion files:
     # hwloc's reads $ZSH_VERSION unguarded — under the entry point's `set -u` that aborted the container.
-    activate.write_text('if [ -n "$ZSH_VERSION" ]; then :; fi\nexport VCELL_FENICS_ACTIVATED=1\n')
+    # It also puts the environment's interpreter first on PATH, as the real one does, so the entry point's
+    # `python -m vcell_fenics.cli` runs in the environment running these tests however pytest was started
+    # (`pixi run test`, or the env's python directly, whose PATH may name another python first).
+    env_bin = Path(sys.executable).parent
+    activate.write_text(
+        f'if [ -n "$ZSH_VERSION" ]; then :; fi\nexport PATH="{env_bin}:$PATH"\nexport VCELL_FENICS_ACTIVATED=1\n'
+    )
     environment = {
         k: v for k, v in os.environ.items() if k not in ("XDG_CACHE_HOME", "MPLCONFIGDIR", "VCELL_FENICS_CACHE")
     }
