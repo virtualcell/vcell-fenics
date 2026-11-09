@@ -316,3 +316,47 @@ math_description:
     geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=0.2)
     with pytest.raises(NotImplementedError, match="unknown-motion subdomain"):
         assemble_unknown_motion(load_yaml(static), geometry, dt=0.04)
+
+
+def test_curvature_is_signed_and_the_normal_outward_on_a_concave_membrane() -> None:
+    # Formalism §1.8.4: `geom.normal` is the outward normal and `geom.mean_curvature` the signed mean
+    # curvature, positive for a circle, negative where the membrane is concave (∇_Γ·n = (d−1) H).
+    # A star r = 1 + 0.3 cos 3θ is concave between its lobes; κ/|κ| would flip the normal there.
+    from vcell_fenics.backend.unknown_motion import _CurvatureProjection
+
+    geometry = make_disk_membrane_geometry("g", surface_subdomain="mem", radius=1.0, h=0.03)
+    mesh = geometry.subdomains["mem"].mesh
+    x = mesh.geometry.x
+    theta = np.arctan2(x[:, 1], x[:, 0])
+    r = 1 + 0.3 * np.cos(3 * theta)
+    x[:, 0], x[:, 1] = r * np.cos(theta), r * np.sin(theta)
+    curvature = _CurvatureProjection(mesh)
+    curvature.project()
+
+    space = fem.functionspace(mesh, ("Lagrange", 1))
+    h = fem.Function(space)
+    h.interpolate(fem.Expression(curvature.mean_curvature, space.element.interpolation_points))
+    points = space.tabulate_dof_coordinates()[:, :2]
+    t = np.arctan2(points[:, 1], points[:, 0])
+    big_r, d_r, dd_r = 1 + 0.3 * np.cos(3 * t), -0.9 * np.sin(3 * t), -2.7 * np.cos(3 * t)
+    exact = (big_r**2 + 2 * d_r**2 - big_r * dd_r) / (big_r**2 + d_r**2) ** 1.5
+
+    normal = curvature.outward.x.array.reshape(-1, 2)
+    radial = points / np.linalg.norm(points, axis=1)[:, None]
+    assert np.all((normal * radial).sum(axis=1) > 0.5)  # outward everywhere, concave or not
+    clear = np.abs(exact) > 0.3  # away from the inflection points
+    assert np.all(np.sign(h.x.array[clear]) == np.sign(exact[clear]))
+    assert h.x.array[clear] == pytest.approx(exact[clear], rel=3e-2)
+    assert exact.min() < 0  # the shape really is concave somewhere
+
+
+def test_curvature_on_a_3d_membrane_is_refused_by_name() -> None:
+    # Orienting a 3D surface consistently is not implemented; asking for the curvature says so.
+    from dolfinx.mesh import create_unit_square
+    from mpi4py import MPI
+
+    from vcell_fenics.backend.unknown_motion import _CurvatureProjection
+
+    surface = create_unit_square(MPI.COMM_WORLD, 2, 2)  # a 2D-topology mesh: stands in for a surface
+    with pytest.raises(NotImplementedError, match="3D"):
+        _CurvatureProjection(surface)
