@@ -423,6 +423,19 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-09** — **Species on a moving membrane, and on both sides of it (ADR 014).**
+  - **What:** a moving model with equations on more than one subdomain runs on the multi-compartment solver,
+    which moves its partition stride by stride (`backend/moving_partition.py`); the SimulationTask import accepts
+    diffusing species on the moving membrane when VCell's math states `Dilution` (virtualcell/vcell#2211;
+    refused as math that predates it otherwise) and species outside the front; non-diffusing species where a
+    front moves stay refused. That refusal had been lost on the single-mesh path with ADR 013 (a non-diffusing
+    species in a membrane-driven volume assembled as pure advection); restored.
+  - **Verified:** the exact and discriminating checks of `tests/test_moving_partition.py` (formalism
+    implementation notes), the CLI runs of a binding membrane species (`tests/test_moving_boundary_run.py`), and
+    the corpus: both applications of 294599465 / 294718710 named `moving_bleb` (species on the moving membrane
+    and in the outside compartment) run; 294718710's "Copy of moving_bleb" stops in geometry realization
+    (`atan2` in an analytic subvolume, not supported by the realizer).
+
 - **2026-11-09** — **Tangential node motion on a membrane-driven volume; the method of lines on moving meshes.**
   - **Why:** ADR 013's RacRho front moves only normally, so the nodes of its retracting side gathered until a
     remesh stalled (Netgen) or a step tangled; and the moving runner was backward Euler only, so RacRho's own

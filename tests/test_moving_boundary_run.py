@@ -275,3 +275,70 @@ def test_nonlinear_kinetics_run_on_a_moving_mesh_with_the_method_of_lines(tmp_pa
     total = bundle.stats("cell", "Ran_cyt")[:, 1] + bound
     assert bound[-1] > bound[0] + 0.1 * abs(total[0])  # the binding proceeded
     assert np.allclose(total, total[0], rtol=1e-6)
+
+
+def _membrane_species(tmp_path: Path, *, dilution: bool = True, ode: bool = False) -> Path:
+    """The moving fixture with a membrane species B_pm binding C_cyt (B' = 0.5 C on the membrane, C's matching
+    consumption its jump flux, so ∫C + ∫B is conserved) — with VCell's `Dilution` flag, or as math from a VCell
+    that predates it (ADR 014)."""
+
+    text = _MB.read_text()
+    equation = (
+        '<OdeEquation Name="B_pm" SolutionType="Unknown"><Rate>(0.5 * C_cyt)</Rate><Initial>0.0</Initial></OdeEquation>'
+        if ode
+        else '<PdeEquation Name="B_pm" SolutionType="Unknown"><Rate>(0.5 * C_cyt)</Rate><Diffusion>0.1</Diffusion>'
+        "<Initial>0.0</Initial></PdeEquation>"
+    )
+    edits = (
+        (
+            '<VolumeVariable Name="RanC_cyt" Domain="cell" />',
+            '<VolumeVariable Name="RanC_cyt" Domain="cell" />\n'
+            '    <MembraneVariable Name="B_pm" Domain="cell_ec_membrane" />',
+        ),
+        (
+            '<MembraneSubDomain Name="cell_ec_membrane" InsideCompartment="cell" OutsideCompartment="ec">',
+            '<MembraneSubDomain Name="cell_ec_membrane" InsideCompartment="cell" OutsideCompartment="ec"'
+            + (' Dilution="true"' if dilution else "")
+            + ">",
+        ),
+        ('      <JumpCondition Name="RanC_cyt">', f'      {equation}\n      <JumpCondition Name="RanC_cyt">'),
+        (
+            '<JumpCondition Name="C_cyt">\n        <InFlux>0.0</InFlux>',
+            '<JumpCondition Name="C_cyt">\n        <InFlux>( - (0.5 * C_cyt))</InFlux>',
+        ),
+    )
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    task = tmp_path / _MB.name
+    task.write_text(text)
+    return task
+
+
+def test_species_on_a_moving_membrane_run_with_both_meshes_moving(tmp_path: Path) -> None:
+    # ADR 014: the membrane species rides the front, C_cyt stays at rest inside, the two exchange through the
+    # binding; the multi-compartment solver moves the partition, and the bound total is conserved
+    task = _membrane_species(tmp_path)
+    assert main(["--simtask", str(task), "--out", str(tmp_path), "--t-final", "0.5", "--output-dt", "0.25"]) == 0
+    bundle = Bundle.open(tmp_path / _BUNDLE)
+    assert set(bundle.manifest.domains) >= {"cell", "cell_ec_membrane"}
+    first, last = bundle.coords("cell_ec_membrane", 0), bundle.coords("cell_ec_membrane", len(bundle.times) - 1)
+    assert np.abs(last - first).max() > 0.1  # the membrane moved
+    free = bundle.stats("cell", "C_cyt")[:, 1]
+    bound = bundle.stats("cell_ec_membrane", "B_pm")[:, 1]
+    assert bound[-1] > 0.01 * free[0]  # the binding proceeded
+    assert np.allclose(free + bound, free[0] + bound[0], rtol=1e-4)
+
+
+def test_species_on_a_moving_membrane_need_the_dilution_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--simtask", str(_membrane_species(tmp_path, dilution=False)), "--out", str(tmp_path)]) == 2
+    assert "regenerate it with a current VCell" in capsys.readouterr().err
+
+
+def test_non_diffusing_species_on_a_moving_membrane_are_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--simtask", str(_membrane_species(tmp_path, ode=True)), "--out", str(tmp_path)]) == 2
+    assert "non-diffusing species on the moving membrane" in capsys.readouterr().err

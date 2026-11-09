@@ -102,6 +102,9 @@ class SimulationTask:
     # A moving-boundary task's front kinematics, one per membrane that carries a <Velocity> (pyvcell
     # FrontVelocity, the raw VCell expressions; the importer inlines them). Empty for a fixed geometry.
     front_velocities: tuple[Any, ...] = ()
+    # Membranes whose math states `Dilution` (VCell's `<MembraneSubDomain Dilution="true">`): their species are
+    # densities carried by the membrane's velocity (vcell-fenics ADR 014). Read from the raw XML, as the front is.
+    diluting_membranes: frozenset[str] = frozenset()
 
     @property
     def job_prefix(self) -> str:
@@ -227,6 +230,18 @@ def read_simtask(path: str | Path) -> SimulationTask:
         math=apply_overrides(math, resolved),
         geometry=geometry,
         front_velocities=_front_velocities(children["MathDescription"]),
+        diluting_membranes=_diluting_membranes(children["MathDescription"]),
+    )
+
+
+def _diluting_membranes(math_element: Any) -> frozenset[str]:
+    """The membranes whose ``<MembraneSubDomain Dilution="true">`` states that their species dilute with them
+    (vcell-fenics ADR 014). pyvcell's math model does not carry the attribute yet."""
+
+    return frozenset(
+        str(membrane.get("Name"))
+        for membrane in math_element
+        if _tag(membrane) == "MembraneSubDomain" and (membrane.get("Dilution") or "").lower() == "true"
     )
 
 
@@ -357,16 +372,24 @@ def _check_moving_boundary(task: SimulationTask) -> list[str]:
         raise SimulationTaskError(
             f"{prefix}: the <Velocity> names membrane {front.surface_name!r}, which the math lacks"
         )
-    if membrane.pde_equations or membrane.ode_equations:
+    if membrane.ode_equations:
         raise SimulationTaskError(
-            f"{prefix} has species on the moving membrane {membrane.name!r}; the FEniCSx moving-boundary path "
-            "does not solve membrane species on a moving front yet"
+            f"{prefix} has non-diffusing species on the moving membrane {membrane.name!r} "
+            f"({', '.join(eq.name for eq in membrane.ode_equations)}); the FEniCSx moving-boundary path solves "
+            "diffusing ones only (pure advection needs stabilization)"
+        )
+    if membrane.pde_equations and membrane.name not in task.diluting_membranes:
+        raise SimulationTaskError(
+            f"{prefix} has species on the moving membrane {membrane.name!r}, but its math does not state that they "
+            "dilute with it (VCell's MembraneSubDomain Dilution, vcell-fenics ADR 014): the math predates it; "
+            "regenerate it with a current VCell"
         )
     for compartment in task.math.compartment_subdomains:
-        if compartment.name != membrane.inside_compartment and (compartment.pde_equations or compartment.ode_equations):
+        if compartment.ode_equations:
             raise SimulationTaskError(
-                f"{prefix} has species in {compartment.name!r}, outside the moving front; the FEniCSx "
-                f"moving-boundary path solves species inside it ({membrane.inside_compartment!r}) only"
+                f"{prefix} has non-diffusing species in {compartment.name!r} "
+                f"({', '.join(eq.name for eq in compartment.ode_equations)}), which the moving front sweeps; the "
+                "FEniCSx moving-boundary path solves diffusing ones only (pure advection needs stabilization)"
             )
     if front_velocity_dependence(task) == "species-coupled":
         return [

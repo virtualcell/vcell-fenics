@@ -33,7 +33,16 @@ Box faces: a Dirichlet value (VCell's Value boundary) is a weak penalty on the c
 face, a Neumann value (Flux) a boundary flux; a face the compartment does not touch has nothing to act on
 (VCell's per-face boilerplate for an interior compartment) and is dropped.
 
-Fixed geometry only; lab-frame ``advection`` and the interface value-equality constraint are refused.
+**A moving membrane** (ADR 014, ``motion_membrane``): one membrane's prescribed velocity moves the partition,
+stride by stride (`backend/moving_partition.py`), the box and every other membrane held fixed. Each compartment's
+material is at rest: its species are transported relative to the moving mesh, ``−u (c − w)·∇q`` with ``c`` its
+drift (0 by default), so a jump-condition flux is a total flux relative to the membrane. The moving membrane's
+species ride its material velocity ``v`` relative to its sliding nodes, ``−ρ (v + d − w_Γ)·∇_Γ q``. Both take
+the swept rate ``ln(|Kⁿ⁺¹|/|Kⁿ|)/h`` as their dilution, and a fresh integrator per stride keeps the BDF history
+from spanning a mesh jump. Region variables, ``region_size`` and non-diffusing species where the mesh moves are
+refused; there is no remeshing yet (ADR 014 decision 6).
+
+Lab-frame ``advection`` and the interface value-equality constraint are refused.
 """
 
 from __future__ import annotations
@@ -283,10 +292,16 @@ def integrate_multi_compartment(
     output_times: Sequence[float] = (),
     on_output: Callable[[float, dict[str, fem.Function]], None] | None = None,
     on_progress: Callable[[float], None] | None = None,
+    motion_membrane: str | None = None,
+    stride_ends: Sequence[float] = (),
 ) -> MultiCompartmentResult:
     """Integrate ``md`` on ``geometry`` to ``t_final`` (the module docstring). ``on_output(t, fields)`` receives
     every species and region variable by name (snapshots valid for the call) at each of ``output_times``,
-    recorded from the TS monitor so the step sequence is unchanged; ``on_progress(t)`` follows every step."""
+    recorded from the TS monitor so the step sequence is unchanged; ``on_progress(t)`` follows every step.
+
+    ``motion_membrane`` names a membrane whose prescribed velocity moves the partition (the module docstring);
+    ``stride_ends`` are then the strides' end times (each mesh move covers one), ending at ``t_final`` and
+    including every output time, at which the output is recorded."""
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
@@ -314,6 +329,8 @@ def integrate_multi_compartment(
     for bc in md.boundary_conditions:
         if isinstance(bc, BCInterfaceValueEquality):
             raise NotImplementedError("the interface value-equality constraint (u = k·u_adjacent) is not supported")
+    if motion_membrane is not None:
+        _refuse_on_a_moving_partition(md, geometry, motion_membrane, template_eqs, region_eqs, stride_ends, t_final)
 
     parent = geometry.parent_mesh
     tdim = parent.topology.dim
@@ -324,7 +341,7 @@ def integrate_multi_compartment(
 
     # sim.t on the parent and on each membrane mesh (a Constant belongs to one mesh), set to each stage time
     time = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]
-    params = _param_symbols(md, parent, geometry.sizes, time)
+    params = _param_symbols(md, parent, geometry.sizes if motion_membrane is None else None, time)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
     membrane_times = {
         name: fem.Constant(m.mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
@@ -335,7 +352,7 @@ def integrate_multi_compartment(
             m.mesh,
             {
                 "geom.x": ufl.SpatialCoordinate(m.mesh),
-                **_param_symbols(md, m.mesh, geometry.sizes, membrane_times[name]),
+                **_param_symbols(md, m.mesh, geometry.sizes if motion_membrane is None else None, membrane_times[name]),
             },
         )
         for name, m in geometry.membranes.items()
@@ -392,6 +409,17 @@ def integrate_multi_compartment(
         name: _indicator(parent, geometry.cell_tags, part_.region_tag) for name, part_ in geometry.compartments.items()
     }
 
+    # Each variable by name: a scalar P1 view of its block's component (a copy), or its Real.
+    views = _Views(names, where, spaces, n_fields)
+    motion = None
+    if motion_membrane is not None:
+        from vcell_fenics.backend.moving_partition import MovingPartition
+
+        bulk_species = [eq.variable for eq in field_eqs if eq.subdomain in geometry.compartments]
+        motion = MovingPartition(
+            md, geometry, motion_membrane, traces={name: views.function(name) for name in bulk_species}
+        )
+
     def trace(compartment: str, f: UflExpr) -> UflExpr:
         return f("+") * chi[compartment]("+") + f("-") * chi[compartment]("-")
 
@@ -435,8 +463,24 @@ def integrate_multi_compartment(
         if "diffusion" in eq.terms:
             d = compile_expression(parse(eq.terms["diffusion"]), local)
             form += d * ufl.dot(ufl.grad(u), ufl.grad(w)) * dx
-        if "relative_advection" in eq.terms:  # drift relative to the (fixed) mesh
-            drift = compile_expression(parse(eq.terms["relative_advection"]), local)
+        drift = (
+            compile_expression(parse(eq.terms["relative_advection"]), local)
+            if "relative_advection" in eq.terms
+            else None
+        )
+        if motion is not None and eq.subdomain in geometry.compartments:
+            # material at rest, on a moving mesh (ADR 014 decision 3): the carrier (the drift, 0 by default)
+            # relative to the mesh, integrated by parts, so the natural flux is total and relative to the
+            # moving membrane; the swept rate keeps the mass across the stride's mesh jump
+            carrier = drift if drift is not None else ufl.as_vector([0.0] * parent.geometry.dim)
+            form += -u * ufl.dot(carrier - motion.parent_velocity, ufl.grad(w)) * dx
+            form += motion.parent_dilution * u * w * dx
+        elif motion is not None and eq.subdomain == motion_membrane:
+            # riding the membrane's material (decision 1) on nodes that slide along it (decision 4)
+            carrier_m = motion.membrane_velocity if drift is None else motion.membrane_velocity + drift
+            form += -u * ufl.dot(carrier_m - motion.membrane_mesh_velocity, ufl.grad(w)) * dx
+            form += motion.membrane_dilution * u * w * dx
+        elif drift is not None:  # drift relative to the (fixed) mesh
             form += ufl.dot(drift, ufl.grad(u)) * w * dx
         if eq.subdomain in geometry.compartments:
             if "source" in eq.terms:
@@ -650,24 +694,58 @@ def integrate_multi_compartment(
             constant.value = sigma
         assemble_jacobian(pre)
 
-    ts = PETSc.TS().create(parent.comm)
-    ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
-    ts.setType("bdf")
-    ts.setIFunction(evaluate_residual, state_vec.duplicate())
-    ts.setIJacobian(evaluate_jacobian, operator, precond)
-    ts.setTimeStep(dt_initial if dt_initial is not None else t_final / 1.0e4)
-    ts.setMaxTime(t_final)
-    ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-    ts.setTolerances(atol, rtol)
-    ts.setMaxSNESFailures(-1)
-    snes = ts.getSNES()
-    snes.setUseEW(False)
-    snes.getKSP().setType(ksp_type)
-    set_preconditioner(snes.getKSP(), pc_type)  # ILU → block-Jacobi/ILU(0) under MPI
-    ts.setFromOptions()
+    def make_ts(t_start: float, t_end: float, dt: float) -> PETSc.TS:
+        ts = PETSc.TS().create(parent.comm)
+        ts.setProblemType(PETSc.TS.ProblemType.NONLINEAR)  # type: ignore[arg-type]
+        ts.setType("bdf")
+        ts.setIFunction(evaluate_residual, state_vec.duplicate())
+        ts.setIJacobian(evaluate_jacobian, operator, precond)
+        ts.setTime(t_start)
+        ts.setTimeStep(dt)
+        ts.setMaxTime(t_end)
+        ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
+        ts.setTolerances(atol, rtol)
+        ts.setMaxSNESFailures(-1)
+        snes = ts.getSNES()
+        snes.setUseEW(False)
+        snes.getKSP().setType(ksp_type)
+        set_preconditioner(snes.getKSP(), pc_type)  # ILU → block-Jacobi/ILU(0) under MPI
+        ts.setFromOptions()
+        return ts
 
-    # Each variable by name: a scalar P1 view of its block's component (a copy), or its Real.
-    views = _Views(names, where, spaces, n_fields)
+    if motion is not None:
+        # A moving membrane: one stride at a time, the mesh moved at the stride's start (the velocity read at its
+        # end), then a fresh integrator over the stride on the moved mesh, so the BDF history never spans a jump.
+        steps, t, dt = 0, 0.0, dt_initial if dt_initial is not None else stride_ends[0] / 10.0
+        recorded = sorted(output_times) if on_output is not None else []
+        if on_output is not None and recorded and recorded[0] <= 0.0:
+            on_output(0.0, views.of(states))
+        for t_end in stride_ends:
+            scatter(state_vec, states)
+            views.of(states)  # the bulk fields the front's velocity reads, as traces
+            motion.advance(t_end, t_end - t)
+            ts = make_ts(t, t_end, min(dt, t_end - t))
+            ts.solve(state_vec)
+            steps += ts.getStepNumber()
+            dt = float(ts.getTimeStep())
+            ts.destroy()
+            t = t_end
+            if on_progress is not None:
+                on_progress(t)
+            if on_output is not None and any(abs(t - r) <= 1.0e-12 * max(1.0, abs(r)) for r in recorded):
+                scatter(state_vec, states)
+                on_output(t, views.of(states))
+        scatter(state_vec, states)
+        for petsc_object in (state_vec, precond, parent_matrix, own_matrix):
+            if petsc_object is not None:
+                petsc_object.destroy()
+        if operator is not precond:
+            operator.destroy()
+        final = {name: _copy(f) for name, f in views.of(states).items()}
+        return MultiCompartmentResult(final, subdomain_of, steps, t)
+
+    ts = make_ts(0.0, t_final, dt_initial if dt_initial is not None else t_final / 1.0e4)
+
     monitor: OutputMonitor | None = None
     work: PETSc.Vec | None = None
     if on_output is not None or on_progress is not None:
@@ -708,6 +786,46 @@ def _zero_like(zero: fem.Constant, test: UflExpr) -> UflExpr:
     return zero * (sum(test[i] for i in range(test.ufl_shape[0])) if test.ufl_shape else test)
 
 
+def _refuse_on_a_moving_partition(
+    md: MathDescription,
+    geometry: MultiCompartmentGeometry,
+    membrane: str,
+    template_eqs: Sequence[TemplateEquation],
+    region_eqs: Sequence[TemplateEquation],
+    stride_ends: Sequence[float],
+    t_final: float,
+) -> None:
+    """What a moving membrane cannot carry yet (ADR 014 decision 5), refused by name."""
+
+    if membrane not in geometry.membranes:
+        raise NotImplementedError(f"the moving membrane {membrane!r} has no realized facets in {geometry.name!r}")
+    if region_eqs:
+        raise NotImplementedError(
+            f"region variables ({', '.join(eq.variable for eq in region_eqs)}) on a moving partition: their "
+            "region's size changes in time (not supported yet)"
+        )
+    moved = {*geometry.compartments, membrane}
+    for eq in template_eqs:
+        if eq.template == "lumped_ode" and eq.subdomain in moved:
+            raise NotImplementedError(
+                f"a non-diffusing species ({eq.variable!r}) on {eq.subdomain!r}, which the moving membrane moves, is "
+                "not supported yet: VCell sweeps it with the front, and pure advection needs stabilization (#186)"
+            )
+    texts = [p.expression for p in md.parameters if hasattr(p, "expression")]
+    texts += [t for eq in template_eqs for t in eq.terms.values()]
+    texts += [getattr(bc, "expression", "") or "" for bc in md.boundary_conditions]
+    if any("region_size(" in text for text in texts):
+        raise NotImplementedError(
+            "region_size(...) on a moving partition: the sizes change in time (not supported yet)"
+        )
+    if (
+        not stride_ends
+        or abs(stride_ends[-1] - t_final) > 1.0e-12 * max(1.0, t_final)
+        or any(b <= a for a, b in zip([0.0, *stride_ends], stride_ends, strict=False))
+    ):
+        raise ValueError(f"stride_ends must rise strictly from 0 to t_final={t_final}")
+
+
 class _Views:
     """Each variable by name as its own Function: a scalar P1 copy of its block's component (the output
     and the result speak per species), or a region variable's Real itself."""
@@ -734,6 +852,10 @@ class _Views:
                 collapsed[blk] = [spaces[blk].sub(k).collapse() for k in range(bs)]
             sub_space, dofs = collapsed[blk][j]
             self._scalar[name] = (fem.Function(sub_space, name=name), np.asarray(dofs))
+
+    def function(self, name: str) -> fem.Function:
+        """The scalar view of species ``name`` (filled by :meth:`of`)."""
+        return self._scalar[name][0]
 
     def of(self, blocks: Sequence[fem.Function]) -> dict[str, fem.Function]:
         out: dict[str, fem.Function] = {}
