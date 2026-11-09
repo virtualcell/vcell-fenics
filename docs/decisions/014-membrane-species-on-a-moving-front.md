@@ -1,7 +1,9 @@
 # ADR 014 — Membrane species on a moving front
 
 **Date:** 2026-11-09
-**Status:** Proposed. Revised after an independent review (9 findings, all addressed below).
+**Status:** Accepted (Jim, 2026-11-09): decisions 1 and 3–8 as recommended; decision 2 as **(a)**, the
+construct specified below, with the MovingBoundary solver's support tracked as a vcell-mbsolver issue.
+Revised after an independent review (9 findings, all addressed below).
 **Builds on:** ADR 013 (accepted 2026-11-09): decision 1 (a surface's prescribed motion is its material
 velocity, tangential part included), decision 3 (a surface-driven bulk is at rest; transport relative to the
 mesh; flux relative to the moving boundary) and decision 5(a) (the same reading in the coupled backend).
@@ -65,7 +67,7 @@ moving-boundary math").
   membrane each step, back to their fractions of its length. It works on a single-mesh volume's *exterior*
   loop, in 2D and serial only (`discrete._boundary_loop` 218–219).
 
-## Decisions (proposed)
+## Decisions
 
 1. **A diffusing membrane species on a moving membrane rides the membrane's material** (T2 as written):
    `∂_t ρ + ∇_Γ·(ρ (v + d)) = ∇_Γ·(D ∇_Γ ρ) + s`, with `v` the membrane's prescribed velocity, tangential
@@ -91,9 +93,28 @@ moving-boundary math").
    - **(c) follow VCell's math literally** (no dilution): rejected, since a uniformly stretching membrane
      would then gain mass.
 
-   *Recommendation: (b) now; (a) only if VCell's math is to state moving-membrane physics itself.* No released
-   VCell solver has produced a result from the undiluted equation, so (b) changes no user's result and needs
-   no VCell change; (a) is a math-language extension whose only consumer would be FEniCSx.
+   *Recommendation was (b) now; **Jim chose (a)**: VCell's math states it, so VCell, vcell-fenics and
+   vcell-core agree, and the MovingBoundary solver can gain it (a vcell-mbsolver issue).*
+
+   **The construct (decided with (a)).** A per-membrane boolean, `Dilution`:
+   - VCML: the token `Dilution true` inside a `MembraneSubDomain` block; XML: the attribute
+     `Dilution="true"` on `<MembraneSubDomain>`. Absent means false.
+   - Meaning: every species on that membrane is a density carried by the membrane's velocity `v`
+     (`velocityX/Y/Z`): `∂_t ρ + ∇_Γ·(ρ v) = …` for a PDE (the dilution and the tangential carry), and
+     `d_t ρ + ρ ∇_Γ·v = rate` along the membrane's material points for an ODE. A membrane PDE's own
+     `<Velocity>` is its drift relative to the membrane. It states nothing for a membrane without a velocity.
+   - VCell's math generator (`DiffEquMathMapping`) writes it for a membrane that has a velocity *and*
+     species, and only then: every other model's math is unchanged, and VCell clients that predate the
+     token (the VCML reader rejects unknown tokens; `MembraneSubDomain.FUTURE_VCML_SYMBOLS` lists only
+     `Name`) are affected only by models they could not run anyway.
+   - vcell-fenics: a moving membrane whose species have `Dilution` imports as T2 (decision 1). One that
+     carries species **without** it is math from a VCell that predates the construct, and is refused by
+     name ("regenerate the math with a current VCell"); VCell regenerates a simulation's math when it runs
+     it, so a current VCell always states it.
+   - The MovingBoundary solver has no membrane state at all; supporting membrane species with the dilution
+     is an issue on vcell-mbsolver. Until then VCell keeps such a model off that solver.
+   - vcell-core captures the flag in its legacy layer and its VCell target writes it, lifting its
+     `moving-membrane-dilution` refusal (a follow-up with its own D-row).
 
 3. **The bulk on each side is at rest** (ADR 013 decisions 3 and 5): a compartment with `motion: none`
    beside the moving membrane is surface-driven — the enclosed volume and, unlike ADR 013's single-mesh path,
@@ -218,7 +239,9 @@ solutions, invariants that discriminate the conventions, and agreement with ADR 
 2. Formalism text: T2 on a sliding mesh (decision 4); §1.10.1 (the outside compartment is surface-driven).
 3. The multi-compartment solver's motion without remeshing (decision 5), with decisions 3 and 4's assembly;
    the runner's dispatch and the import's lifted refusals (decision 8); the verification above.
-4. Decision 2 as chosen (the import's warning; a VCell math construct if (a)).
+4. Decision 2: the `Dilution` construct in VCell's math (reader, writer, comparison, `DiffEquMathMapping`),
+   a VCell PR; vcell-fenics reads it and refuses its absence; the vcell-mbsolver issue; then VCell's
+   pinned vcell-fenics image bumped to the release that runs these models.
 5. Decision 7.
 6. The 2D multi-region remesher (decision 6).
 7. vcell-core: the target's refusals lifted, the bridge oracle over the corpus.
