@@ -1,8 +1,9 @@
 # ADR 013 — A moving front is the membrane's motion; the enclosed volume's material stays at rest
 
 **Date:** 2026-11-09
-**Status:** Proposed (option B chosen by Jim, 2026-11-09, over a near-term "normal inside a volume
-frame" fix). Revised after an independent review (two passes: 12 findings, then 6).
+**Status:** Accepted (Jim, 2026-11-09): option B, over a near-term "normal inside a volume frame"
+fix; decisions 1–6 as recommended, decision 5 as (a). Revised after an independent review (two
+passes: 12 findings, then 6).
 **Amends:**
 - **formalism:**
   - §1.3.5 and §1.10.1 (the `none` row; geometry on a moving domain);
@@ -46,7 +47,7 @@ every point, and the mesh is solver-side (§1.10.7). vcell-core states the same 
 velocities per compartment (`motion-and-mechanics.md`, Addendum C, accepted 2026-11-08). The swept
 front is the **membrane** moving while the **bulk's material is at rest**.
 
-## Decisions (proposed)
+## Decisions
 
 1. **A surface's prescribed motion moves its boundary, and the domains it bounds follow.**
    - **The formalism text.** A subdomain's own `motion` is its substrate velocity. Its *domain*
