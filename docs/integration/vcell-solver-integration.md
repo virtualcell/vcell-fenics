@@ -423,6 +423,25 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-09** — **Tangential node motion on a membrane-driven volume; the method of lines on moving meshes.**
+  - **Why:** ADR 013's RacRho front moves only normally, so the nodes of its retracting side gathered until a
+    remesh stalled (Netgen) or a step tangled; and the moving runner was backward Euler only, so RacRho's own
+    nonlinear kinetics could not run.
+  - **What:** each step (2D) a driven volume's boundary nodes slide along the periodic spline through them back
+    to their fractions of the boundary's length; rigid motions and uniform dilations slide nothing. This
+    replaces ADR 013's merge of crowded vertices before a 2D remesh, so a remesh triangulates exactly the old
+    polygon again. The moving runner honours `--time-integration method_of_lines` (strides ending on the output
+    times) and names that flag when backward Euler meets nonlinear kinetics.
+  - **Verified:** the swept cases match ADR 013's (translate identical; deform 2.68 % and remesh 7.36 % against
+    2.70 % and 7.41 %). The RacRho linear variant runs to t = 5 at dt = 0.01 with no remesh (43 before, at dt = 0.005,
+    and a tangle at dt = 0.01) and is converged in h to 0.2 % (h = 0.08 vs 0.04: leading edge 4.235 / 4.240,
+    area 2.276 / 2.281, centroid 2.855 / 2.856 at t = 5), against mbsolver's extrapolated ≈ 4.25–4.26 /
+    ≈ 2.27 / ≈ 2.89–2.91. RacRho's own nonlinear kinetics run under the method of lines to t = 5 (area within 0.1 % of
+    mbsolver's on the document grid, centroid 2.8 % ahead, the way mbsolver's grid lags).
+  - **Found:** sliding along the polygon's straight edges (the first version) cut corners every step and shrank
+    the domain by 1.7 % by t = 2.5; it also made the swept errors look smaller (1.6 %, 5.8 %) by moving the area
+    toward mbsolver's under-resolved one. The spline removed both.
+
 - **2026-11-09** — **A moving front is the membrane's motion; the enclosed volume's material stays at rest
   (ADR 013).**
   - **Why:** the import put VCell's front on the enclosed volume as its `motion`, so a front that reads the

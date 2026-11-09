@@ -30,7 +30,7 @@ import numpy as np
 import ufl
 from dolfinx import fem
 from dolfinx.fem.petsc import LinearProblem
-from dolfinx.mesh import Mesh, exterior_facet_indices
+from dolfinx.mesh import Mesh, entities_to_geometry, exterior_facet_indices
 from mpi4py import MPI
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
@@ -209,6 +209,66 @@ class _HarmonicExtension:
         displacement.x.array[:] = self._solution.x.array
 
 
+def _boundary_loop(space: fem.FunctionSpace) -> np.ndarray | None:
+    """The dofs of a 2D bulk mesh's boundary, ordered along it, for a vector P1 `space` (one dof block per
+    vertex). None unless the boundary is a single closed loop (it is, for a volume driven by its membrane,
+    ADR 013 decision 4). Topological, so computed once per mesh."""
+
+    mesh = space.mesh
+    if mesh.topology.dim != 2 or mesh.geometry.dim != 2 or mesh.comm.size != 1:
+        return None
+    mesh.topology.create_connectivity(1, 2)
+    facets = exterior_facet_indices(mesh.topology)
+    ends = mesh.geometry.x[entities_to_geometry(mesh, 1, facets)][:, :, :2]
+    tree = cKDTree(space.tabulate_dof_coordinates()[:, :2])
+    pairs = tree.query(ends.reshape(-1, 2))[1].reshape(-1, 2)
+    neighbors: dict[int, list[int]] = {}
+    for a, b in pairs:
+        neighbors.setdefault(int(a), []).append(int(b))
+        neighbors.setdefault(int(b), []).append(int(a))
+    if any(len(nb) != 2 for nb in neighbors.values()):
+        return None
+    start = int(pairs[0, 0])
+    order, prev, cur = [start], -1, start
+    for _ in range(len(neighbors) - 1):
+        nxt = neighbors[cur][0] if neighbors[cur][0] != prev else neighbors[cur][1]
+        order.append(nxt)
+        prev, cur = cur, nxt
+    if len(set(order)) != len(neighbors) or start not in neighbors[cur]:
+        return None  # more than one loop
+    return np.asarray(order, dtype=np.intp)
+
+
+def _arc_fractions(points: np.ndarray) -> np.ndarray:
+    """Each node's arc-length position along the closed polyline `points` (N, 2), as a fraction of its length
+    (the first node at 0)."""
+
+    closed = np.vstack([points, points[:1]])
+    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(closed, axis=0), axis=1))])
+    return np.asarray(arc[:-1] / arc[-1])
+
+
+def _slid_to_fractions(points: np.ndarray, fractions: np.ndarray) -> np.ndarray:
+    """The nodes of the closed curve through `points` (N, 2), slid along it so that each sits at its given
+    fraction of the arc length, keeping their order and, on average, their place (the arc-length offset is the
+    mean of the current ones, so the nodes do not drift around the loop). Where the nodes already sit at their
+    fractions (a rigid motion, a uniform dilation) nothing moves.
+
+    The nodes slide along the periodic cubic spline through them, parametrized by the polyline's arc length,
+    not along the polyline: a node sliding along a straight segment cuts the corner it leaves, and repeated
+    every step that shrank a curved domain steadily (1.7 % of its area by t = 2.5 on RacRho at h = 0.08)."""
+
+    from scipy.interpolate import CubicSpline
+
+    closed = np.vstack([points, points[:1]])
+    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(closed, axis=0), axis=1))])
+    length = arc[-1]
+    target = fractions * length
+    target = (target + np.mean(arc[:-1] - target)) % length
+    curve = CubicSpline(arc, closed, bc_type="periodic", axis=0)
+    return np.asarray(curve(target))
+
+
 class _MeshMotion:
     """Advances mesh nodes by dt·velocity each step (prescribed motion, §1.10).
 
@@ -230,7 +290,13 @@ class _MeshMotion:
     """
 
     def __init__(
-        self, mesh: Mesh, velocity: UflExpr, dt: fem.Constant, *, before_advance: Callable[[], None] | None = None
+        self,
+        mesh: Mesh,
+        velocity: UflExpr,
+        dt: fem.Constant,
+        *,
+        before_advance: Callable[[], None] | None = None,
+        tangential_redistribution: bool = False,
     ) -> None:
         self._mesh = mesh
         self._dt = dt
@@ -245,6 +311,19 @@ class _MeshMotion:
         # A bulk mesh (codim 0) has interior nodes to fill harmonically; a membrane
         # (codim 1) is all boundary, so dt·v moves every node directly.
         self._extension = _HarmonicExtension(space) if mesh.topology.dim == self._gdim else None
+        # Tangential node motion along the boundary (2D bulk): each step the boundary nodes are slid along the
+        # moved boundary back to the fractions of its length they had when this mesh was built. Only where the
+        # boundary's tangential motion is free -- a volume driven by its membrane, whose material is at rest
+        # and transported relative to the mesh (ADR 013) -- so the caller opts in. Without it, a front moving
+        # only normally gathers the nodes of a retracting stretch together until the mesh degrades. A rigid
+        # motion or a uniform dilation keeps the fractions, so it moves the nodes exactly as before.
+        self._space = space
+        self._loop = _boundary_loop(space) if tangential_redistribution and self._extension is not None else None
+        self._fractions = (
+            _arc_fractions(space.tabulate_dof_coordinates()[self._loop, : self._gdim])
+            if self._loop is not None
+            else None
+        )
         dg0 = fem.functionspace(mesh, ("DG", 0))
         # Per-cell volume form (DG0 test function integrates to each cell's
         # volume); re-assembling after a move reports the deformed cell sizes.
@@ -269,6 +348,11 @@ class _MeshMotion:
         if self._before_advance is not None:
             self._before_advance()
         self._displacement.interpolate(self._expression)
+        if self._loop is not None and self._fractions is not None:
+            displacement = self._displacement.x.array.reshape((-1, self._gdim))
+            here = self._space.tabulate_dof_coordinates()[self._loop, : self._gdim]
+            moved = here + displacement[self._loop]
+            displacement[self._loop] = _slid_to_fractions(moved, self._fractions) - here
         if self._extension is not None:
             self._extension.fill(self._displacement)
         volumes_before = self._cell_volumes()

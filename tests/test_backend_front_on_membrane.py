@@ -185,20 +185,38 @@ def test_a_volume_with_its_own_motion_beside_a_moving_membrane_is_refused() -> N
         assemble(load_yaml(model), realize(_cell(2), h=0.1), dt=0.01)
 
 
-def test_a_remesh_merges_crowded_boundary_vertices() -> None:
-    # a normal-only front gathers the nodes of a retracting stretch together; Netgen keeps every input vertex
-    # and stalls grading down to them, so the 2D remesh merges those closer than a tenth of h first
-    from vcell_fenics.backend.ale import _uncrowded
+def _boundary_spacing(problem: DiscreteProblem) -> np.ndarray:
+    from vcell_fenics.backend.discrete import _boundary_loop
 
-    theta = np.linspace(0.0, 2.0 * math.pi, 64, endpoint=False)
-    circle = np.column_stack([np.cos(theta), np.sin(theta)])
-    crowded = np.insert(circle, 10, circle[10] + 1e-5 * np.arange(1, 6)[:, None], axis=0)
+    assert problem.motion is not None
+    space = problem.motion._space
+    loop = _boundary_loop(space)
+    assert loop is not None
+    points = space.tabulate_dof_coordinates()[loop, :2]
+    return np.asarray(np.linalg.norm(np.roll(points, -1, axis=0) - points, axis=1))
 
-    def area(loop: np.ndarray) -> float:
-        return 0.5 * float(np.sum(loop[:, 0] * np.roll(loop[:, 1], -1) - np.roll(loop[:, 0], -1) * loop[:, 1]))
 
-    merged = _uncrowded(crowded, 0.01)
-    assert len(merged) == len(circle)
-    assert area(merged) == pytest.approx(area(crowded), rel=1e-6)
-    spacing = np.linalg.norm(np.roll(merged, -1, axis=0) - merged, axis=1)
-    assert spacing.min() >= 0.01
+def test_tangential_node_motion_keeps_the_boundary_spacing() -> None:
+    # A front moving only normally, retracting fast on one side (V_n = -0.6 at x = 0.5, 0 at x = -0.5): without
+    # tangential node motion the retracting side's nodes gather; with it (the default on a driven volume) each
+    # boundary node keeps its fraction of the boundary's length, so the spacing pattern the mesher made is kept,
+    # and the domain shrinks as with the nodes left where the normal velocity puts them (only the normal motion
+    # is physical).
+    velocity = "-0.3 * (1 + 2 * geom.x[0]) * geom.normal"
+    spread, lost = {}, {}
+    for redistribute in (True, False):
+        problem = _problem(velocity, h=0.05, dt=0.01)
+        assert problem.motion is not None
+        if not redistribute:
+            problem.motion._loop = None
+        initial = _boundary_spacing(problem)
+        size0 = _measure(problem)
+        _run(problem, 40)
+        spacing = _boundary_spacing(problem)
+        spread[redistribute] = (spacing.max() / spacing.min()) / (initial.max() / initial.min())
+        lost[redistribute] = size0 - _measure(problem)
+    assert spread[True] == pytest.approx(1.0, abs=1e-3)  # the mesher's spacing pattern kept
+    assert spread[False] > 1.5  # 4.7 / 2.8 measured
+    # sliding along a spline through the nodes cuts no corners: 0.29921 vs 0.29929 measured (along the polyline
+    # it was 0.305, 2 % more, and it grew with every step)
+    assert lost[True] == pytest.approx(lost[False], rel=2e-3)

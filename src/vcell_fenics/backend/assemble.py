@@ -199,7 +199,14 @@ def _build_problem(
     # differ in a non-affine bulk interior, where the raw `∇·v` mis-states the volume change.
     dt_const = fem.Constant(mesh, PETSc.ScalarType(float(dt)))  # type: ignore[operator]
     motion = (
-        _MeshMotion(mesh, velocity, dt_const, before_advance=normal.refresh if normal is not None else None)
+        _MeshMotion(
+            mesh,
+            velocity,
+            dt_const,
+            before_advance=normal.refresh if normal is not None else None,
+            # a driven volume's boundary may slide along the membrane: only its normal motion is physical
+            tangential_redistribution=driving_surface is not None,
+        )
         if velocity is not None
         else None
     )
