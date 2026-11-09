@@ -185,6 +185,16 @@ moving-boundary math").
    compress (decision 3), unlike ADR 013's single mesh, which translated rigidly. The slide (decision 4)
    removes the membrane's own node gathering in 2D; 3D has neither the slide nor a multi-region remesh yet.
 
+   *First stage's stop, built late (2026-11-09).* The first stage shipped without it: the moving partition
+   checked nothing, and moving_bleb (BioModel 294599465) at VCell's mesh (h = 0.04) kept integrating on
+   inverted cells, losing 2 % of its membrane species by t = 2.6 (an analytic recast of its 35-tooth cell
+   tangled the same way at t ≈ 1.4, an 8-tooth one at t = 2). `CellOrientation` (`backend/discrete.py`) now
+   checks the moved parent after every stride, by **signed** cell volumes against each cell's orientation
+   as built (an assembled `1·dx` is `|det J|` and cannot see an inverted cell), and stops on inversion or
+   past the hard growth limit. The single-mesh path (ADR 013) had the same blind spot: the 3D furrow
+   inverted a tetrahedron near t = 2 unseen. There the move is now undone and the step retried once on a
+   fresh mesh (`MeshTangled`).
+
 7. **The membrane-coupled solver's prescribed moving mode**, which reads `none` bulks as co-moving
    (decision 3 says the opposite):
    - **(a) align it** with decision 3 (transport relative to the mesh, total relative flux);

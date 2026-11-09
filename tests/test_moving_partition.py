@@ -306,3 +306,12 @@ def test_a_nonlinear_bulk_reaction_keeps_its_pool_while_the_membrane_moves() -> 
     assert abs(_measure(geometry.compartments["cyto"].mesh) / area0 - 1.0) > 0.15
     assert species_mass(result, "C") > 0.05
     assert species_mass(result, "A") + species_mass(result, "C") == pytest.approx(area0, rel=1e-2)
+
+
+def test_a_motion_that_tangles_the_partition_stops_the_run() -> None:
+    # the membrane swells past the fixed box: the cells between them turn inside out, which an assembled
+    # |det J| volume cannot show; with no remeshing (ADR 014 decision 6) the run must stop, not continue
+    from vcell_fenics.backend.discrete import MeshQualityError
+
+    with pytest.raises(MeshQualityError, match="inverted or collapsed"):
+        _run("2.0 * geom.normal", {"u": ("cyto", "1.0", "1.0"), "rho": ("pm", "0.1", "1.0")}, h=0.12, strides=10)
