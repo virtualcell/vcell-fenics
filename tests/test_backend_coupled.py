@@ -12,10 +12,12 @@ terms are all derived from the MathDescription's expressions. The checks:
 5. **Reservoir Dirichlet** — L = L_reservoir on the outer boundary.
 6. **A purely-surface source stays local** — a non-`trace` source is not mistaken for
    coupling.
-7. **Moving membrane (conservative ALE)** — under membrane expansion the receptor total
-   and (in a closed cell) the total ligand are conserved, and consumption keeps L below
-   the reservoir. The closed-ligand check is the mass-balance gate on the moving-boundary
-   flux.
+7. **Moving membrane (ADR 013)** — the receptors ride the membrane and the ligand's
+   material is at rest. Under membrane expansion the receptor total and (in a closed cell)
+   the total ligand are conserved; with no binding the shrinking bulk keeps its ligand,
+   which piles up ahead of the membrane; and a ligand profile stays in place in the lab
+   frame while the mesh moves under it. Consumption keeps L below the reservoir on a static
+   membrane (the Neumann sign check).
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ def _model(
     free_source: str | None = None,
     velocity: str = "0",
     reservoir: bool = True,
+    ligand_initial: str = "1.0",
+    ligand_diffusion: str = "0.5",
 ) -> str:
     binding = "k_on * trace(L) * rho_f - k_off * rho_b"
     rho_f_source = free_source if free_source is not None else f"-({binding})"
@@ -60,8 +64,8 @@ math_description:
       variable: L
       subdomain: ext
       temporality: time_dependent
-      terms: {{ diffusion: "0.5" }}
-      initial_condition: "1.0"
+      terms: {{ diffusion: "{ligand_diffusion}" }}
+      initial_condition: "{ligand_initial}"
     - template: surface_pde_with_dilution
       variable: rho_f
       subdomain: mem
@@ -198,13 +202,14 @@ def test_local_surface_source_is_not_coupling() -> None:
 # 7. moving coupled surface — conservative ALE
 # ---------------------------------------------------------------------------
 #
-# When the membrane moves, both fields co-move with the deforming domain: the surface
-# species get the dilution term ρ ∇_Γ·v_Γ and the bulk ligand the volumetric L ∇·v_mesh;
-# the consumption flux at the co-moving membrane is the ordinary diffusive Neumann (no
-# moving-boundary relative-flux correction). The defining checks are conservation across
-# the motion — receptor total, and (in a *closed* extracellular space) total ligand.
+# When the membrane moves, the receptors ride it (the surface dilution term ρ ∇_Γ·v_Γ) and the
+# ligand's material stays at rest (ADR 013 decision 5): the mesh moves under it, the transport
+# relative to the mesh keeps it in place, and the binding flux is a total flux relative to the
+# moving membrane. The checks are conservation across the motion (receptor total, and in a *closed*
+# extracellular space total ligand), the sweep of a ligand at rest, and its staying in place.
 
 _MOVING = "0.2 * geom.x / geom.radius"  # radial membrane expansion
+_EXPANDING = "0.2 * geom.normal"  # the same, stated with the membrane's normal (away from the cell)
 
 
 def _membrane_length(problem: CoupledProblem) -> float:
@@ -213,8 +218,15 @@ def _membrane_length(problem: CoupledProblem) -> float:
     return problem.integral(ufl.as_ufl(1.0), surface=True)
 
 
-def test_moving_membrane_dilutes_and_conserves_receptor() -> None:
-    problem = assemble(load_yaml(_model(velocity=_MOVING)), _geom(h=0.13), dt=0.04)
+def _bulk_area(problem: CoupledProblem) -> float:
+    import ufl
+
+    return problem.integral(ufl.as_ufl(1.0), surface=False)
+
+
+@pytest.mark.parametrize("velocity", [_MOVING, _EXPANDING])
+def test_moving_membrane_dilutes_and_conserves_receptor(velocity: str) -> None:
+    problem = assemble(load_yaml(_model(velocity=velocity)), _geom(h=0.13), dt=0.04)
     assert isinstance(problem, CoupledProblem)
     receptor0, length0 = _receptor_total(problem), _membrane_length(problem)
     for _ in range(15):
@@ -230,8 +242,8 @@ def test_moving_membrane_dilutes_and_conserves_receptor() -> None:
 def test_moving_membrane_conserves_total_ligand_in_a_closed_cell() -> None:
     # The mass-balance gate: in a closed extracellular space (no reservoir) the ligand
     # only moves between free-in-bulk and membrane-bound, so ∫_Ω L + ∫_Γ ρ_b is invariant
-    # — and stays so *under membrane motion* only if the moving-boundary flux (bulk
-    # dilution + co-moving Neumann) is handled correctly.
+    # — and stays so *under membrane motion* only if the conservative time term and the
+    # zero total flux relative to the moving membrane are handled correctly.
     problem = assemble(load_yaml(_model(velocity=_MOVING, reservoir=False)), _geom(h=0.13), dt=0.04)
     assert isinstance(problem, CoupledProblem)
 
@@ -243,14 +255,75 @@ def test_moving_membrane_conserves_total_ligand_in_a_closed_cell() -> None:
         problem.step()
 
     assert _membrane_length(problem) > 1.15 * length0
+    # The bulk's share is exact (the sweep test below holds it to 1e-10); the membrane-bound share uses the
+    # plain time term plus the dilution term, whose geometric-conservation error is O(dt) (~0.2 % here).
     assert total_ligand() == pytest.approx(ligand0, rel=5e-3)
 
 
-def test_moving_membrane_consumption_keeps_ligand_below_reservoir() -> None:
+def test_an_expanding_membrane_sweeps_the_ligand_at_rest() -> None:
+    # No binding, a closed space: the expanding membrane sweeps the ligand ahead of it. None crosses the
+    # membrane (zero total flux relative to it), so the bulk keeps its ligand while its area shrinks: the
+    # mean rises as A₀/A, and the ligand piles up at the membrane (D ∂L/∂n = v·n L there).
+    model = _model(velocity=_EXPANDING, reservoir=False, k_on=0.0, k_off=0.0)
+    problem = assemble(load_yaml(model), _geom(h=0.1), dt=0.04)
+    assert isinstance(problem, CoupledProblem)
+    mass0, area0 = problem.integral(problem.bulk, surface=False), _bulk_area(problem)
+    for _ in range(15):
+        problem.step()
+
+    area = _bulk_area(problem)
+    assert area < 0.85 * area0
+    assert problem.integral(problem.bulk, surface=False) == pytest.approx(mass0, rel=1e-10)
+    radius = np.linalg.norm(problem.bulk.function_space.tabulate_dof_coordinates()[:, :2], axis=1)
+    near_membrane = problem.bulk.x.array[radius < radius.min() + 0.02].mean()
+    near_wall = problem.bulk.x.array[radius > 0.98].mean()
+    assert near_membrane > near_wall > 1.0  # swept up against the membrane, and everywhere denser
+
+
+def test_the_ligand_stays_in_place_while_the_mesh_moves_under_it() -> None:
+    # L = x at rest, no binding: a translating membrane moves the interior mesh (harmonic extension), but L
+    # at each current position stays x there. Riding the mesh would leave each node with its initial x.
+    # Checked between the membrane's boundary layer and the outer wall's (a linear profile has no flux
+    # there, so the no-flux wall bends it within √(D t) ≈ 0.06 of the wall).
+    model = _model(
+        velocity="[0.2, 0.0]", reservoir=False, k_on=0.0, k_off=0.0, ligand_initial="geom.x[0]", ligand_diffusion="0.01"
+    )
+    problem = assemble(load_yaml(model), _geom(h=0.06), dt=0.04)
+    assert isinstance(problem, CoupledProblem)
+    start = problem.bulk.function_space.tabulate_dof_coordinates()[:, :2].copy()
+    for _ in range(10):
+        problem.step()
+
+    xy = problem.bulk.function_space.tabulate_dof_coordinates()[:, :2]
+    radius = np.linalg.norm(xy, axis=1)
+    band = (radius > 0.72) & (radius < 0.85)
+    moved = np.linalg.norm(xy - start, axis=1)[band]
+    error = np.abs(problem.bulk.x.array[band] - xy[band, 0])
+    assert moved.max() > 0.01  # the mesh did move under the ligand there
+    assert error.max() < 0.2 * moved.max()
+
+
+def test_consumption_keeps_ligand_below_reservoir() -> None:
     # With the correct consumption sign, binding is a *sink* on the ligand, so L never
     # exceeds the reservoir it is fed from (a maximum-principle check that also guards
-    # the §1.6 Neumann sign convention).
-    problem = _solve(_model(velocity=_MOVING), steps=15, dt=0.04, h=0.13)
+    # the §1.6 Neumann sign convention). On a static membrane: a moving one sweeps ligand at
+    # rest ahead of it, which may exceed the reservoir near the membrane.
+    problem = _solve(_model(), steps=15, dt=0.04, h=0.13)
 
-    assert problem.bulk.x.array.max() <= 1.0 + 1e-2
+    assert problem.bulk.x.array.max() <= 1.0 + 1e-9
     assert problem.field("rho_b").x.array.mean() > 0.05  # binding still proceeded
+
+
+def test_a_bulk_source_is_refused_rather_than_dropped() -> None:
+    model = _model().replace('terms: { diffusion: "0.5" }', 'terms: { diffusion: "0.5", source: "-0.1 * L" }')
+    with pytest.raises(NotImplementedError, match="'diffusion' only"):
+        assemble(load_yaml(model), _geom(), dt=0.05)
+
+
+def test_a_bulk_with_its_own_motion_beside_a_moving_membrane_is_refused() -> None:
+    model = _model(velocity=_MOVING).replace(
+        "{ name: ext, kind: volume, motion: { kind: none } }",
+        '{ name: ext, kind: volume, motion: { kind: prescribed, velocity: "[0.1, 0.0]" } }',
+    )
+    with pytest.raises(NotImplementedError, match="decision 6"):
+        assemble(load_yaml(model), _geom(), dt=0.05)

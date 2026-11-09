@@ -44,11 +44,14 @@ def _run(model: Any, options: RunOptions, out: Path) -> Bundle:
 
 
 def _carried(model: Any) -> Any:
-    """The same model with each species riding the cell: lab-frame advection = the front velocity."""
+    """The same model with each species riding the cell: its drift relative to the bulk at rest (a lab-frame
+    velocity, ADR 013) is the front velocity, a function of time only in these cases."""
 
     front = next(s.motion.velocity for s in model.math.subdomains if s.motion.kind == "prescribed")
     equations = [
-        dataclasses.replace(eq, terms={**eq.terms, "advection": front}) if isinstance(eq, TemplateEquation) else eq
+        dataclasses.replace(eq, terms={**eq.terms, "relative_advection": front})
+        if isinstance(eq, TemplateEquation)
+        else eq
         for eq in model.math.equations
     ]
     return dataclasses.replace(model, math=dataclasses.replace(model.math, equations=equations))

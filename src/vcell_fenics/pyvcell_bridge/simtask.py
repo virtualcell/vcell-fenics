@@ -331,8 +331,9 @@ def check_supported(task: SimulationTask) -> list[str]:
 def _check_moving_boundary(task: SimulationTask) -> list[str]:
     """What the FEniCSx moving-boundary path solves (vcell-fenics tracker "Moving boundaries"): a 2D or
     3D analytic geometry, one moving membrane with a front <Velocity>, and species only in the
-    volume it encloses (the interior rides the mesh, ``v = v_b``). Everything else is refused, each with
-    its own reason, rather than solved on the initial shape. Returns non-fatal notes."""
+    volume it encloses: the membrane moves, that volume's material stays at rest, and its mesh follows
+    the membrane (ADR 013). Everything else is refused, each with its own reason, rather than solved on
+    the initial shape. Returns non-fatal notes."""
 
     name = task.path.name
     prefix = f"{name}: a moving-boundary simulation (Solver={task.solver!r})"

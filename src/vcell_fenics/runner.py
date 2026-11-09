@@ -343,28 +343,36 @@ _REMESH_QUALITY_LIMIT = 4.0
 
 
 def _moving_subdomains(model: ModelInput) -> list[str]:
-    return [s.name for s in model.math.subdomains if s.motion.kind == "prescribed"]
+    """The subdomains with a prescribed, non-zero velocity (a literal zero does not move, ADR 013)."""
+
+    from vcell_fenics.backend.geometry import prescribed_velocity
+
+    return [s.name for s in model.math.subdomains if prescribed_velocity(s) is not None]
 
 
 def _run_moving(
     model: ModelInput, moving: list[str], options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
 ) -> tuple[int, int, float, int]:
-    """Backward Euler through the ALE driver on the moving volume: the mesh moves with the prescribed
-    velocity every step (the conservative ALE time term keeps each species' mass), remeshing when it
-    has degraded and continuing on the new mesh (conservatively remapped). Returns (cells, steps,
-    largest dt, remeshes)."""
+    """Backward Euler through the ALE driver on the moving domain: the mesh moves every step (the
+    conservative ALE time term keeps each species' mass), remeshing when it has degraded and continuing
+    on the new mesh (conservatively remapped). Returns (cells, steps, largest dt, remeshes).
+
+    The equations live on one subdomain, and one subdomain moves (ADR 013 decision 4). Either they are the
+    same (a prescribed volume, whose substrate moves its mesh, or a membrane carrying its own species), or
+    the moving one is a membrane and the equations are on the volume it encloses, whose material is at rest
+    and whose mesh the membrane drives (a VCell front). `assemble` refuses any other arrangement."""
 
     from vcell_fenics.backend.ale import ALEState, StepTooLarge, step_with_remeshing
     from vcell_fenics.backend.discrete import MeshQualityError
 
     comm = MPI.COMM_WORLD
     domains = sorted({equation.subdomain for equation in model.math.equations})
-    if len(moving) != 1 or domains != moving:
+    if len(moving) != 1 or len(domains) != 1:
         raise RunError(
-            f"the moving-boundary path solves species in the one moving volume; the model moves {moving} "
-            f"and has equations on {domains}"
+            f"the moving-boundary path solves species on one subdomain with one moving subdomain; the model "
+            f"moves {moving} and has equations on {domains}"
         )
-    domain = moving[0]
+    domain = domains[0]
     if options.fe_degree != 1:
         raise RunError(f"the moving-boundary path is P1 (its remesh transfer is); got fe_degree {options.fe_degree}")
     if options.time_integration != "backward_euler":
@@ -378,7 +386,10 @@ def _run_moving(
     log(f"assembling a moving problem on {domain!r} (fe_degree {options.fe_degree}, {cells} cells)")
     problem = assemble(model.math, geometry, dt=options.dt, fe_degree=options.fe_degree)
     if not isinstance(problem, DiscreteProblem) or problem.motion_velocity is None:
-        raise RunError(f"{domain!r} was given a motion, but it did not assemble to a moving problem")
+        raise RunError(
+            f"{moving[0]!r} moves, but the equations on {domain!r} did not assemble to a moving problem "
+            f"({domain!r} is neither the moving subdomain nor a volume it bounds)"
+        )
     state = ALEState(problem=problem, md=model.math)
     names = problem.variable_name.split(",")
     recorder.add_domain(domain, "volume", problem.V.mesh, _named(problem, names), moving=True)

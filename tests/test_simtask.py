@@ -336,21 +336,47 @@ def test_the_front_velocity_is_read_from_the_membrane() -> None:
     assert front_velocity_dependence(task) == "prescribed"
 
 
-def test_the_front_moves_the_interior_compartment() -> None:
-    # threaded to the importer, the front becomes a prescribed motion of the volume it encloses (v = v_b)
+def test_the_front_moves_the_membrane() -> None:
+    # threaded to the importer, the front is the membrane's prescribed motion (ADR 013); the volumes'
+    # material stays at rest, and the enclosed one's domain moves with the membrane
     from vcell_fenics.formalism.schema import MotionPrescribedVelocity, TemplateEquation
     from vcell_fenics.pyvcell_bridge import import_math_description
 
     task = read_simtask(_MB)
     math = import_math_description(task.math, geometry="g", dim=2, front_velocity=task.front_velocities[0])
     motion = {s.name: s.motion for s in math.subdomains}
-    assert motion["cell"] == MotionPrescribedVelocity(velocity="[((sin(sim.t))), ((cos(sim.t)))]")
-    assert motion["ec"].kind == "none"
-    # the front moves the frame only: the species keep VCell's lab-frame velocity (none), so each takes
-    # an explicit zero lab-frame advection rather than riding with the cell
+    assert motion["cell_ec_membrane"] == MotionPrescribedVelocity(velocity="[((sin(sim.t))), ((cos(sim.t)))]")
+    assert motion["cell"].kind == "none" and motion["ec"].kind == "none"
+    # the species have no VCell velocity, so no drift: they are at rest in the lab frame and swept by the
+    # front (the backend's lab-frame transport relative to the moving mesh, decision 3)
     for equation in math.equations:
         assert isinstance(equation, TemplateEquation)
-        assert equation.terms.get("advection") == "[0.0, 0.0]" and "relative_advection" not in equation.terms
+        assert "advection" not in equation.terms and "relative_advection" not in equation.terms
+
+
+def test_a_front_reading_the_normal_and_a_species_is_stated_on_the_membrane(tmp_path: Path) -> None:
+    # VCell's normalX() (mbsolver: out of the inside compartment) is the formalism's outward geom.normal, and
+    # a bulk species the front reads is its trace on the membrane (ADR 013 decision 2)
+    from vcell_fenics.formalism.validator import validate_or_raise
+    from vcell_fenics.pyvcell_bridge import import_math_description
+
+    task = read_simtask(
+        _mb_variant(
+            tmp_path,
+            (
+                '<Function Name="sproc_0.velocityX" Domain="cell_ec_membrane">sin(t)</Function>',
+                '<Function Name="sproc_0.velocityX" Domain="cell_ec_membrane">(0.1 * C_cyt * normalX())</Function>',
+            ),
+        )
+    )
+    math = import_math_description(task.math, geometry="g", dim=2, front_velocity=task.front_velocities[0])
+    from vcell_fenics.formalism.schema import MotionPrescribedVelocity
+
+    membrane = next(s for s in math.subdomains if s.name == "cell_ec_membrane")
+    assert isinstance(membrane.motion, MotionPrescribedVelocity)
+    velocity = membrane.motion.velocity
+    assert "trace(C_cyt)" in velocity and "geom.normal[0]" in velocity and "normalX" not in velocity
+    validate_or_raise(math)
 
 
 def test_a_species_dependent_front_is_species_coupled(tmp_path: Path) -> None:

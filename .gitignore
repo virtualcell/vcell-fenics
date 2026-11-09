@@ -151,3 +151,5 @@ docs/papers/
 
 # Scratch output dirs the mbsolver drops in the cwd when stage-1 FV references are generated.
 workspace/
+cross_validation/racrho_front_linear.vcml
+cross_validation/racrho_front_out/

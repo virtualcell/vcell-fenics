@@ -214,7 +214,7 @@ def test_a_velocity_reached_through_functions_keeps_its_parameters() -> None:
 
 def _moving_boundary_vcml(membranes: int = 1) -> vm.MathDescription:
     """A cyto disk (with a diffusing species) inside ec, joined by one (or more) membranes whose
-    ``inside_compartment`` is the moving interior — the moving-boundary import target."""
+    ``inside_compartment`` is cyto — the volume a moving membrane drives (ADR 013)."""
     membrane_subdomains = [
         vm.MembraneSubDomain(name=f"cyto_ec_{i}", inside_compartment="cyto", outside_compartment="ec")
         for i in range(membranes)
@@ -232,7 +232,7 @@ def _moving_boundary_vcml(membranes: int = 1) -> vm.MathDescription:
     )
 
 
-def test_front_velocity_imports_as_prescribed_motion_on_the_interior() -> None:
+def test_front_velocity_imports_as_prescribed_motion_of_the_membrane() -> None:
     from pyvcell.vcml.models_app import FrontVelocity
 
     from vcell_fenics.formalism.schema import MotionNone, MotionPrescribedVelocity
@@ -244,10 +244,10 @@ def test_front_velocity_imports_as_prescribed_motion_on_the_interior() -> None:
         front_velocity=FrontVelocity(velocity_x=0.5, velocity_y=0.0),
     )
     motions = {s.name: s.motion for s in md.subdomains}
-    # The moving front carries the cell interior (v = v_b); ec stays the static lab frame.
-    assert isinstance(motions["cyto"], MotionPrescribedVelocity)
-    assert motions["cyto"].velocity == "[0.5, 0.0]"
-    assert isinstance(motions["ec"], MotionNone)
+    # The front is the membrane's motion (ADR 013); both volumes' material stays at rest.
+    assert isinstance(motions["cyto_ec_0"], MotionPrescribedVelocity)
+    assert motions["cyto_ec_0"].velocity == "[0.5, 0.0]"
+    assert isinstance(motions["cyto"], MotionNone) and isinstance(motions["ec"], MotionNone)
 
 
 def test_front_velocity_expression_components_are_translated() -> None:
@@ -260,7 +260,7 @@ def test_front_velocity_expression_components_are_translated() -> None:
         dim=2,
         front_velocity=FrontVelocity(velocity_x="sin(t)", velocity_y="2*y"),
     )
-    motion = next(s.motion for s in md.subdomains if s.name == "cyto")
+    motion = next(s.motion for s in md.subdomains if s.name == "cyto_ec_0")
     assert isinstance(motion, MotionPrescribedVelocity)
     assert motion.velocity == "[sin(sim.t), 2*geom.x[1]]"
 
@@ -272,7 +272,7 @@ def test_front_velocity_includes_z_only_for_a_3d_geometry() -> None:
 
     front = FrontVelocity(velocity_x=0.5, velocity_y=0.0, velocity_z=0.25)
     md = import_math_description(_moving_boundary_vcml(), dim=3, front_velocity=front)
-    motion = next(s.motion for s in md.subdomains if s.name == "cyto")
+    motion = next(s.motion for s in md.subdomains if s.name == "cyto_ec_0")
     assert isinstance(motion, MotionPrescribedVelocity)
     assert motion.velocity == "[0.5, 0.0, 0.25]"
 
@@ -291,8 +291,9 @@ def test_front_velocity_surface_name_selects_the_moving_membrane() -> None:
 
     front = FrontVelocity(velocity_x=0.5, velocity_y=0.0, surface_name="cyto_ec_1")
     md = import_math_description(_moving_boundary_vcml(membranes=2), dim=2, front_velocity=front)
-    motion = next(s.motion for s in md.subdomains if s.name == "cyto")
-    assert isinstance(motion, MotionPrescribedVelocity)
+    motions = {s.name: s.motion for s in md.subdomains}
+    assert isinstance(motions["cyto_ec_1"], MotionPrescribedVelocity)
+    assert motions["cyto_ec_0"].kind == "none"
 
 
 def test_front_velocity_is_ambiguous_without_a_surface_name() -> None:

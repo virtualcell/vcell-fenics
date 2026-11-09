@@ -40,11 +40,12 @@ from petsc4py import PETSc
 from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
+from vcell_fenics.backend.boundary_normal import BoundaryNormal
 from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.coupled import CoupledProblem, assemble_coupled
 from vcell_fenics.backend.discrete import BackwardEuler, BoundaryTerm, DiscreteProblem, Term, TermKind, _MeshMotion
 from vcell_fenics.backend.equations import as_field_equation
-from vcell_fenics.backend.geometry import CoupledGeometry, Geometry, cross_validate
+from vcell_fenics.backend.geometry import CoupledGeometry, Geometry, cross_validate, prescribed_velocity
 from vcell_fenics.core import remap_bulk_function, remap_surface_function
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
@@ -93,7 +94,10 @@ def assemble(
     # region sizes (§1.8.4) are fixed numbers only while nothing moves (a moving mesh changes them in time)
     static = all(isinstance(sd.motion, MotionNone) for sd in md.subdomains)
     ctx = _compile_context(md, mesh, region_sizes=_region_sizes(geometry, mesh) if static else None)
-    problem = _build_problem(md, equations, mesh, ctx, dt=dt, fe_degree=fe_degree, geometry=geometry)
+    driving_surface = _driving_surface(md, geometry, equations[0].subdomain)
+    problem = _build_problem(
+        md, equations, mesh, ctx, dt=dt, fe_degree=fe_degree, geometry=geometry, driving_surface=driving_surface
+    )
     _apply_initial_conditions(problem, equations, ctx, len(equations))
     return problem
 
@@ -131,7 +135,17 @@ def rebuild_on_mesh(
 
     equations = _resolve_equations(md)
     ctx = _compile_context(md, new_mesh)
-    new_problem = _build_problem(md, equations, new_mesh, ctx, dt=float(problem.dt.value), fe_degree=degree)
+    # The rebuild has no geometry, so a volume driven by its membrane takes the surface resolved at the
+    # fresh build (ADR 013 decision 4); a remeshed enclosed volume's boundary is again only that membrane.
+    new_problem = _build_problem(
+        md,
+        equations,
+        new_mesh,
+        ctx,
+        dt=float(problem.dt.value),
+        fe_degree=degree,
+        driving_surface=problem.driving_surface,
+    )
     _transfer_state(problem.unknown, new_problem.unknown, conserve=conserve)
     _transfer_state(problem.previous, new_problem.previous, conserve=conserve)
     return new_problem
@@ -146,12 +160,17 @@ def _build_problem(
     dt: float,
     fe_degree: int,
     geometry: Geometry | None = None,
+    driving_surface: str | None = None,
 ) -> DiscreteProblem:
     """Build a lowered `DiscreteProblem` on `mesh` from already-resolved equations
     and a compile context bound to `mesh`. No validation, no IC — the shared core
     of `assemble` (fresh build) and `rebuild_on_mesh` (post-remesh). When `geometry`
     is given, the MathDescription's boundary conditions are translated too (the
-    rebuild path passes none — BCs are static-geometry only in v1)."""
+    rebuild path passes none — BCs are static-geometry only in v1).
+
+    `driving_surface` names the moving membrane that bounds this volume when the volume's own
+    material is at rest (ADR 013): the mesh moves with the membrane, and every species is
+    transported in the lab frame relative to that mesh motion (decision 3)."""
 
     subdomain = equations[0].subdomain
     n = len(equations)
@@ -170,20 +189,42 @@ def _build_problem(
     # which is interpolated to a concrete displacement (not assembled into a form), so a
     # chemistry-coupled motion `v = f(species)` reads the current field each step (explicit/lagged ALE).
     var_funcs = {eq.variable: (unknown if n == 1 else unknown[k]) for k, eq in enumerate(equations)}
-    velocity = _motion_velocity(md, subdomain, ctx, var_funcs)
+    # A front velocity may read the membrane's normal: bound on this volume mesh's boundary (which is the
+    # membrane, decision 4) and refreshed on the current configuration before every move.
+    normal = BoundaryNormal(mesh) if driving_surface is not None else None
+    velocity = _motion_velocity(md, subdomain, ctx, var_funcs, driving_surface=driving_surface, normal=normal)
     # Build the mesh motion *now* (not in DiscreteProblem.__post_init__) so the dilution term can read
     # the actual substrate velocity it will move at — the harmonic extension for a bulk — rather than
     # the raw prescribed velocity. The two agree on a membrane and for an affine bulk motion; they
     # differ in a non-affine bulk interior, where the raw `∇·v` mis-states the volume change.
     dt_const = fem.Constant(mesh, PETSc.ScalarType(float(dt)))  # type: ignore[operator]
-    motion = _MeshMotion(mesh, velocity, dt_const) if velocity is not None else None
+    motion = (
+        _MeshMotion(mesh, velocity, dt_const, before_advance=normal.refresh if normal is not None else None)
+        if velocity is not None
+        else None
+    )
+    # On a surface-driven domain (the material at rest, the mesh moved by its membrane) every species
+    # is transported in the lab frame, relative to the mesh: −u (c − w)·∇q, integrated by parts, with
+    # c the species' drift (0 when it has none). This term is what keeps the solution fixed in the lab
+    # frame while the harmonic-extended mesh moves under it (ADR 013 decision 3).
+    surface_driven = driving_surface is not None and motion is not None
 
     terms: list[Term] = [Term(TermKind.TIME_DERIVATIVE)]
     for (u, w), eq in zip(components, equations, strict=True):
         if "diffusion" in eq.terms:
             diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
             terms.append(Term(TermKind.DIFFUSION, diffusion * ufl.dot(ufl.grad(u), ufl.grad(w))))
-        if "relative_advection" in eq.terms:
+        if surface_driven and "advection" not in eq.terms:
+            # Drift relative to a substrate at rest is the lab-frame velocity, so it takes the lab-frame
+            # assembly; with no drift the carrier is 0 and the term is u w·∇q (decision 3).
+            assert motion is not None  # implied by `surface_driven`
+            drift = (
+                compile_expression(parse(eq.terms["relative_advection"]), ctx)
+                if "relative_advection" in eq.terms
+                else ufl.as_vector([0.0] * mesh.geometry.dim)
+            )
+            terms.append(Term(TermKind.ADVECTION, -u * ufl.dot(drift - motion.velocity(), ufl.grad(w))))
+        elif "relative_advection" in eq.terms:
             # Species drift *relative to the substrate/mesh* (§1.4 T1): the convective
             # term w_rel·∇u. On a static mesh this is plain advection (the Eulerian-fluid
             # setup, motion=none + fluid velocity here); on a mesh that moves at v_Ω it is
@@ -243,6 +284,7 @@ def _build_problem(
         motion=motion,
         time=ctx.symbols["sim.t"],
         dirichlet_refreshers=tuple(dirichlet_refreshers),
+        driving_surface=driving_surface,
     )
 
 
@@ -501,10 +543,37 @@ def _resolve_equations(md: MathDescription) -> list[TemplateEquation]:
     return equations
 
 
+def _driving_surface(md: MathDescription, geometry: Geometry, subdomain: str) -> str | None:
+    """The moving surface that bounds `subdomain` when `subdomain` is a volume at rest (ADR 013
+    decision 1): its domain moves with that surface although its material does not. None otherwise.
+    `cross_validate` has refused the cases this cannot drive (several moving surfaces, a boundary that is
+    not only the membrane, a volume with its own motion beside a moving membrane)."""
+
+    home = next((s for s in md.subdomains if s.name == subdomain), None)
+    if home is None or home.kind != "volume" or prescribed_velocity(home) is not None:
+        return None
+    for surface in md.subdomains:
+        if surface.kind != "surface" or prescribed_velocity(surface) is None:
+            continue
+        boundary = geometry.boundary_of(surface.name)
+        if boundary is not None and subdomain in boundary.subdomains:
+            return surface.name
+    return None
+
+
 def _motion_velocity(
-    md: MathDescription, subdomain: str, ctx: CompileContext, species: dict[str, UflExpr]
+    md: MathDescription,
+    subdomain: str,
+    ctx: CompileContext,
+    species: dict[str, UflExpr],
+    *,
+    driving_surface: str | None = None,
+    normal: BoundaryNormal | None = None,
 ) -> UflExpr | None:
-    """The compiled substrate velocity for `subdomain`, or None if static.
+    """The compiled mesh velocity for `subdomain`, or None if static: its own substrate velocity, or,
+    for a volume at rest bounded by a moving membrane (`driving_surface`), the membrane's velocity
+    evaluated on the volume mesh, whose boundary is that membrane. There `geom.normal` is the
+    membrane's outward normal (`normal`), and `trace(X)` reads the bulk field X at the boundary nodes.
     Prescribed displacement and unknown motion are later increments.
 
     `species` binds each governed variable to its *solution* Function component, so a
@@ -515,6 +584,13 @@ def _motion_velocity(
     drives the auto-dilution term, which then carries the field dependence too (semi-implicit)."""
 
     motion = next((s.motion for s in md.subdomains if s.name == subdomain), None)
+    if driving_surface is not None:
+        surface_motion = next(s.motion for s in md.subdomains if s.name == driving_surface)
+        assert isinstance(surface_motion, MotionPrescribedVelocity)  # `_driving_surface` chose it so
+        symbols = {**ctx.symbols, **species}
+        if normal is not None:
+            symbols["__normal__"] = normal.function
+        return compile_expression(parse(surface_motion.velocity), CompileContext(mesh=ctx.mesh, symbols=symbols))
     if motion is None or isinstance(motion, MotionNone):
         return None
     if isinstance(motion, MotionPrescribedVelocity):

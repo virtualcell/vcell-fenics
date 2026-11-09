@@ -35,8 +35,10 @@ from mpi4py import MPI
 from numpy.typing import NDArray
 
 from vcell_fenics.backend._typing import UflExpr
+from vcell_fenics.formalism.expr import Number
 from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume, SurfaceClass
-from vcell_fenics.formalism.schema import MathDescription, SubdomainKind
+from vcell_fenics.formalism.parser import parse
+from vcell_fenics.formalism.schema import MathDescription, MotionPrescribedVelocity, Subdomain, SubdomainKind
 from vcell_fenics.formalism.validator import Diagnostic
 
 
@@ -446,6 +448,19 @@ def make_two_bulk_membrane_geometry(
 # ---------------------------------------------------------------------------
 
 
+def prescribed_velocity(subdomain: Subdomain) -> str | None:
+    """The subdomain's prescribed velocity expression, or None when it does not move: no prescribed
+    velocity, or a literal zero (ADR 013 decision 1)."""
+
+    motion = subdomain.motion
+    if not isinstance(motion, MotionPrescribedVelocity):
+        return None
+    node = parse(motion.velocity)
+    if isinstance(node, Number) and node.value == 0.0:
+        return None
+    return motion.velocity
+
+
 def cross_validate(md: MathDescription, geometry: Geometry) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     if md.geometry != geometry.name:
@@ -486,6 +501,74 @@ def cross_validate(md: MathDescription, geometry: Geometry) -> list[Diagnostic]:
                     f"boundary_conditions[{i}]",
                     f"boundary {bc.boundary!r} has no matching labelled boundary in geometry "
                     f"{geometry.name!r} (§1.11.10)",
+                )
+            )
+    diagnostics.extend(_moving_surface_diagnostics(md, geometry))
+    return diagnostics
+
+
+def _moving_surface_diagnostics(md: MathDescription, geometry: Geometry) -> list[Diagnostic]:
+    """What a moving membrane next to a volume can drive on a single mesh (ADR 013 decisions 4, 6).
+
+    A volume at rest whose bounding membrane moves is driven by it: its mesh follows the membrane. For
+    a volume that carries equations, its boundary must be that membrane alone, so that every exterior
+    facet of its mesh is the membrane: a box face or a second surface (a nucleus inside it) would be
+    moved with it, which is wrong. A volume with its own prescribed motion beside a moving membrane is
+    refused, because the two normal velocities would have to agree. These need the geometry's
+    adjacency, so they are checked here rather than in the formalism validator."""
+
+    diagnostics: list[Diagnostic] = []
+    by_name = {s.name: s for s in md.subdomains}
+    carrying = {eq.subdomain for eq in md.equations}
+    drivers: dict[str, list[str]] = {}
+    for surface in md.subdomains:
+        if surface.kind != "surface" or prescribed_velocity(surface) is None:
+            continue
+        boundary = geometry.boundary_of(surface.name)
+        if boundary is None:
+            continue
+        for name in boundary.subdomains:
+            volume = by_name.get(name)
+            if volume is None or volume.kind != "volume":
+                continue
+            if prescribed_velocity(volume) is not None:
+                diagnostics.append(
+                    Diagnostic(
+                        "error",
+                        "subdomains",
+                        f"volume {name!r} has its own prescribed motion and borders the moving membrane "
+                        f"{surface.name!r}; the two motions would have to agree at the membrane, which is not "
+                        "supported yet (ADR 013 decision 6)",
+                    )
+                )
+            elif volume.motion.kind in ("none", "prescribed"):
+                drivers.setdefault(name, []).append(surface.name)
+    for name, surfaces in sorted(drivers.items()):
+        if name not in carrying:
+            continue
+        if len(surfaces) > 1:
+            diagnostics.append(
+                Diagnostic(
+                    "error",
+                    "subdomains",
+                    f"volume {name!r} carries equations and is bounded by several moving membranes "
+                    f"{sorted(surfaces)}; one is supported (ADR 013 decision 4)",
+                )
+            )
+            continue
+        others = sorted(
+            label
+            for label, boundary in geometry.boundaries.items()
+            if label != surfaces[0] and name in boundary.subdomains
+        )
+        if others:
+            diagnostics.append(
+                Diagnostic(
+                    "error",
+                    "subdomains",
+                    f"volume {name!r} carries equations and is moved by the membrane {surfaces[0]!r}, but its "
+                    f"boundary also includes {others}; a volume driven by its membrane must be bounded by that "
+                    "membrane alone (no box wall, no other surface inside it) (ADR 013 decision 4)",
                 )
             )
     return diagnostics

@@ -50,7 +50,6 @@ compartments raise :class:`NotImplementedError` pointing at the follow-up.
 
 from __future__ import annotations
 
-import dataclasses
 import functools
 import re
 from collections.abc import Callable
@@ -138,12 +137,14 @@ def import_model(
 
     ``front_velocity`` is the application's moving-boundary front kinematics (``app.front_velocity``
     — *not* part of the lowered ``MathDescription``, so the caller threads it in). It moves a
-    geometry *surface* class; we attach it as a prescribed-velocity motion (§1.10) on the volume
-    subdomain that surface encloses (its membrane's ``inside_compartment``). That motion is only the
-    **frame**: VCell's moving-boundary solver is Eulerian — a fixed grid, a moving front, and each
-    species' own lab-frame velocity (its PDE ``<Velocity>``, zero when absent). So the moving
-    compartment's species take that velocity as the lab-frame ``advection`` slot, transported relative
-    to the moving mesh with zero total flux at the front (the Rankine–Hugoniot condition); a species
+    geometry *surface* class, and is stated where VCell states it: as the prescribed-velocity motion
+    (§1.10) of that **membrane** (ADR 013). VCell's ``normalX()`` becomes ``geom.normal[0]`` (the
+    membrane's normal out of its inside compartment, checked against mbsolver), and a bulk species
+    the velocity reads is wrapped in ``trace(·)``. Every compartment keeps ``motion: none``: its
+    material is at rest, and the domains the membrane bounds move with it (decision 1). Each
+    species' own VCell velocity (its PDE ``<Velocity>``) is its drift relative to that material at rest,
+    the ``relative_advection`` slot; the backend transports it in the lab frame, relative to the moving
+    mesh, with zero total flux at the front (the Rankine–Hugoniot condition, decision 3). So a species
     whose velocity equals the front's rides with the cell, and one with none is swept by the front.
     See ``cross_validation/mb_translation.py`` and ``mb_swept.py``."""
 
@@ -167,22 +168,19 @@ def import_model(
     equations: list[Equation] = []
     boundary_conditions: list[BoundaryCondition] = []
 
-    motion_by_compartment = _front_motion(vcml, front_velocity, resolution, dim)
+    motion_by_membrane = _front_motion(vcml, front_velocity, dim, bulk_species)
 
     for compartment in vcml.compartment_subdomains:
         _reject_stochastic(compartment)
-        motion = motion_by_compartment.get(compartment.name, MotionNone())
-        subdomains.append(Subdomain(name=compartment.name, kind="volume", motion=motion))
-        first = len(equations)
+        subdomains.append(Subdomain(name=compartment.name, kind="volume", motion=MotionNone()))
         _translate_subdomain_equations(
             compartment, "volume", variables, equations, boundary_conditions, resolution, dim, bulk_species
         )
-        if compartment.name in motion_by_compartment:
-            equations[first:] = [_lab_frame(eq, dim) for eq in equations[first:]]
 
     for membrane in vcml.membrane_subdomains:
         _reject_stochastic(membrane)
-        subdomains.append(Subdomain(name=membrane.name, kind="surface", motion=MotionNone()))
+        motion = motion_by_membrane.get(membrane.name, MotionNone())
+        subdomains.append(Subdomain(name=membrane.name, kind="surface", motion=motion))
         _translate_subdomain_equations(
             membrane, "surface", variables, equations, boundary_conditions, resolution, dim, bulk_species
         )
@@ -207,19 +205,6 @@ def import_model(
         boundary_conditions=boundary_conditions,
     )
     return ImportResult(math=math, observables=tuple(observables))
-
-
-def _lab_frame(equation: Equation, dim: int | None) -> Equation:
-    """A species of a moving compartment: its VCell velocity is lab-frame (Eulerian), so it becomes the
-    ``advection`` slot — an explicit zero when VCell gives none (the species is swept by the front, not
-    carried with the cell, which is what the formalism's default would do)."""
-
-    if not isinstance(equation, TemplateEquation) or equation.template != "bulk_radv_diff":
-        return equation
-    terms = dict(equation.terms)
-    velocity = terms.pop("relative_advection", None)
-    terms["advection"] = velocity if velocity is not None else "[" + ", ".join(["0.0"] * (dim or 2)) + "]"
-    return dataclasses.replace(equation, terms=terms)
 
 
 def _is_zero_neumann(bc: BoundaryCondition, numeric: dict[str, float]) -> bool:
@@ -357,20 +342,28 @@ def _translate_subdomain_equations(
         )
 
 
+# VCell's surface normal built-ins (a spatial object's `SurfaceNormal` quantity inlines to these) → the
+# formalism's `geom.normal` components. mbsolver's normal points out of the membrane's inside compartment
+# (a disk with front velocity 0.5·normal grows as R0 + 0.5 t; `cross_validation/mb_normal_sign_fv.py`),
+# which is §1.8.4's outward normal of the region the membrane encloses, so no sign change is needed.
+_VCELL_NORMAL = re.compile(r"\bnormal([XYZ])\(\s*\)")
+
+
 def _front_motion(
     vcml: VcmlMathDescription,
     front_velocity: FrontVelocity | None,
-    res: FunctionResolution,
     dim: int | None,
+    bulk_species: set[str],
 ) -> dict[str, MotionPrescribedVelocity]:
     """Resolve the application's moving-boundary ``front_velocity`` to a prescribed-velocity motion
-    on the volume subdomain it moves. Returns ``{compartment_name: MotionPrescribedVelocity}`` (empty
+    of the membrane it moves (ADR 013). Returns ``{membrane_name: MotionPrescribedVelocity}`` (empty
     when there is no front).
 
-    The front moves a geometry *surface* class (``FrontVelocity.surface_name``); the moving volume is
-    that surface's ``inside_compartment`` (the cell interior — the bulk it encloses rides along, the
-    ``v = v_b`` carry). With no ``surface_name`` we require the model to have exactly one membrane so
-    the target is unambiguous."""
+    The front moves a geometry *surface* class (``FrontVelocity.surface_name``). With no
+    ``surface_name`` we require the model to have exactly one membrane so the target is unambiguous.
+    The membrane must have an ``inside_compartment``: the volume it encloses is the one whose domain it
+    drives. The velocity is evaluated on the membrane, so ``normalX()`` becomes ``geom.normal[0]`` and a
+    bulk species is read through ``trace(·)`` (§1.8.2)."""
 
     if front_velocity is None:
         return {}
@@ -401,8 +394,18 @@ def _front_motion(
     components = [front_velocity.velocity_x, front_velocity.velocity_y]
     if dim == 3:
         components.append(front_velocity.velocity_z)
-    rendered = [translate_expression(_inline_every_function(str(c), vcml)) for c in components]
-    return {interior: MotionPrescribedVelocity(velocity="[" + ", ".join(rendered) + "]")}
+    rendered = [
+        _on_membrane(translate_expression(_inline_every_function(str(c), vcml)), bulk_species) for c in components
+    ]
+    return {moving.name: MotionPrescribedVelocity(velocity="[" + ", ".join(rendered) + "]")}
+
+
+def _on_membrane(expression: str, bulk_species: set[str]) -> str:
+    """A translated front-velocity component as an expression on the membrane: VCell's normal built-ins
+    become ``geom.normal[k]`` and bulk species are traced."""
+
+    expression = _VCELL_NORMAL.sub(lambda m: f"geom.normal[{'XYZ'.index(m.group(1))}]", expression)
+    return _trace_wrap(expression, bulk_species)
 
 
 def _body_or_name(match: re.Match[str], names: frozenset[str], bodies: dict[str, str]) -> str:
