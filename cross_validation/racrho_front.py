@@ -24,7 +24,11 @@ its grids), mbsolver gives an area of ≈ 2.51 (ours 2.509) and a centroid of �
 1.5 %); the leading edge brackets, the gap shrinking from 0.37 at the coarsest pair through 0.18 to 0.11 at the
 finest. Halving our dt (h = 0.08) moves the t = 5 leading edge by
 0.011. mbsolver cannot be refined past 120 × 49 (``Voronoi32`` overflows at 144 × 58). The leading edge is a
-single extreme point of the front, sensitive to the tip's resolution in both solvers. At dt = 0.01 a step tangles the mesh near
+single extreme point of the front, sensitive to the tip's resolution in both solvers.
+
+**With tangential node motion** (2026-11-09, after the study above): no remesh to t = 5 at dt = 0.01, and ours
+converges in h to 0.2 % at t = 5 (h = 0.08 / 0.04: leading edge 4.235 / 4.240, area 2.276 / 2.281, centroid
+2.855 / 2.856). At dt = 0.01 a step tangles the mesh near
 t = 4.4: a front moving only normally gathers the retracting stretch's boundary nodes (no tangential
 redistribution), so the run remeshes ever more often.
 
@@ -55,6 +59,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=_HERE / "racrho_front_out")
     parser.add_argument("--t-final", type=float, default=5.0)
     parser.add_argument("--reference", type=Path, default=_HERE / "racrho_front_fv.npz")
+    parser.add_argument("--time-integration", default="backward_euler", choices=("backward_euler", "method_of_lines"))
     args = parser.parse_args()
     source = _HERE / "racrho_front_linear.vcml"
     reference = np.load(args.reference)
@@ -74,7 +79,7 @@ def main() -> None:
         t_final=args.t_final,
         output_times=uniform_output_times(args.t_final, 0.5),
         fe_degree=1,
-        time_integration="backward_euler",
+        time_integration=args.time_integration,
     )
     args.out.mkdir(parents=True, exist_ok=True)
     try:
