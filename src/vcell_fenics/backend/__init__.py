@@ -18,6 +18,8 @@ the submodule that defines ``X``. Type checkers and IDEs still see every name th
 from __future__ import annotations
 
 import importlib
+import sys
+import types
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -199,6 +201,25 @@ def __getattr__(name: str) -> Any:
     value = getattr(importlib.import_module(module), name)
     globals()[name] = value  # cache: later lookups bypass __getattr__
     return value
+
+
+class _Backend(types.ModuleType):
+    """This package's module type. The submodule ``backend.assemble`` exports a function of the same name,
+    and importing a submodule binds it onto its package: whichever of ``runner``, ``ale``, ``solver`` (all
+    ``from vcell_fenics.backend.assemble import …``) loaded first left ``backend.assemble`` the *module*, so
+    a later ``from vcell_fenics.backend import assemble`` got a module, not the function (seen as test-order
+    dependence: ``test_moving_boundary_run.py`` before ``test_backend_lab_frame_advection.py``). Binding a
+    submodule whose name is a lazy export *of that submodule* (today only ``assemble``) binds the export
+    instead; any other submodule binds as usual, so ``import vcell_fenics.backend.realize as m`` is still the
+    module. ``from vcell_fenics.backend.assemble import …`` is unaffected (it reads ``sys.modules``)."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if isinstance(value, types.ModuleType) and _EXPORTS.get(name) == value.__name__ == f"{__name__}.{name}":
+            value = getattr(value, name)
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _Backend
 
 
 def __dir__() -> list[str]:
