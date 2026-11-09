@@ -10,13 +10,12 @@ species' lab-frame velocity (1, 0), the front). mbsolver runs the document's own
 Writes ``racrho_front_fv.npz`` (front area, centroid, x-extent and the mean of ``a`` per output time) and
 the variant ``racrho_front_linear.vcml`` that stage 2 runs. Gitignored and regenerable:
 
-    ../pyvcell/.venv/bin/python -I cross_validation/racrho_front_fv.py [path/to/biomodel_104122918.vcml]
+    ../pyvcell/.venv/bin/python -I cross_validation/racrho_front_fv.py [path/to/biomodel_104122918.vcml] [--mesh NX,NY] [--out F]
 """
 
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -57,15 +56,26 @@ def _centroid(p: np.ndarray) -> np.ndarray:
 
 
 def main() -> None:
-    source = Path(sys.argv[1]) if len(sys.argv) > 1 else _HERE.parent / "vcml_biomodels" / "biomodel_104122918.vcml"
-    text = source.read_text()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("source", nargs="?", type=Path, default=_HERE.parent / "vcml_biomodels" / "biomodel_104122918.vcml")
+    parser.add_argument("--mesh", default=None, help="mbsolver grid 'NX,NY' (the document's is 96,39)")
+    parser.add_argument("--out", type=Path, default=_HERE / "racrho_front_fv.npz")
+    args = parser.parse_args()
+    text = args.source.read_text()
     assert text.count(_NONLINEAR) == 2, "the RacRho kinetics (reaction and generated math) were not found"
     variant = _HERE / "racrho_front_linear.vcml"
-    variant.write_text(text.replace(_NONLINEAR, _LINEAR))
+    linear = text.replace(_NONLINEAR, _LINEAR)
+    variant.write_text(linear)
+    if args.mesh is not None:
+        nx, ny = (int(v) for v in args.mesh.split(","))
+        assert linear.count('<Size X="96" Y="39" Z="1" />') == 1
+        linear = linear.replace('<Size X="96" Y="39" Z="1" />', f'<Size X="{nx}" Y="{ny}" Z="1" />')
 
     out = Path(tempfile.mkdtemp(prefix="racrho_mb_"))
     refined = out / "refined.vcml"
-    ok, message = libvcell.vcml_to_vcml(vcml_content=variant.read_text(), vcml_file_path=refined)
+    ok, message = libvcell.vcml_to_vcml(vcml_content=linear, vcml_file_path=refined)
     assert ok, message
     ok, message = libvcell.vcml_to_moving_boundary_input(
         vcml_content=refined.read_text(), simulation_name="Simulation4", output_dir_path=out
@@ -78,7 +88,7 @@ def main() -> None:
         )
     fronts = [np.asarray(f.front, float) for f in result.frames]
     np.savez(
-        _HERE / "racrho_front_fv.npz",
+        args.out,
         times=np.array(result.times),
         areas=np.array([_area(p) for p in fronts]),
         centroids=np.array([_centroid(p) for p in fronts]),
@@ -86,7 +96,7 @@ def main() -> None:
         xmax=np.array([p[:, 0].max() for p in fronts]),
         a_mean=np.array([float(f.concentrations["a"].mean()) for f in result.frames]),
     )
-    print(f"  wrote racrho_front_fv.npz ({len(fronts)} frames) and {variant.name}")
+    print(f"  wrote {args.out.name} ({len(fronts)} frames) and {variant.name}")
 
 
 if __name__ == "__main__":

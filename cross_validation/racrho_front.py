@@ -6,15 +6,28 @@ moving-boundary runner: the front ``v = (a − 1)|a − 1| n`` becomes the membr
 centroid and x-extent, and the area-weighted mean of ``a``, with mbsolver's at each output time, and
 checks that ``a + b`` (which the reaction conserves) keeps its total.
 
-Result (2026-11-09, h = 0.08, dt = 0.005, 43 remeshes to t = 5; mbsolver on its 96 × 39 grid): area within
-3.0 % (ours larger throughout), centroid x 8 % ahead at t = 0.5 and 2–4 % ahead after, trailing edge within
-0.03; the leading edge runs ahead of mbsolver's, by 0.28 (7 %) at t = 5; area-weighted mean ``a`` within
-3.8 % (ours lower); ``∫(a + b)`` constant to 6 digits. The systematic lead of our leading edge is not
-explained yet (no refinement study in either solver). At dt = 0.01 a step tangles the mesh near
+Result (2026-11-09, h = 0.08, dt = 0.005, 43 remeshes to t = 5; mbsolver on the document's 96 × 39 grid): area
+within 3.0 % (ours larger throughout), centroid x 8 % ahead at t = 0.5 and 2–4 % ahead after, trailing edge
+within 0.03; the leading edge runs ahead of mbsolver's, by 0.28 (7 %) at t = 5; area-weighted mean ``a`` within
+3.8 % (ours lower); ``∫(a + b)`` constant to 6 digits.
+
+**Refinement study (2026-11-09): the difference is both solvers' discretization error, from opposite sides.**
+At t = 2.5 (the finest run of ours tangles near t = 4.7 without tangential node motion):
+
+    leading edge   ours h = 0.16 / 0.08 / 0.04:  2.568 / 2.515 / 2.478    mbsolver 48×20 / 96×39 / 120×49:  2.197 / 2.337 / 2.369
+    centroid x                                   1.2503 / 1.2512 / 1.2517                                    1.162 / 1.218 / 1.226
+    area                                         2.496 / 2.505 / 2.509                                       2.364 / 2.436 / 2.450
+
+Ours is nearly converged in the centroid and the area and still falls in the leading edge; mbsolver, first
+order on its grid, still rises in all three. Extrapolated linearly in its grid spacing, mbsolver gives a
+centroid of ≈ 1.25 and an area of ≈ 2.51 (ours: 1.252 and 2.509); the leading edge brackets, the gap shrinking
+from 0.18 at the coarse pair to 0.11 at the finest. Halving our dt (h = 0.08) moves the t = 5 leading edge by
+0.011. mbsolver cannot be refined past 120 × 49 (``Voronoi32`` overflows at 144 × 58). The leading edge is a
+single extreme point of the front, sensitive to the tip's resolution in both solvers. At dt = 0.01 a step tangles the mesh near
 t = 4.4: a front moving only normally gathers the retracting stretch's boundary nodes (no tangential
 redistribution), so the run remeshes ever more often.
 
-    .pixi/envs/dev/bin/python cross_validation/racrho_front.py [--h 0.08] [--dt 0.005] [--out DIR]
+    .pixi/envs/dev/bin/python cross_validation/racrho_front.py [--h 0.08] [--dt 0.005] [--t-final 5] [--out DIR]
 """
 
 from __future__ import annotations
@@ -39,9 +52,11 @@ def main() -> None:
     parser.add_argument("--h", type=float, default=0.08)
     parser.add_argument("--dt", type=float, default=0.005)
     parser.add_argument("--out", type=Path, default=_HERE / "racrho_front_out")
+    parser.add_argument("--t-final", type=float, default=5.0)
+    parser.add_argument("--reference", type=Path, default=_HERE / "racrho_front_fv.npz")
     args = parser.parse_args()
     source = _HERE / "racrho_front_linear.vcml"
-    reference = np.load(_HERE / "racrho_front_fv.npz")
+    reference = np.load(args.reference)
 
     biomodel = VcmlReader.biomodel_from_file(str(source))
     app = biomodel.applications[0]
@@ -55,8 +70,8 @@ def main() -> None:
     options = RunOptions(
         h=args.h,
         dt=args.dt,
-        t_final=5.0,
-        output_times=uniform_output_times(5.0, 0.5),
+        t_final=args.t_final,
+        output_times=uniform_output_times(args.t_final, 0.5),
         fe_degree=1,
         time_integration="backward_euler",
     )
