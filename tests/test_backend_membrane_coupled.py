@@ -666,91 +666,6 @@ def test_mol_velocity_none_is_the_static_integration() -> None:
     assert result.total_mass() == pytest.approx(total0, abs=1e-9)  # static ⇒ round-off conservation
 
 
-def test_mol_conserves_total_ligand_under_motion() -> None:
-    # The migrating-cell headline: the stiff binding integrates adaptively WHILE the cell deforms, and the
-    # GCL-consistent effective dilution rate keeps total ligand conserved. The dilution itself is now
-    # conserved to ~round-off (see test_mol_moving_coupled_dilution_conserves_without_binding); the residual
-    # O(motion-step) drift here is the *lagged interface coupling flux* across the moving membrane (a
-    # separate operator split, not the dilution). Both expansion and shrinkage.
-    for velocity in ("[0.3 * geom.x[0], 0.3 * geom.x[1]]", "[-0.3 * geom.x[0], -0.3 * geom.x[1]]"):
-        geom = _geom(h=0.11)
-        area0 = _inner_area(geom)
-        model = _model()
-        total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
-        result = integrate_membrane_coupled(model, geom, t_final=0.3, velocity=velocity, motion_steps=10)
-        assert abs(_inner_area(geom) / area0 - 1.0) > 0.15  # the cell deformed substantially
-        assert result.total_mass() == pytest.approx(total0, rel=2e-3)  # ≪ the ~0.2 a no-dilution run drifts
-
-
-def test_mol_motion_splitting_error_is_first_order() -> None:
-    # With the effective dilution rate the move/dilute split is conserved to ~round-off, so the residual
-    # conservation error under motion is the *lagged interface coupling flux* on the moving membrane —
-    # still first order in the outer motion step. Halving the interval (doubling motion_steps) halves the
-    # drift; this is the clean, predictable convergence the BE/IMEX path can't give.
-    velocity = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
-    model = _model()
-
-    def drift(motion_steps: int) -> float:
-        geom = _geom(h=0.11)
-        total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
-        result = integrate_membrane_coupled(model, geom, t_final=0.3, velocity=velocity, motion_steps=motion_steps)
-        return abs(result.total_mass() / total0 - 1.0)
-
-    coarse, fine = drift(10), drift(20)
-    assert coarse / fine == pytest.approx(2.0, abs=0.3)  # first-order: ~2× reduction per halved interval
-
-
-def test_mol_handles_stiff_binding_under_motion() -> None:
-    # The reason MOL-under-motion exists: stiff binding (kon·Rmax large) that the explicit IMEX-BE step
-    # cannot take while the membrane also moves. The adaptive implicit solve captures strongly and stays
-    # conserved on the deforming cell.
-    geom = _geom(h=0.11)
-    model = _model(kon=1.0, rmax=10.0)
-    total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
-    result = integrate_membrane_coupled(
-        model, geom, t_final=0.3, velocity="[0.3 * geom.x[0], 0.3 * geom.x[1]]", motion_steps=10
-    )
-    assert result.mass("R") > 2.0  # strong stiff capture (≫ the gentle-kon ~1.1)
-    assert result.total_mass() == pytest.approx(total0, rel=5e-3)
-
-
-def test_be_moving_coupled_conserves_each_field_to_roundoff() -> None:
-    # The conservative ALE correction on the backward-Euler coupled path, isolated from the binding
-    # coupling (kon=0, but R seeded so the membrane dilutes too). Each co-moving field just diffuses +
-    # dilutes on its own moving mesh, and the (u − r·uⁿ)·w time term — r = the per-cell (bulk) / per-facet
-    # (membrane) swept ratio |Kⁿ|/|Kⁿ⁺¹| — conserves each field's substance to *solver precision*, exactly
-    # and independently of dt (the term telescopes). The coupled analogue of the single-mesh bulk/membrane
-    # conservative form.
-    v = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
-    model = _model(kon=0.0, r_ic="1.0")
-    totals = []
-    for dt, nsteps in ((0.03, 10), (0.0075, 40)):
-        geom = _geom(h=0.11)
-        p = assemble_membrane_coupled(model, geom, dt=dt, velocity=v)
-        m0 = {s: p.mass(s) for s in ("L_in", "L_out", "R")}
-        tot0 = p.total_mass()
-        for _ in range(nsteps):
-            p.step()
-        for s in ("L_in", "L_out", "R"):
-            assert abs(p.mass(s) / m0[s] - 1.0) < 1e-10  # each field's substance conserved to round-off
-        totals.append(p.total_mass() / tot0 - 1.0)
-    assert abs(totals[0]) < 1e-10 and abs(totals[1] - totals[0]) < 1e-10  # exact + dt-independent
-
-
-def test_mol_moving_coupled_dilution_conserves_without_binding() -> None:
-    # The MOL coupled path's dilution in isolation (kon=0, R seeded). The strided TS can't telescope, so it
-    # uses the GCL-consistent effective rate ln(|Kⁿ⁺¹|/|Kⁿ|)/interval per mesh: the continuous over-a-stride
-    # decay exactly cancels the discrete mesh jump, conserving total substance to ~round-off (≫ tighter than
-    # the ~0.1 % lagged-coupling drift of the binding case). Confirms the dilution — not the fix's target
-    # coupling flux — is what the effective rate makes conservative.
-    v = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
-    model = _model(kon=0.0, r_ic="1.0")
-    geom = _geom(h=0.11)
-    total0 = assemble_membrane_coupled(model, geom, dt=0.02).total_mass()
-    result = integrate_membrane_coupled(model, geom, t_final=0.3, velocity=v, motion_steps=10)
-    assert result.total_mass() == pytest.approx(total0, rel=1e-3)  # dilution conserved to ~round-off, no coupling
-
-
 def test_motion_grows_the_cell_to_the_analytic_homothety() -> None:
     # Guards the mesh-motion node→dof permutation: it is topological/fixed and must be computed ONCE on the
     # initial geometry, NOT re-queried from the moved node positions each step (which mis-matches and
@@ -881,21 +796,6 @@ def test_mol_handles_nonlinear_in_bulk_mass_action() -> None:
     assert result.mass("C") > 0.1  # the reaction actually ran
     assert result.mass("A") + result.mass("C") == pytest.approx(pool_ac0, rel=1e-9)
     assert result.mass("B") + result.mass("C") == pytest.approx(pool_bc0, rel=1e-9)
-
-
-def test_mol_nonlinear_in_bulk_reaction_conserves_under_motion() -> None:
-    # The migrating cell with a nonlinear in-bulk reaction: A + B → C while the membrane expands. The
-    # conserved pool (A+C) holds to the O(motion-step) split error (no external flux through the membrane),
-    # combining the implicit dilution, the moving mesh, and the matrix-free reaction in one solve.
-    model = _reacting_model(src_a="-kf*A*B", src_b="-kf*A*B", src_c="kf*A*B")
-    geom = _geom(h=0.13)
-    area0 = _inner_area(geom)
-    pool_ac0 = 1.0 * area0
-    result = integrate_membrane_coupled(
-        model, geom, t_final=0.6, velocity="[0.25 * geom.x[0], 0.25 * geom.x[1]]", motion_steps=24
-    )
-    assert abs(_inner_area(geom) / area0 - 1.0) > 0.15  # the cell deformed substantially
-    assert result.mass("A") + result.mass("C") == pytest.approx(pool_ac0, rel=1e-2)
 
 
 # ---------------------------------------------------------------------------
@@ -1463,45 +1363,6 @@ def test_membrane_mesh_motion_moves_the_substrate_coherently() -> None:
     assert problem.mass("L_in") > 0.0  # a sane solve on the deformed mesh
 
 
-def test_moving_membrane_dilutes_the_bulk_to_the_analytic_value() -> None:
-    # The bulk dilution term, verified against an exact solution. Decouple binding (kon=0) and expand the
-    # cell radially with v = a·x. In the cyto disk the harmonic mesh velocity equals a·x exactly, so a
-    # uniform ligand field (diffusion of a constant is zero) stays uniform and must dilute as the area
-    # grows: c(T) = c₀·e^{-2aT} (∇·v = 2a in 2D). Without the `c ∇·v_mesh` term the value would not change
-    # at all (the node-following BE update leaves a uniform field fixed) and mass would be created.
-    import numpy as np
-    from mpi4py import MPI
-
-    a, dt, steps = 0.3, 0.02, 15
-    geom = _geom(h=0.1)
-    problem = assemble_membrane_coupled(_model(kon=0.0), geom, dt=dt, velocity=f"[{a} * geom.x[0], {a} * geom.x[1]]")
-    for _ in range(steps):
-        problem.step()
-    values = problem.field("L_in").x.array
-    comm = geom.inner_mesh.comm
-    cmax = float(comm.allreduce(values.max(), op=MPI.MAX))
-    cmin = float(comm.allreduce(values.min(), op=MPI.MIN))
-    assert cmax - cmin < 1e-3  # stayed uniform — pure dilution, no spurious gradients
-    assert cmax == pytest.approx(np.exp(-2 * a * dt * steps), rel=1e-3)  # the analytic dilution factor
-
-
-def test_moving_membrane_conserves_total_ligand_under_expansion_and_shrinkage() -> None:
-    # The headline conservation check under motion, both directions. As the cell deforms (area changes by
-    # ~20%), the bulk `c ∇·v_mesh` and the MANDATORY surface `ρ ∇_Γ·v_Γ` dilution keep every co-moving
-    # pool's integral consistent with its geometry — so total ligand (free L_in + free L_out + bound R) is
-    # conserved to ~1e-4 (the lagged-dilution O(dt) error). The discrimination is the magnitude: WITHOUT
-    # the dilution terms the total would drift by the full volume change (~0.2), 1000× the tolerance here.
-    for velocity in ("[0.3 * geom.x[0], 0.3 * geom.x[1]]", "[-0.3 * geom.x[0], -0.3 * geom.x[1]]"):
-        geom = _geom(h=0.1)
-        area0 = _inner_area(geom)
-        problem = assemble_membrane_coupled(_model(), geom, dt=0.02, velocity=velocity)
-        total0 = problem.total_mass()
-        for _ in range(15):
-            problem.step()
-        assert abs(_inner_area(geom) / area0 - 1.0) > 0.15  # the cell actually deformed substantially
-        assert problem.total_mass() == pytest.approx(total0, rel=1e-3)  # ≪ the ~0.2 a no-dilution run drifts
-
-
 def test_velocity_none_is_the_static_solve() -> None:
     # The moving-membrane path is opt-in: omitting `velocity` (or passing None) leaves the membrane fixed
     # and recovers the static, round-off-conservative solve — the matrix is never re-assembled.
@@ -1560,3 +1421,14 @@ def test_value_equality_constraint_is_rejected() -> None:
     )
     with pytest.raises(NotImplementedError, match="value-equality"):
         assemble_membrane_coupled(model, _geom(), dt=0.02)
+
+
+def test_a_prescribed_moving_membrane_is_refused() -> None:
+    # ADR 014 decision 7: this solver read its `motion: none` bulks as co-moving with the mesh; a prescribed
+    # moving membrane with bulks at rest is the multi-compartment solver's (tests/test_moving_partition.py holds
+    # this file's former prescribed-motion checks, rederived there)
+    velocity = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
+    with pytest.raises(NotImplementedError, match="motion_membrane"):
+        integrate_membrane_coupled(_model(), _geom(h=0.13), t_final=0.3, velocity=velocity)
+    with pytest.raises(NotImplementedError, match="motion_membrane"):
+        assemble_membrane_coupled(_model(), _geom(h=0.13), dt=0.02, velocity=velocity)

@@ -423,6 +423,16 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-09** — **ADR 014 decision 7: the membrane-coupled solver refuses a prescribed moving membrane.** It
+  read its `motion: none` bulks as co-moving with the mesh; the multi-compartment solver moves a membrane with its
+  bulks at rest, so `assemble_membrane_coupled` / `integrate_membrane_coupled` now refuse a `velocity` (or a
+  `MembraneCoupledMeshMotion`) and name `integrate_multi_compartment(..., motion_membrane=...)`. Their force-balance
+  motion is unchanged. Eight prescribed-motion tests moved: five rederived on the multi-compartment solver with
+  the bulk at rest (`tests/test_moving_partition.py`: total ligand under expansion and shrinkage, each field
+  without binding, the first-order stride error, stiff binding, a nonlinear bulk reaction's pool); the two
+  backward-Euler ones and the one asserting the co-moving bulk dilution were dropped (the at-rest checks replace
+  it). `MembraneCoupledMeshMotion` itself stays, as the force-balance tests' pre-deformation.
+
 - **2026-11-09** — **Species on a moving membrane, and on both sides of it (ADR 014).**
   - **What:** a moving model with equations on more than one subdomain runs on the multi-compartment solver,
     which moves its partition stride by stride (`backend/moving_partition.py`); the SimulationTask import accepts

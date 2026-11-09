@@ -32,8 +32,10 @@ un-assemblable in DOLFINx 0.10/0.11, so the implicit Jacobian is applied by fini
 residual, preconditioned by the assembled partial Jacobian) are provided; the MOL one is
 unconditionally stable for stiff binding.
 
-Implemented on this substrate: a moving membrane (prescribed or force-balance velocity, with the mandatory
-`ρ ∇_Γ·v_Γ` dilution), in-bulk reactions, and a reservoir Dirichlet on the outer wall. The remaining
+Implemented on this substrate: a membrane moved by a force-balance velocity (with the mandatory `ρ ∇_Γ·v_Γ`
+dilution), in-bulk reactions, and a reservoir Dirichlet on the outer wall. A **prescribed** moving membrane is
+refused (ADR 014 decision 7): this solver read its bulks as co-moving with the mesh; the multi-compartment solver
+moves a membrane with its bulks at rest. The remaining
 follow-up is `BCInterfaceValueEquality` (the `u_inner = k·u_outer` interface constraint).
 """
 
@@ -1337,9 +1339,10 @@ def assemble_membrane_coupled(
     matrix-free Newton handles it.
 
     Scope (this increment): backward Euler with affine in-bulk reactions, a *prescribed* membrane velocity
-    (no force balance). Nonlinear in-bulk reactions (via the MOL) and a moving membrane *under MOL* are the
-    method-of-lines integrator's; force-balance velocity is a follow-up.
+    (no force balance). Nonlinear in-bulk reactions (via the MOL) are the method-of-lines integrator's. A
+    prescribed velocity is refused (ADR 014 decision 7); a force-balance `motion` is accepted.
     """
+    _refuse_prescribed_motion(velocity, motion)
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
@@ -1703,9 +1706,11 @@ def integrate_membrane_coupled(
     the membrane species and the fluxes. ``on_output_regions(t, {name: value})`` receives their values at
     each output time, just before ``on_output``. Fixed geometry only.
 
-    Scope: a *prescribed* membrane velocity; the moving case freezes geometry within each outer interval
-    (operator-split). Force-balance velocity is a follow-up.
+    Scope: a membrane moved by a force-balance velocity; the moving case freezes geometry within each outer
+    interval (operator-split). A prescribed velocity is refused (ADR 014 decision 7): use
+    `integrate_multi_compartment(..., motion_membrane=...)`.
     """
+    _refuse_prescribed_motion(velocity, motion)
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
@@ -2117,6 +2122,20 @@ def integrate_membrane_coupled(
         final_time,
         regions={eq.variable: fn for eq, fn in zip(region_eqs, region_fns, strict=True)},
     )
+
+
+def _refuse_prescribed_motion(velocity: str | None, motion: object) -> None:
+    """A prescribed moving membrane is refused here (vcell-fenics ADR 014 decision 7): this solver read its
+    `motion: none` bulks as co-moving with the mesh, where a bulk at rest is transported relative to it (ADR 013
+    decision 3); the multi-compartment solver moves a membrane with its bulks at rest. The force-balance
+    motion (a solved Stokes velocity in the cytoplasm) is not affected."""
+
+    if velocity is not None or isinstance(motion, MembraneCoupledMeshMotion):
+        raise NotImplementedError(
+            "a prescribed moving membrane is not solved by the membrane-coupled solver any more: it read the "
+            "`motion: none` bulks as co-moving with the mesh; use integrate_multi_compartment(..., "
+            "motion_membrane=...), whose bulks are at rest (ADR 014 decision 7)"
+        )
 
 
 def _require_equation(equations: dict[str, TemplateEquation], subdomain: str) -> TemplateEquation:
