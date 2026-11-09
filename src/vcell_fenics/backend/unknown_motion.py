@@ -118,15 +118,34 @@ class UnknownMotionProblem:
 
 
 class _CurvatureProjection:
-    """The projected mean-curvature vector κ = H·n on the membrane (the weak surface
-    Laplacian of position). `project()` re-solves it on the current geometry; the UFL
-    `mean_curvature` (|κ|) and `normal` (κ/|κ|) are what a form's `H(x)`/`n(x)` resolve
-    to."""
+    """The membrane's curvature quantities on the current geometry (formalism §1.8.4).
+
+    - ``kappa``: the projected curvature vector, the weak surface Laplacian of position,
+      ``∫κ·φ ds = ∫∇_Γ X : ∇_Γ φ ds``, i.e. ``κ = −Δ_Γ X = (∇_Γ·n) n = (d−1) H n`` (a discrete
+      membrane's curvature is vertex-concentrated, not pointwise, so it is projected);
+    - ``normal``: the **outward** unit normal, nodal, from the ordered membrane loop and the sign of
+      its enclosed area -- outward everywhere, convex or concave (``κ/|κ|`` would flip where the
+      membrane is concave);
+    - ``mean_curvature``: the **signed** mean curvature ``H = κ·n / (d−1)`` -- the mean of the
+      principal curvatures, positive for a circle or sphere under the outward normal, negative where
+      the membrane is concave, so ``∇_Γ·n = (d−1) H`` (the surface-tension force is
+      ``(d−1) σ H n``, equal to ``σ κ`` in its normal part).
+
+    ``project()`` re-solves all three on the current geometry. A 2D membrane (a closed loop) only:
+    orienting a 3D surface consistently is not implemented yet, and asking for it raises."""
 
     def __init__(self, mesh: Mesh) -> None:
         gdim = mesh.geometry.dim
+        if mesh.topology.dim != 1 or gdim != 2:
+            raise NotImplementedError(
+                "geom.normal / geom.mean_curvature on a membrane in 3D: a consistently oriented "
+                "surface normal is not implemented yet (2D closed membranes only)"
+            )
+        self._gdim = gdim
         space = fem.functionspace(mesh, ("Lagrange", 1, (gdim,)))
+        self._scalar = fem.functionspace(mesh, ("Lagrange", 1))  # its dof i is the vector's block i
         self.kappa = fem.Function(space, name="curvature_vector")
+        self.outward = fem.Function(space, name="outward_normal")
         trial, test = ufl.TrialFunction(space), ufl.TestFunction(space)
         dx = ufl.Measure("dx", domain=mesh)
         self._problem = LinearProblem(
@@ -136,12 +155,29 @@ class _CurvatureProjection:
             petsc_options_prefix=f"vcellfenics_curvature_{id(self):x}_",
             petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
         )
-        magnitude = ufl.sqrt(ufl.inner(self.kappa, self.kappa) + 1e-14)  # eps guards flat regions
-        self.mean_curvature: UflExpr = magnitude
-        self.normal: UflExpr = self.kappa / magnitude
+        self.normal: UflExpr = self.outward
+        self.mean_curvature: UflExpr = ufl.inner(self.kappa, self.outward) / (gdim - 1)
 
     def project(self) -> None:
         self._problem.solve()
+        self._orient()
+
+    def _orient(self) -> None:
+        """The outward nodal normal: each node's tangent along the ordered loop (central
+        difference), rotated a quarter turn away from the enclosed region -- clockwise for a
+        counter-clockwise loop (positive signed area), the other way otherwise."""
+        coords, order = ordered_membrane_loop(self._scalar)
+        x, y = coords[:, 0], coords[:, 1]
+        area = 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+        tangent = np.roll(coords, -1, axis=0) - np.roll(coords, 1, axis=0)
+        normal = np.stack([tangent[:, 1], -tangent[:, 0]], axis=1)  # outward for a CCW loop
+        if area < 0:
+            normal = -normal
+        normal /= np.linalg.norm(normal, axis=1)[:, None]
+        values = np.zeros((len(order), self._gdim))
+        values[order] = normal
+        self.outward.x.array[:] = values.reshape(-1)
+        self.outward.x.scatter_forward()
 
 
 class _BGNMotion:
