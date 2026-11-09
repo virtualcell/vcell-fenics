@@ -72,6 +72,7 @@ from vcell_fenics.formalism.schema import (
     BoundaryCondition,
     Equation,
     MathDescription,
+    MotionNone,
     MotionPrescribedDisplacement,
     MotionPrescribedVelocity,
     MotionUnknown,
@@ -522,11 +523,28 @@ class _Validator:
         dilution."""
 
         moving = (MotionPrescribedVelocity, MotionPrescribedDisplacement, MotionUnknown)
+        moving_surfaces = sorted(
+            s.name for s in self._md.subdomains if s.kind == "surface" and isinstance(s.motion, moving)
+        )
         for i, eq in enumerate(self._md.equations):
             if not isinstance(eq, WeakFormEquation) or eq.temporality != "time_dependent":
                 continue
             subdomain = self._subdomain_by_name.get(eq.subdomain)
-            if subdomain is None or not isinstance(subdomain.motion, moving):
+            if subdomain is None:
+                continue
+            if subdomain.kind == "volume" and isinstance(subdomain.motion, MotionNone) and moving_surfaces:
+                # A volume at rest whose bounding membrane moves (ADR 013): its domain moves although its
+                # material does not. Which volumes a membrane bounds is the geometry's, so this is a hint.
+                self._warn(
+                    f"equations[{i}].form",
+                    f"weak form on {eq.subdomain!r}, a volume at rest in a model whose membrane(s) "
+                    f"{moving_surfaces} move: if one bounds it, its domain moves with that membrane, and a "
+                    f"density at rest there needs the conservative time term and the transport relative to the "
+                    f"moving mesh, which the backend adds to a template but not to a weak form (ADR 013). "
+                    f"Confirm it is intended.",
+                )
+                continue
+            if not isinstance(subdomain.motion, moving):
                 continue
             variable = self._var_by_key.get((eq.variable, eq.subdomain))
             if variable is None or variable.type != "scalar":  # dilution is for densities, not a momentum balance

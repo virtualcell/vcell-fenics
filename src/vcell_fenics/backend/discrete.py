@@ -229,9 +229,14 @@ class _MeshMotion:
     keep the elements valid, so a tangling motion must fail loudly.
     """
 
-    def __init__(self, mesh: Mesh, velocity: UflExpr, dt: fem.Constant) -> None:
+    def __init__(
+        self, mesh: Mesh, velocity: UflExpr, dt: fem.Constant, *, before_advance: Callable[[], None] | None = None
+    ) -> None:
         self._mesh = mesh
         self._dt = dt
+        # Refreshes what the velocity reads from the current configuration (a membrane's normal, ADR 013)
+        # before it is interpolated; called at the start of every `advance`.
+        self._before_advance = before_advance
         self._gdim = mesh.geometry.dim
         space = fem.functionspace(mesh, ("Lagrange", 1, (self._gdim,)))
         self._displacement = fem.Function(space)
@@ -261,6 +266,8 @@ class _MeshMotion:
         self._reference_ratio = self._cell_volume_ratio()
 
     def advance(self) -> None:
+        if self._before_advance is not None:
+            self._before_advance()
         self._displacement.interpolate(self._expression)
         if self._extension is not None:
             self._extension.fill(self._displacement)
@@ -369,6 +376,10 @@ class DiscreteProblem:
     # velocity `unknown_motion` path moves the membrane itself, then steps the receptor: the receptor
     # then only *reads* the motion's `volume_ratio` for the conservative time term, without moving again.
     owns_mesh_motion: bool = True
+    # The moving surface that drives this volume's mesh when the volume's own material is at rest
+    # (`motion: none`, ADR 013 decision 4). Kept so a rebuild after a remesh, which has no geometry,
+    # still finds the velocity; None when the mesh follows the subdomain's own motion or is static.
+    driving_surface: str | None = None
     # The bound time Constant `t` (compile context). A driver advances it via
     # `set_time` so a time-dependent expression — e.g. a Dirichlet g(t) — tracks it.
     time: fem.Constant | None = None

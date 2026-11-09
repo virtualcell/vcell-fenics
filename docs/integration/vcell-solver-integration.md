@@ -316,7 +316,8 @@ these problems (cross-validated against mbsolver: `cross_validation/mb_translati
 scoped set below runs through the CLI in 2D and 3D** (M1–M5, 3M1–3M3). `simtask._check_moving_boundary`
 still refuses: no membrane `<Velocity>`, a dimension other than 2 or 3, image subvolumes, more than
 one moving front, membrane species, and species outside the moving compartment; boundary conditions
-are not refused up front but fail at the first remesh (`assemble.rebuild_on_mesh`).
+are not refused up front but fail at the first remesh (`assemble.rebuild_on_mesh`). Since ADR 013 (2026-11-09) the front is stated as the membrane's motion, may read the normal,
+and the enclosed volume's material is at rest.
 
 **First-pass scope** (decided 2026-09-22):
 - 2D, with species in the **moving interior volume** only (the fixture `SimID_274641196`: three
@@ -421,6 +422,44 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 ## Progress
 
 Newest first. One entry per landed step or notable finding.
+
+- **2026-11-09** — **A moving front is the membrane's motion; the enclosed volume's material stays at rest
+  (ADR 013).**
+  - **Why:** the import put VCell's front on the enclosed volume as its `motion`, so a front that reads the
+    surface normal (20 of the corpus' 43 front velocities) could not be stated: `normalX()` had no
+    translation and `geom.normal` was bound only in a mechanics solve. The coupled backend also read a
+    `none` bulk beside a moving membrane as co-moving, and dropped a bulk `source` silently.
+  - **What:**
+    - The import states the front on the membrane (`normalX()` → `geom.normal[0]`, bulk species traced);
+      every volume keeps `motion: none`, and species velocities go in `relative_advection`.
+    - The single-mesh path drives an enclosed volume's mesh from its membrane (`driving_surface`, kept
+      across a remesh), binds `geom.normal` to the area-weighted outward facet normal
+      (`backend/boundary_normal.py`), and assembles every T1 equation there in the lab frame relative to the
+      mesh. `cross_validate` refuses a driven volume bounded by anything but its membrane (a box wall, a
+      nucleus) and a volume with its own motion beside a moving membrane.
+    - The coupled backend takes a `none` bulk at rest (conservative time term, transport relative to the
+      mesh, the binding flux a total flux relative to the membrane), binds `geom.normal` (oriented by the
+      sign of `∫ x·n`), and refuses a bulk `source` / `relative_advection` and a bulk with its own motion.
+    - A 2D remesh merges boundary vertices closer than h/10: a normal-only front gathers a retracting
+      stretch's nodes down to ~1e-4·h, and Netgen stalled grading the mesh down to them.
+  - **Verified:**
+    - mbsolver's normal points out of the inside compartment (`cross_validation/mb_normal_sign_fv.py`: a
+      disk with `V_n = 0.5` grows as `R0 + 0.5 t`), so the translation needs no sign change.
+    - `mb_swept.py` (translate, deform, remesh) reproduces the previous assembly's printed errors to every
+      digit, swept and carried control alike; `test_moving_boundary_run.py` (2D and the 3D furrow) passes.
+    - An expanding circle and sphere with `V_n = c` grow at `c` with exact species mass; a linear profile at
+      rest stays put while a translating membrane moves the interior mesh; the refusals
+      (`tests/test_backend_front_on_membrane.py`).
+    - Coupled: receptor and total ligand conserved under expansion; with no binding the bulk keeps its
+      ligand to 1e-10 and piles it up at the membrane; a ligand profile stays in place.
+    - A RacRho front (`v = (a − 1)|a − 1| n`, linear-kinetics variant) against mbsolver
+      (`cross_validation/racrho_front.py`, h = 0.08, dt = 0.005): the cell migrates up the gradient as
+      mbsolver's does; area within 3.0 %, mean `a` within 3.8 %, trailing edge within 0.03, `∫(a + b)`
+      constant to 6 digits across 43 remeshes. Our leading edge runs ahead, by 7 % at t = 5: not explained
+      yet (no refinement study).
+  - **Found:** a normal-only front without tangential redistribution remeshes ever more often where it
+    retracts (43 remeshes to t = 5 on RacRho), and at dt = 0.01 a step tangles near t = 4.4. RacRho's own
+    nonlinear kinetics fail at the first step on this backward-Euler path (`NonlinearTermError`).
 
 - **2026-10-07** — **Membrane-to-volume point maps in the bundle (ADR 010 §3, "Membrane adjacency").**
   - **Why:** VCell's field viewer refused membrane functions of the adjacent volume values, such as a flux
