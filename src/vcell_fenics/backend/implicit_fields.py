@@ -81,11 +81,24 @@ def _call(callee: str, args: list[NDArray[np.float64]]) -> NDArray[np.float64]:
         return np.minimum(args[0], args[1])
     if callee == "max":
         return np.maximum(args[0], args[1])
-    unary = {"sqrt": np.sqrt, "abs": np.abs, "exp": np.exp, "log": np.log, "sin": np.sin, "cos": np.cos}
+    unary = {
+        "sqrt": np.sqrt,
+        "abs": np.abs,
+        "exp": np.exp,
+        "log": np.log,
+        "sin": np.sin,
+        "cos": np.cos,
+        "tan": np.tan,
+        "asin": np.arcsin,
+        "acos": np.arccos,
+        "atan": np.arctan,
+    }
     if callee in unary:
         return unary[callee](args[0])
     if callee == "pow":
         return np.power(args[0], args[1])
+    if callee == "atan2":
+        return np.arctan2(args[0], args[1])
     raise RealizationError(f"function {callee!r} is not supported in an implicit function")
 
 
