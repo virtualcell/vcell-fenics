@@ -457,9 +457,9 @@ Newest first. One entry per landed step or notable finding.
       mbsolver's does; area within 3.0 %, mean `a` within 3.8 %, trailing edge within 0.03, `∫(a + b)`
       constant to 6 digits across 43 remeshes. Our leading edge runs ahead, by 7 % at t = 5. A refinement
       study of both solvers (in that script) explains it as both solvers' discretization error, from opposite
-      sides: under refinement the centroid and area converge to the same values (≈ 1.25 and 2.51 at t = 2.5),
-      and the leading edge brackets, the gap shrinking from 0.18 to 0.11; mbsolver at the document's grid is
-      the coarser of the two.
+      sides: under refinement the area converges to the same value (≈ 2.51 at t = 2.5) and the centroid to
+      within 1.5 %, and the leading edge brackets, the gap shrinking from 0.37 through 0.18 to 0.11;
+      mbsolver at the document's grid is the coarser of the two.
   - **Found:** a normal-only front without tangential redistribution remeshes ever more often where it
     retracts (43 remeshes to t = 5 on RacRho), and at dt = 0.01 a step tangles near t = 4.4. RacRho's own
     nonlinear kinetics fail at the first step on this backward-Euler path (`NonlinearTermError`).

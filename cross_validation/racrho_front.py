@@ -19,9 +19,10 @@ At t = 2.5 (the finest run of ours tangles near t = 4.7 without tangential node 
     area                                         2.496 / 2.505 / 2.509                                       2.364 / 2.436 / 2.450
 
 Ours is nearly converged in the centroid and the area and still falls in the leading edge; mbsolver, first
-order on its grid, still rises in all three. Extrapolated linearly in its grid spacing, mbsolver gives a
-centroid of ≈ 1.25 and an area of ≈ 2.51 (ours: 1.252 and 2.509); the leading edge brackets, the gap shrinking
-from 0.18 at the coarse pair to 0.11 at the finest. Halving our dt (h = 0.08) moves the t = 5 leading edge by
+order on its grid, still rises in all three. Extrapolated linearly in its grid spacing (from either pair of
+its grids), mbsolver gives an area of ≈ 2.51 (ours 2.509) and a centroid of ≈ 1.26–1.27 (ours 1.252, within
+1.5 %); the leading edge brackets, the gap shrinking from 0.37 at the coarsest pair through 0.18 to 0.11 at the
+finest. Halving our dt (h = 0.08) moves the t = 5 leading edge by
 0.011. mbsolver cannot be refined past 120 × 49 (``Voronoi32`` overflows at 144 × 58). The leading edge is a
 single extreme point of the front, sensitive to the tip's resolution in both solvers. At dt = 0.01 a step tangles the mesh near
 t = 4.4: a front moving only normally gathers the retracting stretch's boundary nodes (no tangential
