@@ -95,6 +95,15 @@ def assemble(
     static = all(isinstance(sd.motion, MotionNone) for sd in md.subdomains)
     ctx = _compile_context(md, mesh, region_sizes=_region_sizes(geometry, mesh) if static else None)
     driving_surface = _driving_surface(md, geometry, equations[0].subdomain)
+    if driving_surface is not None:
+        # a volume driven by its membrane moves under its material as surely as one with its own motion
+        # (`_resolve_equations` sees only the latter): a species without diffusion would be pure advection
+        for original in md.equations:
+            if isinstance(original, TemplateEquation) and original.template == "lumped_ode":
+                raise NotImplementedError(
+                    f"a non-diffusing species ({original.variable!r}) on a moving subdomain is not supported yet: "
+                    f"VCell sweeps it with the front, and pure advection without diffusion needs stabilization (#186)"
+                )
     problem = _build_problem(
         md, equations, mesh, ctx, dt=dt, fe_degree=fe_degree, geometry=geometry, driving_surface=driving_surface
     )

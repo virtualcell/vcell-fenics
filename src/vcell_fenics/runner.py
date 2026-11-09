@@ -139,7 +139,12 @@ def run_model(
 
     # The model's shape (and any refusal of it) is settled before anything is written.
     moving = _moving_subdomains(model)
-    multi = not moving and _is_multi_compartment(model)
+    # a moving membrane with equations on more than one subdomain (its species, both sides' species): the
+    # multi-compartment solver moves the whole partition (ADR 014); one subdomain is the moving path's (ADR 013)
+    moving_partition = _moving_partition_membrane(model, moving)
+    multi = (not moving and _is_multi_compartment(model)) or moving_partition is not None
+    if moving_partition is not None:
+        moving = []
     if not multi:
         _refuse_region_variables(model.math)
     comm = MPI.COMM_WORLD
@@ -183,7 +188,7 @@ def run_model(
                 "remeshes": remeshes,
             }
         elif multi:
-            cells, steps = _run_multi_compartment(model, options, recorder, reporter)
+            cells, steps = _run_multi_compartment(model, options, recorder, reporter, motion_membrane=moving_partition)
             run_info |= {"time_integration": "method_of_lines", "steps": steps}
         else:
             cells, steps, dt_used = _run_single_mesh(model, options, recorder, reporter)
@@ -508,8 +513,35 @@ def _is_multi_compartment(model: ModelInput) -> bool:
     return len(model.geometry.subvolumes) >= 2 and len(homes) >= 2
 
 
+def _moving_partition_membrane(model: ModelInput, moving: list[str]) -> str | None:
+    """The moving membrane, when one surface moves and the equations span more than one subdomain (ADR 014)."""
+
+    kinds = {sd.name: sd.kind for sd in model.math.subdomains}
+    domains = {eq.subdomain for eq in model.math.equations}
+    if len(moving) == 1 and kinds.get(moving[0]) == "surface" and len(domains) > 1:
+        return moving[0]
+    return None
+
+
+def _stride_ends(options: RunOptions) -> list[float]:
+    """Strides of at most ``dt``, ending on every output time (as the moving path's steps do)."""
+
+    ends: list[float] = []
+    t = 0.0
+    for t_out in options.output_times[1:]:
+        n = max(1, round((t_out - t) / options.dt))
+        ends += [t + (t_out - t) * k / n for k in range(1, n)] + [t_out]
+        t = t_out
+    return ends
+
+
 def _run_multi_compartment(
-    model: ModelInput, options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
+    model: ModelInput,
+    options: RunOptions,
+    recorder: BundleRecorder,
+    status: _PhasedProgress,
+    *,
+    motion_membrane: str | None = None,
 ) -> tuple[int, int]:
     """Any number of compartments and membranes, any number of species and region variables on each,
     coupled by the membrane fluxes (``integrate_multi_compartment``); every output time recorded from the
@@ -533,13 +565,14 @@ def _run_multi_compartment(
         f"realizing multi-compartment geometry {model.geometry.name!r} at h = {options.h:g}: "
         + ", ".join(f"{name} ({kinds.get(name, '?')})" for name in variables)
     )
+    wanted = {name for name in variables if kinds.get(name) == "volume"}
+    if motion_membrane is not None:
+        # the moving membrane's normal is its inside compartment's outward one, so that compartment is realized
+        inside = next((s.inside for s in model.geometry.surfaces if s.name == motion_membrane), None)
+        if inside is not None:
+            wanted.add(inside)
     with _logged_geometry_warnings():
-        geometry = realize_multi_compartment(
-            model.geometry,
-            h=options.h,
-            compartments={name for name in variables if kinds.get(name) == "volume"},
-            comm=comm,
-        )
+        geometry = realize_multi_compartment(model.geometry, h=options.h, compartments=wanted, comm=comm)
     missing = sorted(name for name in variables if name not in geometry.compartments and name not in geometry.membranes)
     if missing:
         raise RunError(
@@ -552,12 +585,21 @@ def _run_multi_compartment(
     for name, names in sorted(variables.items(), key=lambda item: item[0] not in geometry.compartments):
         kind: DomainKind = "volume" if name in geometry.compartments else "membrane"
         sides = _sides(geometry, name)
-        recorder.add_domain(name, kind, geometry.mesh_of(name), [(variable, None) for variable in names], sides=sides)
+        recorder.add_domain(
+            name,
+            kind,
+            geometry.mesh_of(name),
+            [(variable, None) for variable in names],
+            sides=sides,
+            moving=motion_membrane is not None,
+        )
     # A membrane without species beside a compartment with some: written for its mesh and its maps onto its
     # sides, so a membrane function of the adjacent volume values (a flux) can be drawn on it (ADR 010 §3).
     for name, membrane in geometry.membranes.items():
         if name not in variables and (membrane.inside in variables or membrane.outside in variables):
-            recorder.add_domain(name, "membrane", membrane.mesh, [], sides=_sides(geometry, name))
+            recorder.add_domain(
+                name, "membrane", membrane.mesh, [], sides=_sides(geometry, name), moving=motion_membrane is not None
+            )
     recorder.open()
 
     cells = mesh_cell_count(geometry.parent_mesh)
@@ -591,6 +633,8 @@ def _run_multi_compartment(
         output_times=options.output_times,
         on_output=on_output,
         on_progress=status.step,
+        motion_membrane=motion_membrane,
+        stride_ends=_stride_ends(options) if motion_membrane is not None else (),
     )
     return cells, int(result.steps)
 
