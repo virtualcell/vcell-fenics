@@ -239,9 +239,14 @@ solutions, invariants that discriminate the conventions, and agreement with ADR 
 2. Formalism text: T2 on a sliding mesh (decision 4); §1.10.1 (the outside compartment is surface-driven).
 3. The multi-compartment solver's motion without remeshing (decision 5), with decisions 3 and 4's assembly;
    the runner's dispatch and the import's lifted refusals (decision 8); the verification above.
-4. Decision 2: the `Dilution` construct in VCell's math (reader, writer, comparison, `DiffEquMathMapping`),
-   a VCell PR; vcell-fenics reads it and refuses its absence; the vcell-mbsolver issue; then VCell's
-   pinned vcell-fenics image bumped to the release that runs these models.
+4. Decision 2: the `Dilution` construct in VCell's math (reader, writer, comparison, `DiffEquMathMapping`,
+   and an error issue keeping the MovingBoundary solver off such models), a VCell PR; the vcell-mbsolver
+   issue (virtualcell/vcell-mbsolver#35). vcell-fenics reads the flag from the SimulationTask's raw XML (as it
+   reads the front's velocity) and refuses its absence. pyvcell follows: `libvcell` rebuilt from that VCell
+   (so pyvcell's regenerated math states it), and pyvcell's math model (`models_math.MembraneSubDomain`)
+   capturing `Dilution` and the membrane velocity on read and write; vcell-fenics then reads them from
+   pyvcell. Last, VCell's pinned vcell-fenics image is bumped to the release that runs these models, and
+   VCell's FEniCSx refusals of species on and outside a moving membrane are lifted.
 5. Decision 7.
 6. The 2D multi-region remesher (decision 6).
 7. vcell-core: the target's refusals lifted, the bridge oracle over the corpus.
