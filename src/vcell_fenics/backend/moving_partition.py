@@ -36,7 +36,13 @@ from scipy.spatial import cKDTree
 
 from vcell_fenics.backend.boundary_normal import BoundaryNormal
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
-from vcell_fenics.backend.discrete import _arc_fractions, _slid_to_fractions
+from vcell_fenics.backend.discrete import (
+    _MAX_CELL_RATIO_GROWTH,
+    CellOrientation,
+    MeshQualityError,
+    _arc_fractions,
+    _slid_to_fractions,
+)
 from vcell_fenics.backend.geometry import prescribed_velocity
 from vcell_fenics.backend.interface_coupled import _param_symbols, _SweptMeasures
 from vcell_fenics.formalism.parser import parse
@@ -175,6 +181,10 @@ class MovingPartition:
         ]
         self._moves = [(m, _matching(m.geometry.x[:, :gdim], parent_xyz, "a submesh")) for m in meshes]
         self._swept = _SweptMeasures({"parent": parent, "membrane": mem_mesh})
+        # The moved parent's validity after every stride (ADR 014 decision 6: no remeshing yet, so a mesh the
+        # motion has tangled or badly distorted stops the run rather than being solved on).
+        self._orientation = CellOrientation(parent)
+        self._growth = 1.0
 
     @property
     def parent_dilution(self) -> fem.Function:
@@ -216,3 +226,16 @@ class MovingPartition:
         for mesh, index in self._moves:
             mesh.geometry.x[:, :gdim] += parent_displacement[index]
         self._swept.update(h)
+        where = f"the moving partition at t = {t_end:g}"
+        self._growth = self._orientation.check(where)
+        if self._growth > _MAX_CELL_RATIO_GROWTH:
+            raise MeshQualityError(
+                f"{where}: the motion has distorted the mesh (cell-size ratio grown {self._growth:.3g}x since it "
+                f"was built), and a moving partition cannot be remeshed yet (vcell-fenics ADR 014 decision 6); "
+                f"use a coarser mesh, a smaller motion, or a shorter run."
+            )
+
+    def mesh_quality_growth(self) -> float:
+        """The parent mesh's cell-size ratio growth since it was built (1.0 undistorted), as of the last stride:
+        what a remesh trigger would read."""
+        return self._growth

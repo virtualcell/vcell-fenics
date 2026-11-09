@@ -161,6 +161,61 @@ class MeshQualityError(RuntimeError):
     fails here. Remeshing / field transfer is future work (§3.3)."""
 
 
+def signed_cell_volumes(mesh: Mesh) -> np.ndarray:
+    """Each affine simplex cell's signed volume (area in 2D) from its corner coordinates. A cell turned inside
+    out changes sign, which an assembled ``1·dx`` cannot show: UFL integrates with ``|det J|``, so an inverted
+    cell still reports a positive volume. Only for a mesh of full dimension (a bulk, not a membrane)."""
+
+    tdim = mesh.topology.dim
+    if tdim != mesh.geometry.dim:
+        raise ValueError("signed cell volumes need a mesh of full dimension")
+    corners = np.asarray(mesh.geometry.x, dtype=np.float64)[np.asarray(mesh.geometry.dofmap)][:, : tdim + 1, :tdim]
+    volumes: np.ndarray = np.linalg.det(corners[:, 1:] - corners[:, :1]) / math.factorial(tdim)
+    return volumes
+
+
+class CellOrientation:
+    """A moving bulk mesh's validity, against the mesh as it was built: every cell keeps the orientation it had
+    (a mesh generator need not orient all cells alike) and a non-zero volume. `check` raises `MeshQualityError`
+    otherwise, and returns the cell-size (max/min volume) ratio's growth since the mesh was built -- what a
+    remesh trigger reads (1.0 undistorted)."""
+
+    def __init__(self, mesh: Mesh) -> None:
+        self._mesh = mesh
+        volumes = signed_cell_volumes(mesh)
+        self._sign = np.where(volumes < 0.0, -1.0, 1.0)
+        low, high = self._extremes(np.abs(volumes))
+        self._reference_ratio = high / low if low > 0.0 else 1.0
+
+    def _extremes(self, volumes: np.ndarray) -> tuple[float, float]:
+        # over every rank, so that all of them raise (or none does) and no collective call is left waiting
+        from mpi4py import MPI
+
+        comm = self._mesh.comm
+        local_min = float(volumes.min()) if volumes.size else math.inf
+        local_max = float(volumes.max()) if volumes.size else -math.inf
+        if not (math.isfinite(local_min) or volumes.size == 0):
+            local_min = -math.inf  # a NaN cell counts as invalid
+        return comm.allreduce(local_min, op=MPI.MIN), comm.allreduce(local_max, op=MPI.MAX)
+
+    def check(self, what: str) -> float:
+        volumes = signed_cell_volumes(self._mesh) * self._sign
+        volumes = np.where(np.isfinite(volumes), volumes, -math.inf)
+        v_min, v_max = self._extremes(volumes)
+        if not v_min > 0.0 or not math.isfinite(v_max):
+            bad = self._mesh.comm.allreduce(int(np.count_nonzero(~(volumes > 0.0))))
+            raise MeshQualityError(
+                f"{what}: {bad} cell(s) inverted or collapsed (smallest oriented volume {v_min:.3g}); "
+                f"the motion has tangled the mesh."
+            )
+        return (v_max / v_min) / self._reference_ratio
+
+
+class MeshTangled(MeshQualityError):
+    """A move would have inverted or collapsed a cell; it was undone, so the mesh is still the valid one from
+    before the move. A driver that can remesh does so and retries the step; one that cannot stops."""
+
+
 class _HarmonicExtension:
     """Extends a boundary displacement into a bulk mesh's interior by a vector
     Laplace solve — the standard ALE mesh-motion fill (Approach A).
@@ -343,6 +398,8 @@ class _MeshMotion:
         # the first move. (The backward-Euler path drops the dilution term entirely — see BackwardEuler.)
         self._effective_dilution = fem.Function(dg0)
         self._reference_ratio = self._cell_volume_ratio()
+        # The assembled volumes above are |det J|, blind to an inverted cell; a bulk's orientation is checked too.
+        self._orientation = CellOrientation(mesh) if mesh.topology.dim == self._gdim else None
 
     def advance(self) -> None:
         if self._before_advance is not None:
@@ -358,6 +415,12 @@ class _MeshMotion:
         volumes_before = self._cell_volumes()
         increment = self._displacement.x.array.reshape((-1, self._gdim))[self._geom_from_dof]
         self._mesh.geometry.x[:, : self._gdim] += increment
+        if self._orientation is not None:
+            try:
+                self._orientation.check("prescribed motion")
+            except MeshQualityError as error:
+                self._mesh.geometry.x[:, : self._gdim] -= increment  # undo: the mesh stays valid for a remesh
+                raise MeshTangled(str(error)) from error
         volumes_after = self._cell_volumes()
         v_min, v_max = float(volumes_after.min()), float(volumes_after.max())
         if not (math.isfinite(v_min) and math.isfinite(v_max)) or v_min <= 0.0:

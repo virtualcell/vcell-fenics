@@ -44,7 +44,7 @@ from dolfinx import fem
 from dolfinx.mesh import Mesh, create_submesh, exterior_facet_indices
 
 from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
-from vcell_fenics.backend.discrete import DiscreteProblem, MeshQualityError
+from vcell_fenics.backend.discrete import DiscreteProblem, MeshQualityError, MeshTangled
 from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem_stride
 from vcell_fenics.backend.solver import SolverConfiguration
@@ -141,7 +141,14 @@ def step_with_remeshing(state: ALEState, *, quality_limit: float, target_h: floa
     # its `sim.t` at 0.
     state.problem.set_time(state.t + float(state.problem.dt.value))
     try:
-        state.problem.step()
+        try:
+            state.problem.step()
+        except MeshTangled:
+            # the step's move would have inverted a cell the quality trigger did not foresee; the move was undone,
+            # so remesh the still-valid mesh and take the step once more on the fresh one
+            state.remesh(target_h)
+            state.problem.set_time(state.t + float(state.problem.dt.value))
+            state.problem.step()
     except MeshQualityError as exc:
         raise StepTooLarge(
             f"a single dt step tangled the mesh at t={state.t:.4g}; remeshing cannot rescue a step this large "
@@ -195,7 +202,14 @@ def stride_with_remeshing(
     # velocity must see that time, also right after a remesh, whose rebuilt problem starts its `sim.t` at 0.
     state.problem.set_time(t_start + h)
     try:
-        state.problem.advance_mesh()
+        try:
+            state.problem.advance_mesh()
+        except MeshTangled:
+            # as in `step_with_remeshing`: the undone move is retried once on a fresh mesh of the valid geometry
+            state.remesh(target_h)
+            state.problem.dt.value = h
+            state.problem.set_time(t_start + h)
+            state.problem.advance_mesh()
     except MeshQualityError as exc:
         raise StepTooLarge(
             f"a single MOL stride tangled the mesh at t={state.t:.4g}; remeshing cannot rescue a stride "
