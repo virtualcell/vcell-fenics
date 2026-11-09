@@ -83,8 +83,15 @@ front is the **membrane** moving while the **bulk's material is at rest**.
    - **Deferred:** mean curvature in a front velocity.
 
    *Recommendation: yes.*
-3. **On a surface-driven domain, every T1 species is transported relative to the mesh, and its flux
-   at the moving boundary is relative to the boundary.** A surface-driven domain is a volume whose
+3. **On a surface-driven domain, every T1 species' ALE convective term uses its carrier velocity
+   relative to the mesh velocity, and its flux at the moving boundary is relative to the
+   boundary.** The species does not move with the mesh. The mesh nodes move with `w` (inside the
+   volume, the harmonic extension of the membrane's motion), and the term `−u (c − w)·∇q`
+   compensates exactly for that node motion. With the material at rest (`c` = the species' own
+   drift, 0 by default), the solution stays fixed in the lab frame and does not depend on how the
+   interior nodes move. vcell-fenics verifies this today: `tests/test_backend_lab_frame_advection.py`
+   converges a rotating-mesh run to the static-mesh solution. Only the front's normal motion, which
+   the mesh shares, enters the physics. A surface-driven domain is a volume whose
    own `motion` is `none` and whose bounding surface moves.
    - **How the backend knows the adjacency.** A fresh `assemble` reads it from the realized
      geometry (`geometry.boundaries[*].subdomains`). A rebuild after a remesh reads it from the
