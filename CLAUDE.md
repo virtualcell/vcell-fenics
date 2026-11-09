@@ -50,7 +50,7 @@ Platforms locked: `osx-arm64`, `linux-64`, `linux-aarch64` (the last for the con
 
 Environments defined:
 - `default` — runtime dependencies only
-- `dev` — adds `pytest`, `ipython`, `ruff`, `mypy`, `jupyterlab`, and **`gmsh`** (GPL, so dev/test-only — never move it to runtime deps; `src/` must stay gmsh-free, see `LICENSING.md` and ADR 008)
+- `dev` — adds `pytest` (with `pytest-xdist`), `ipython`, `ruff`, `mypy`, `jupyterlab`, and **`gmsh`** (GPL, so dev/test-only — never move it to runtime deps; `src/` must stay gmsh-free, see `LICENSING.md` and ADR 008)
 
 ## Commands
 
@@ -58,8 +58,9 @@ Environments defined:
 pixi install                  # resolve and install (run after editing deps)
 pixi shell                    # activate the default env
 pixi shell -e dev             # activate the dev env (pytest, ipython, ruff, mypy)
-pixi run -e dev test          # run pytest (excludes the slow `integration`-marked tests)
-pixi run -e dev test path/to/test_x.py::test_y   # run a single test
+pixi run -e dev test          # run pytest in 6 parallel workers, whole files each (pytest-xdist); excludes `integration`
+pixi run -e dev test-serial   # the same in one process
+pixi run -e dev test-serial path/to/test_x.py::test_y   # run a single test
 pixi run -e dev test-integration   # run only the slow integration/convergence tests (minutes)
 pixi run -e dev lint          # ruff lint
 pixi run -e dev format        # ruff format (writes)

@@ -88,7 +88,10 @@ def test_recording_does_not_perturb_the_integration() -> None:
     )
     result_plain = integrate_discrete_problem(plain, t_final=2.0)
     assert result_monitored.steps == result_plain.steps
-    assert np.array_equal(monitored.unknown.x.array, plain.unknown.x.array)
+    # Not bitwise: two identical plain integrations differ in the last bits now and then on a loaded machine
+    # (2.3e-15 in 1 of 16 runs, same 69 steps; 2026-11-09), recording or not, which made this test flaky in
+    # the parallel suite. Recording that perturbed the integration would change the steps or far more.
+    assert np.allclose(monitored.unknown.x.array, plain.unknown.x.array, rtol=0.0, atol=1e-12)
 
 
 def test_the_initial_state_is_recorded_when_asked_for() -> None:

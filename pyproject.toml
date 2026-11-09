@@ -116,6 +116,8 @@ zarr = ">=3.1,<4"
 
 [tool.pixi.feature.dev.dependencies]
 pytest = "*"
+# runs the test suite in parallel processes (`pixi run -e dev test`, below)
+pytest-xdist = "*"
 ipython = "*"
 ruff = "*"
 mypy = "*"
@@ -154,7 +156,11 @@ default = { features = [], solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
 
 [tool.pixi.tasks]
-test = "pytest -m 'not integration'"
+# In parallel: 6 worker processes, each taking whole test files (`--dist loadfile`, so a file's tests run in
+# order in one process). Not `-n auto`: each worker's PETSc/BLAS uses several cores and a few GB of memory.
+# Override with `pixi run -e dev test -n 2`; `test-serial` runs in one process.
+test = "pytest -m 'not integration' -n 6 --dist loadfile"
+test-serial = "pytest -m 'not integration'"
 test-integration = "pytest -m integration"
 lint = "ruff check src tests examples"
 format = "ruff format src tests examples"
