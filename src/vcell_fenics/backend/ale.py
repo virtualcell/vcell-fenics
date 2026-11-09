@@ -42,7 +42,6 @@ from dataclasses import dataclass
 import numpy as np
 from dolfinx import fem
 from dolfinx.mesh import Mesh, create_submesh, exterior_facet_indices
-from numpy.typing import NDArray
 
 from vcell_fenics.backend.assemble import assemble, rebuild_on_mesh
 from vcell_fenics.backend.discrete import DiscreteProblem, MeshQualityError
@@ -192,6 +191,9 @@ def stride_with_remeshing(
     if state.problem.mesh_quality_growth() >= quality_limit:
         state.remesh(target_h)  # swap on the still-valid geometry, before the move would tangle it
         state.problem.dt.value = h  # rebuild preserves dt; keep the stride magnitude explicit
+    # The move evaluates the velocity at the stride's end, as `step_with_remeshing` does: a time-dependent
+    # velocity must see that time, also right after a remesh, whose rebuilt problem starts its `sim.t` at 0.
+    state.problem.set_time(t_start + h)
     try:
         state.problem.advance_mesh()
     except MeshQualityError as exc:
@@ -250,27 +252,6 @@ def run_moving_with_remeshing(
     return state
 
 
-# Boundary vertices closer than this fraction of the target h are merged before a 2D bulk remesh. A front
-# that moves only normally (a VCell front reading the normal, ADR 013) gathers the nodes of a retracting
-# stretch of boundary together, down to 1e-4·h; Netgen keeps every input vertex, grades the mesh down to
-# the shortest edge and then stalls (seen on a RacRho-like front, 2026-11-09).
-_MIN_VERTEX_SPACING = 0.1
-
-
-def _uncrowded(loop: NDArray[np.float64], spacing: float) -> NDArray[np.float64]:
-    """`loop` (a closed polyline, (N, 2)) without the vertices closer than `spacing` to the previous one
-    kept. The polygon changes only by the slivers between merged vertices, O(spacing²) each, so a field's
-    conservative transfer onto the new mesh loses at most that much of the domain."""
-
-    kept = [0]
-    for i in range(1, len(loop)):
-        if np.linalg.norm(loop[i] - loop[kept[-1]]) >= spacing:
-            kept.append(i)
-    while len(kept) > 3 and np.linalg.norm(loop[kept[-1]] - loop[kept[0]]) < spacing:
-        kept.pop()  # the closing edge, back to the first vertex
-    return loop[kept] if len(kept) >= 3 else loop
-
-
 def _remesh(problem: DiscreteProblem, target_h: float) -> Mesh:
     """A fresh mesh of the current (deformed) configuration at resolution `target_h`,
     dispatched on the subdomain's codimension:
@@ -306,7 +287,7 @@ def _remesh(problem: DiscreteProblem, target_h: float) -> Mesh:
         except (PinchOffError, RemeshError) as error:
             raise MeshQualityError(str(error)) from error  # the runner reports it with the time
     if mesh.topology.dim == gdim:
-        loop = _uncrowded(BulkBoundaryTrace(problem.V).boundary_loop(), target_h * _MIN_VERTEX_SPACING)
+        loop = BulkBoundaryTrace(problem.V).boundary_loop()
         return mesh_region_netgen(loop, target_h)
     if mesh.topology.dim == gdim - 1:
         loop, _order = ordered_membrane_loop(fem.functionspace(mesh, ("Lagrange", 1)))

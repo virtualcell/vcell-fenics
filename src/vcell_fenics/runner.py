@@ -178,7 +178,7 @@ def run_model(
             run_info |= {
                 "dt": dt_used,
                 "dt_requested": options.dt,
-                "time_integration": "backward_euler",
+                "time_integration": options.time_integration,
                 "steps": steps,
                 "remeshes": remeshes,
             }
@@ -362,7 +362,8 @@ def _run_moving(
     the moving one is a membrane and the equations are on the volume it encloses, whose material is at rest
     and whose mesh the membrane drives (a VCell front). `assemble` refuses any other arrangement."""
 
-    from vcell_fenics.backend.ale import ALEState, StepTooLarge, step_with_remeshing
+    from vcell_fenics.backend.ale import ALEState, StepTooLarge, step_with_remeshing, stride_with_remeshing
+    from vcell_fenics.backend.diagnostics import NonlinearTermError
     from vcell_fenics.backend.discrete import MeshQualityError
 
     comm = MPI.COMM_WORLD
@@ -375,8 +376,15 @@ def _run_moving(
     domain = domains[0]
     if options.fe_degree != 1:
         raise RunError(f"the moving-boundary path is P1 (its remesh transfer is); got fe_degree {options.fe_degree}")
-    if options.time_integration != "backward_euler":
-        log(f"moving mesh: backward Euler with dt = {options.dt:g} (the method of lines has no moving-output path)")
+    # Backward Euler steps the mesh and the species together; the method of lines moves the mesh by a stride
+    # of the same length and integrates the species over it with adaptive BDF, which also takes kinetics
+    # nonlinear in the species (backward Euler cannot assemble them). Strides end on every output time.
+    mol = options.time_integration == "method_of_lines"
+    log(
+        f"moving mesh: method of lines in strides of {options.dt:g}"
+        if mol
+        else f"moving mesh: backward Euler with dt = {options.dt:g}"
+    )
     status.phase(MESHING)
     log(f"realizing geometry {model.geometry.name!r} (dim {model.geometry.dim}) at h = {options.h:g}")
     with _logged_geometry_warnings():
@@ -407,7 +415,18 @@ def _run_moving(
                 remeshes = state.remesh_count
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always", RemeshWarning)
-                    step_with_remeshing(state, quality_limit=_REMESH_QUALITY_LIMIT, target_h=options.h)
+                    if mol:
+                        stride_with_remeshing(
+                            state,
+                            h=dt,
+                            t_start=state.t,
+                            quality_limit=_REMESH_QUALITY_LIMIT,
+                            target_h=options.h,
+                            rtol=options.rtol,
+                            atol=options.atol,
+                        )
+                    else:
+                        step_with_remeshing(state, quality_limit=_REMESH_QUALITY_LIMIT, target_h=options.h)
                 for warning in caught:
                     if issubclass(warning.category, RemeshWarning):
                         log(f"warning: {warning.message}")
@@ -425,11 +444,18 @@ def _run_moving(
             recorder.capture(t_out, progress=t_out / options.t_final)
     except (StepTooLarge, MeshQualityError) as error:
         raise RunError(f"the moving mesh failed near t = {state.t:g}: {error}") from error
+    except NonlinearTermError as error:
+        raise RunError(
+            "the model's kinetics are nonlinear in the species, which backward Euler cannot assemble; run the "
+            "moving mesh with the method of lines (--time-integration method_of_lines, or the task's "
+            "FEniCSxSolverOptions TimeIntegration=MethodOfLines)"
+        ) from error
     except NotImplementedError as error:  # a remesh cannot carry boundary conditions yet
         raise RunError(
             f"the moving mesh needed a remesh near t = {state.t:g}, which is not possible here: {error}"
         ) from error
-    return cells, steps, dt_max, state.remesh_count
+    # under the method of lines, the adaptive integrator's own steps (the strides are the mesh moves)
+    return cells, state.steps if mol else steps, dt_max, state.remesh_count
 
 
 def _named(problem: DiscreteProblem, names: list[str]) -> list[tuple[str, Any]]:

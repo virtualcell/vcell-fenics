@@ -237,3 +237,41 @@ def _waist_3d(bundle: Bundle, row: int) -> float:
         if a[1] * b[1] <= 0.0 and a[1] != b[1]:
             crossings.append(float(abs(a[0] + a[1] / (a[1] - b[1]) * (b[0] - a[0]))))
     return min(crossings)
+
+
+def _nonlinear(tmp_path: Path) -> Path:
+    """The moving fixture with a binding nonlinear in the species, RanC' = k Ran C, Ran' = −k Ran C (so
+    Ran + RanC is conserved), which backward Euler cannot assemble."""
+
+    text = _MB.read_text()
+    for species, rate in (("RanC_cyt", "(0.5 * Ran_cyt * C_cyt)"), ("Ran_cyt", "( - 0.5 * Ran_cyt * C_cyt)")):
+        old = f'<PdeEquation Name="{species}" SolutionType="Unknown">\n        <Rate>0.0</Rate>'
+        assert text.count(old) == 1, species
+        text = text.replace(old, old.replace("<Rate>0.0</Rate>", f"<Rate>{rate}</Rate>"))
+    task = tmp_path / _MB.name
+    task.write_text(text)
+    return task
+
+
+def test_nonlinear_kinetics_on_a_moving_mesh_ask_for_the_method_of_lines(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--simtask", str(_nonlinear(tmp_path)), "--out", str(tmp_path)]) != 0
+    assert "--time-integration method_of_lines" in capsys.readouterr().err
+
+
+def test_nonlinear_kinetics_run_on_a_moving_mesh_with_the_method_of_lines(tmp_path: Path) -> None:
+    # the mesh moves in strides and the species are integrated over each with adaptive BDF; the strides end on
+    # the output times, the front translates as under backward Euler, and Ran + RanC keeps its total
+    task = _nonlinear(tmp_path)
+    assert main(["--simtask", str(task), "--out", str(tmp_path), "--time-integration", "method_of_lines"]) == 0
+    bundle = Bundle.open(tmp_path / _BUNDLE)
+    assert bundle.manifest.solver.options["time_integration"] == "method_of_lines"
+    assert len(bundle.times) == 11
+    dt = 0.1
+    expected = dt * np.array([sum(math.sin(dt * k) for k in range(1, 11)), sum(math.cos(dt * k) for k in range(1, 11))])
+    assert np.allclose(_shift(bundle), expected, atol=1e-12)
+    bound = bundle.stats("cell", "RanC_cyt")[:, 1]
+    total = bundle.stats("cell", "Ran_cyt")[:, 1] + bound
+    assert bound[-1] > bound[0] + 0.1 * abs(total[0])  # the binding proceeded
+    assert np.allclose(total, total[0], rtol=1e-6)
