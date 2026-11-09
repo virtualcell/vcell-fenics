@@ -208,3 +208,101 @@ def test_the_slide_changes_nothing_physical_under_a_normal_front(monkeypatch: py
     near = distance < 0.02
     assert near.mean() > 0.5
     assert np.abs(a.x.array[near] - b.x.array[index[near]]).max() < 3e-2
+
+
+# --- the membrane-coupled solver's prescribed-motion tests, on this solver (ADR 014 decision 7) ----------------
+# The same receptor model (a membrane receptor capturing ligand from both compartments, total ligand conserved)
+# and reacting model as `test_backend_membrane_coupled.py`, with the membrane's velocity in the model's motion and
+# both compartments' material at rest, which the membrane-coupled solver read as co-moving with the mesh.
+
+_EXPANDING = "[0.3 * geom.x[0], 0.3 * geom.x[1]]"
+
+
+def _moving(md: object, velocity: str) -> object:
+    from dataclasses import replace
+
+    from vcell_fenics.formalism.schema import MathDescription, MotionPrescribedVelocity
+
+    assert isinstance(md, MathDescription)
+    subdomains = [
+        replace(s, motion=MotionPrescribedVelocity(velocity=velocity)) if s.name == "pm" else s for s in md.subdomains
+    ]
+    return replace(md, subdomains=subdomains)
+
+
+def _solve(
+    md: object, *, t: float = 0.3, strides: int = 10, h: float = 0.08
+) -> tuple[MultiCompartmentGeometry, MultiCompartmentResult, float]:
+    from vcell_fenics.formalism.schema import MathDescription
+
+    assert isinstance(md, MathDescription)
+    geometry = realize_multi_compartment(_cell(), h=h, compartments={"cyto", "ext"})
+    area0 = _measure(geometry.compartments["cyto"].mesh)
+    result = integrate_multi_compartment(
+        md, geometry, t_final=t, motion_membrane="pm", stride_ends=[t * k / strides for k in range(1, strides + 1)]
+    )
+    return geometry, result, area0
+
+
+def _ligand(result: MultiCompartmentResult) -> float:
+    return sum(species_mass(result, name) for name in ("L_in", "L_out", "R"))
+
+
+def _initial_ligand() -> float:
+    # L_in = L_out = 1 over the box (4), R = 0: the initial total does not depend on the mesh but for the
+    # polygonal membrane, which both compartments share, so their sum is the box's area exactly
+    return 4.0
+
+
+@pytest.mark.parametrize("velocity", [_EXPANDING, "[-0.3 * geom.x[0], -0.3 * geom.x[1]]"])
+def test_total_ligand_is_conserved_while_the_membrane_moves(velocity: str) -> None:
+    from tests.test_backend_membrane_coupled import _model as receptor_model
+
+    geometry, result, area0 = _solve(_moving(receptor_model(), velocity))
+    assert abs(_measure(geometry.compartments["cyto"].mesh) / area0 - 1.0) > 0.15  # deformed substantially
+    assert species_mass(result, "R") > 0.1  # the receptor captured ligand
+    assert _ligand(result) == pytest.approx(_initial_ligand(), rel=2e-3)
+
+
+def test_without_binding_each_field_keeps_its_amount() -> None:
+    from tests.test_backend_membrane_coupled import _model as receptor_model
+
+    geometry, result, area0 = _solve(_moving(receptor_model(kon=0.0, r_ic="1.0"), _EXPANDING))
+    assert species_mass(result, "L_in") == pytest.approx(area0, rel=1e-5)
+    assert species_mass(result, "L_out") == pytest.approx(4.0 - area0, rel=1e-5)
+    # R started at 1 on the membrane, so its amount is the initial length; v = 0.3 x scales lengths by e^(0.3 t)
+    initial_length = species_mass(result, "R")
+    assert initial_length == pytest.approx(2.0 * math.pi * _R0, rel=1e-2)
+    assert _measure(geometry.membranes["pm"].mesh) == pytest.approx(initial_length * math.exp(0.09), rel=2e-3)
+
+
+def test_the_conservation_error_is_first_order_in_the_stride() -> None:
+    # what remains of the total's drift is the coupling flux across the moving membrane over a stride's split
+    from tests.test_backend_membrane_coupled import _model as receptor_model
+
+    def drift(strides: int) -> float:
+        _, result, _ = _solve(_moving(receptor_model(), _EXPANDING), strides=strides)
+        return abs(_ligand(result) / _initial_ligand() - 1.0)
+
+    coarse, fine = drift(10), drift(20)
+    assert coarse / fine == pytest.approx(2.0, abs=0.4)
+
+
+def test_stiff_binding_is_captured_while_the_membrane_moves() -> None:
+    from tests.test_backend_membrane_coupled import _model as receptor_model
+
+    _, result, _ = _solve(_moving(receptor_model(kon=1.0, rmax=10.0), _EXPANDING))
+    assert species_mass(result, "R") > 2.0
+    assert _ligand(result) == pytest.approx(_initial_ligand(), rel=5e-3)
+
+
+def test_a_nonlinear_bulk_reaction_keeps_its_pool_while_the_membrane_moves() -> None:
+    # A + B → C at rate kf·A·B in the cytoplasm, the membrane expanding: the pool A + C holds (no flux through
+    # the membrane), the reaction runs, all on the moving partition
+    from tests.test_backend_membrane_coupled import _reacting_model
+
+    model = _reacting_model(src_a="-kf*A*B", src_b="-kf*A*B", src_c="kf*A*B")
+    geometry, result, area0 = _solve(_moving(model, "[0.25 * geom.x[0], 0.25 * geom.x[1]]"), t=0.6, strides=24)
+    assert abs(_measure(geometry.compartments["cyto"].mesh) / area0 - 1.0) > 0.15
+    assert species_mass(result, "C") > 0.05
+    assert species_mass(result, "A") + species_mass(result, "C") == pytest.approx(area0, rel=1e-2)
