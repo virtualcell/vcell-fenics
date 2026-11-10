@@ -164,6 +164,8 @@ moving-boundary math").
      velocity evaluated at the stride's end (as `ale.stride_with_remeshing` does), then integrates the stride
      with adaptive BDF on the moved mesh. The swept-measure rates (`_SweptMeasures`, `interface_coupled.py`
      269–305) supply the GCL-consistent time terms per compartment and membrane.
+     *Amended by ADR 015 (2026-11-10):* the swept rates are replaced: each move carries every species' nodal
+     moments exactly, and each stride moves half, integrates on the midpoint mesh, and moves the other half.
    - **Refused for now, by name:** non-diffusing species (T4) on the moving membrane or in a compartment the
      membrane drives (as today: "a non-diffusing species … on a moving subdomain is not supported yet");
      `region_size` and region variables on a moving partition (vcell-core's M2); several moving membranes;
