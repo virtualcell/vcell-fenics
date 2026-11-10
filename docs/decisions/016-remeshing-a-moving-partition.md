@@ -230,11 +230,17 @@ decision 6, and ran moving_bleb's geometries.
   - The front's narrowest gap fell from 0.021 to 0.011 to 0.008, below `δ` = 0.01 at t = 1.75: contact
     (decision 5).
   - Each remesh took about 78 s (Netgen 3.9 s, transfer 72–75 s), about 1.6 strides' worth.
-- **What the two show:** both stop at the time the shape predicts. A front moving along its normal at
+- **What the 35-tooth and image runs show:** both stop at the time the shape predicts. A front moving along its normal at
   `0.05 (1 − cos t)` reaches the 59 nm valleys' radius at t ≈ 1.75. The remesh carries the mesh to that limit;
   the model's kinematics stop it.
-- **The 8-tooth recast, h = 0.04:** *pending.* The first attempt failed in the time integrator
-  (`DIVERGED_STEP_REJECTED`) before any remesh; it is being rerun with decision 7.
+- **The 8-tooth recast, h = 0.04** (133k cells, with decision 7): **carried to t = 3.5.**
+  - One remesh, at t = 1.75; the run without remeshing had tangled near t = 2.0. The front's narrowest gap
+    was 0.040, far from contact.
+  - Totals were kept to 2.4e-13 across the remesh; the membrane pair X + B held at 1846.73 from t = 1.75 to 3.5.
+  - The remesh took 79 s (Netgen 3.8 s, transfer 75 s), against about 36 minutes for the whole run.
+  - A first attempt without decision 7 failed in the time integrator (`DIVERGED_STEP_REJECTED`) before any
+    remesh. It also overlapped a laptop sleep, so the failure is *not attributed*; the rerun with decision 7
+    completed.
 - **Conservation across remeshes:** most totals were kept to 1e-13–1e-10, the worst to 3.8e-7 (132k cells) and
   3.7e-8 (23k). This is the supermesh kernel's absolute clipping cutoff, as decision 3 anticipates, growing
   with the mesh. Its cutoff must become relative to the cells' area before the check can be `1e-12`.
