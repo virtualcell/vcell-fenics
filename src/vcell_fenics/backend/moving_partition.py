@@ -170,7 +170,10 @@ class MovingPartition:
                 fem.dirichletbc(fem.Function(V_p), fixed_dofs.astype(np.int32)),
             ],
             petsc_options_prefix=f"vcellfenics_partition_motion_{id(self):x}_",
-            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+            # CG with algebraic multigrid: a direct solve grows as (cells)^2.5 in 3D (46 s per move at 136k cells,
+            # against 0.8 s here, ADR 015). Each move's moments are carried exactly whatever mesh this yields, so
+            # the extension need not be solved tightly.
+            petsc_options={"ksp_type": "cg", "pc_type": "gamg", "ksp_rtol": 1.0e-10},
         )
         self.parent_velocity = fem.Function(V_p, name="w")
 

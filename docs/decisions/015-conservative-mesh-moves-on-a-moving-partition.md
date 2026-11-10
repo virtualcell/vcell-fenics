@@ -66,7 +66,7 @@ different rates, so totals drifted at first order in the stride. The test
    undershoot on a steep front (about −1.1e-2 in every scheme, from unstabilized Galerkin on an under-resolved
    front with D = 0.001, not from the move).
 
-   *Decision: consistent.* A direct solve (LU) of each mass matrix per move: two per species per stride.
+   *Decision: consistent*, solved as decision 6 states.
 
 4. **Mesh relaxation is not adopted. moving_bleb needs a local remesh.**
    - Variants measured on the analytic 35-tooth recast of moving_bleb (BioModel 294599465) at h = 0.04:
@@ -89,6 +89,28 @@ different rates, so totals drifted at first order in the stride. The test
 5. **The single-mesh moving path (ADR 013) keeps its scheme for now.** Its method-of-lines path uses the same
    swept rate (`discrete._MeshMotion.effective_dilution_rate`), and its backward-Euler path a per-cell ratio.
    Moving it to decision 1–2's scheme is a follow-up, measured against its own tests and the RacRho study.
+
+6. **Iterative solvers, and one mass matrix per mesh.** Two half-moves per stride double the moves, so their
+   cost was measured (2026-11-10). A sphere in a box, per move:
+
+   | mesh | parent cells | extension, LU | extension, CG + GAMG | per species: LU mass solve | per species: CG mass solve |
+   |---|---|---|---|---|---|
+   | 2D, h = 0.01 | 85k | 0.46 s | 0.18 s (13 its) | 0.075 s | 0.012 s (27 its) |
+   | 3D, h = 0.07 | 55k | 4.5 s | 0.32 s (13 its) | 0.59 s | 0.013 s (29 its) |
+   | 3D, h = 0.05 | 136k | 46 s | 0.78 s (14 its) | 5.0 s | 0.020 s (29 its) |
+
+   The direct solves grow as about (cells)^2.5 in 3D. That was a 3D problem before this ADR too (one extension
+   LU per stride); the iterative solves grow linearly, with iteration counts flat. So:
+   - **The extension** is solved by CG with algebraic multigrid (PETSc's GAMG) to 1e-10. The moments are carried
+     exactly whatever mesh it yields, so it need not be tighter.
+   - **The mass matrices** are solved by CG with a diagonal preconditioner to 1e-14, starting from the values
+     before the move. A mass matrix is well conditioned at any mesh size. Each total is kept to the solve's
+     residual, so the solve is tight, and one that does not converge stops the run.
+   - **One mass matrix per mesh and block size**, shared by the species on it, assembled once per move: the
+     mesh does not change between moves, so the matrix after one move is the one before the next.
+   - In 2D (moving_bleb's analytic recast, 138k cells), moves were already about 2 % of a run's time and the
+     stride's time integration the rest; in 3D at 136k cells a move now costs about 0.6 s plus about 0.02 s per
+     species.
 
 ## Verification
 
@@ -138,3 +160,10 @@ Errors at t = 1 (relative L2 of u / largest error of ρ), h halved with the stri
 - **The contact stop** ADR 014 decision 6 promised (the moving membrane meeting the box, another membrane or
   itself): still not built.
 - **Positivity** on steep, under-resolved fronts: a stabilization question, independent of the move.
+- **To track down: a reused CG solver gave a wrong mass solve.** In the spike, one `PETSc.KSP` (CG, Jacobi)
+  was kept across strides while its operator matrix was destroyed and reassembled each move. Its first
+  solve with a nonzero right-hand side returned a doubled membrane total: 0.164 became 0.328, while the
+  moments `b` summed to 0.164 and the KSP reported convergence. Later solves were exact. A fresh KSP per
+  solve, and a direct solve, were both exact; the built code creates a fresh KSP per solve, and the
+  round-off conservation tests would catch a recurrence. Not yet explained: stale preconditioner state
+  across destroyed and reallocated operators is a guess, not a finding.

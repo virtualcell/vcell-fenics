@@ -718,36 +718,58 @@ def integrate_multi_compartment(
         # other half. Each move carries every species' nodal moments ∫φᵢu exactly, M⁺u⁺ = M⁻u⁻ with the mass
         # matrices on the mesh after and before it: the material is carried with the mesh by the move and
         # transported back relative to the mesh by the stride, and each species' total is kept exactly.
-        mass_forms = [
-            fem.form(ufl.inner(ufl.TrialFunction(V), ufl.TestFunction(V)) * ufl.dx) for V in spaces[:n_fields]
-        ]
+        # One mass matrix per mesh and block size, shared by the species on it, assembled once per move: the
+        # mesh does not change between moves, so the matrix after one move is the one before the next.
+        mass_key = [(id(V.mesh), V.dofmap.index_map_bs) for V in spaces[:n_fields]]
+        mass_forms: dict[tuple[int, int], fem.Form] = {}
+        for key, V in zip(mass_key, spaces[:n_fields], strict=True):
+            if key not in mass_forms:
+                mass_forms[key] = fem.form(ufl.inner(ufl.TrialFunction(V), ufl.TestFunction(V)) * ufl.dx)
 
-        def mass_matrix(k: int) -> PETSc.Mat:
-            m: PETSc.Mat = petsc.assemble_matrix(mass_forms[k])
-            m.assemble()
-            return m
+        def assemble_masses() -> dict[tuple[int, int], PETSc.Mat]:
+            matrices: dict[tuple[int, int], PETSc.Mat] = {}
+            for key, form in mass_forms.items():
+                matrix: PETSc.Mat = petsc.assemble_matrix(form)
+                matrix.assemble()
+                matrices[key] = matrix
+            return matrices
+
+        masses = assemble_masses()  # on the mesh as it is now
 
         def move(t_move: float, length: float) -> None:
+            nonlocal masses
             scatter(state_vec, states)
             views.of(states)  # the bulk fields the front's velocity reads, as traces
             moments = []
             for k in range(n_fields):  # each node's moment on the mesh before the move
-                m = mass_matrix(k)
-                b = m.createVecLeft()
-                m.mult(states[k].x.petsc_vec, b)
+                b = masses[mass_key[k]].createVecLeft()
+                masses[mass_key[k]].mult(states[k].x.petsc_vec, b)
                 moments.append(b)
-                m.destroy()
             motion.advance(t_move, length)
+            for mass in masses.values():
+                mass.destroy()
+            masses = assemble_masses()
             for k, b in enumerate(moments):  # the same moments on the moved mesh
-                m = mass_matrix(k)
+                # A mass matrix is well conditioned at any mesh size, so CG with a diagonal preconditioner
+                # converges in a few tens of iterations; solved tightly, since each total is kept to the
+                # residual. A fresh KSP per solve: a reused one once returned a wrong (doubled) membrane total
+                # in the ADR 015 spike, not yet explained (ADR 015, "Not decided here").
                 ksp = PETSc.KSP().create(parent.comm)
-                ksp.setOperators(m)
-                ksp.setType("preonly")
-                ksp.getPC().setType("lu")
+                ksp.setOperators(masses[mass_key[k]])
+                ksp.setType("cg")
+                ksp.getPC().setType("jacobi")
+                ksp.setTolerances(rtol=1.0e-14, atol=1.0e-300, max_it=1000)
+                ksp.setInitialGuessNonzero(True)  # the values before the move
                 ksp.solve(b, states[k].x.petsc_vec)
+                reason = ksp.getConvergedReason()
+                if reason <= 0:  # type: ignore[operator]  # petsc4py stubs ConvergedReason without comparison
+                    raise RuntimeError(
+                        f"carrying the moments through a mesh move did not converge (KSP reason "
+                        f"{reason}, {ksp.getIterationNumber()} iterations)"
+                    )
                 states[k].x.scatter_forward()
-                for petsc_object in (ksp, m, b):
-                    petsc_object.destroy()
+                ksp.destroy()
+                b.destroy()
             for k in range(n_fields):
                 state_vec.array[offsets[k] : offsets[k + 1]] = states[k].x.array[: sizes[k]]
 
@@ -770,6 +792,8 @@ def integrate_multi_compartment(
                 scatter(state_vec, states)
                 on_output(t, views.of(states))
         scatter(state_vec, states)
+        for mass in masses.values():
+            mass.destroy()
         for petsc_object in (state_vec, precond, parent_matrix, own_matrix):
             if petsc_object is not None:
                 petsc_object.destroy()

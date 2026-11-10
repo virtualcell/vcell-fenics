@@ -435,6 +435,11 @@ Newest first. One entry per landed step or notable finding.
       species), second order in space, and second order in time for the membrane species;
     - about 3× more accurate than the swept-rate scheme at h = 0.05
       (`tests/test_moving_partition_exact.py`).
+  - **Cost:** two half-moves per stride, so the moves were moved to iterative solvers (the extension by CG
+    with multigrid, the mass matrices by CG, one mass matrix per mesh). In 3D at 136k cells a move costs about
+    0.6 s plus 0.02 s per species, against 46 s plus 5 s per species with the direct solves.
+  - **To track down:** a reused CG solver once returned a doubled membrane total in the spike (ADR 015, "Not
+    decided here"); the code creates a fresh solver per solve.
   - **Not adopted:** relaxing the mesh (a stiffened extension, frozen or not) did not keep moving_bleb's analytic
     recast untangled at h = 0.04. Notches of the outside compartment close there, so cells must be removed: a
     local remesh, still open (ADR 014 decision 6).
