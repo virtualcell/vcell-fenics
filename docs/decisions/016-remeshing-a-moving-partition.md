@@ -167,19 +167,35 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
 
    *Recommendation: yes.*
 
-   **The risk, plainly:** a remesh may not carry moving_bleb.
-   - The image recast's neck heads for about 0.05, a little over `h` = 0.04, so it may stay above `δ` = 0.01.
-   - The 35-tooth recast is worse:
-     - its valleys (radii 0.002–0.004) are much sharper than the front's displacement (0.03 by t ≈ 1.4);
-     - its notches' area shrinks toward zero (ADR 015 decision 4);
-     - "no membrane segment turns over" was measured only to t = 1.2.
+   **The spike's answer: moving_bleb reaches contact at t ≈ 1.75** (Spike results). The remesh carries its mesh
+   to that point; the front's own geometry stops it there.
 
-     So there a remesh may only postpone the stop.
-   - If the spike confirms that, moving_bleb as authored (sharp teeth moving along their normals) cannot run to
-     t = 5 at h = 0.04 in any front-tracking solver without changing the front itself. That is a modelling
-     question, not a meshing one.
+6. **A front that cannot advance is a stop.** If a fresh mesh tangles on its first move (the retry of
+   decision 2 fails), the cause is the front's own geometry, not the mesh: a valley that a front moving along
+   its normal folds into a cusp once the displacement exceeds the valley's radius of curvature. The run then
+   stops with a named error ("the moving membrane cannot advance at t = …: it folds or closes on itself"),
+   rather than remeshing again. Real membranes resist this focusing (tension and bending give the motion a
+   curvature-dependent part); a prescribed uniform normal speed does not, so it is a property of the model's
+   kinematics.
 
-6. **Scope: 2D, serial.**
+   *Recommendation: yes.* The spike remeshed 20–40 times in place without taking a step before hitting its
+   limit (Spike results).
+
+7. **Realization: no traced membrane segment far below the mesh's resolution.** Marching squares on an `h`-grid
+   gives arbitrarily short segments wherever a contour passes near a grid node. The simplification
+   (`approximate_polygon` at `0.01 h`) removes them on a circle, but keeps them where the shape is finer than the
+   grid: the 35-tooth cell's crests (radius 34 nm) and valleys (59 nm) at h = 0.04 become near-corners with 1–4 nm
+   segments, which force cells of about 5e-7 next to the membrane. After the simplification, drop each traced
+   vertex closer than `h/4` to the last one kept.
+
+   *Recommendation: yes, as its own change to `realize._netgen_box_with_contours`*, with the realization tests
+   and area fidelity on curved shapes.
+   - Measured on the 35-tooth cell at h = 0.04: area changed by +0.0009 %, membrane length by −0.06 %,
+     the shortest membrane segment went from 9.1e-4 to 8.5e-3, and the smallest cell from 4.8e-7 to 4.1e-5
+     (85× larger).
+   - It helps every moving run on a sharply featured analytic geometry, remeshed or not.
+
+8. **Scope: 2D, serial.**
    - 3D needs a 3D supermesh (tetrahedron intersections), which does not exist here; interpolation plus a rescale
      is the rejected option. A later ADR.
    - Under MPI the skeleton would have to be gathered to rank 0, and the supermesh kernel is serial.
@@ -197,6 +213,32 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
 
 That is one or two strides' worth (a stride took about 100 s there in ADR 015's 4-stride profile), so a handful of
 remeshes per run costs a few percent. Vectorizing the kernel's clipping would cut the transfer's share; it is not needed to start.
+
+## Spike results (2026-11-10)
+
+A spike (branch `spike/partition-remesh`, not merged) implemented decisions 1–4 without the contact stop or
+decision 6, and ran moving_bleb's geometries.
+- **The 35-tooth analytic recast, h = 0.1** (23k cells):
+  - Without decision 7, the first tangle came at t = 1.05. The remesh worked (totals within 6e-15, 11 s), but
+    the fresh mesh tangled on its first move, at cells beside 1 nm membrane segments.
+  - With decision 7, the first tangle came at t = 2.15. One remesh carried the run to t = 2.55.
+  - There every fresh mesh tangled on its first move, 20+ times. The front's narrowest gap stayed at 0.041,
+    above the contact threshold, so the front folds (decision 6).
+- **The image geometry, h = 0.04** (132k cells, without decision 7):
+  - The first tangle came at t = 1.6; the earlier run without remeshing inverted cells at t ≈ 1.5.
+  - Remeshes at t = 1.6 and 1.7 carried it to t = 1.75.
+  - The front's narrowest gap fell from 0.021 to 0.011 to 0.008, below `δ` = 0.01 at t = 1.75: contact
+    (decision 5).
+  - Each remesh took about 78 s (Netgen 3.9 s, transfer 72–75 s), about 1.6 strides' worth.
+- **What the two show:** both stop at the time the shape predicts. A front moving along its normal at
+  `0.05 (1 − cos t)` reaches the 59 nm valleys' radius at t ≈ 1.75. The remesh carries the mesh to that limit;
+  the model's kinematics stop it.
+- **The 8-tooth recast, h = 0.04:** *pending.* The first attempt failed in the time integrator
+  (`DIVERGED_STEP_REJECTED`) before any remesh; it is being rerun with decision 7.
+- **Conservation across remeshes:** most totals were kept to 1e-13–1e-10, the worst to 3.8e-7 (132k cells) and
+  3.7e-8 (23k). This is the supermesh kernel's absolute clipping cutoff, as decision 3 anticipates, growing
+  with the mesh. Its cutoff must become relative to the cells' area before the check can be `1e-12`.
+- **The lumped fallback** switched on in about half the remeshes, for the species with a sharp initial step.
 
 ## Verification
 
@@ -232,14 +274,15 @@ remeshes per run costs a few percent. Vectorizing the kernel's clipping would cu
 2. **A spike** (not merged): the whole-partition remesh with the projection on moving_bleb's recasts. It answers
    whether remeshing carries the run or reaches contact, how often it remeshes, and at what cost. The numbers go
    into this ADR before code lands.
-3. The contact stop (decision 5): useful on its own.
+3. The contact stop (decision 5) and the realizer fix (decision 7): useful on their own.
 4. The skeleton remesh, the rebuilt geometry and the transfer (decisions 1, 3, 4), with the unmoved-remesh tests.
-5. The undo and the trigger (decision 2), the segmented solver, and the remaining verification.
+5. The undo and the trigger (decision 2), the stop for a front that cannot advance (decision 6), the
+   segmented solver, and the remaining verification.
 
 ## Not decided here
 
 - **Patch remeshing**, as an optimization for runs that remesh often: it keeps the field outside the patch exact.
-- **3D and MPI** (decision 6).
+- **3D and MPI** (decision 8).
 - **A vectorized supermesh kernel with a spatial index** (the cost paragraph): the broad phase is all-pairs.
 - **MMG** (mmgtools, local adaptation in 2D and 3D) as an alternative mesher. Its licence and packaging are
   unchecked against ADR 008.

@@ -76,7 +76,9 @@ different rates, so totals drifted at first order in the stride. The test
 
      Every one tangled at t = 1.35–1.4, as the scheme before them did.
    - The cells that fail sit in notches of the outside compartment between a tooth valley's two flanks. The
-     valleys' radii of curvature are 0.002–0.004; the front has moved 0.03 by then. The image recast fails the
+     valleys' radii of curvature are 59 nm (from the shape's formula; *corrected 2026-11-10*: the 0.002–0.004
+     first quoted here came from three-point estimates on the traced polygon, whose 1–4 nm segments are a tracing
+     artifact, ADR 016); the front has moved 0.03 by then. The image recast fails the
      same way in a wider neck, closing from 0.25 to 0.09 by t = 2.6.
    - The notch's area shrinks toward zero, so its cells must be removed, which no fixed-topology mesh can do.
      The front itself never folds: no membrane segment turns over.
