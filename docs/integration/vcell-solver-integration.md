@@ -423,13 +423,34 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-10** — **Exact conservation on a moving partition (ADR 015).**
+  - **What:** every mesh move of the multi-compartment solver's moving partition now carries each species' nodal
+    moments exactly (`M⁺u⁺ = M⁻u⁻`), and each stride moves half, integrates on the midpoint mesh, and moves the
+    other half. The swept-rate dilution terms are gone.
+  - **Why:** the swept rate kept totals only to first order in the stride (−7e-4 on the exchange across a moving
+    membrane at 10 strides).
+  - **Verified:**
+    - every total to round-off (about 1e-15) at any stride;
+    - against an exact solution (an expanding circle, a bulk species at rest coupled to a diluting membrane
+      species), second order in space, and second order in time for the membrane species;
+    - about 3× more accurate than the swept-rate scheme at h = 0.05
+      (`tests/test_moving_partition_exact.py`).
+  - **Cost:** two half-moves per stride, so the moves were moved to iterative solvers (the extension by CG
+    with multigrid, the mass matrices by CG, one mass matrix per mesh). In 3D at 136k cells a move costs about
+    0.6 s plus 0.02 s per species, against 46 s plus 5 s per species with the direct solves.
+  - **To track down:** a reused CG solver once returned a doubled membrane total in the spike (ADR 015, "Not
+    decided here"); the code creates a fresh solver per solve.
+  - **Not adopted:** relaxing the mesh (a stiffened extension, frozen or not) did not keep moving_bleb's analytic
+    recast untangled at h = 0.04. Notches of the outside compartment close there, so cells must be removed: a
+    local remesh, still open (ADR 014 decision 6).
+
 - **2026-11-09** — **ADR 014 decision 7: the membrane-coupled solver refuses a prescribed moving membrane.** It
   read its `motion: none` bulks as co-moving with the mesh; the multi-compartment solver moves a membrane with its
   bulks at rest, so `assemble_membrane_coupled` / `integrate_membrane_coupled` now refuse a `velocity` (or a
   `MembraneCoupledMeshMotion`) and name `integrate_multi_compartment(..., motion_membrane=...)`. Their force-balance
   motion is unchanged. Eight prescribed-motion tests moved: five rederived on the multi-compartment solver with
   the bulk at rest (`tests/test_moving_partition.py`: total ligand under expansion and shrinkage, each field
-  without binding, the first-order stride error, stiff binding, a nonlinear bulk reaction's pool); the two
+  without binding, the first-order stride error (exact since ADR 015), stiff binding, a nonlinear bulk reaction's pool); the two
   backward-Euler ones and the one asserting the co-moving bulk dilution were dropped (the at-rest checks replace
   it). `MembraneCoupledMeshMotion` itself stays, as the force-balance tests' pre-deformation.
 

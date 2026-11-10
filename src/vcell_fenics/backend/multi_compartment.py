@@ -37,10 +37,11 @@ face, a Neumann value (Flux) a boundary flux; a face the compartment does not to
 stride by stride (`backend/moving_partition.py`), the box and every other membrane held fixed. Each compartment's
 material is at rest: its species are transported relative to the moving mesh, ``−u (c − w)·∇q`` with ``c`` its
 drift (0 by default), so a jump-condition flux is a total flux relative to the membrane. The moving membrane's
-species ride its material velocity ``v`` relative to its sliding nodes, ``−ρ (v + d − w_Γ)·∇_Γ q``. Both take
-the swept rate ``ln(|Kⁿ⁺¹|/|Kⁿ|)/h`` as their dilution, and a fresh integrator per stride keeps the BDF history
-from spanning a mesh jump. Region variables, ``region_size`` and non-diffusing species where the mesh moves are
-refused; there is no remeshing yet (ADR 014 decision 6).
+species ride its material velocity ``v`` relative to its sliding nodes, ``−ρ (v + d − w_Γ)·∇_Γ q``. Each stride
+moves the mesh by half a stride, integrates on that midpoint mesh, and moves the other half; every move carries
+each species' nodal moments exactly (``M⁺u⁺ = M⁻u⁻``, ADR 015), so every total is kept to round-off, and a fresh
+integrator per stride keeps the BDF history from spanning a move. Region variables, ``region_size`` and
+non-diffusing species where the mesh moves are refused; there is no remeshing yet (ADR 014 decision 6).
 
 Lab-frame ``advection`` and the interface value-equality constraint are refused.
 """
@@ -471,15 +472,13 @@ def integrate_multi_compartment(
         if motion is not None and eq.subdomain in geometry.compartments:
             # material at rest, on a moving mesh (ADR 014 decision 3): the carrier (the drift, 0 by default)
             # relative to the mesh, integrated by parts, so the natural flux is total and relative to the
-            # moving membrane; the swept rate keeps the mass across the stride's mesh jump
+            # moving membrane; the mass across a mesh move is carried by the moments (ADR 015)
             carrier = drift if drift is not None else ufl.as_vector([0.0] * parent.geometry.dim)
             form += -u * ufl.dot(carrier - motion.parent_velocity, ufl.grad(w)) * dx
-            form += motion.parent_dilution * u * w * dx
         elif motion is not None and eq.subdomain == motion_membrane:
             # riding the membrane's material (decision 1) on nodes that slide along it (decision 4)
             carrier_m = motion.membrane_velocity if drift is None else motion.membrane_velocity + drift
             form += -u * ufl.dot(carrier_m - motion.membrane_mesh_velocity, ufl.grad(w)) * dx
-            form += motion.membrane_dilution * u * w * dx
         elif drift is not None:  # drift relative to the (fixed) mesh
             form += ufl.dot(drift, ufl.grad(u)) * w * dx
         if eq.subdomain in geometry.compartments:
@@ -714,21 +713,78 @@ def integrate_multi_compartment(
         return ts
 
     if motion is not None:
-        # A moving membrane: one stride at a time, the mesh moved at the stride's start (the velocity read at its
-        # end), then a fresh integrator over the stride on the moved mesh, so the BDF history never spans a jump.
+        # A moving membrane (ADR 015): each stride moves the mesh by half a stride, integrates the whole stride on
+        # that midpoint mesh with a fresh integrator (so the BDF history never spans a move), then moves the
+        # other half. Each move carries every species' nodal moments ∫φᵢu exactly, M⁺u⁺ = M⁻u⁻ with the mass
+        # matrices on the mesh after and before it: the material is carried with the mesh by the move and
+        # transported back relative to the mesh by the stride, and each species' total is kept exactly.
+        # One mass matrix per mesh and block size, shared by the species on it, assembled once per move: the
+        # mesh does not change between moves, so the matrix after one move is the one before the next.
+        mass_key = [(id(V.mesh), V.dofmap.index_map_bs) for V in spaces[:n_fields]]
+        mass_forms: dict[tuple[int, int], fem.Form] = {}
+        for key, V in zip(mass_key, spaces[:n_fields], strict=True):
+            if key not in mass_forms:
+                mass_forms[key] = fem.form(ufl.inner(ufl.TrialFunction(V), ufl.TestFunction(V)) * ufl.dx)
+
+        def assemble_masses() -> dict[tuple[int, int], PETSc.Mat]:
+            matrices: dict[tuple[int, int], PETSc.Mat] = {}
+            for key, form in mass_forms.items():
+                matrix: PETSc.Mat = petsc.assemble_matrix(form)
+                matrix.assemble()
+                matrices[key] = matrix
+            return matrices
+
+        masses = assemble_masses()  # on the mesh as it is now
+
+        def move(t_move: float, length: float) -> None:
+            nonlocal masses
+            scatter(state_vec, states)
+            views.of(states)  # the bulk fields the front's velocity reads, as traces
+            moments = []
+            for k in range(n_fields):  # each node's moment on the mesh before the move
+                b = masses[mass_key[k]].createVecLeft()
+                masses[mass_key[k]].mult(states[k].x.petsc_vec, b)
+                moments.append(b)
+            motion.advance(t_move, length)
+            for mass in masses.values():
+                mass.destroy()
+            masses = assemble_masses()
+            for k, b in enumerate(moments):  # the same moments on the moved mesh
+                # A mass matrix is well conditioned at any mesh size, so CG with a diagonal preconditioner
+                # converges in a few tens of iterations; solved tightly, since each total is kept to the
+                # residual. A fresh KSP per solve: a reused one once returned a wrong (doubled) membrane total
+                # in the ADR 015 spike, not yet explained (ADR 015, "Not decided here").
+                ksp = PETSc.KSP().create(parent.comm)
+                ksp.setOperators(masses[mass_key[k]])
+                ksp.setType("cg")
+                ksp.getPC().setType("jacobi")
+                ksp.setTolerances(rtol=1.0e-14, atol=1.0e-300, max_it=1000)
+                ksp.setInitialGuessNonzero(True)  # the values before the move
+                ksp.solve(b, states[k].x.petsc_vec)
+                reason = ksp.getConvergedReason()
+                if reason <= 0:  # type: ignore[operator]  # petsc4py stubs ConvergedReason without comparison
+                    raise RuntimeError(
+                        f"carrying the moments through a mesh move did not converge (KSP reason "
+                        f"{reason}, {ksp.getIterationNumber()} iterations)"
+                    )
+                states[k].x.scatter_forward()
+                ksp.destroy()
+                b.destroy()
+            for k in range(n_fields):
+                state_vec.array[offsets[k] : offsets[k + 1]] = states[k].x.array[: sizes[k]]
+
         steps, t, dt = 0, 0.0, dt_initial if dt_initial is not None else stride_ends[0] / 10.0
         recorded = sorted(output_times) if on_output is not None else []
         if on_output is not None and recorded and recorded[0] <= 0.0:
             on_output(0.0, views.of(states))
         for t_end in stride_ends:
-            scatter(state_vec, states)
-            views.of(states)  # the bulk fields the front's velocity reads, as traces
-            motion.advance(t_end, t_end - t)
+            move(0.5 * (t + t_end), 0.5 * (t_end - t))
             ts = make_ts(t, t_end, min(dt, t_end - t))
             ts.solve(state_vec)
             steps += ts.getStepNumber()
             dt = float(ts.getTimeStep())
             ts.destroy()
+            move(t_end, 0.5 * (t_end - t))
             t = t_end
             if on_progress is not None:
                 on_progress(t)
@@ -736,6 +792,8 @@ def integrate_multi_compartment(
                 scatter(state_vec, states)
                 on_output(t, views.of(states))
         scatter(state_vec, states)
+        for mass in masses.values():
+            mass.destroy()
         for petsc_object in (state_vec, precond, parent_matrix, own_matrix):
             if petsc_object is not None:
                 petsc_object.destroy()

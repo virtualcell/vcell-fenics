@@ -103,8 +103,8 @@ def test_a_uniform_stretch_dilutes_the_membrane_species_exactly() -> None:
     rho = result.fields["rho"].x.array
     assert rho.mean() == pytest.approx(length0 / length, rel=1e-3)  # ρ₀ |Γ₀| / |Γ(t)|
     assert rho.max() - rho.min() < 5e-3
-    assert species_mass(result, "rho") == pytest.approx(length0, rel=1e-5)
-    assert species_mass(result, "u") == pytest.approx(area0, rel=1e-5)
+    assert species_mass(result, "rho") == pytest.approx(length0, rel=1e-12)
+    assert species_mass(result, "u") == pytest.approx(area0, rel=1e-12)
 
 
 def test_a_membrane_flowing_along_itself_carries_its_species_relative_to_the_sliding_nodes() -> None:
@@ -261,31 +261,30 @@ def test_total_ligand_is_conserved_while_the_membrane_moves(velocity: str) -> No
     geometry, result, area0 = _solve(_moving(receptor_model(), velocity))
     assert abs(_measure(geometry.compartments["cyto"].mesh) / area0 - 1.0) > 0.15  # deformed substantially
     assert species_mass(result, "R") > 0.1  # the receptor captured ligand
-    assert _ligand(result) == pytest.approx(_initial_ligand(), rel=2e-3)
+    assert _ligand(result) == pytest.approx(_initial_ligand(), rel=1e-12)
 
 
 def test_without_binding_each_field_keeps_its_amount() -> None:
     from tests.test_backend_membrane_coupled import _model as receptor_model
 
     geometry, result, area0 = _solve(_moving(receptor_model(kon=0.0, r_ic="1.0"), _EXPANDING))
-    assert species_mass(result, "L_in") == pytest.approx(area0, rel=1e-5)
-    assert species_mass(result, "L_out") == pytest.approx(4.0 - area0, rel=1e-5)
+    assert species_mass(result, "L_in") == pytest.approx(area0, rel=1e-12)
+    assert species_mass(result, "L_out") == pytest.approx(4.0 - area0, rel=1e-12)
     # R started at 1 on the membrane, so its amount is the initial length; v = 0.3 x scales lengths by e^(0.3 t)
     initial_length = species_mass(result, "R")
     assert initial_length == pytest.approx(2.0 * math.pi * _R0, rel=1e-2)
     assert _measure(geometry.membranes["pm"].mesh) == pytest.approx(initial_length * math.exp(0.09), rel=2e-3)
 
 
-def test_the_conservation_error_is_first_order_in_the_stride() -> None:
-    # what remains of the total's drift is the coupling flux across the moving membrane over a stride's split
+@pytest.mark.parametrize("strides", [3, 10, 30])
+def test_ligand_is_conserved_to_round_off_at_any_stride(strides: int) -> None:
+    # each mesh move carries every species' nodal moments exactly (ADR 015), so the exchange across the moving
+    # membrane leaves the total unchanged however coarse the strides (the swept-rate scheme before it drifted
+    # at first order in the stride)
     from tests.test_backend_membrane_coupled import _model as receptor_model
 
-    def drift(strides: int) -> float:
-        _, result, _ = _solve(_moving(receptor_model(), _EXPANDING), strides=strides)
-        return abs(_ligand(result) / _initial_ligand() - 1.0)
-
-    coarse, fine = drift(10), drift(20)
-    assert coarse / fine == pytest.approx(2.0, abs=0.4)
+    _, result, _ = _solve(_moving(receptor_model(), _EXPANDING), strides=strides)
+    assert _ligand(result) == pytest.approx(_initial_ligand(), rel=1e-12)
 
 
 def test_stiff_binding_is_captured_while_the_membrane_moves() -> None:
@@ -293,7 +292,7 @@ def test_stiff_binding_is_captured_while_the_membrane_moves() -> None:
 
     _, result, _ = _solve(_moving(receptor_model(kon=1.0, rmax=10.0), _EXPANDING))
     assert species_mass(result, "R") > 2.0
-    assert _ligand(result) == pytest.approx(_initial_ligand(), rel=5e-3)
+    assert _ligand(result) == pytest.approx(_initial_ligand(), rel=1e-12)
 
 
 def test_a_nonlinear_bulk_reaction_keeps_its_pool_while_the_membrane_moves() -> None:
@@ -305,7 +304,7 @@ def test_a_nonlinear_bulk_reaction_keeps_its_pool_while_the_membrane_moves() -> 
     geometry, result, area0 = _solve(_moving(model, "[0.25 * geom.x[0], 0.25 * geom.x[1]]"), t=0.6, strides=24)
     assert abs(_measure(geometry.compartments["cyto"].mesh) / area0 - 1.0) > 0.15
     assert species_mass(result, "C") > 0.05
-    assert species_mass(result, "A") + species_mass(result, "C") == pytest.approx(area0, rel=1e-2)
+    assert species_mass(result, "A") + species_mass(result, "C") == pytest.approx(area0, rel=1e-10)
 
 
 def test_a_motion_that_tangles_the_partition_stops_the_run() -> None:

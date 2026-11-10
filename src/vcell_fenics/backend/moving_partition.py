@@ -3,10 +3,10 @@
 The multi-compartment solver keeps every compartment and membrane on one parent mesh, with a submesh and an
 `EntityMap` for each. This moves them together, one method-of-lines stride at a time:
 
-1. **The front.** The membrane's prescribed velocity `v` is evaluated on the membrane mesh at the stride's end:
+1. **The front.** The membrane's prescribed velocity `v` is evaluated on the membrane mesh at the move's end:
    `geom.normal` is the membrane's normal out of its inside compartment (the area-weighted facet normal of the
    inside compartment's submesh, `BoundaryNormal`), `trace(X)` reads the bulk species `X` at the membrane's
-   nodes, and `sim.t` is the stride's end time. Its displacement over the stride is `h·v`.
+   nodes, and `sim.t` is the move's end time. Its displacement over a move of length `h` is `h·v`.
 2. **The slide** (2D, decision 4). The membrane's nodes are slid along the moved membrane, along the periodic
    spline through them, back to the fractions of its length they had when the mesh was built; only the
    front's normal motion is physical, and the membrane's species are transported relative to the slide.
@@ -14,12 +14,13 @@ The multi-compartment solver keeps every compartment and membrane on one parent 
    every other membrane held fixed (a membrane without a velocity is static, as in VCell). Every mesh — the
    parent, each compartment's and each membrane's submesh — then takes the same displacement at its coincident
    nodes, so the topological `EntityMap`s stay valid.
-4. **The swept measures.** Each parent cell's and each membrane facet's measure before and after the move give
-   the GCL-consistent rate `ln(|Kⁿ⁺¹|/|Kⁿ|)/h` that the stride's dilution term uses (`_SweptMeasures`).
+4. **The check.** The moved parent must keep every cell's orientation (`CellOrientation`): a tangled mesh
+   stops the run.
 
-The solver reads `parent_velocity` (the mesh velocity `w` in the bulk, the transport relative to the mesh
-`−u (c − w)·∇q`), `membrane_velocity` (the material velocity `v` of the membrane's species), the membrane's
-own `membrane_mesh_velocity` (the slid nodes' velocity), and the two dilution rates.
+The solver carries each species' nodal moments through every move (ADR 015) and reads `parent_velocity` (the
+mesh velocity `w` in the bulk, the transport relative to the mesh `−u (c − w)·∇q`), `membrane_velocity` (the
+material velocity `v` of the membrane's species) and the membrane's own `membrane_mesh_velocity` (the slid
+nodes' velocity).
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from vcell_fenics.backend.discrete import (
     _slid_to_fractions,
 )
 from vcell_fenics.backend.geometry import prescribed_velocity
-from vcell_fenics.backend.interface_coupled import _param_symbols, _SweptMeasures
+from vcell_fenics.backend.interface_coupled import _param_symbols
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import MathDescription
 
@@ -169,7 +170,10 @@ class MovingPartition:
                 fem.dirichletbc(fem.Function(V_p), fixed_dofs.astype(np.int32)),
             ],
             petsc_options_prefix=f"vcellfenics_partition_motion_{id(self):x}_",
-            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+            # CG with algebraic multigrid: a direct solve grows as (cells)^2.5 in 3D (46 s per move at 136k cells,
+            # against 0.8 s here, ADR 015). Each move's moments are carried exactly whatever mesh this yields, so
+            # the extension need not be solved tightly.
+            petsc_options={"ksp_type": "cg", "pc_type": "gamg", "ksp_rtol": 1.0e-10},
         )
         self.parent_velocity = fem.Function(V_p, name="w")
 
@@ -180,24 +184,14 @@ class MovingPartition:
             *(m.mesh for m in geometry.membranes.values()),
         ]
         self._moves = [(m, _matching(m.geometry.x[:, :gdim], parent_xyz, "a submesh")) for m in meshes]
-        self._swept = _SweptMeasures({"parent": parent, "membrane": mem_mesh})
         # The moved parent's validity after every stride (ADR 014 decision 6: no remeshing yet, so a mesh the
         # motion has tangled or badly distorted stops the run rather than being solved on).
         self._orientation = CellOrientation(parent)
         self._growth = 1.0
 
-    @property
-    def parent_dilution(self) -> fem.Function:
-        """Per parent cell `ln(|Kⁿ⁺¹|/|Kⁿ|)/h` over the last stride (DG0)."""
-        return self._swept.effective_dilution["parent"]
-
-    @property
-    def membrane_dilution(self) -> fem.Function:
-        """Per moving-membrane facet `ln(|Kⁿ⁺¹|/|Kⁿ|)/h` over the last stride (DG0)."""
-        return self._swept.effective_dilution["membrane"]
-
     def advance(self, t_end: float, h: float) -> None:
-        """Move every mesh over a stride of length `h` ending at `t_end` (the module docstring)."""
+        """Move every mesh by `h` times the front's velocity read at `t_end` (the module docstring): a whole stride,
+        or half of one (ADR 015)."""
         gdim = self._gdim
         self.time.value = t_end
         for source, on_membrane, index in self._traces:
@@ -222,10 +216,8 @@ class MovingPartition:
         parent_displacement = self._displacement.x.array.reshape((-1, gdim))
         self.parent_velocity.x.array[:] = parent_displacement.ravel() / h
 
-        self._swept.capture()
         for mesh, index in self._moves:
             mesh.geometry.x[:, :gdim] += parent_displacement[index]
-        self._swept.update(h)
         where = f"the moving partition at t = {t_end:g}"
         self._growth = self._orientation.check(where)
         if self._growth > _MAX_CELL_RATIO_GROWTH:
