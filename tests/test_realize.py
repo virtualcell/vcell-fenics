@@ -450,3 +450,58 @@ def test_unsupported_dim_rejected() -> None:
     g = GeometryDescription(name="g", dim=1, subvolumes=(SubVolume(name="c", type="compartmental"),))
     with pytest.raises(NotImplementedError, match="supports dim 0, 2, 3"):
         realize(g)
+
+
+def test_drop_short_segments_keeps_a_polygon_and_drops_sub_resolution_vertices() -> None:
+    """ADR 016 decision 7: a traced vertex closer than the minimum to the last one kept is dropped,
+    the closing segment included; vertices that are far enough apart are untouched."""
+    from vcell_fenics.backend.realize import _drop_short_segments
+
+    square = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    assert np.array_equal(_drop_short_segments(square, 0.25), square)
+    near_corner = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 0.001], [1.0, 1.0], [0.0, 1.0]])
+    assert np.array_equal(_drop_short_segments(near_corner, 0.25), square)
+    closing = np.vstack([square, [[0.0, 0.001]]])  # the last vertex sits next to the first
+    assert np.array_equal(_drop_short_segments(closing, 0.25), square)
+    tiny = 1e-3 * square
+    assert len(_drop_short_segments(tiny, 0.25)) <= 3  # left for the caller's degeneracy check
+
+
+def _toothed_cell(teeth: int) -> GeometryDescription:
+    """moving_bleb's analytic recast: r(θ)² = 2.5² + (1 + 0.4 sin nθ)² about (5, 5) in a 10 x 10 box."""
+    r2 = f"6.25 + (1 + 0.4*sin({teeth}*atan2(geom.x[1] - 5, geom.x[0] - 5)))**2"
+    d2 = "(geom.x[0] - 5)**2 + (geom.x[1] - 5)**2"
+    return GeometryDescription(
+        name="teeth",
+        dim=2,
+        extent=(10.0, 10.0, 1.0),
+        origin=(0.0, 0.0, 0.0),
+        subvolumes=(
+            SubVolume(name="cell", type="analytic", expression=f"{d2} < {r2}"),
+            SubVolume(name="ec", type="analytic", expression=f"{d2} > {r2}"),
+        ),
+        surfaces=(SurfaceClass(name="pm", inside="cell", outside="ec"),),
+    )
+
+
+def test_2d_teeth_finer_than_the_grid_leave_no_sub_resolution_membrane_segment() -> None:
+    """The 35-tooth cell's crests (radius 34 nm) and valleys (59 nm) are finer than the marching grid. Without
+    ADR 016 decision 7 they left membrane segments of ~0.07 h and cells of ~2e-5 beside them at h = 0.1
+    (measured); with it no membrane segment is far below h, and the area stays within the realization's
+    usual fidelity of the analytic one."""
+    h = 0.1
+    geom = realize(_toothed_cell(35), h=h)
+
+    pm = geom.mesh_of("pm")
+    x, segments = pm.geometry.x, pm.geometry.dofmap
+    lengths = np.linalg.norm(x[segments[:, 0]] - x[segments[:, 1]], axis=1)
+    assert lengths.min() > 0.2 * h  # 0.23 h measured (Netgen may split a kept segment unevenly)
+
+    parent = geom.parent_mesh
+    assert parent is not None
+    xp, cells = parent.geometry.x[:, :2], parent.geometry.dofmap
+    areas = 0.5 * np.abs(np.cross(xp[cells[:, 1]] - xp[cells[:, 0]], xp[cells[:, 2]] - xp[cells[:, 0]]))
+    assert areas.min() > 1e-4  # 3.2e-4 measured; 2.4e-5 without the fix
+
+    exact = math.pi * (6.25 + 1.0 + 0.08)  # ½ ∫ r² dθ
+    assert _measure(geom, "cell") == pytest.approx(exact, rel=1e-3)  # -7.0e-4 measured (-6.6e-4 without)

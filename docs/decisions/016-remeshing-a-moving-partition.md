@@ -220,6 +220,9 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
 
    *Recommendation: yes, as its own change to `realize._netgen_box_with_contours`*, with the realization tests
    and area fidelity on curved shapes.
+   *Built (2026-11-11):* `realize._drop_short_segments`. Measured on the 35-tooth cell realized directly at
+   h = 0.04, the smallest cell went from 2.0e-6 to 4.1e-5 (20×; the 85× above compares against the spike's
+   simtask recast, whose "before" was smaller), and the area moved by +1e-5 relative.
    - Measured on the 35-tooth cell at h = 0.04: area changed by +0.0009 %, membrane length by −0.06 %,
      the shortest membrane segment went from 9.1e-4 to 8.5e-3, and the smallest cell from 4.8e-7 to 4.1e-5
      (85× larger).

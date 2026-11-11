@@ -633,6 +633,12 @@ def _netgen_box_with_contours(
         verts = approximate_polygon(contour, tolerance=0.01 * h)
         if len(verts) > 1 and np.allclose(verts[0], verts[-1]):
             verts = verts[:-1]
+        # Marching squares leaves arbitrarily short segments where a contour passes near a grid node, and
+        # the tight simplification keeps them where the shape is finer than the grid (a sharp tooth's crest
+        # or valley): segments of ~1e-3 h that force cells of ~1e-6 h² beside them, which the first move of
+        # a moving membrane inverts. Detail below h/4 is below the mesh's resolution anyway (ADR 016
+        # decision 7: +0.0009 % area on moving_bleb's 35-tooth cell, its smallest cell 85x larger).
+        verts = _drop_short_segments(verts, 0.25 * h)
         if len(verts) < 3:
             raise RealizationError(f"a contour of {name!r} degenerated to {len(verts)} vertices")
         if _signed_area(verts) < 0.0:
@@ -666,6 +672,20 @@ def _netgen_box_with_contours(
     cells = np.array([[v.nr - 1 for v in el.vertices] for el in ngmesh.Elements2D()], dtype=np.int64)
     material = np.array([el.index for el in ngmesh.Elements2D()], dtype=np.int32)
     return points, cells, material
+
+
+def _drop_short_segments(verts: NDArray[np.float64], min_length: float) -> NDArray[np.float64]:
+    """Drop each vertex closer than ``min_length`` to the last one kept, around a closed polygon given
+    without its repeated end vertex (so the closing segment is checked too). A polygon whose every
+    vertex is that close stays at three vertices or fewer, for the caller's degeneracy check."""
+
+    keep = [verts[0]]
+    for p in verts[1:]:
+        if float(np.linalg.norm(p - keep[-1])) >= min_length:
+            keep.append(p)
+    while len(keep) > 3 and float(np.linalg.norm(keep[-1] - keep[0])) < min_length:
+        keep.pop()
+    return np.asarray(keep)
 
 
 def _signed_area(poly: NDArray[np.float64]) -> float:
