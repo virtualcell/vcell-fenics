@@ -145,6 +145,7 @@ class MultiCompartmentGeometry:
     membranes: dict[str, MembranePart]
     region_tags: dict[str, int]
     sizes: dict[str, float] = field(default_factory=dict)
+    h: float | None = None  # the mesh size it was realized at (the contact stop's scale, ADR 016 decision 5)
 
     def mesh_of(self, subdomain: str) -> Mesh:
         if subdomain in self.compartments:
@@ -243,6 +244,7 @@ def realize_multi_compartment(
         compartments=parts,
         membranes=membranes,
         region_tags=dict(tagging.region_tags),
+        h=h,
     )
     geometry.sizes = _measures(geometry, tagging.surface_tags)
     return geometry

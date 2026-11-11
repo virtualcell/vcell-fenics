@@ -308,12 +308,68 @@ def test_a_nonlinear_bulk_reaction_keeps_its_pool_while_the_membrane_moves() -> 
 
 
 def test_a_motion_that_tangles_the_partition_stops_the_run() -> None:
-    # the membrane swells past the fixed box: the cells between them turn inside out, which an assembled
-    # |det J| volume cannot show; with no remeshing (ADR 014 decision 6) the run must stop, not continue
+    # a fast rigid rotation of the membrane shears the outside compartment against the fixed box until its cells
+    # turn inside out, which an assembled |det J| volume cannot show: the run must stop, not continue (the front
+    # comes near nothing, so it is the orientation check that stops it, not the contact stop)
     from vcell_fenics.backend.discrete import MeshQualityError
 
     with pytest.raises(MeshQualityError, match="inverted or collapsed"):
-        _run("2.0 * geom.normal", {"u": ("cyto", "1.0", "1.0"), "rho": ("pm", "0.1", "1.0")}, h=0.12, strides=10)
+        _run("20.0 * [-geom.x[1], geom.x[0]]", {"u": ("cyto", "1.0", "1.0")}, h=0.12, strides=10)
+
+
+def test_a_front_that_reaches_the_box_stops_with_a_contact_error() -> None:
+    # ADR 016 decision 5: the membrane swells toward the box (r = 0.5 + 2t, the box at 1); its gap falls below
+    # h/4 = 0.03 near t = 0.24, before any cell inverts, and the run stops naming the contact
+    from vcell_fenics.backend.moving_partition import FrontContact
+
+    with pytest.raises(FrontContact, match=r"at t = 0\.2\d*: the moving membrane 'pm' has come within .* of the box"):
+        _run("2.0 * geom.normal", {"u": ("cyto", "1.0", "1.0"), "rho": ("pm", "0.1", "1.0")}, h=0.12, strides=20)
+
+
+def _notched(width: float, spacing: float = 0.05) -> np.ndarray:
+    """A closed polyline: the rectangle [0, 2] x [0, 1] with a slot of `width` cut down from its top to y = 0.2,
+    sampled every `spacing`. The slot's walls face each other `width` apart, but ~1.6 apart along the front."""
+    corners = [
+        (0, 0),
+        (2, 0),
+        (2, 1),
+        (1 + width / 2, 1),
+        (1 + width / 2, 0.2),
+        (1 - width / 2, 0.2),
+        (1 - width / 2, 1),
+        (0, 1),
+    ]
+    points = []
+    for (x0, y0), (x1, y1) in zip(corners, corners[1:] + corners[:1], strict=True):
+        n = max(1, round(math.hypot(x1 - x0, y1 - y0) / spacing))
+        points += [(x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(n)]
+    return np.array(points, dtype=np.float64)
+
+
+def test_the_contact_check_sees_a_front_closing_on_itself_but_not_its_own_corners() -> None:
+    from vcell_fenics.backend.moving_partition import FrontContact, _ContactCheck
+
+    h, box = 0.1, (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+    check = _ContactCheck(_notched(0.5), {}, box, h)
+    assert check.initial_gap == pytest.approx(0.5 * h)  # nothing nearer than h/2: the corners are excluded
+    assert check.threshold == pytest.approx(0.25 * h)
+    check.check(_notched(0.03), "t = 1", "pm")  # a 0.03 slot is still above h/4
+    with pytest.raises(FrontContact, match=r"within 0\.02 of itself"):
+        check.check(_notched(0.02), "t = 2", "pm")
+
+
+def test_the_contact_check_sees_another_membrane_and_honours_a_narrow_gap_as_built() -> None:
+    from vcell_fenics.backend.moving_partition import FrontContact, _ContactCheck
+
+    h, box = 0.1, (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+    front = _notched(1.0)
+    wall = (np.array([[0.0, -0.04]]), np.array([[2.0, -0.04]]))  # a straight membrane 0.04 below the front
+    check = _ContactCheck(front, {"er": wall}, box, h)
+    assert check.initial_gap == pytest.approx(0.04)  # narrower than h/2 as built
+    assert check.threshold == pytest.approx(0.02)  # so the stop waits for half of it, not h/4
+    check.check(front + np.array([0.0, -0.015]), "t = 1", "pm")  # 0.025 apart: closer than h/4, but not than 0.02
+    with pytest.raises(FrontContact, match="of membrane 'er'"):
+        check.check(front + np.array([0.0, -0.025]), "t = 2", "pm")
 
 
 def test_region_sizes_follow_the_moving_partition() -> None:

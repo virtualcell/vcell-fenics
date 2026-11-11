@@ -423,6 +423,19 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-11** — **The contact stop on a moving partition (ADR 016 decision 5).**
+  - **What:** after every move, the moving membrane's gap to itself (parts more than `h` apart along it), to the
+    box and to every other membrane is measured exactly between the polylines; below `δ = min(h/4, g₀/2)`, with
+    `g₀` the narrowest such gap as built, the run stops with `FrontContact` naming what it touched and when. 2D,
+    one process. It is checked before the cells' orientation, so a front pressed into the box reports contact,
+    not a tangle.
+  - **Verified** (`tests/test_moving_partition.py`): a membrane swelling into the box stops at t ≈ 0.2 with the
+    contact error; a fast rotation still stops on tangled cells; a slotted front closing to 0.02 at h = 0.1 is
+    caught while its own corners are not; a membrane built 0.04 from another waits for half that gap. The
+    moving-partition, exact-solution and CLI moving-boundary tests pass unchanged.
+  - **Not verified here:** moving_bleb's image geometry, which ADR 016's spike saw reach contact at t ≈ 1.75; its
+    simtask was lost with the spike's scratchpad.
+
 - **2026-11-11** — **No traced membrane segment far below the mesh's resolution (ADR 016 decision 7).**
   - **What:** the analytic realizer (`realize._netgen_box_with_contours`) drops each traced contour vertex closer
     than `h/4` to the last one kept, after the Douglas–Peucker simplification. Shapes finer than the marching
