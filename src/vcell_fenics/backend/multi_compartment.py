@@ -65,6 +65,7 @@ from ufl.algorithms import expand_derivatives
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.discrete import MeshQualityError
 from vcell_fenics.backend.equations import as_field_equation
 from vcell_fenics.backend.interface_coupled import (
     _RESERVOIR_PENALTY,
@@ -178,6 +179,20 @@ def realize_multi_compartment(
         face_names = _FACE_NAMES_2D
     else:
         raise NotImplementedError(f"multi-compartment realization of a {description.dim}D geometry is not implemented")
+    return partition_geometry(description, parent, tagging, face_names, compartments=compartments, comm=comm)
+
+
+def partition_geometry(
+    description: GeometryDescription,
+    parent: Mesh,
+    tagging: Any,
+    face_names: tuple[str, ...],
+    *,
+    compartments: Collection[str] | None = None,
+    comm: MPI.Comm = MPI.COMM_WORLD,
+) -> MultiCompartmentGeometry:
+    """The multi-compartment geometry of a region-tagged parent mesh: facet tags split by compartment, the
+    submeshes and maps (realization's tail, shared with the remesh, ADR 016)."""
 
     tdim = parent.topology.dim
     parent.topology.create_connectivity(tdim - 1, tdim)
@@ -278,6 +293,11 @@ class MultiCompartmentResult:
     subdomain_of: dict[str, str]
     steps: int
     final_time: float
+    # (spike, ADR 016) set when a mesh move would have tangled: the run stopped at `final_time` on the last valid
+    # mesh, with the half-move still to do (its end time and length), or None if the tangle came on a first half
+    pending_move: tuple[float, float] | None = None
+    needs_remesh: bool = False
+    last_dt: float | None = None
 
 
 def integrate_multi_compartment(
@@ -295,6 +315,10 @@ def integrate_multi_compartment(
     on_progress: Callable[[float], None] | None = None,
     motion_membrane: str | None = None,
     stride_ends: Sequence[float] = (),
+    t_start: float = 0.0,
+    initial: Callable[[str, fem.FunctionSpace], fem.Function] | None = None,
+    pending_move: tuple[float, float] | None = None,
+    remesh_on_tangle: bool = False,
 ) -> MultiCompartmentResult:
     """Integrate ``md`` on ``geometry`` to ``t_final`` (the module docstring). ``on_output(t, fields)`` receives
     every species and region variable by name (snapshots valid for the call) at each of ``output_times``,
@@ -629,6 +653,17 @@ def integrate_multi_compartment(
             _interpolate_ic(states[blk], group[0], ic_ctx)
     for r, eq in enumerate(region_eqs):
         states[n_fields + r].x.array[:] = _region_initial(eq, geometry, ctx, cells, facets)
+    if initial is not None:  # a restart after a remesh (spike, ADR 016): the transferred fields, per species
+        for name in names:
+            blk, j = where[name]
+            if blk >= n_fields:
+                continue
+            given = initial(name, views.function(name).function_space)
+            if j is None:
+                states[blk].x.array[:] = given.x.array
+            else:
+                states[blk].x.array[views._scalar[name][1]] = given.x.array
+            states[blk].x.scatter_forward()
 
     def scatter(x: PETSc.Vec, targets: Sequence[fem.Function]) -> None:
         for k, target in enumerate(targets):
@@ -745,7 +780,15 @@ def integrate_multi_compartment(
                 b = masses[mass_key[k]].createVecLeft()
                 masses[mass_key[k]].mult(states[k].x.petsc_vec, b)
                 moments.append(b)
-            motion.advance(t_move, length)
+            saved = [m.geometry.x.copy() for m, _ in motion._moves]
+            try:
+                motion.advance(t_move, length)
+            except MeshQualityError:  # undo (spike, ADR 016): every mesh back to where it was
+                for (m, _), x in zip(motion._moves, saved, strict=True):
+                    m.geometry.x[:] = x
+                for b in moments:
+                    b.destroy()
+                raise
             for mass in masses.values():
                 mass.destroy()
             masses = assemble_masses()
@@ -773,24 +816,46 @@ def integrate_multi_compartment(
             for k in range(n_fields):
                 state_vec.array[offsets[k] : offsets[k + 1]] = states[k].x.array[: sizes[k]]
 
-        steps, t, dt = 0, 0.0, dt_initial if dt_initial is not None else stride_ends[0] / 10.0
+        steps, t, dt = 0, t_start, dt_initial if dt_initial is not None else (stride_ends[0] - t_start) / 10.0
         recorded = sorted(output_times) if on_output is not None else []
-        if on_output is not None and recorded and recorded[0] <= 0.0:
+        if on_output is not None and recorded and t_start <= 0.0 and recorded[0] <= 0.0:
             on_output(0.0, views.of(states))
-        for t_end in stride_ends:
-            move(0.5 * (t + t_end), 0.5 * (t_end - t))
-            ts = make_ts(t, t_end, min(dt, t_end - t))
-            ts.solve(state_vec)
-            steps += ts.getStepNumber()
-            dt = float(ts.getTimeStep())
-            ts.destroy()
-            move(t_end, 0.5 * (t_end - t))
-            t = t_end
-            if on_progress is not None:
-                on_progress(t)
-            if on_output is not None and any(abs(t - r) <= 1.0e-12 * max(1.0, abs(r)) for r in recorded):
-                scatter(state_vec, states)
-                on_output(t, views.of(states))
+        stopped: tuple[float, tuple[float, float] | None] | None = None
+        try:
+            if pending_move is not None:  # a second half-move left undone before the remesh
+                move(*pending_move)
+                if on_output is not None and any(abs(t - r) <= 1.0e-12 * max(1.0, abs(r)) for r in recorded):
+                    scatter(state_vec, states)
+                    on_output(t, views.of(states))
+            for t_end in stride_ends:
+                try:
+                    move(0.5 * (t + t_end), 0.5 * (t_end - t))
+                except MeshQualityError:
+                    if not remesh_on_tangle:
+                        raise
+                    stopped = (t, None)
+                    break
+                ts = make_ts(t, t_end, min(dt, t_end - t))
+                ts.solve(state_vec)
+                steps += ts.getStepNumber()
+                dt = float(ts.getTimeStep())
+                ts.destroy()
+                try:
+                    move(t_end, 0.5 * (t_end - t))
+                except MeshQualityError:
+                    if not remesh_on_tangle:
+                        raise
+                    stopped = (t_end, (t_end, 0.5 * (t_end - t)))
+                    t = t_end
+                    break
+                t = t_end
+                if on_progress is not None:
+                    on_progress(t)
+                if on_output is not None and any(abs(t - r) <= 1.0e-12 * max(1.0, abs(r)) for r in recorded):
+                    scatter(state_vec, states)
+                    on_output(t, views.of(states))
+        except MeshQualityError:
+            raise  # without remesh_on_tangle, or a pending half-move that tangles a fresh mesh
         scatter(state_vec, states)
         for mass in masses.values():
             mass.destroy()
@@ -800,7 +865,10 @@ def integrate_multi_compartment(
         if operator is not precond:
             operator.destroy()
         final = {name: _copy(f) for name, f in views.of(states).items()}
-        return MultiCompartmentResult(final, subdomain_of, steps, t)
+        result = MultiCompartmentResult(final, subdomain_of, steps, t, last_dt=dt)
+        if stopped is not None:
+            result.final_time, result.pending_move, result.needs_remesh = stopped[0], stopped[1], True
+        return result
 
     ts = make_ts(0.0, t_final, dt_initial if dt_initial is not None else t_final / 1.0e4)
 

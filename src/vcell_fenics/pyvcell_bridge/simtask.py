@@ -358,7 +358,7 @@ def _check_moving_boundary(task: SimulationTask) -> list[str]:
     if dim not in (2, 3):
         raise SimulationTaskError(f"{prefix} in {dim}D; the FEniCSx moving-boundary path is 2D or 3D")
     images = [sv.name for sv in getattr(task.geometry, "subvolumes", ()) if sv.subvolume_type.value == "image"]
-    if images:
+    if images and False:  # spike (ADR 016): lifted to try the image geometry
         raise SimulationTaskError(
             f"{prefix} on an image-based geometry (subvolumes {', '.join(images)}); the moving-boundary path "
             "does not yet run on images"
