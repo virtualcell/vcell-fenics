@@ -14,16 +14,16 @@ boundary skeleton, with every species transferred and every total kept.
 3. **The transfer** (decision 3).
    - A compartment's species: the supermesh L2 projection from the old compartment submesh to the new one
      (`core.supermesh`, libsupermesh). Both meshes cover the same polygon, so its total is kept to the solve's
-     round-off and a linear field is reproduced. A field whose new minimum falls below its old one by more than
-     `1e-8` of its largest magnitude takes the lumped variant, non-negative where it was and exact in total too.
+     round-off and a linear field is reproduced. A field that had no negative values and that the projection
+     would make negative (below `-1e-12` of its largest magnitude) takes the lumped variant instead, non-negative
+     where the old field was and exact in total too (ADR 016 decision 3, as amended 2026-11-11).
      The matrices are built once per compartment and shared by its species.
    - A membrane's species: the new membrane's nodes are the old ones plus points on the old segments, so a kept
      node takes its value by coordinate and an added node interpolates along the old segment it lies on. Values
      and totals are exact.
    - The check: a total that changes by more than `1e-12` of its scale (`∫ |u|`) stops the run.
 
-2D, serial (decision 8). The solver's side (an undo, a restart from transferred fields, the segments) is the next
-stage (decisions 2, 4, 6).
+2D, serial (decision 8). The runner drives it in segments (decisions 2, 4, 6: `runner._run_moving_partition`).
 """
 
 from __future__ import annotations
@@ -50,8 +50,8 @@ Ints = NDArray[np.int64]
 
 # a remeshed total may differ from the old one by this much of the field's scale, ∫ |u| (round-off)
 TOTAL_TOLERANCE = 1.0e-12
-# a projected field is "undershooting" when its minimum falls this far (relative to max |u|) below the old one
-UNDERSHOOT = 1.0e-8
+# a projected field "goes negative" below this (relative to max |u|): a smaller negative is round-off
+NEGATIVE = 1.0e-12
 # a new membrane node coincides with an old one, or lies on an old segment, to this (relative to the box)
 _ON_OLD = 1.0e-9
 
@@ -184,7 +184,7 @@ def transfer_compartment(
     fields: Mapping[str, fem.Function], V_new: fem.FunctionSpace
 ) -> tuple[dict[str, fem.Function], dict[str, str]]:
     """Every species of one compartment, from its old submesh's P1 space to `V_new` (decision 3): the L2
-    projection, or the lumped variant for a field it would make undershoot. Returns the new fields and, per
+    projection, or the lumped variant for a non-negative field it would make negative. Returns the new fields and, per
     field, which transfer it took ("projection" or "lumped")."""
 
     if not fields:
@@ -203,7 +203,10 @@ def transfer_compartment(
         c_new = project(old_x, old_cells, c_old, new_x, new_cells, mixed=mixed, mass=new_mass)
         kind = "projection"
         largest = float(np.abs(c_old).max()) if c_old.size else 0.0
-        if c_new.size and c_new.min() < c_old.min() - UNDERSHOOT * largest:
+        # positivity, not undershoot: a projection undershoots a smooth field's minimum by its interpolation error
+        # (1e-5 to 2e-3 of the maximum, measured), which is no reason to give up its second order; a negative
+        # concentration where there was none is
+        if c_new.size and c_old.min() >= 0.0 and c_new.min() < -NEGATIVE * largest:
             c_new = project(old_x, old_cells, c_old, new_x, new_cells, mixed=mixed, mass=new_mass, lumped=True)
             kind = "lumped"
         _check_total(name, _scale(old_mass, c_old), _scale(new_mass, c_new))

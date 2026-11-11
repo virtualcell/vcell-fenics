@@ -155,9 +155,14 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
      - Each node's moment is not kept, and the field is re-projected everywhere at each remesh. The error is
        about the fields' interpolation error at that mesh.
      - `M` and `B` are built once per compartment per remesh and applied to every species on it.
-   - **Where the projection would add undershoot:** a field whose new minimum falls below its old minimum by
-     more than `10⁻⁸` of its maximum takes the lumped variant, per field. The comparison is with the old
-     minimum, since Galerkin fields already undershoot by about −1e-2 on steep fronts (ADR 015 decision 3).
+   - **Where the projection would make a field negative** (*amended 2026-11-11, Jim:* positivity only): a field
+     that had no negative values, and that the projection would make negative below `−10⁻¹²` of its maximum,
+     takes the lumped variant, per field. A field already negative somewhere keeps the projection.
+     - *The rule first accepted* compared with the old minimum (a new minimum more than `10⁻⁸` of the maximum
+       below it). Measured once built: a projection undershoots smooth fields (`1 + x²`, a Gaussian,
+       `1 + cos 3x`, remeshed unmoved at h = 0.12 and 0.06) by 1e-5 to 2e-3 of their maximum, its ordinary
+       interpolation error, so most fields took the first-order lumped transfer at most remeshes, which
+       defeated the reason for preferring the projection. Positivity is what the kinetics need.
      - The lumped variant is `uᵢ = (B u_old)ᵢ / mᵢ`, with `mᵢ` the new lumped node masses (the same `B`).
      - `B` is entrywise non-negative, so it is non-negative where the old field is.
      - Its total is exact too, since `Σᵢ (B u_old)ᵢ = ∫ u_old`.
