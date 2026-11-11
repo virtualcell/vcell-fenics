@@ -275,6 +275,12 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
    - Licence: LGPL-2.1 (Context), called through its shared library; by ADR 008's reasoning, the same tier as
      Netgen (*inferred from ADR 008; not a ruling*).
 
+   *Built (2026-11-11):* `libsupermesh` 2026.3 under `[tool.pixi.pypi-dependencies]`, with `fortran-compiler`,
+   `cxx-compiler`, `cmake` and `ninja` from conda-forge; the kernel in `core/supermesh.py`, compiled with cffi
+   into `$XDG_CACHE_HOME/vcell-fenics`, warmed and checked in the image build. On osx-arm64 pixi built it in
+   about 30 s. Adding the compilers re-solved the toolchain: osx-arm64's clang went from 22 to 21 and
+   linux-aarch64's gcc from 16.1 to 15.3, which DOLFINx's JIT also uses.
+
    *Recommendation: yes.* Alternatives:
    - **A conda-forge recipe for libsupermesh** (it has none): cleaner for the image, but a recipe to write and
      maintain; worth doing if the source build proves fragile.

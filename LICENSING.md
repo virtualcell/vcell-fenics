@@ -31,6 +31,11 @@ are permissive or weak-copyleft (LGPL):
 - **FEniCSx stack** — DOLFINx, UFL, FFCx, Basix: **LGPL-3.0**. Used by dynamic import / linkage.
 - **Netgen / pyngcore**: **LGPL-2.1**. The body-fitted meshing engine behind `backend/realize.py`
   (the production geometry path) and the ALE remesher (`core/region_remesh_netgen.py`).
+- **libsupermesh**: **LGPL-2.1** (its `COPYING`; its PyPI classifier says "LGPLv2 or later"). The supermesh
+  behind the conservative transfer (`core/supermesh.py`, ADR 016), built from its PyPI sdist into the
+  environment as a shared library. Our transfer kernel is compiled at run time and links it dynamically.
+  Building it brings conda-forge's Fortran and C++ compilers into the environment, beside the C toolchain
+  DOLFINx's JIT already needs; GCC's runtime libraries carry the GCC Runtime Library Exception.
 - **PETSc / petsc4py**: BSD-2-Clause. **NumPy, SciPy**: BSD-3-Clause. **pyvista**: MIT.
   **scikit-image**: BSD-3-Clause. **pydantic**: MIT. **meshio**: MIT. **matplotlib**: PSF/BSD-compatible.
 
