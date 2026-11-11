@@ -423,6 +423,19 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-11** — **No traced membrane segment far below the mesh's resolution (ADR 016 decision 7).**
+  - **What:** the analytic realizer (`realize._netgen_box_with_contours`) drops each traced contour vertex closer
+    than `h/4` to the last one kept, after the Douglas–Peucker simplification. Shapes finer than the marching
+    grid (a sharp tooth's crest or valley) had left segments of ~1e-3–1e-2 `h` and tiny cells beside them, which
+    a moving membrane's first move inverts.
+  - **Measured** on moving_bleb's 35-tooth analytic cell (realized directly, not from the simtask): at h = 0.04
+    the shortest membrane segment 1.9e-3 → 8.5e-3 and the smallest cell 2.0e-6 → 4.1e-5 (20×); the cell's area
+    +8.8e-6 → +1.8e-5 relative to the analytic one. At h = 0.1: smallest cell 2.4e-5 → 3.2e-4. ADR 016 quotes
+    9.1e-4 and 4.8e-7 for the "before" from the spike's simtask recast.
+  - **Verified:** `tests/test_realize.py` (the helper, and the 35-tooth cell at h = 0.1, which fails without the
+    fix); the realization suites pass unchanged.
+  - **Next (ADR 016 staging):** the contact stop (decision 5), then libsupermesh in the environment (decision 9).
+
 - **2026-11-10** — **`region_size` on a moving partition.**
   - **What:** the multi-compartment solver's moving partition no longer refuses `region_size(...)` (VCell's
     `vcRegionVolume` / `vcRegionArea`, e.g. `Size_pm`). Each size is a Constant per mesh, re-measured after every
