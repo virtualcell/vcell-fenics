@@ -198,6 +198,9 @@ moving-boundary math").
    inverted a tetrahedron near t = 2 unseen. There the move is now undone and the step retried once on a
    fresh mesh (`MeshTangled`).
 
+   *The promised stop for a membrane approaching the box or another membrane* is built with ADR 016 decision 5
+   (2026-11-11): `FrontContact`, in 2D, for the front approaching itself too.
+
    *Second stage amended by ADR 016 (accepted 2026-11-11):* the whole partition is remeshed from its own
    boundary skeleton, each region's polygon kept exactly, with compartments projected by libsupermesh and
    membranes transferred exactly; a front that closes on itself or cannot advance stops the run. Still 2D

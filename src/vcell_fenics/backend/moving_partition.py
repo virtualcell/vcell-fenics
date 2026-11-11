@@ -14,8 +14,9 @@ The multi-compartment solver keeps every compartment and membrane on one parent 
    every other membrane held fixed (a membrane without a velocity is static, as in VCell). Every mesh — the
    parent, each compartment's and each membrane's submesh — then takes the same displacement at its coincident
    nodes, so the topological `EntityMap`s stay valid.
-4. **The check.** The moved parent must keep every cell's orientation (`CellOrientation`): a tangled mesh
-   stops the run.
+4. **The checks.** The front must not come into contact with itself, the box or another membrane
+   (`FrontContact`, 2D: ADR 016 decision 5), and the moved parent must keep every cell's orientation
+   (`CellOrientation`): either stops the run.
 
 The solver carries each species' nodal moments through every move (ADR 015) and reads `parent_velocity` (the
 mesh velocity `w` in the bulk, the transport relative to the mesh `−u (c − w)·∇q`), `membrane_velocity` (the
@@ -25,7 +26,7 @@ nodes' velocity).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import numpy as np
 import ufl
@@ -51,6 +52,109 @@ from vcell_fenics.formalism.schema import MathDescription
 
 # a node of one mesh and its twin on another coincide to round-off (the submeshes copy the parent's geometry)
 _COINCIDENT = 1.0e-9
+
+
+class FrontContact(MeshQualityError):
+    """The moving membrane has come into contact with itself, the box or another membrane (ADR 016 decision 5).
+    A remesh keeps every region's topology, so it cannot carry a run past contact: the run stops."""
+
+
+def _point_segment_distances(points: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """The distance from each `points[k]` to the segment `a[k]`–`b[k]`."""
+    ab = b - a
+    length2 = np.einsum("ij,ij->i", ab, ab)
+    t = np.clip(np.einsum("ij,ij->i", points - a, ab) / np.where(length2 > 0.0, length2, 1.0), 0.0, 1.0)
+    closest = a + t[:, None] * ab
+    distances: np.ndarray = np.linalg.norm(points - closest, axis=1)
+    return distances
+
+
+def _nearest_segment_gap(
+    points: np.ndarray,
+    a: np.ndarray,
+    b: np.ndarray,
+    cap: float,
+    exclude: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None,
+) -> float:
+    """The smallest distance from any of `points` to any segment `a[j]`–`b[j]`, or `cap` if none is nearer.
+    `exclude(i, j)` (vectorized over candidate pairs) drops pairs. Between non-crossing segments the smallest
+    distance is attained at an endpoint, so checking every point of one set against the other set's segments,
+    both ways, gives the polylines' gap."""
+    if len(points) == 0 or len(a) == 0:
+        return cap
+    midpoints = 0.5 * (a + b)
+    half = 0.5 * float(np.max(np.linalg.norm(b - a, axis=1)))
+    tree = cKDTree(midpoints)
+    near = tree.query_ball_point(points, cap + half)
+    i = np.repeat(np.arange(len(points)), [len(n) for n in near])
+    if i.size == 0:
+        return cap
+    j = np.concatenate([np.asarray(n, dtype=np.int64) for n in near])
+    if exclude is not None:
+        keep = ~exclude(i, j)
+        i, j = i[keep], j[keep]
+        if i.size == 0:
+            return cap
+    return min(cap, float(_point_segment_distances(points[i], a[j], b[j]).min()))
+
+
+class _ContactCheck:
+    """ADR 016 decision 5, in 2D: after each move, the moving membrane's gap to itself, to the box and to every
+    other membrane. Two parts of the front count as separate only if they lie more than `h` apart along it. The
+    run stops when a gap falls below `delta = min(h/4, g0/2)`, with `g0` the smallest such gap as built, so a
+    geometry built with a narrow gap stops only close to true contact. Gaps are measured exactly between the
+    polylines (every vertex against every segment, both ways), and only up to `h/2`, which bounds `delta`."""
+
+    def __init__(
+        self,
+        front: np.ndarray,
+        others: Mapping[str, tuple[np.ndarray, np.ndarray]],
+        box: tuple[np.ndarray, np.ndarray],
+        h: float,
+    ) -> None:
+        self._others = others
+        self._box = box
+        self._h = h
+        self._cap = 0.5 * h
+        g0, _ = self.gap(front)
+        self.initial_gap = g0
+        self.threshold = min(0.25 * h, 0.5 * g0)
+
+    def gap(self, front: np.ndarray) -> tuple[float, str]:
+        """The front's smallest gap (at most `h/2`) and what it is to."""
+        cap, h = self._cap, self._h
+        a, b = front, np.roll(front, -1, axis=0)
+        lengths = np.linalg.norm(b - a, axis=1)
+        s = np.concatenate([[0.0], np.cumsum(lengths)[:-1]])
+        perimeter = float(lengths.sum())
+
+        def along(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+            d = np.abs(x - y)
+            result: np.ndarray = np.minimum(d, perimeter - d)
+            return result
+
+        def same_part(i: np.ndarray, j: np.ndarray) -> np.ndarray:
+            ends = np.minimum(along(s[i], s[j]), along(s[i], s[(j + 1) % len(s)]))
+            result: np.ndarray = ends <= h
+            return result
+
+        gaps = [(_nearest_segment_gap(a, a, b, cap, same_part), "itself")]
+        lo, hi = self._box
+        gaps.append((min(cap, float(np.min(np.minimum(front - lo, hi - front)))), "the box"))
+        for name, (oa, ob) in self._others.items():
+            g = min(_nearest_segment_gap(a, oa, ob, cap), _nearest_segment_gap(oa, a, b, cap))
+            gaps.append((g, f"membrane {name!r}"))
+        return min(gaps, key=lambda item: item[0])
+
+    def check(self, front: np.ndarray, where: str, membrane: str) -> None:
+        gap, what = self.gap(front)
+        if gap < self.threshold:
+            raise FrontContact(
+                f"{where}: the moving membrane {membrane!r} has come within {gap:.3g} of {what} (the contact "
+                f"threshold is {self.threshold:.3g} = min(h/4, half its narrowest gap as built, "
+                f"{self.initial_gap:.3g}), at h = {self._h:g}). A remesh cannot carry a run past contact (vcell-fenics "
+                f"ADR 016 decision 5); the prescribed motion brings the membrane into contact here."
+            )
 
 
 def _matching(points: np.ndarray, onto: np.ndarray, what: str) -> np.ndarray:
@@ -188,6 +292,22 @@ class MovingPartition:
             *(m.mesh for m in geometry.membranes.values()),
         ]
         self._moves = [(m, _matching(m.geometry.x[:, :gdim], parent_xyz, "a submesh")) for m in meshes]
+        # The contact stop (ADR 016 decision 5), in 2D on one process, where the front is an ordered loop.
+        self._membrane = membrane
+        self._contact: _ContactCheck | None = None
+        if self._loop is not None:
+            front = mem_xyz[self._loop]
+            h_mesh = geometry.h
+            if h_mesh is None:  # a geometry built by hand: the front's own spacing stands in for h
+                h_mesh = float(np.median(np.linalg.norm(np.roll(front, -1, axis=0) - front, axis=1)))
+            others = {}
+            for name, m in geometry.membranes.items():
+                if name == membrane:
+                    continue
+                x, segments = m.mesh.geometry.x[:, :gdim], np.asarray(m.mesh.geometry.dofmap)
+                others[name] = (x[segments[:, 0]].copy(), x[segments[:, 1]].copy())
+            box = (parent_xyz.min(axis=0), parent_xyz.max(axis=0))
+            self._contact = _ContactCheck(front, others, box, h_mesh)
         # The moved parent's validity after every stride (ADR 014 decision 6: no remeshing yet, so a mesh the
         # motion has tangled or badly distorted stops the run rather than being solved on).
         self._orientation = CellOrientation(parent)
@@ -223,6 +343,9 @@ class MovingPartition:
         for mesh, index in self._moves:
             mesh.geometry.x[:, :gdim] += parent_displacement[index]
         where = f"the moving partition at t = {t_end:g}"
+        if self._contact is not None and self._loop is not None:  # before the orientation: contact is the cause
+            moved_front = self.membrane_velocity.function_space.tabulate_dof_coordinates()[:, :gdim][self._loop]
+            self._contact.check(moved_front, where, self._membrane)
         self._growth = self._orientation.check(where)
         if self._growth > _MAX_CELL_RATIO_GROWTH:
             raise MeshQualityError(

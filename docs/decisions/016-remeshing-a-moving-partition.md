@@ -197,6 +197,11 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
 
    *Recommendation: yes.*
 
+   *Built (2026-11-11):* `moving_partition.FrontContact`, checked after every move before the cells' orientation,
+   in 2D on one process (where the front is an ordered loop; 3D needs its own definition, decision 8). Gaps are
+   measured exactly between polylines, every vertex against every segment both ways, up to `h/2`; `h` is the
+   realization's mesh size, recorded on `MultiCompartmentGeometry`.
+
    **The spike's answer: moving_bleb reaches contact at t ≈ 1.75** (Spike results). The remesh carries its mesh
    to that point; the front's own geometry stops it there.
 
