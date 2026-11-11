@@ -134,6 +134,11 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
    *Recommendation: yes*, the single-mesh path's limit and undo-and-retry.
    - *A known gap:* pure shear changes no cell's size, so only the undo catches it.
 
+   *Built (2026-11-11):* `MovingPartition.advance` restores every mesh's stored coordinates and raises
+   `MeshTangled` on an inverted cell or growth past #228's limit (contact is not undone: it stops);
+   `MovingPartition.degraded` is the per-cell trigger, checked before each half-move; the solver returns with
+   `needs_remesh` (and any pending second half-move) when `stop_for_remesh` is set.
+
 3. **The transfer: each compartment's total exact, by projection; each membrane exact.**
    - **A compartment's species:** the supermesh L2 projection from the old compartment submesh to the new one.
      - Both triangulate the same polygon (decision 1), so the compartment's total is kept with no rescale, exact
@@ -197,6 +202,11 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
 
    *Recommendation: yes.*
 
+   *Built (2026-11-11):* `runner._run_moving_partition` loops integrate → `remesh_partition` → transfer →
+   `BundleRecorder.start_segment` → integrate from the stop's time with the transferred fields, the step size
+   and any pending half-move (`integrate_multi_compartment`'s `t_start`, `initial`, `pending_move`). In 2D on one
+   process; elsewhere a tangle stops the run, now as a named run failure with the time, not a crash.
+
 5. **Contact is a stop.** A remesh keeps every region's topology, so it cannot let a notch vanish.
    - If, after a move, the gap between two parts of the front falls below `δ = min(h/4, g₀/2)`, the run stops
      with a named error and the time. "Two parts" means points more than `h` apart along the front.
@@ -225,6 +235,9 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
 
    *Recommendation: yes.* The spike remeshed 20–40 times in place without taking a step before hitting its
    limit (Spike results).
+
+   *Built (2026-11-11):* `moving_partition.FrontCannotAdvance`, raised by the solver when a geometry it was handed
+   after a remesh tangles on its first move.
 
 7. **Realization: no traced membrane segment far below the mesh's resolution.** Marching squares on an `h`-grid
    gives arbitrarily short segments wherever a contour passes near a grid node. The simplification

@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import sys
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from itertools import pairwise
@@ -624,19 +624,109 @@ def _run_multi_compartment(
             progress=t / options.t_final,
         )
 
-    result = integrate_multi_compartment(
-        model.math,
-        geometry,
-        t_final=options.t_final,
-        rtol=options.rtol,
-        atol=options.atol,
-        output_times=options.output_times,
-        on_output=on_output,
-        on_progress=status.step,
-        motion_membrane=motion_membrane,
-        stride_ends=_stride_ends(options) if motion_membrane is not None else (),
+    if motion_membrane is None:
+        result = integrate_multi_compartment(
+            model.math,
+            geometry,
+            t_final=options.t_final,
+            rtol=options.rtol,
+            atol=options.atol,
+            output_times=options.output_times,
+            on_output=on_output,
+            on_progress=status.step,
+        )
+        return cells, int(result.steps)
+    return cells, _run_moving_partition(
+        model, options, recorder, status, geometry, wanted, motion_membrane, variables, on_output, comm
     )
-    return cells, int(result.steps)
+
+
+def _run_moving_partition(
+    model: ModelInput,
+    options: RunOptions,
+    recorder: BundleRecorder,
+    status: _PhasedProgress,
+    geometry: Any,
+    compartments: Collection[str],
+    motion_membrane: str,
+    variables: Mapping[str, list[str]],
+    on_output: Callable[[float, dict[str, Any]], None],
+    comm: MPI.Comm,
+) -> int:
+    """A moving partition in segments (vcell-fenics ADR 016 decision 4): integrate until the mesh needs a remesh
+    (a cell shrunk below a quarter of its as-built area, or a move that would tangle it, undone), remesh the whole
+    partition from its own skeleton, transfer every species with its total kept, start a new bundle segment and
+    continue, carrying the step size and any half-move left undone. In 2D on one process; elsewhere (3D, MPI) a
+    tangle stops the run as before. Returns the integrator's steps."""
+
+    from dolfinx import fem
+
+    from vcell_fenics.backend.discrete import MeshQualityError
+    from vcell_fenics.backend.multi_compartment import integrate_multi_compartment
+    from vcell_fenics.backend.partition_remesh import (
+        PartitionRemeshError,
+        remesh_partition,
+        transfer_compartment,
+        transfer_membrane,
+    )
+
+    can_remesh = model.geometry.dim == 2 and comm.size == 1
+    domains = list(recorder.domain_names())
+    stride_ends = _stride_ends(options)
+    t, steps, remeshes = 0.0, 0, 0
+    initial: dict[str, Any] | None = None
+    pending: tuple[float, float] | None = None
+    dt: float | None = None
+    while True:
+        try:
+            result = integrate_multi_compartment(
+                model.math,
+                geometry,
+                t_final=options.t_final,
+                dt_initial=dt,
+                rtol=options.rtol,
+                atol=options.atol,
+                output_times=options.output_times,
+                on_output=on_output,
+                on_progress=status.step,
+                motion_membrane=motion_membrane,
+                stride_ends=[e for e in stride_ends if e > t + 1.0e-12 * max(1.0, abs(t))],
+                t_start=t,
+                initial=initial,
+                pending_move=pending,
+                stop_for_remesh=can_remesh,
+            )
+        except MeshQualityError as error:
+            raise RunError(f"the moving partition failed: {error}") from error
+        steps += int(result.steps)
+        if not result.needs_remesh:
+            return steps
+        t, pending, dt = result.final_time, result.pending_move, result.last_dt
+        try:
+            new = remesh_partition(geometry, model.geometry, h=options.h, compartments=compartments, comm=comm)
+            initial = {}
+            kinds: dict[str, str] = {}
+            for subdomain, names in variables.items():
+                old_fields = {name: result.fields[name] for name in names}
+                if subdomain in new.compartments:
+                    V = fem.functionspace(new.compartments[subdomain].mesh, ("Lagrange", 1))
+                    moved, kind = transfer_compartment(old_fields, V)
+                    initial |= moved
+                    kinds |= kind
+                else:
+                    V = fem.functionspace(new.membranes[subdomain].mesh, ("Lagrange", 1))
+                    initial |= transfer_membrane(old_fields, V)
+        except PartitionRemeshError as error:
+            raise RunError(f"remeshing the moving partition at t = {t:g} failed: {error}") from error
+        remeshes += 1
+        lumped = sorted(name for name, kind in kinds.items() if kind == "lumped")
+        log(
+            f"remeshed the moving partition at t = {t:g} ({remeshes}): {mesh_cell_count(new.parent_mesh)} cells"
+            + (f"; lumped transfer for {', '.join(lumped)}" if lumped else "")
+            + ("; the stride's second half-move follows on the new mesh" if pending is not None else "")
+        )
+        recorder.start_segment({name: (new.mesh_of(name), [None] * len(variables.get(name, []))) for name in domains})
+        geometry = new
 
 
 def _sides(geometry: MultiCompartmentGeometry, name: str) -> tuple[str, ...] | None:

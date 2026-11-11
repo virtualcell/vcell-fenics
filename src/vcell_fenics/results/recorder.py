@@ -105,6 +105,11 @@ class BundleRecorder:
                 self._domains[index] = self._channels(domain.name, space, domain.names, list(sources), domain.moving)
         return self._writer.new_segment({domain.name: domain.space for domain in self._domains})
 
+    def domain_names(self) -> list[str]:
+        """Every registered domain, in registration order (what `start_segment` may move onto new meshes)."""
+
+        return [domain.name for domain in self._domains]
+
     def on_row(self, callback: Callable[[float, int], None]) -> None:
         """Call ``callback(t, row)`` after each row is written (e.g. to report a VCell DATA event)."""
 
