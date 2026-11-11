@@ -423,6 +423,19 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-11** — **libsupermesh and the conservative transfer kernel (ADR 016 decision 9).**
+  - **What:** `libsupermesh` (LGPL-2.1, PyPI sdist only) is built into the environment with conda-forge's Fortran
+    and C++ compilers; `core/supermesh.py` assembles the mixed mass matrix over the supermesh in 2D and 3D with a
+    small C kernel, compiled with cffi at first use and cached like DOLFINx's forms, and projects (L2, or lumped
+    and non-negative). Empty pairs store nothing. The image build compiles and checks it.
+  - **Verified** (`tests/test_core_supermesh.py`): between unrelated Delaunay meshes of the unit square and cube the
+    total is kept to 1e-12, a linear field reproduced to 1e-10, the pieces tile the region; it agrees with the
+    pure-Python `bulk_remap` kernel in 2D to 1e-10; the lumped variant keeps the total and non-negativity.
+  - **Toolchain:** adding the compilers moved osx-arm64's clang from 22 to 21 and linux-aarch64's gcc from 16.1
+    to 15.3 (DOLFINx's JIT uses them too); the numerical stack is unchanged in the lock.
+  - **Next (ADR 016 staging):** the skeleton remesh, the rebuilt geometry and the transfer in the solver
+    (decisions 1, 3, 4).
+
 - **2026-11-11** — **The contact stop on a moving partition (ADR 016 decision 5).**
   - **What:** after every move, the moving membrane's gap to itself (parts more than `h` apart along it), to the
     box and to every other membrane is measured exactly between the polylines; below `δ = min(h/4, g₀/2)`, with

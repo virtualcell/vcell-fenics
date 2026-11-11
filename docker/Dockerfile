@@ -122,6 +122,8 @@ ENV XDG_CACHE_HOME=/opt/cache \
 #      broke every remesh here while the osx-arm64 lock still had 2.4) — it must open a second segment.
 #   5. a model on a real segmented 3D image (VCell's tutorial geometry: label field, SurfaceNets, a
 #      Netgen volume mesh from the conforming surfaces) solved by the two-compartment coupled solver.
+#   6. the libsupermesh transfer kernel (ADR 016 decision 9), compiled with cffi into the same cache, and
+#      checked: a projection between two meshes of the unit square keeps the total.
 RUN mkdir -p /opt/cache \
  && /usr/local/bin/vcell-fenics-entrypoint \
       --math /opt/vcell-fenics/examples/diffusion2d_math.yaml \
@@ -154,6 +156,11 @@ RUN mkdir -p /opt/cache \
       --t-final 0.25 --output-dt 0.25 --h 2.5 --out /tmp/warmup/image \
  && /usr/local/bin/vcell-fenics-entrypoint python -m vcell_fenics.results \
       /tmp/warmup/image/results.fenics --require-status completed \
+ && /usr/local/bin/vcell-fenics-entrypoint python -c \
+      "import numpy as np; from vcell_fenics.core.supermesh import mixed_mass_matrix; \
+x = np.array([[0, 0], [1, 0], [1, 1], [0, 1.0]]); \
+B, covered = mixed_mass_matrix(x, np.array([[0, 1, 2], [0, 2, 3]]), x, np.array([[0, 1, 3], [1, 2, 3]])); \
+assert abs(covered - 1) < 1e-12 and abs(B.sum() - 1) < 1e-12, (covered, B.sum())" \
  && rm -rf /tmp/warmup \
  && chmod -R a+rwX /opt/cache
 
