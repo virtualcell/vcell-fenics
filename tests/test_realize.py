@@ -500,7 +500,8 @@ def test_2d_teeth_finer_than_the_grid_leave_no_sub_resolution_membrane_segment()
     parent = geom.parent_mesh
     assert parent is not None
     xp, cells = parent.geometry.x[:, :2], parent.geometry.dofmap
-    areas = 0.5 * np.abs(np.cross(xp[cells[:, 1]] - xp[cells[:, 0]], xp[cells[:, 2]] - xp[cells[:, 0]]))
+    u, v = xp[cells[:, 1]] - xp[cells[:, 0]], xp[cells[:, 2]] - xp[cells[:, 0]]
+    areas = 0.5 * np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])  # not np.cross: NumPy 2.5 dropped 2D vectors
     assert areas.min() > 1e-4  # 3.2e-4 measured; 2.4e-5 without the fix
 
     exact = math.pi * (6.25 + 1.0 + 0.08)  # ½ ∫ r² dθ

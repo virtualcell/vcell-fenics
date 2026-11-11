@@ -94,6 +94,11 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
      altering the skeleton would change the regions. Its messages, written for image geometries, are reworded.
 
    *Recommendation and Jim's choice: yes.*
+
+   *Built (2026-11-11):* `backend/partition_remesh.py` (`skeleton`, `remesh_partition`), with the realizer's tail
+   shared as `multi_compartment.partition_geometry`. Before Netgen sees the skeleton, every region's oriented
+   boundary must enclose exactly its cells' area (Green's theorem): a skeleton with its sides swapped makes
+   Netgen hang rather than fail (found while testing), so it is refused by name.
    - Simpler than a patch: no patch growth, no stitching, no hanging vertices, no patch-boundary
      constraints.
    - It resets the quality of the interior cells, including cells compressed against the box away from the
@@ -162,6 +167,11 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
    - **The check:** each compartment's and membrane's total must agree, or the run stops ("a remesh lost mass").
      The tolerance is relative, `1e-12`, with an absolute floor for a zero total. The libsupermesh spike kept
      totals to 3e-16 at 133k triangles and 132k tetrahedra: with identical regions, a larger miss is a bug.
+
+   *Built (2026-11-11):* `partition_remesh.transfer_compartment` (libsupermesh's projection, `B` and `M` built
+   once per compartment, the lumped variant per field) and `transfer_membrane` (vectorized: kept nodes by
+   coordinate, added nodes along their old segment), each with the total check (`RemeshLostMass`). The solver's
+   side (vector blocks, the restart) comes with decisions 2 and 4's segments.
 
    *Recommendation and Jim's choice: yes.* Rejected options:
    - **Interpolation plus a rescale:** it needs a rescale to hit the total, and it is less accurate.

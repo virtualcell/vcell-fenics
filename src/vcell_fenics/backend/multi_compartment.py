@@ -180,6 +180,21 @@ def realize_multi_compartment(
         face_names = _FACE_NAMES_2D
     else:
         raise NotImplementedError(f"multi-compartment realization of a {description.dim}D geometry is not implemented")
+    return partition_geometry(description, parent, tagging, face_names, h=h, compartments=compartments, comm=comm)
+
+
+def partition_geometry(
+    description: GeometryDescription,
+    parent: Mesh,
+    tagging: Any,
+    face_names: tuple[str, ...],
+    *,
+    h: float,
+    compartments: Collection[str] | None = None,
+    comm: MPI.Comm = MPI.COMM_WORLD,
+) -> MultiCompartmentGeometry:
+    """The multi-compartment geometry of a region-tagged parent mesh: the facet tags split by compartment, the
+    submeshes and their maps, the sizes. The realization's tail, shared with the remesh (ADR 016 decision 4)."""
 
     tdim = parent.topology.dim
     parent.topology.create_connectivity(tdim - 1, tdim)

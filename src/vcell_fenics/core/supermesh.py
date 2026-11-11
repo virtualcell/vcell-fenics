@@ -254,6 +254,7 @@ def project(
     *,
     lumped: bool = False,
     mixed: csr_matrix | None = None,
+    mass: csr_matrix | None = None,
 ) -> Floats:
     """``c_old`` (P1, on the old mesh's nodes) transferred to the new mesh, keeping its total.
 
@@ -262,12 +263,12 @@ def project(
     - ``lumped=True``: ``c_new = (B c_old) / m``, with ``m`` the new mesh's lumped node masses (``M_new``'s row
       sums); first order, non-negative where ``c_old`` is (``B`` is entrywise non-negative), total kept too.
 
-    ``mixed`` reuses a ``B`` from `mixed_mass_matrix` for the same two meshes (one per compartment, shared by its
-    species)."""
+    ``mixed`` reuses a ``B`` from `mixed_mass_matrix` for the same two meshes, and ``mass`` the new mesh's
+    `mass_matrix` (one each per compartment, shared by its species)."""
     if mixed is None:
         mixed, _ = mixed_mass_matrix(old_x, old_cells, new_x, new_cells)
     rhs = mixed @ np.asarray(c_old, dtype=np.float64)
-    m = mass_matrix(new_x, new_cells)
+    m = mass_matrix(new_x, new_cells) if mass is None else mass
     if lumped:
         lumped_mass = np.asarray(m.sum(axis=1)).ravel()
         result: Floats = rhs / lumped_mass
