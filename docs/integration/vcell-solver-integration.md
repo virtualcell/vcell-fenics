@@ -423,6 +423,21 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-11** — **Remeshing a moving partition: the remesh and the transfer (ADR 016 decisions 1, 3, 4).**
+  - **What:** `backend/partition_remesh.py` meshes a (moved) partition afresh from its own skeleton (every
+    region boundary and box facet, oriented geometrically) with the labelled-curve Netgen mesher, rebuilds its
+    tags, submeshes and maps (`partition_geometry`, the realizer's tail), and transfers each compartment's
+    species by libsupermesh's projection (lumped where it would undershoot) and each membrane's exactly; a
+    total that changes stops the run. Not yet called by the solver: the undo, the trigger and the segments are
+    next (decisions 2, 4, 6).
+  - **Verified** (`tests/test_partition_remesh.py`): unmoved remeshes of nested loops, a membrane ending on the
+    box and a three-region junction keep every area and length to 1e-12, reproduce linear fields (1e-10 in
+    compartments, 1e-12 on membranes) and leave the new parent conforming; a partition stretched 2.5x, so Netgen
+    adds points on its membrane, does the same; a step field takes the lumped transfer and stays non-negative.
+  - **Found:** Netgen hangs, rather than failing, on a skeleton with its sides swapped; the remesh now checks each
+    region's enclosed area against its cells first. Also: two tests used `np.cross` on 2D vectors, which NumPy 2.5
+    (in the Linux lock) removed; replaced.
+
 - **2026-11-11** — **libsupermesh and the conservative transfer kernel (ADR 016 decision 9).**
   - **What:** `libsupermesh` (LGPL-2.1, PyPI sdist only) is built into the environment with conda-forge's Fortran
     and C++ compilers; `core/supermesh.py` assembles the mixed mass matrix over the supermesh in 2D and 3D with a
