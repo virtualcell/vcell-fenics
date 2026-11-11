@@ -1,0 +1,3 @@
+2D small linear: old 3200 cells, new 2738; pairs 26655; finder 0.00 s, assemble 0.01 s, solve 0.00 s; covered/area-1 5.3e-15; total rel change 1.8e-16; linear max err 5.3e-13
+2D small rough: old 3200 cells, new 2738; pairs 26655; finder 0.00 s, assemble 0.01 s, solve 0.00 s; covered/area-1 5.3e-15; total rel change 0.0e+00; linear max err nan
+vs Python kernel: max |diff| 1.3e-13 (values ~1); Python 1.56 s, libsupermesh 0.012 s

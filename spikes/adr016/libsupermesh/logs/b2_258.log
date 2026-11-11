@@ -1,0 +1,2 @@
+2D linear: old 133128 cells, new 126002; pairs 1134580; finder 0.08 s, assemble 0.36 s, solve 0.06 s; covered/area-1 -9.4e-15; total rel change 1.8e-16; linear max err 3.3e-12
+2D rough: old 133128 cells, new 126002; pairs 1134580; finder 0.08 s, assemble 0.35 s, solve 0.06 s; covered/area-1 -9.4e-15; total rel change 2.2e-16; linear max err nan
