@@ -314,3 +314,44 @@ def test_a_motion_that_tangles_the_partition_stops_the_run() -> None:
 
     with pytest.raises(MeshQualityError, match="inverted or collapsed"):
         _run("2.0 * geom.normal", {"u": ("cyto", "1.0", "1.0"), "rho": ("pm", "0.1", "1.0")}, h=0.12, strides=10)
+
+
+def test_region_sizes_follow_the_moving_partition() -> None:
+    # each species is fed 1/|its subdomain|, so every total grows at exactly 1 per unit time — but only if the
+    # size is the measure of the mesh each stride integrates on (a size frozen at t = 0 would feed |Ω(t)|/|Ω₀|,
+    # here up to ~2 for the swelling cytosol); the membrane's size goes through a parameter, as VCell's Size_pm
+    model = load_yaml(
+        """
+math_description:
+  geometry: cell
+  subdomains:
+    - { name: cyto, kind: volume }
+    - { name: ext, kind: volume }
+    - { name: pm, kind: surface, motion: { kind: prescribed, velocity: "0.2 * geom.normal" } }
+  parameters:
+    - { name: Size_pm, expression: "region_size(pm)" }
+  variables:
+    - { name: u, subdomain: cyto }
+    - { name: v, subdomain: ext }
+    - { name: rho, subdomain: pm }
+  equations:
+    - { template: bulk_radv_diff, variable: u, subdomain: cyto, temporality: time_dependent,
+        terms: { diffusion: "1.0", source: "1.0 / region_size(cyto)" }, initial_condition: "0.0" }
+    - { template: bulk_radv_diff, variable: v, subdomain: ext, temporality: time_dependent,
+        terms: { diffusion: "1.0", source: "1.0 / region_size(ext)" }, initial_condition: "0.0" }
+    - { template: surface_pde_with_dilution, variable: rho, subdomain: pm, temporality: time_dependent,
+        terms: { diffusion: "0.1", source: "1.0 / Size_pm" }, initial_condition: "0.0" }
+"""
+    )
+    geometry = realize_multi_compartment(_cell(), h=0.08)
+    area0 = geometry.sizes["cyto"]
+    result = integrate_multi_compartment(
+        model, geometry, t_final=1.0, motion_membrane="pm", stride_ends=[0.1 * k for k in range(1, 11)]
+    )
+    for name in ("u", "v", "rho"):
+        assert species_mass(result, name) == pytest.approx(1.0, rel=1e-9), name
+    # the sizes describe the moved mesh: the cytosol has swollen from R = 0.5 to 0.7, the box is unchanged
+    assert geometry.sizes["cyto"] == pytest.approx(_measure(geometry.compartments["cyto"].mesh), rel=1e-12)
+    assert geometry.sizes["pm"] == pytest.approx(_measure(geometry.membranes["pm"].mesh), rel=1e-12)
+    assert geometry.sizes["cyto"] / area0 == pytest.approx((0.7 / _R0) ** 2, rel=1e-2)
+    assert geometry.sizes["cyto"] + geometry.sizes["ext"] == pytest.approx(4.0, rel=1e-12)

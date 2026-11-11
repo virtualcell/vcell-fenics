@@ -92,7 +92,8 @@ driver** solves it, and the **CLI** routes to that driver. The matrix names the 
 
 Refused with a message, never mis-solved: FastSystem, field data, steady tasks, `StartTime ≠ 0`
 (`pyvcell_bridge/simtask.py`); non-diffusing species where a front moves, membrane species without VCell's `Dilution` flag, more than one front, image geometries on a moving front; region variables outside the
-multi-compartment solver; boundary conditions across a remesh; `region_size` on a moving mesh.
+multi-compartment solver; boundary conditions across a remesh; `region_size` on ADR 013's single moving mesh (a moving partition
+re-measures it after every move).
 
 **Backend drivers with their own Python entry points, not routed by the CLI** (each verified by its
 tests; the status of each is in the note it implements):
