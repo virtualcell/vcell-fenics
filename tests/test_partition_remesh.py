@@ -218,3 +218,21 @@ def test_a_skeleton_with_its_sides_swapped_is_refused_before_netgen_sees_it() ->
     swapped = LabelBoundary(dim=2, points=boundary.points, elements=boundary.elements, pairs=boundary.pairs[:, ::-1])
     with pytest.raises(PartitionRemeshError, match="skeleton is inconsistent"):
         _check_orientation(swapped, region - 1, area)
+
+
+def test_a_smooth_field_that_undershoots_but_stays_positive_keeps_the_projection() -> None:
+    # ADR 016 decision 3 as amended: the projection undershoots a smooth field's minimum by its interpolation
+    # error, which is no reason to fall back; only a field it would make negative does. A field already negative
+    # somewhere keeps the projection too.
+    description = _nested()
+    old = realize_multi_compartment(description, h=0.12)
+    new = remesh_partition(old, description, h=0.12)
+    V_old = fem.functionspace(old.compartments["ext"].mesh, ("Lagrange", 1))
+    V_new = fem.functionspace(new.compartments["ext"].mesh, ("Lagrange", 1))
+    smooth, signed = fem.Function(V_old), fem.Function(V_old)
+    smooth.interpolate(lambda x: 1.0 + np.cos(3.0 * x[0]))
+    signed.interpolate(lambda x: np.sin(4.0 * x[0]))
+    moved, kinds = transfer_compartment({"smooth": smooth, "signed": signed}, V_new)
+    assert moved["smooth"].x.array.min() < smooth.x.array.min()  # it does undershoot the old minimum
+    assert moved["smooth"].x.array.min() > 0.0  # but stays positive
+    assert kinds == {"smooth": "projection", "signed": "projection"}

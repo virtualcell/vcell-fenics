@@ -423,6 +423,15 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-11** — **The lumped fallback is for positivity only (ADR 016 decision 3, amended by Jim).**
+  - **What:** a compartment species takes the lumped transfer at a remesh only if it had no negative values and
+    the projection would make it negative (below `-1e-12` of its maximum); otherwise the projection, second order,
+    is kept. Before, any new minimum more than `1e-8` of the maximum below the old one fell back, which the
+    projection's ordinary interpolation error tripped for most smooth fields.
+  - **Verified** (`tests/test_partition_remesh.py`): a smooth positive field that undershoots its old minimum
+    keeps the projection; a step that the projection would make negative takes the lumped transfer and stays
+    non-negative; a field already negative somewhere keeps the projection.
+
 - **2026-11-11** — **A moving partition runs through remeshes (ADR 016 decisions 2, 4, 6).**
   - **What:** a move that would tangle the partition is undone bitwise and raises `MeshTangled`; a cell shrunk
     below a quarter of its as-built area triggers a remesh before the next half-move; the solver then returns with
@@ -438,6 +447,7 @@ Newest first. One entry per landed step or notable finding.
   - **Open question (ADR 016 decision 3):** the lumped fallback's trigger, a new minimum more than `1e-8` of the
     maximum below the old one, catches smooth fields too: a projection's ordinary interpolation error undershoots
     by 1e-5–2e-3 of the maximum (measured), so most fields take the first-order lumped transfer at most remeshes.
+    *Resolved 2026-11-11 (Jim):* positivity only, the entry above.
 
 - **2026-11-11** — **Remeshing a moving partition: the remesh and the transfer (ADR 016 decisions 1, 3, 4).**
   - **What:** `backend/partition_remesh.py` meshes a (moved) partition afresh from its own skeleton (every
