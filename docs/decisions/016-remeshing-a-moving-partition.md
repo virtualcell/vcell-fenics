@@ -3,20 +3,23 @@
 **Date:** 2026-11-10
 **Status:** Proposed. Jim chose (2026-11-10) to remesh the whole partition, not a patch, after the first draft's
 independent review (8 findings) showed what a patch transfer can conserve. Revised accordingly, then after a
-second independent review (12 findings, addressed below).
+second independent review (12 findings, addressed below). Revised 2026-11-11 after a second spike, on Jim's
+question whether libsupermesh would do the transfer: it does, in 2D and 3D, about 130× faster than the Python
+kernel on a matched case (decisions 3, 8 and 9); a third independent review (12 findings) is addressed.
 **Builds on:**
 - ADR 014 decision 6: remeshing comes second; its first stage, the named stop, is built (#228).
 - ADR 015: each mesh move carries every species' nodal moments exactly; relaxation was measured and not adopted.
 - ADR 012: the labelled-curve Netgen mesher.
 - ADR 010: a remesh starts a new bundle segment.
-- ADR 008: Netgen (LGPL) in-process.
+- ADR 008: Netgen (LGPL) in-process; libsupermesh is LGPL-2.1, the same tier.
 
 **Amends:** ADR 014 decision 6's second stage (a box-wide multi-region remesher remapping the membrane species).
 This specifies it: the whole partition meshed from its own boundary skeleton, each region unchanged.
 
 **Would amend:** `backend/multi_compartment.py` (the solver runs in segments), `backend/moving_partition.py` (an
-undo, and the trigger), `runner._run_multi_compartment` (it drives the segments) and `backend/realize.py` (its
-partition tail is shared).
+undo, and the trigger), `runner._run_multi_compartment` (it drives the segments), `backend/realize.py` (its
+partition tail is shared), `pyproject.toml` / `pixi.lock` (libsupermesh, with Fortran and C++ compilers, decision 9)
+and `docker/` (the same, in the image).
 
 ## Context
 
@@ -56,6 +59,20 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
     reviewer measured 0.19 ms per new triangle against 138k old ones, against 0.03 ms at 20k.
   - Its clipping uses an absolute area `_EPS = 1e-12`, both to discard tiny pieces and as its in/out
     tolerance (`bulk_remap.py` 42, 115, 148–150). That does not scale with the mesh.
+  - 2D only: it clips triangles.
+- **libsupermesh** (Farrell, Maddison et al.; Firedrake's supermesh library), *checked 2026-11-11*:
+  - Not part of DOLFINx 0.10 and not on conda-forge; on PyPI as a source distribution only (`libsupermesh`
+    2026.3, scikit-build-core, LGPL-2.1, depending on `rtree`, whose wheel bundles libspatialindex).
+  - Its C interface (`libsupermesh-c.h`) has an R-tree intersection finder
+    (`libsupermesh_tree_intersection_finder_*`) and intersections of intervals, triangles and tetrahedra
+    (`libsupermesh_intersect_tris_real`, `_tets_real`), plus triangle–quad and tet–hex. Its triangles are planar
+    (`dimension(2, 3)`, `Triangle_Intersection.F90` 125–127), so it does not intersect triangles lying on a
+    surface in 3D (*checked in its source*).
+  - It is C, C++ and Fortran, compiled through the MPI wrappers (`CMakeLists.txt` 19, 107–110), so its build needs
+    MPI with Fortran and Fortran and C++ compilers. `pip install` built it in about 10 s (*measured*, spike
+    README).
+  - Licence: LGPL-2.1 per its `COPYING`; its PyPI classifier says "LGPLv2 or later", an upstream
+    inconsistency.
 - **The bundle** starts a segment for new meshes (`BundleRecorder.start_segment`, ADR 010).
 - **The solver** builds its spaces, forms and PETSc objects once per geometry.
 
@@ -115,16 +132,23 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
 3. **The transfer: each compartment's total exact, by projection; each membrane exact.**
    - **A compartment's species:** the supermesh L2 projection from the old compartment submesh to the new one.
      - Both triangulate the same polygon (decision 1), so the compartment's total is kept with no rescale, exact
-       to the kernel's clipping tolerance and the solve's round-off, and a linear field is reproduced exactly.
-     - The clipping tolerance becomes relative to the cells' area (it is an absolute 1e-12 today). The spike
-       measures the loss at 138k cells before the check below is set.
+       to the solve's round-off, and a linear field is reproduced exactly.
+     - **The kernel is libsupermesh** (decision 9), not `core.bulk_remap`: its R-tree finder pairs the cells,
+       its simplex intersection gives the pieces, and a small compiled kernel assembles `B` exactly on each
+       piece (for P1 on a simplex `S`, `∫ f g = |S|/((d+1)(d+2)) (Σ f_k g_k + Σ f_k Σ g_k)`).
+     - Pieces are dropped only below a tolerance relative to the new cell (`1e-14` of its area in the spike),
+       besides libsupermesh's own floor of ten ulps of the smaller cell's measure (`Triangle_Intersection.F90`
+       174–180, `Tetrahedron_Intersection.F90` 151–171). Both are relative, which removes the absolute cutoff
+       behind the first spike's worst loss (Spike results). The spike's totals were kept to 3e-16.
+     - Pairs whose intersection is empty contribute nothing and are not stored (the spike's kernel stored
+       them, and ran out of memory at 384k tetrahedra).
      - Each node's moment is not kept, and the field is re-projected everywhere at each remesh. The error is
        about the fields' interpolation error at that mesh.
      - `M` and `B` are built once per compartment per remesh and applied to every species on it.
    - **Where the projection would add undershoot:** a field whose new minimum falls below its old minimum by
      more than `10⁻⁸` of its maximum takes the lumped variant, per field. The comparison is with the old
      minimum, since Galerkin fields already undershoot by about −1e-2 on steep fronts (ADR 015 decision 3).
-     - The lumped variant is `uᵢ = (B u_old)ᵢ / mᵢ`, with `mᵢ` the new lumped node masses.
+     - The lumped variant is `uᵢ = (B u_old)ᵢ / mᵢ`, with `mᵢ` the new lumped node masses (the same `B`).
      - `B` is entrywise non-negative, so it is non-negative where the old field is.
      - Its total is exact too, since `Σᵢ (B u_old)ᵢ = ∫ u_old`.
      - It is first order rather than second.
@@ -136,13 +160,19 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
    - **Vector blocks** (one block per subdomain, a component per species, on the matrix-free path) are transferred
      component by component. Region variables are refused on a moving partition (ADR 014 decision 5).
    - **The check:** each compartment's and membrane's total must agree, or the run stops ("a remesh lost mass").
-     The tolerance, relative with an absolute floor for a zero total, is set from the spike's measured loss
-     (expected near round-off, `1e-12`): with identical regions, a larger miss is a bug.
+     The tolerance is relative, `1e-12`, with an absolute floor for a zero total. The libsupermesh spike kept
+     totals to 3e-16 at 133k triangles and 132k tetrahedra: with identical regions, a larger miss is a bug.
 
    *Recommendation and Jim's choice: yes.* Rejected options:
    - **Interpolation plus a rescale:** it needs a rescale to hit the total, and it is less accurate.
    - **A patch with its boundary fixed:** more exact outside the patch, but more machinery; it is kept as a later
      optimization (Not decided here).
+   - **`core.bulk_remap` as the kernel, made relative and vectorized:** no new dependency, but 2D only, and
+     its broad phase is all-pairs. On the one matched case (2D, 3.2k to 2.7k cells) it took 1.54 s and
+     libsupermesh 0.012 s. At 133k cells libsupermesh took 0.5 s per projection; the first spike's 72–75 s
+     per remesh is not comparable, since its driver rebuilt `M` and `B` for every bulk species in both
+     compartments (Spike results). `bulk_remap` stays as the reference the libsupermesh kernel is tested
+     against.
 
 4. **The rebuild: the whole geometry, in segments.** DOLFINx meshes are immutable, so a remesh builds a new
    parent mesh, tags, submeshes and maps (`realize_multi_compartment`'s tail, split so the remesh shares it).
@@ -195,26 +225,68 @@ partition instead, for simplicity and robustness, given that remeshes are rare o
      (85× larger).
    - It helps every moving run on a sharply featured analytic geometry, remeshed or not.
 
-8. **Scope: 2D, serial.**
-   - 3D needs a 3D supermesh (tetrahedron intersections), which does not exist here; interpolation plus a rescale
-     is the rejected option. A later ADR.
-   - Under MPI the skeleton would have to be gathered to rank 0, and the supermesh kernel is serial.
+8. **Scope: 2D, serial.** The bulk transfer is shown feasible in 3D, though not settled: libsupermesh
+   intersects tetrahedra, and the spike projected between 132k- and 105k-tetrahedron meshes of a cube in 6.8 s
+   with the total kept to 3e-16; real compartments, and the kernel's memory (it stored every candidate pair,
+   about 2.5 GB at 132k, and ran out at 384k), are untested. What limits 3D otherwise:
+   - **The mesher keeps the membrane's triangles.** A 3D partition skeleton is a triangle surface, and the
+     existing labelled-surface mesher (`realize._netgen_from_surfaces`, ADR 012) uses those triangles as the
+     surface mesh and fills only the volumes (*checked in the source*). So a 3D whole-partition remesh would
+     renew the tetrahedra but never the moving membrane's own triangles.
+   - **Those triangles degrade.** In 3D the moving membrane has no slide (ADR 014: `w_mesh = v` on it), so its
+     triangles distort with its motion. Renewing them needs a surface remesh and a conservative transfer
+     between two triangulations of a curved surface. libsupermesh does not provide the transfer (it intersects
+     triangles in the plane and tetrahedra in space). The single-mesh path's 3D remesher
+     (`backend/remesh_3d.py`) does renew a degraded surface (SurfaceNets on a lattice, a Netgen fill, a snap
+     onto the old surface and a volume restore), but its new surface only approximates the old one and its
+     transfer interpolates and rescales (`remesh_3d.py` 1–40), so it gives up this ADR's premise that every
+     region keeps exactly its shape, and with it the exact transfer.
+   - **The contact stop** (decision 5) is defined along a curve ("more than `h` apart along the front"); a
+     surface needs its own definition.
+   - **The moving partition has no 3D test** (none in `tests/test_moving_partition*.py`, *checked*), though its
+     code is written for any dimension.
+   - **Under MPI** the skeleton would have to be gathered to rank 0; libsupermesh has a parallel supermesh
+     (`Parallel_Supermesh.F90`), unused here.
    - Both keep #228's stop.
 
-   *Recommendation: yes.*
+   *Recommendation: yes*, with 3D as a later ADR on the items above; the bulk transfer has a candidate.
 
-**Cost** (*estimates*; the spike measures them). For moving_bleb at h = 0.04 (138k cells), one remesh is about
-2 minutes:
-- Netgen on the whole partition: a few seconds (*an estimate*: realizing ADR 015's 85k-cell sphere-in-a-box
-  benchmark took 2.2 s).
-- Rebuilding the geometry and the solver: *an estimate*, about 10–30 s.
-- The supermesh transfer: about 110 s for a compartment holding most of the cells, at the reviewer's measured
-  0.19 ms per new triangle against 138k old ones. Once per compartment, shared by its species.
+9. **libsupermesh is a dependency, built from source into the environment.**
+   - `libsupermesh` from PyPI (`[tool.pixi.pypi-dependencies]`, its sdist built against the environment's
+     MPICH), with conda-forge's Fortran compiler and CMake added for its build. In the spike, vcell-fenics' env
+     had MPICH's `mpif90` but not the gfortran it wraps, and no `clang++`; the build borrowed Homebrew's
+     gfortran and Apple clang (*measured, macOS arm64*). The Linux image is untested.
+   - The assembly kernel (about 100 lines of C on libsupermesh's C interface) is compiled at first use with
+     cffi, as DOLFINx compiles its forms; the image already keeps its compiler toolchain for that
+     (`docker/Dockerfile`). No compiled extension in vcell-fenics' own build. *This route is design, untested:*
+     the spike compiled the kernel by hand and loaded it with ctypes. Building it needs:
+     - libsupermesh's header and library located from the installed package at compile time;
+     - a writable cache when the image runs as an arbitrary user, as the Dockerfile arranges for FFCx
+       (`XDG_CACHE_HOME`);
+     - a warm-up in the image build, so the first run does not compile it.
+   - Licence: LGPL-2.1 (Context), called through its shared library; by ADR 008's reasoning, the same tier as
+     Netgen (*inferred from ADR 008; not a ruling*).
 
-That is one or two strides' worth (a stride took about 100 s there in ADR 015's 4-stride profile), so a handful of
-remeshes per run costs a few percent. Vectorizing the kernel's clipping would cut the transfer's share; it is not needed to start.
+   *Recommendation: yes.* Alternatives:
+   - **A conda-forge recipe for libsupermesh** (it has none): cleaner for the image, but a recipe to write and
+     maintain; worth doing if the source build proves fragile.
+   - **Vectorize `core.bulk_remap`:** no dependency, 2D only (decision 3's rejected options).
 
-## Spike results (2026-11-10)
+**Cost.** For moving_bleb at h = 0.04 (about 133k cells), one remesh:
+- Netgen and the geometry rebuild (parent mesh, tags, submeshes, maps): 3.8–3.9 s together (*measured in the
+  first spike*: its timer wraps all of `remesh_partition`).
+- The solver rebuild (spaces, forms, PETSc objects): *not separated*; the first spike counted it in the next
+  segment's integration time.
+- The transfer: about 0.5 s per projection of a compartment of that size with libsupermesh (*measured on
+  synthetic meshes, not a partition*), once per compartment with `M` and `B` shared by its species
+  (decision 3). The first spike's 72–75 s rebuilt them per species with the Python kernel.
+
+So a remesh's measured parts come to about 5 s, against strides of about 31 s (*derived*: the 8-tooth run's
+36 minutes over its 70 strides of 0.05, one remesh included). The solver rebuild is the unmeasured part.
+
+## Spike results
+
+### The whole-partition remesh (2026-11-10)
 
 A spike (branch `spike/partition-remesh`, not merged) implemented decisions 1–4 without the contact stop or
 decision 6, and ran moving_bleb's geometries.
@@ -229,7 +301,8 @@ decision 6, and ran moving_bleb's geometries.
   - Remeshes at t = 1.6 and 1.7 carried it to t = 1.75.
   - The front's narrowest gap fell from 0.021 to 0.011 to 0.008, below `δ` = 0.01 at t = 1.75: contact
     (decision 5).
-  - Each remesh took about 78 s (Netgen 3.9 s, transfer 72–75 s), about 1.6 strides' worth.
+  - Each remesh took about 78 s (Netgen and the geometry rebuild 3.9 s, transfer 72–75 s), about 1.6 strides'
+    worth.
 - **What the 35-tooth and image runs show:** both stop at the time the shape predicts. A front moving along its normal at
   `0.05 (1 − cos t)` reaches the 59 nm valleys' radius at t ≈ 1.75. The remesh carries the mesh to that limit;
   the model's kinematics stop it.
@@ -237,17 +310,42 @@ decision 6, and ran moving_bleb's geometries.
   - One remesh, at t = 1.75; the run without remeshing had tangled near t = 2.0. The front's narrowest gap
     was 0.040, far from contact.
   - Totals were kept to 2.4e-13 across the remesh; the membrane pair X + B held at 1846.73 from t = 1.75 to 3.5.
-  - The remesh took 79 s (Netgen 3.8 s, transfer 75 s), against about 36 minutes for the whole run.
+  - The remesh took 79 s (Netgen and the geometry rebuild 3.8 s, transfer 75 s), against about 36 minutes for
+    the whole run.
   - A first attempt without decision 7 failed in the time integrator (`DIVERGED_STEP_REJECTED`) before any
     remesh. It also overlapped a laptop sleep, so the failure is *not attributed*; the rerun with decision 7
     completed.
 - **Conservation across remeshes:** most totals were kept to 1e-13–1e-10, the worst to 3.8e-7 (132k cells) and
   3.7e-8 (23k). This is the supermesh kernel's absolute clipping cutoff, as decision 3 anticipates, growing
-  with the mesh. Its cutoff must become relative to the cells' area before the check can be `1e-12`.
+  with the mesh. *Superseded:* the libsupermesh kernel (decision 3) has no absolute cutoff.
 - **The lumped fallback** switched on in about half the remeshes, for the species with a sharp initial step.
+
+### libsupermesh as the kernel (2026-11-11)
+
+On Jim's question. Branch `spike/partition-remesh`, `spikes/adr016/libsupermesh/` (build notes, the C kernel,
+the benchmark). Two unrelated meshes of the unit square or cube (structured, interior nodes perturbed), serial,
+macOS arm64; a linear field and a random one projected. Logs are kept with the spike.
+
+| Case | Old / new cells | Finder | Assembly | Solve (CG) | Total change | Linear field error |
+|---|---|---|---|---|---|---|
+| 2D | 3,200 / 2,738 | 0.012 s in all | | | 0 | 5e-13 |
+| 2D | 133,128 / 126,002 | 0.08 s | 0.37 s | 0.06 s | 2e-16 | 3e-12 |
+| 3D | 48,000 / 34,992 | 0.10 s | 2.2 s | 0.02 s | 0 | 5e-12 |
+| 3D | 131,712 / 105,456 | 0.27 s | 6.4 s | 0.07 s | 3e-16 | 7e-12 |
+
+- On the small 2D case it agrees with `core.bulk_remap.supermesh_project_2d` to 1.3e-13; that took 1.54 s.
+- **What each column tests.** The total change compares `1ᵀM_new c_new` with `1ᵀM_old c_old`: it tests the
+  pieces' coverage, the old side's weights and the solve, but not the new side's weights, which cancel by
+  partition of unity. The linear-field error and the agreement with `bulk_remap` test those.
+- The pieces' summed measure matched the domain's to 1.1e-13 at 132k tetrahedra (9e-15 in 2D). That is the
+  rounding of summing millions of terms; the totals, kept to 3e-16, show nothing was lost.
+- The spike did not check CG's convergence flag; the linear-field errors show it converged.
+- Not tested: compartment submeshes of a real partition, a remesh in the solver loop, the Linux image, MPI.
 
 ## Verification
 
+- **The kernel:** the libsupermesh projection agrees with `core.bulk_remap` on small 2D meshes (to 1e-12), keeps
+  totals to round-off, and reproduces linear fields, in 2D and 3D.
 - **A remesh of an unmoved partition:**
   - every compartment's area and every membrane's length equal to round-off;
   - a linear field reproduced exactly in every compartment;
@@ -277,19 +375,20 @@ decision 6, and ran moving_bleb's geometries.
 ## Staging
 
 1. This ADR, accepted.
-2. **A spike** (not merged): the whole-partition remesh with the projection on moving_bleb's recasts. It answers
-   whether remeshing carries the run or reaches contact, how often it remeshes, and at what cost. The numbers go
-   into this ADR before code lands.
+2. **Spikes** (not merged; done, Spike results): the whole-partition remesh on moving_bleb's geometries, and
+   libsupermesh as the kernel.
 3. The contact stop (decision 5) and the realizer fix (decision 7): useful on their own.
-4. The skeleton remesh, the rebuilt geometry and the transfer (decisions 1, 3, 4), with the unmoved-remesh tests.
-5. The undo and the trigger (decision 2), the stop for a front that cannot advance (decision 6), the
+4. libsupermesh in the environment and the image, with the kernel and its tests (decision 9).
+5. The skeleton remesh, the rebuilt geometry and the transfer (decisions 1, 3, 4), with the unmoved-remesh tests.
+6. The undo and the trigger (decision 2), the stop for a front that cannot advance (decision 6), the
    segmented solver, and the remaining verification.
 
 ## Not decided here
 
 - **Patch remeshing**, as an optimization for runs that remesh often: it keeps the field outside the patch exact.
-- **3D and MPI** (decision 8).
-- **A vectorized supermesh kernel with a spatial index** (the cost paragraph): the broad phase is all-pairs.
-- **MMG** (mmgtools, local adaptation in 2D and 3D) as an alternative mesher. Its licence and packaging are
-  unchecked against ADR 008.
+- **3D and MPI** (decision 8): a surface remesh of the moving membrane with a conservative surface transfer,
+  a contact stop for surfaces, and 3D tests of the moving partition. The bulk transfer has a candidate
+  (libsupermesh), shown feasible on synthetic meshes.
+- **MMG** (mmgtools, local adaptation in 2D and 3D, surfaces included) as an alternative mesher, which may bear
+  on the 3D membrane. Its licence and packaging are unchecked against ADR 008.
 - **A front that develops a cusp:** a geometric question about the front, not the mesh.
