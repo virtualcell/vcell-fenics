@@ -198,6 +198,11 @@ moving-boundary math").
    inverted a tetrahedron near t = 2 unseen. There the move is now undone and the step retried once on a
    fresh mesh (`MeshTangled`).
 
+   *Second stage amended by ADR 016 (accepted 2026-11-11):* the whole partition is remeshed from its own
+   boundary skeleton, each region's polygon kept exactly, with compartments projected by libsupermesh and
+   membranes transferred exactly; a front that closes on itself or cannot advance stops the run. Still 2D
+   and serial.
+
 7. **The membrane-coupled solver's prescribed moving mode**, which reads `none` bulks as co-moving
    (decision 3 says the opposite):
    - **(a) align it** with decision 3 (transport relative to the mesh, total relative flux);

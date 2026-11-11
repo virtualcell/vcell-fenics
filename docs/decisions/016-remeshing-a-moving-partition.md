@@ -1,7 +1,7 @@
 # ADR 016 — Remeshing a moving partition
 
 **Date:** 2026-11-10
-**Status:** Proposed. Jim chose (2026-11-10) to remesh the whole partition, not a patch, after the first draft's
+**Status:** Accepted (Jim, 2026-11-11), decisions 1–9 as recommended. Jim chose (2026-11-10) to remesh the whole partition, not a patch, after the first draft's
 independent review (8 findings) showed what a patch transfer can conserve. Revised accordingly, then after a
 second independent review (12 findings, addressed below). Revised 2026-11-11 after a second spike, on Jim's
 question whether libsupermesh would do the transfer: it does, in 2D and 3D, about 130× faster than the Python
