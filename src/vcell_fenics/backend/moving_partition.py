@@ -36,7 +36,7 @@ from petsc4py import PETSc
 from scipy.spatial import cKDTree
 
 from vcell_fenics.backend.boundary_normal import BoundaryNormal
-from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.discrete import (
     _MAX_CELL_RATIO_GROWTH,
     CellOrientation,
@@ -118,8 +118,12 @@ class MovingPartition:
         self.normal = fem.Function(V_m, name="normal")
         inside_xyz = self._inside_normal.function.function_space.tabulate_dof_coordinates()[:, :gdim]
         self._normal_from_inside = _matching(mem_xyz, inside_xyz, "the membrane's normal")
+        # the parameters, `region_size(...)` among them: its Constants (`size_constants`) are the solver's to
+        # re-measure after each move, so the front reads the sizes of the mesh it moves from
+        params = _param_symbols(md, mem_mesh, geometry.sizes, self.time)
+        self.size_constants = [(name, params[region_size_symbol(name)]) for name in geometry.sizes]
         symbols = {
-            **_param_symbols(md, mem_mesh, None, self.time),
+            **params,
             "geom.x": ufl.SpatialCoordinate(mem_mesh),
             "sim.t": self.time,
             "__normal__": self.normal,

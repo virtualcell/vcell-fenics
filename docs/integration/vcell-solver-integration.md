@@ -423,6 +423,16 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-10** — **`region_size` on a moving partition.**
+  - **What:** the multi-compartment solver's moving partition no longer refuses `region_size(...)` (VCell's
+    `vcRegionVolume` / `vcRegionArea`, e.g. `Size_pm`). Each size is a Constant per mesh, re-measured after every
+    half-stride move, so a stride reads the measures of the midpoint mesh it integrates on and the front's
+    velocity reads those of the mesh it moves from. `geometry.sizes` follows the moved mesh.
+  - **Verified:** each species fed `1/region_size(own subdomain)` (cytosol, outside, and the membrane through a
+    `Size_pm` parameter) gains exactly 1 per unit time to 1e-9 while the membrane swells from R = 0.5 to 0.7;
+    with the sizes frozen at t = 0 the cytosol's gain is 1.45 (`tests/test_moving_partition.py`).
+  - **Still refused:** region variables on a moving partition; `region_size` on ADR 013's single moving mesh.
+
 - **2026-11-10** — **Exact conservation on a moving partition (ADR 015).**
   - **What:** every mesh move of the multi-compartment solver's moving partition now carries each species' nodal
     moments exactly (`M⁺u⁺ = M⁻u⁻`), and each stride moves half, integrates on the midpoint mesh, and moves the

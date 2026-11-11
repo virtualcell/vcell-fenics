@@ -168,7 +168,8 @@ moving-boundary math").
      moments exactly, and each stride moves half, integrates on the midpoint mesh, and moves the other half.
    - **Refused for now, by name:** non-diffusing species (T4) on the moving membrane or in a compartment the
      membrane drives (as today: "a non-diffusing species … on a moving subdomain is not supported yet");
-     `region_size` and region variables on a moving partition (vcell-core's M2); several moving membranes;
+     `region_size` and region variables on a moving partition (vcell-core's M2; `region_size` lifted
+     2026-11-10, re-measured after every move); several moving membranes;
      lab-frame `advection` (as today).
 
    *Recommendation: yes.* It is the solver VCell's models with membranes already take (jump conditions,
@@ -270,7 +271,8 @@ solutions, invariants that discriminate the conventions, and agreement with ADR 
 - Several moving membranes; a moving membrane approaching or crossing a fixed one, or touching the box; a
   moving membrane meeting another at a triple junction (conflicting mesh-motion data). Each is refused by
   name in the first stage.
-- Region variables and `region_size` on a moving partition (vcell-core M2).
+- Region variables on a moving partition (vcell-core M2). (`region_size` landed 2026-11-10: re-measured after
+  every move.)
 - Mean curvature in a front velocity.
 - The force-balance mode's bulk transport (decision 7).
 - A membrane whose material flows tangentially on its own (cortical flow): T2's `relative_advection` covers a

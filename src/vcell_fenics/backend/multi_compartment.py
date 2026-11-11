@@ -40,7 +40,8 @@ drift (0 by default), so a jump-condition flux is a total flux relative to the m
 species ride its material velocity ``v`` relative to its sliding nodes, ``−ρ (v + d − w_Γ)·∇_Γ q``. Each stride
 moves the mesh by half a stride, integrates on that midpoint mesh, and moves the other half; every move carries
 each species' nodal moments exactly (``M⁺u⁺ = M⁻u⁻``, ADR 015), so every total is kept to round-off, and a fresh
-integrator per stride keeps the BDF history from spanning a move. Region variables, ``region_size`` and
+integrator per stride keeps the BDF history from spanning a move. ``region_size(...)`` is re-measured after
+every move, so a stride reads the sizes of the midpoint mesh it integrates on. Region variables and
 non-diffusing species where the mesh moves are refused; there is no remeshing yet (ADR 014 decision 6).
 
 Lab-frame ``advection`` and the interface value-equality constraint are refused.
@@ -64,7 +65,7 @@ from petsc4py import PETSc
 from ufl.algorithms import expand_derivatives
 
 from vcell_fenics.backend._typing import UflExpr
-from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.equations import as_field_equation
 from vcell_fenics.backend.interface_coupled import (
     _RESERVOIR_PENALTY,
@@ -331,7 +332,7 @@ def integrate_multi_compartment(
         if isinstance(bc, BCInterfaceValueEquality):
             raise NotImplementedError("the interface value-equality constraint (u = k·u_adjacent) is not supported")
     if motion_membrane is not None:
-        _refuse_on_a_moving_partition(md, geometry, motion_membrane, template_eqs, region_eqs, stride_ends, t_final)
+        _refuse_on_a_moving_partition(geometry, motion_membrane, template_eqs, region_eqs, stride_ends, t_final)
 
     parent = geometry.parent_mesh
     tdim = parent.topology.dim
@@ -342,7 +343,9 @@ def integrate_multi_compartment(
 
     # sim.t on the parent and on each membrane mesh (a Constant belongs to one mesh), set to each stage time
     time = fem.Constant(parent, PETSc.ScalarType(0.0))  # type: ignore[operator]
-    params = _param_symbols(md, parent, geometry.sizes if motion_membrane is None else None, time)
+    # `region_size(...)` binds each subdomain's measure as a Constant per mesh; on a moving partition the
+    # constants are re-measured after every move, so a stride reads the sizes of the mesh it integrates on
+    params = _param_symbols(md, parent, geometry.sizes, time)
     ctx = CompileContext(parent, {"geom.x": ufl.SpatialCoordinate(parent), **params})
     membrane_times = {
         name: fem.Constant(m.mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
@@ -353,11 +356,22 @@ def integrate_multi_compartment(
             m.mesh,
             {
                 "geom.x": ufl.SpatialCoordinate(m.mesh),
-                **_param_symbols(md, m.mesh, geometry.sizes if motion_membrane is None else None, membrane_times[name]),
+                **_param_symbols(md, m.mesh, geometry.sizes, membrane_times[name]),
             },
         )
         for name, m in geometry.membranes.items()
     }
+    size_constants = [
+        (name, symbols[region_size_symbol(name)])
+        for symbols in (params, *(c.symbols for c in surface_ctx.values()))
+        for name in geometry.sizes
+    ]
+
+    def remeasure_sizes() -> None:
+        """Each subdomain's measure on the mesh as it is now, into `geometry.sizes` and every bound Constant."""
+        geometry.sizes |= _measures(geometry, {name: m.facet_tag for name, m in geometry.membranes.items()})
+        for name, constant in size_constants:
+            constant.value = geometry.sizes[name]
 
     # --- the blocks: P1 blocks for the species, then one Real per region variable. With membrane species the
     # Newton is matrix-free and assembles the residual once per Krylov iteration, a cost that grows with the
@@ -420,6 +434,7 @@ def integrate_multi_compartment(
         motion = MovingPartition(
             md, geometry, motion_membrane, traces={name: views.function(name) for name in bulk_species}
         )
+        size_constants += motion.size_constants
 
     def trace(compartment: str, f: UflExpr) -> UflExpr:
         return f("+") * chi[compartment]("+") + f("-") * chi[compartment]("-")
@@ -746,6 +761,7 @@ def integrate_multi_compartment(
                 masses[mass_key[k]].mult(states[k].x.petsc_vec, b)
                 moments.append(b)
             motion.advance(t_move, length)
+            remeasure_sizes()
             for mass in masses.values():
                 mass.destroy()
             masses = assemble_masses()
@@ -845,7 +861,6 @@ def _zero_like(zero: fem.Constant, test: UflExpr) -> UflExpr:
 
 
 def _refuse_on_a_moving_partition(
-    md: MathDescription,
     geometry: MultiCompartmentGeometry,
     membrane: str,
     template_eqs: Sequence[TemplateEquation],
@@ -869,13 +884,6 @@ def _refuse_on_a_moving_partition(
                 f"a non-diffusing species ({eq.variable!r}) on {eq.subdomain!r}, which the moving membrane moves, is "
                 "not supported yet: VCell sweeps it with the front, and pure advection needs stabilization (#186)"
             )
-    texts = [p.expression for p in md.parameters if hasattr(p, "expression")]
-    texts += [t for eq in template_eqs for t in eq.terms.values()]
-    texts += [getattr(bc, "expression", "") or "" for bc in md.boundary_conditions]
-    if any("region_size(" in text for text in texts):
-        raise NotImplementedError(
-            "region_size(...) on a moving partition: the sizes change in time (not supported yet)"
-        )
     if (
         not stride_ends
         or abs(stride_ends[-1] - t_final) > 1.0e-12 * max(1.0, t_final)
