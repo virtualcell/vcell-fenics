@@ -201,7 +201,7 @@ moving-boundary math").
    *The promised stop for a membrane approaching the box or another membrane* is built with ADR 016 decision 5
    (2026-11-11): `FrontContact`, in 2D, for the front approaching itself too.
 
-   *Second stage amended by ADR 016 (accepted 2026-11-11):* the whole partition is remeshed from its own
+   *Second stage built with ADR 016 (2026-11-11), in 2D on one process.* *Amended by ADR 016 (accepted 2026-11-11):* the whole partition is remeshed from its own
    boundary skeleton, each region's polygon kept exactly, with compartments projected by libsupermesh and
    membranes transferred exactly; a front that closes on itself or cannot advance stops the run. Still 2D
    and serial.

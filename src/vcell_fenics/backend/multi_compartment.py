@@ -42,14 +42,15 @@ moves the mesh by half a stride, integrates on that midpoint mesh, and moves the
 each species' nodal moments exactly (``M⁺u⁺ = M⁻u⁻``, ADR 015), so every total is kept to round-off, and a fresh
 integrator per stride keeps the BDF history from spanning a move. ``region_size(...)`` is re-measured after
 every move, so a stride reads the sizes of the midpoint mesh it integrates on. Region variables and
-non-diffusing species where the mesh moves are refused; there is no remeshing yet (ADR 014 decision 6).
+non-diffusing species where the mesh moves are refused. A run is carried through remeshes in segments (ADR 016:
+`stop_for_remesh`, `t_start`, `initial`, `pending_move`; the runner drives them).
 
 Lab-frame ``advection`` and the interface value-equality constraint are refused.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -296,6 +297,12 @@ class MultiCompartmentResult:
     subdomain_of: dict[str, str]
     steps: int
     final_time: float
+    # A moving partition that stopped for a remesh (``stop_for_remesh``, ADR 016 decisions 2 and 4): the fields at
+    # ``final_time`` on the last valid mesh, the half-move still to do (its end time and length) if the remesh
+    # came between a stride's integration and its second half, and the integrator's last step size to carry on.
+    needs_remesh: bool = False
+    pending_move: tuple[float, float] | None = None
+    last_dt: float | None = None
 
 
 def integrate_multi_compartment(
@@ -313,6 +320,10 @@ def integrate_multi_compartment(
     on_progress: Callable[[float], None] | None = None,
     motion_membrane: str | None = None,
     stride_ends: Sequence[float] = (),
+    t_start: float = 0.0,
+    initial: Mapping[str, fem.Function] | None = None,
+    pending_move: tuple[float, float] | None = None,
+    stop_for_remesh: bool = False,
 ) -> MultiCompartmentResult:
     """Integrate ``md`` on ``geometry`` to ``t_final`` (the module docstring). ``on_output(t, fields)`` receives
     every species and region variable by name (snapshots valid for the call) at each of ``output_times``,
@@ -320,7 +331,13 @@ def integrate_multi_compartment(
 
     ``motion_membrane`` names a membrane whose prescribed velocity moves the partition (the module docstring);
     ``stride_ends`` are then the strides' end times (each mesh move covers one), ending at ``t_final`` and
-    including every output time, at which the output is recorded."""
+    including every output time, at which the output is recorded.
+
+    A moving run continues after a remesh (ADR 016 decision 4) from ``t_start`` with ``initial``, each species'
+    transferred scalar P1 field on this geometry, doing first any ``pending_move``. With ``stop_for_remesh`` it
+    returns early, ``needs_remesh`` set, when a cell has shrunk below a quarter of its as-built area or a move would
+    tangle the mesh (the move undone); without it, a tangle raises. A geometry that was just remeshed must take its
+    first move: if that tangles, the front cannot advance (`FrontCannotAdvance`, decision 6)."""
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
@@ -661,6 +678,17 @@ def integrate_multi_compartment(
             _interpolate_ic(states[blk], group[0], ic_ctx)
     for r, eq in enumerate(region_eqs):
         states[n_fields + r].x.array[:] = _region_initial(eq, geometry, ctx, cells, facets)
+    if initial is not None:  # a restart after a remesh: each species' transferred field, into its block
+        for name in names:
+            block, component = where[name]
+            if block >= n_fields:
+                continue
+            given = initial[name].x.array
+            if component is None:
+                states[block].x.array[:] = given
+            else:
+                states[block].x.array[views._scalar[name][1]] = given
+            states[block].x.scatter_forward()
 
     def scatter(x: PETSc.Vec, targets: Sequence[fem.Function]) -> None:
         for k, target in enumerate(targets):
@@ -777,7 +805,12 @@ def integrate_multi_compartment(
                 b = masses[mass_key[k]].createVecLeft()
                 masses[mass_key[k]].mult(states[k].x.petsc_vec, b)
                 moments.append(b)
-            motion.advance(t_move, length)
+            try:
+                motion.advance(t_move, length)
+            except Exception:  # undone (or a stop): the moments are not needed
+                for b in moments:
+                    b.destroy()
+                raise
             remeasure_sizes()
             for mass in masses.values():
                 mass.destroy()
@@ -806,22 +839,67 @@ def integrate_multi_compartment(
             for k in range(n_fields):
                 state_vec.array[offsets[k] : offsets[k + 1]] = states[k].x.array[: sizes[k]]
 
-        steps, t, dt = 0, 0.0, dt_initial if dt_initial is not None else stride_ends[0] / 10.0
+        from vcell_fenics.backend.discrete import MeshTangled
+        from vcell_fenics.backend.moving_partition import FrontCannotAdvance
+
+        steps, t = 0, t_start
+        dt = dt_initial if dt_initial is not None else (stride_ends[0] - t_start) / 10.0
         recorded = sorted(output_times) if on_output is not None else []
-        if on_output is not None and recorded and recorded[0] <= 0.0:
+        if on_output is not None and recorded and t_start <= 0.0 and recorded[0] <= 0.0:
             on_output(0.0, views.of(states))
+        fresh = initial is not None  # a geometry just remeshed: its first move must succeed
+
+        def moved(t_move: float, length: float) -> bool:
+            """Make a half-move; False if the mesh needs a remesh first (it has degraded, or the move would have
+            tangled it and was undone) and the caller should stop for one."""
+            nonlocal fresh
+            if stop_for_remesh and not fresh and motion.degraded():
+                return False
+            try:
+                move(t_move, length)
+            except MeshTangled as error:
+                if fresh:
+                    raise FrontCannotAdvance(
+                        f"the moving membrane {motion_membrane!r} cannot advance at t = {t_move:g}: a freshly remeshed "
+                        f"mesh tangled on its first move, so the front folds or closes on itself there "
+                        f"(vcell-fenics ADR 016 decision 6). {error}"
+                    ) from error
+                if not stop_for_remesh:
+                    raise
+                return False
+            fresh = False
+            return True
+
+        def at_output(time_now: float) -> bool:
+            return any(abs(time_now - r) <= 1.0e-12 * max(1.0, abs(r)) for r in recorded)
+
+        needs_remesh, pending = False, None
+        if pending_move is not None:  # the second half of a stride, left undone before the remesh
+            moved(*pending_move)
+            if on_progress is not None:
+                on_progress(t)
+            if on_output is not None and at_output(t):  # recorded once, on the new mesh, after the redone move
+                scatter(state_vec, states)
+                on_output(t, views.of(states))
         for t_end in stride_ends:
-            move(0.5 * (t + t_end), 0.5 * (t_end - t))
+            if t_end <= t + 1.0e-12 * max(1.0, abs(t)):
+                continue
+            if not moved(0.5 * (t + t_end), 0.5 * (t_end - t)):
+                needs_remesh = True
+                break
             ts = make_ts(t, t_end, min(dt, t_end - t))
             ts.solve(state_vec)
             steps += ts.getStepNumber()
             dt = float(ts.getTimeStep())
             ts.destroy()
-            move(t_end, 0.5 * (t_end - t))
+            if not moved(t_end, 0.5 * (t_end - t)):
+                needs_remesh, pending = True, (t_end, 0.5 * (t_end - t))
+                t = t_end
+                break
             t = t_end
             if on_progress is not None:
                 on_progress(t)
-            if on_output is not None and any(abs(t - r) <= 1.0e-12 * max(1.0, abs(r)) for r in recorded):
+            if on_output is not None and at_output(t):
                 scatter(state_vec, states)
                 on_output(t, views.of(states))
         scatter(state_vec, states)
@@ -833,7 +911,9 @@ def integrate_multi_compartment(
         if operator is not precond:
             operator.destroy()
         final = {name: _copy(f) for name, f in views.of(states).items()}
-        return MultiCompartmentResult(final, subdomain_of, steps, t)
+        return MultiCompartmentResult(
+            final, subdomain_of, steps, t, needs_remesh=needs_remesh, pending_move=pending, last_dt=dt
+        )
 
     ts = make_ts(0.0, t_final, dt_initial if dt_initial is not None else t_final / 1.0e4)
 

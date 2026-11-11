@@ -42,8 +42,10 @@ from vcell_fenics.backend.discrete import (
     _MAX_CELL_RATIO_GROWTH,
     CellOrientation,
     MeshQualityError,
+    MeshTangled,
     _arc_fractions,
     _slid_to_fractions,
+    signed_cell_volumes,
 )
 from vcell_fenics.backend.geometry import prescribed_velocity
 from vcell_fenics.backend.interface_coupled import _param_symbols
@@ -57,6 +59,17 @@ _COINCIDENT = 1.0e-9
 class FrontContact(MeshQualityError):
     """The moving membrane has come into contact with itself, the box or another membrane (ADR 016 decision 5).
     A remesh keeps every region's topology, so it cannot carry a run past contact: the run stops."""
+
+
+class FrontCannotAdvance(MeshQualityError):
+    """A freshly remeshed partition tangled on its very first move (ADR 016 decision 6): the cause is the front's
+    own geometry (a valley its normal motion folds into a cusp, or two parts closing), not the mesh, so another
+    remesh would not help and the run stops."""
+
+
+# a cell that has shrunk below this fraction of its area when its mesh was built triggers a remesh (ADR 016
+# decision 2): the single-mesh path's 4x limit, read per cell
+REMESH_SHRINK = 0.25
 
 
 def _point_segment_distances(points: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -308,14 +321,41 @@ class MovingPartition:
                 others[name] = (x[segments[:, 0]].copy(), x[segments[:, 1]].copy())
             box = (parent_xyz.min(axis=0), parent_xyz.max(axis=0))
             self._contact = _ContactCheck(front, others, box, h_mesh)
-        # The moved parent's validity after every stride (ADR 014 decision 6: no remeshing yet, so a mesh the
-        # motion has tangled or badly distorted stops the run rather than being solved on).
+        # The moved parent's validity after every move: a move that tangles it, or distorts it past the hard limit,
+        # is undone (`advance`), for a driver to remesh (ADR 016 decision 2) or stop.
         self._orientation = CellOrientation(parent)
         self._growth = 1.0
+        self._built_volume = np.abs(signed_cell_volumes(parent))
+
+    def degraded(self) -> bool:
+        """Whether any cell has shrunk below `REMESH_SHRINK` of its area when this mesh was built (the original
+        mesh, or the remesh that made it): the proactive remesh trigger (ADR 016 decision 2). Per cell, not the
+        global size ratio, which a geometry's own small cells would hold back until a notch cell nearly inverts."""
+        current = np.abs(signed_cell_volumes(self._geometry.parent_mesh))
+        ratio = current / np.where(self._built_volume > 0.0, self._built_volume, 1.0)
+        local = float(ratio.min()) if ratio.size else 1.0
+        from mpi4py import MPI
+
+        return bool(self._geometry.parent_mesh.comm.allreduce(local, op=MPI.MIN) < REMESH_SHRINK)
 
     def advance(self, t_end: float, h: float) -> None:
         """Move every mesh by `h` times the front's velocity read at `t_end` (the module docstring): a whole stride,
-        or half of one (ADR 015)."""
+        or half of one (ADR 015).
+
+        A move that would invert a cell, or distort the mesh past the hard limit, is undone, every mesh restored
+        to its stored coordinates (not `x + d - d`, which is not bitwise `x`), and raises `MeshTangled`: a driver
+        that can remesh does so and redoes the move (ADR 016 decision 2). Contact (`FrontContact`) is a stop."""
+        saved = [mesh.geometry.x.copy() for mesh, _ in self._moves]
+        try:
+            self._advance(t_end, h)
+        except FrontContact:
+            raise
+        except MeshQualityError as error:
+            for (mesh, _), x in zip(self._moves, saved, strict=True):
+                mesh.geometry.x[:] = x
+            raise MeshTangled(str(error)) from error
+
+    def _advance(self, t_end: float, h: float) -> None:
         gdim = self._gdim
         self.time.value = t_end
         for source, on_membrane, index in self._traces:
@@ -350,8 +390,7 @@ class MovingPartition:
         if self._growth > _MAX_CELL_RATIO_GROWTH:
             raise MeshQualityError(
                 f"{where}: the motion has distorted the mesh (cell-size ratio grown {self._growth:.3g}x since it "
-                f"was built), and a moving partition cannot be remeshed yet (vcell-fenics ADR 014 decision 6); "
-                f"use a coarser mesh, a smaller motion, or a shorter run."
+                f"was built), past the hard limit of {_MAX_CELL_RATIO_GROWTH:g}x."
             )
 
     def mesh_quality_growth(self) -> float:

@@ -423,6 +423,22 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-11** — **A moving partition runs through remeshes (ADR 016 decisions 2, 4, 6).**
+  - **What:** a move that would tangle the partition is undone bitwise and raises `MeshTangled`; a cell shrunk
+    below a quarter of its as-built area triggers a remesh before the next half-move; the solver then returns with
+    its fields, time, step size and any pending half-move, and the runner remeshes (`partition_remesh`), transfers
+    every species, starts a bundle segment and continues. A fresh mesh that tangles on its first move stops the
+    run (`FrontCannotAdvance`). 2D, one process; in 3D or under MPI a tangle stops the run, now reported as a
+    run failure with the time instead of a crash.
+  - **Verified** (`tests/test_moving_partition_remesh.py`): the undo restores every mesh bitwise; the trigger;
+    the solver stops on an untangled mesh; a fresh mesh tangling at once raises `FrontCannotAdvance`; a disk
+    rotating at 5 rad/s through the CLI remeshes twice by t = 0.75 (once between a stride's halves) in four bundle
+    segments, with every total (two compartments, the membrane) kept to 1e-12 (2e-14 measured over three
+    remeshes to t = 1).
+  - **Open question (ADR 016 decision 3):** the lumped fallback's trigger, a new minimum more than `1e-8` of the
+    maximum below the old one, catches smooth fields too: a projection's ordinary interpolation error undershoots
+    by 1e-5–2e-3 of the maximum (measured), so most fields take the first-order lumped transfer at most remeshes.
+
 - **2026-11-11** — **Remeshing a moving partition: the remesh and the transfer (ADR 016 decisions 1, 3, 4).**
   - **What:** `backend/partition_remesh.py` meshes a (moved) partition afresh from its own skeleton (every
     region boundary and box facet, oriented geometrically) with the labelled-curve Netgen mesher, rebuilds its
