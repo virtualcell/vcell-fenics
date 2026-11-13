@@ -1,8 +1,9 @@
 # ADR 017 — FEM forms of vcell-core's shared-subset mechanical laws
 
 **Date:** 2026-11-13
-**Status:** Proposed. Answers issue #241's four questions (decisions 1–4) and adds two that the answers
-force (decisions 5–6). Revised after an independent review (17 findings, none blocking, 6 major), each
+**Status:** Accepted (Jim, 2026-11-13): decisions 1–6 as recommended, decision 2 with option (a) (a vertex
+realization drops `Viscosity` with a warning). Answers issue #241's four questions (decisions 1–4) and adds
+two that the answers force (decisions 5–6). Revised after an independent review (17 findings, none blocking, 6 major), each
 answered below and listed in "Review" at the end.
 **Builds on:**
 - vcell-core's accepted M4a note, `spec/semantics/vertex-laws.md` (accepted 2026-11-12; D111, D112): the five
@@ -194,7 +195,7 @@ the edges' linear interpolation (*inferred*, not run).
        is a measurable property, not a discretization parameter.
      - **(c) Refuse,** as §4 says. Shared models are then impossible.
 
-     *Recommendation: (a).* Jim to choose.
+     *Recommendation: (a).* *Jim's choice (2026-11-13): (a).*
    - **No default.** A resolved cell whose model states no interior law is refused by name
      (`MissingInteriorLaw`). This follows vertex-realization's `MissingFriction` (D113; *checked*) and the
      cell-mechanics framework's rule that unresolved choices be "diagnosed rather than silently defaulted"
