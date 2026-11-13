@@ -120,3 +120,44 @@ To run Python directly in the env without going through `pixi shell`:
 - Frame design discussions in terms of cell-biology modeling concepts (compartments, species, reactions, mechanics) when they map onto FEM constructs — `vcell-fenics` is anchored to the Virtual Cell platform.
 - When a user asks "can FEniCSx do X for a moving membrane?", surface the relevant pitfall from `docs/modeling/approaches.md` up front — don't wait for them to hit it.
 - The `ρ ∇_Γ · v_Γ` dilution term on a moving surface PDE is mandatory and the most common source of subtle bugs in this problem class. Flag it whenever surface-density code appears.
+
+## Working agreements (Jim, 2026-11-13)
+
+These match vcell-core's (`../vcell-core/CLAUDE.md`), so that work moving between the repositories
+follows one set of rules.
+
+**Git and pull requests**
+- **Merge only when Jim says "merge"**, naming the PR or saying "merge it". Approval of one PR does
+  not extend to another.
+- **Always a merge commit:** `gh pr merge N --merge --delete-branch`. Never squash or rebase.
+- **Delete the feature branch after merging,** locally and on the remote.
+- **Stacked PRs:** retarget the upper PR to `main` before deleting the lower branch.
+- **Branch before committing;** never commit to `main` directly.
+- `pixi run -e dev check` must pass before a PR.
+
+**Design before code**
+- A change to the formalism, the IR or a solver contract starts as a short design note (an ADR in
+  `docs/decisions/`, or a note in `docs/modeling/`), sent as a PR for review.
+- The note has numbered decisions, each with a recommendation. Code follows once Jim accepts them.
+- An accepted note is marked accepted in place.
+
+**Independent review before asking Jim for decisions**
+- Before a design note goes to Jim, a **reviewer agent that has not seen the author's conclusions**
+  reads the note and its cited sources. Its brief is to find statements that are wrong, unsupported,
+  ambiguous or missing, and to say for each how severe it is.
+- Fix or answer each finding first, and say in the PR what the review found.
+- Use a reviewer for substantial code too, when a second reading would catch what tests cannot (a
+  formulation, a sign, a conservation property).
+
+**Claims, sources and summaries**
+- **Mark what is verified and what is inferred.** "Checked in the source" means it was read; any other
+  statement is reasoning, and says so.
+- **Claims about another system cite their source:** a section of a vcell-core note, a D-number, an
+  ADR, or a file and line.
+- **A summary is never looser than the document.**
+- **Cite and acknowledge published work** (Jim, 2026-11-13). A note that draws on a model, an
+  algorithm, a result or software ends with a **References** section: the full citation, whether it
+  was read or is cited second hand, and what it is used for. Code that implements a published method
+  names it in its docstring.
+- **Pushback is welcome.** Treat a challenge from Jim as a possible defect in the document, not only
+  in the wording of a reply.
