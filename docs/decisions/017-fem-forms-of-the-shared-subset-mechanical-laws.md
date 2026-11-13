@@ -340,8 +340,9 @@ the edges' linear interpolation (*inferred*, not run).
      generalized forces on prescribed deformations, against the vertex forms, in 2D: the spike above as a test,
      and with subdivided edges through the chain rule. 3D waits for a 3D vertex convention (vertex-laws.md §4
      leaves 3D vertex models undecided).
-   - **Where the vectors come from** (a choice for Jim). vcell-core is private and declares no licence; this
-     repository is public under MIT. The options:
+   - **Where the vectors come from** (a choice for Jim). This repository is public under MIT. vcell-core is
+     private, and today its repository has no licence, but it will be licensed MIT (Jim, 2026-11-13). The
+     options:
      - (a) a test that reads `../vcell-core/conformance/mechanics/terms.jsonl` when the sibling checkout is
        present and skips otherwise, as `cross_validation/` relies on sibling repositories;
      - (b) a self-contained test on the same complexes, built in the test, with a small independent vertex
@@ -349,8 +350,11 @@ the edges' linear interpolation (*inferred*, not run).
      - (c) copying the five vectors into `tests/fixtures/` with their source commit, as `vcell-vertex` did
        (D112). That puts vcell-core content in a public repository.
 
-     *Recommendation: (a) and (b).* (b) runs in CI and is independent of vcell-core's formulas. (c) waits for a
-     licence decision.
+     *Recommendation: (b) and (c), with (a) until (c) is possible.* (b) runs in CI and is independent of
+     vcell-core's formulas. (c) puts the contract itself in CI. It waits only until vcell-core's MIT licence is
+     committed, since copying earlier would publish unlicensed content. Until then, (a) checks the vectors
+     locally. When (c) lands, the copied file names its source commit, and (a) is kept as a drift check against
+     the sibling checkout.
    - **Exact and manufactured solutions, where the measures are not shared** (the viscous interior, friction,
      the dynamics):
      - a disk relaxing under `AreaElasticity`: its radial velocity has a closed form, `v_r ∝ I₁(r/ℓ)` with
@@ -386,7 +390,7 @@ the edges' linear interpolation (*inferred*, not run).
 - `MaterialVelocity.Solved` (reserved, `biological.yaml`) un-reserved for a resolved cell.
 - A warning for a model with an incompressible interior law (M3) and `AreaElasticity`, since the law is inert
   there.
-- The licence question of decision 6, if Jim wants option (c).
+- The MIT licence (Jim's intent, 2026-11-13), which decision 6's option (c) waits for.
 
 ## Staging (after acceptance)
 
