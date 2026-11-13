@@ -115,7 +115,7 @@ s:    |--|---|--|---|--|----|--|----|         supermesh sub-segments
 
 Because the new P1 basis is a partition of unity (Σ_j φ_j ≡ 1), the column sums of `B`
 equal `(∫ φ_old_i ds)` = `𝟙ᵀ M_old`, so total mass transfers **exactly**. This is the
-Farrell–Maddison–Pelletier supermesh conservation property, specialized to 1D.
+Farrell–Maddison (Farrell et al. 2009; Farrell & Maddison 2011) supermesh conservation property, specialized to 1D.
 
 The cheaper **P0 (cell-average)** variant is the donor-cell special case `[deferred]`:
 

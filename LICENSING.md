@@ -28,7 +28,7 @@ obligation** — the practical goal being that `vcell-fenics` can be shipped and
 The runtime dependencies (conda-forge, declared under `[tool.pixi.dependencies]` in `pyproject.toml`)
 are permissive or weak-copyleft (LGPL):
 
-- **FEniCSx stack** — DOLFINx, UFL, FFCx, Basix: **LGPL-3.0**. Used by dynamic import / linkage.
+- **FEniCSx stack** — DOLFINx, UFL, FFCx: **LGPL-3.0-or-later**; Basix: **MIT** (conda metadata, 2026-11-13). Used by dynamic import / linkage.
 - **Netgen / pyngcore**: **LGPL-2.1**. The body-fitted meshing engine behind `backend/realize.py`
   (the production geometry path) and the ALE remesher (`core/region_remesh_netgen.py`).
 - **libsupermesh**: **LGPL-2.1** (its `COPYING`; its PyPI classifier says "LGPLv2 or later"). The supermesh
