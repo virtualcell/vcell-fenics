@@ -49,7 +49,8 @@ from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
 from vcell_fenics.backend.realize import ImageGeometryWarning, realize
 from vcell_fenics.backend.remesh_3d import RemeshWarning
 from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_geometry_yaml, dump_yaml
-from vcell_fenics.formalism.schema import REGION_SPACE
+from vcell_fenics.formalism.schema import REGION_SPACE, TemplateEquation
+from vcell_fenics.formalism.templates import CELL_FORCE_BALANCE
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
 from vcell_fenics.results.schema import DomainKind
 from vcell_fenics.status import COMPILING, MESHING, SOLVING, WRITING, NullReporter, StatusReporter
@@ -138,6 +139,7 @@ def run_model(
     are the caller's, since they bracket more than the solve."""
 
     # The model's shape (and any refusal of it) is settled before anything is written.
+    _refuse_cell_force_balance(model.math)
     moving = _moving_subdomains(model)
     # a moving membrane with equations on more than one subdomain (its species, both sides' species): the
     # multi-compartment solver moves the whole partition (ADR 014); one subdomain is the moving path's (ADR 013)
@@ -256,6 +258,22 @@ class _PhasedProgress:
         self._solving = True
         self._status.phase(SOLVING, t / self._t_final, t)
         return True
+
+
+def _refuse_cell_force_balance(math: MathDescription) -> None:
+    """T9 `cell_force_balance` (ADR 018) is in the formalism and its validator, but no solver assembles it
+    yet: its term builders, quasi-static scheme and moving cells are ADR 018's staging steps 2–4. Refuse it
+    by name before any bundle is started."""
+    governed = [
+        repr(eq.variable)
+        for eq in math.equations
+        if isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE
+    ]
+    if governed:
+        raise RunError(
+            f"the {CELL_FORCE_BALANCE!r} template (T9, ADR 018), governing {', '.join(governed)}, is not solved "
+            f"yet: no solver assembles it until ADR 018's staging steps 2–4 land"
+        )
 
 
 def _refuse_region_variables(math: MathDescription) -> None:
