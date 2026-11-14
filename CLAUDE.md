@@ -157,7 +157,8 @@ follows one set of rules.
 - **A summary is never looser than the document.**
 - **Cite and acknowledge published work** (Jim, 2026-11-13). A note that draws on a model, an
   algorithm, a result or software ends with a **References** section: the full citation, whether it
-  was read or is cited second hand, and what it is used for. Code that implements a published method
-  names it in its docstring.
+  was read or is cited second hand, and what it is used for. Work whose method or software is used
+  here is listed in `ACKNOWLEDGEMENTS.md`, and code that implements a published method names it in
+  its docstring.
 - **Pushback is welcome.** Treat a challenge from Jim as a possible defect in the document, not only
   in the wording of a reply.
