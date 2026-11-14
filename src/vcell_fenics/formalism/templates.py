@@ -1,4 +1,5 @@
-"""Operator-template registry: T1–T5 and `cahn_hilliard` (the mechanics templates T6–T8 are proposed, §1.4.3).
+"""Operator-template registry: T1–T5, T9 `cell_force_balance` and `cahn_hilliard` (the mechanics templates
+T6–T8 are proposed, §1.4.3).
 
 The validator checks each `TemplateEquation` against the spec registered here:
 the governed variable's type and home-subdomain kind, the allowed
@@ -45,9 +46,21 @@ class TemplateSpec:
     temporalities: frozenset[Temporality]
     slots: tuple[SlotSpec, ...]
     require_any_of: tuple[str, ...] = field(default=())
+    # A template whose slots are keyed by subdomain (T9, ADR 018 decision 2): `slots` are then the slots of
+    # each member volume (the equation's `volumes:` map) and `surface_slots` those of each surface
+    # (`surfaces:`); the equation's `terms` must be empty.
+    surface_slots: tuple[SlotSpec, ...] = field(default=())
+    slot_maps: bool = False
 
     def slot(self, name: str) -> SlotSpec | None:
         return next((s for s in self.slots if s.name == name), None)
+
+    def surface_slot(self, name: str) -> SlotSpec | None:
+        return next((s for s in self.surface_slots if s.name == name), None)
+
+
+# The T9 template's name (ADR 018): code outside the formalism refers to it through this constant.
+CELL_FORCE_BALANCE = "cell_force_balance"
 
 
 _SCALAR: frozenset[VariableType] = frozenset({"scalar"})
@@ -117,6 +130,25 @@ REGISTRY: dict[str, TemplateSpec] = {
             SlotSpec(name="uniform_rate", types=_SCALAR, required=False),
             SlotSpec(name="region_rate", types=_SCALAR, required=False),
         ),
+    ),
+    CELL_FORCE_BALANCE: TemplateSpec(  # T9 — ADR 018; the forms of ADR 017
+        # A quasi-static, overdamped force balance for one velocity v on a list of volume classes (the
+        # members: the cells' compartments). For every test velocity φ:
+        #   Σ_members ∫(2η dev ε(v):ε(φ) + η_b ∇·v ∇·φ + ζ v·φ − P ∇·φ) + Σ_surfaces ∫ γ ∇_Γ·φ = 0,
+        # with dev the 3D deviator in every dimension. Per member: viscosity η (required), bulk_viscosity η_b,
+        # drag ζ, and pressure P (uniform on the member); per surface: tension γ. Always steady_state.
+        name=CELL_FORCE_BALANCE,
+        governed_types=_VECTOR,
+        subdomain_kinds=frozenset({"volume"}),
+        temporalities=frozenset({"steady_state"}),
+        slots=(
+            SlotSpec(name="viscosity", types=_SCALAR, required=True),
+            SlotSpec(name="bulk_viscosity", types=_SCALAR, required=False),
+            SlotSpec(name="drag", types=_SCALAR, required=False),
+            SlotSpec(name="pressure", types=_SCALAR, required=False),
+        ),
+        surface_slots=(SlotSpec(name="tension", types=_SCALAR, required=False),),
+        slot_maps=True,
     ),
     "cahn_hilliard": TemplateSpec(  # diffuse-interface phase separation
         # A 4th-order conserved order parameter ∂φ/∂t = ∇·(M∇μ), μ = f'(φ) − ε²∇²φ, with the

@@ -122,7 +122,7 @@ def _motion_to_dict(m: Motion) -> dict[str, object]:
 
 
 def _variable_to_dict(v: Variable) -> dict[str, object]:
-    out: dict[str, object] = {"name": v.name, "subdomain": v.subdomain}
+    out: dict[str, object] = {"name": v.name, "subdomain": list(v.members) if v.members else v.subdomain}
     if v.type != "scalar":
         out["type"] = v.type
     if v.space != "lagrange_p1":
@@ -169,11 +169,15 @@ def _equation_to_dict(e: Equation) -> dict[str, object]:
         out = {
             "template": e.template,
             "variable": e.variable,
-            "subdomain": e.subdomain,
+            "subdomain": list(e.members) if e.members else e.subdomain,
             "temporality": e.temporality,
         }
         if e.terms:
             out["terms"] = dict(e.terms)
+        if e.volumes:
+            out["volumes"] = {name: dict(slots) for name, slots in e.volumes.items()}
+        if e.surfaces:
+            out["surfaces"] = {name: dict(slots) for name, slots in e.surfaces.items()}
         if e.initial_condition is not None:
             out["initial_condition"] = e.initial_condition
         return out

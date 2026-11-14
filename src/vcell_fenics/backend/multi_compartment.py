@@ -98,6 +98,7 @@ from vcell_fenics.formalism.schema import (
     MathDescription,
     TemplateEquation,
 )
+from vcell_fenics.formalism.templates import CELL_FORCE_BALANCE
 from vcell_fenics.formalism.validator import validate_or_raise
 
 # a compartment's share of a box face: its own facet tag (distinct from the membranes' and the faces')
@@ -341,6 +342,11 @@ def integrate_multi_compartment(
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
+    if any(eq.template == CELL_FORCE_BALANCE for eq in template_eqs):
+        raise NotImplementedError(
+            f"the {CELL_FORCE_BALANCE!r} template (T9, ADR 018) is not assembled by the multi-compartment solver; "
+            f"its own solve is ADR 018's staging steps 2–4"
+        )
     kind_of = {sd.name: sd.kind for sd in md.subdomains}
     region_eqs = [eq for eq in template_eqs if eq.template == "region_ode"]
     field_eqs = [as_field_equation(eq, kind_of[eq.subdomain]) for eq in template_eqs if eq.template != "region_ode"]

@@ -160,12 +160,24 @@ class Variable:
 
     `(name, subdomain)` is the unique identifier — the same `name` on a
     different subdomain is a different variable (§1.3.1).
+
+    **A listed variable** (ADR 018 decision 2): the velocity of the `cell_force_balance` template (T9) lives
+    on a list of volume classes, its *members*, written `subdomain: [a, b, ...]` in YAML. It is stored with
+    `members` holding the whole list and `subdomain` its first member (the variable's *home*, the key the
+    coverage rules use). The validator maps every member to it. Code that does not handle T9 sees a vector
+    variable on its home, so the solver entry points that could reach one (the runner and the
+    multi-compartment solver) refuse T9 first.
     """
 
     name: str
     subdomain: str
     type: VariableType = "scalar"
     space: str = "lagrange_p1"
+    members: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # A list given from Python is stored as a tuple, so the variable compares equal to a loaded one.
+        object.__setattr__(self, "members", tuple(self.members))
 
 
 # The `space` of a region variable (§1.4.2 T5): one value per connected region of its subdomain — spatially
@@ -307,6 +319,15 @@ class TemplateEquation:
     temporality: Temporality
     terms: dict[str, str] = field(default_factory=dict)
     initial_condition: str | None = None
+    # T9 `cell_force_balance` only (ADR 018 decision 2): the members its velocity lives on (YAML
+    # `subdomain: [a, b, ...]`; `subdomain` is then the first), and two slot maps in place of `terms` —
+    # per member volume and per surface, each a map from slot name to expression.
+    members: tuple[str, ...] = ()
+    volumes: dict[str, dict[str, str]] = field(default_factory=dict)
+    surfaces: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "members", tuple(self.members))
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -327,6 +348,22 @@ class WeakFormEquation:
     initial_condition: str | None = None
 
 
+def _listed_subdomain(value: object) -> object:
+    """The YAML/JSON sugar for a listed variable or a T9 equation (ADR 018 decision 2): `subdomain: [a, b]`
+    becomes `subdomain: a, members: (a, b)`. A list may not be empty, and may not be given beside `members`."""
+
+    if not isinstance(value, dict):
+        return value
+    if "members" in value:
+        raise ValueError("list the members as 'subdomain: [a, b, ...]'; 'members' is not written directly")
+    listed = value.get("subdomain")
+    if isinstance(listed, list):
+        if not listed:
+            raise ValueError("'subdomain' may be a name or a non-empty list of names, not an empty list")
+        return {**value, "subdomain": listed[0], "members": tuple(listed)}
+    return value
+
+
 def _equation_tag(value: object) -> str:
     """Route an Equation: `template: weak_form` is the WeakFormEquation; any other
     template name is a TemplateEquation (whose `template` is an open registry name)."""
@@ -337,7 +374,8 @@ def _equation_tag(value: object) -> str:
 
 
 Equation: TypeAlias = Annotated[
-    Annotated[WeakFormEquation, Tag("weak_form")] | Annotated[TemplateEquation, Tag("template")],
+    Annotated[WeakFormEquation, Tag("weak_form")]
+    | Annotated[Annotated[TemplateEquation, BeforeValidator(_listed_subdomain)], Tag("template")],
     Discriminator(_equation_tag),
 ]
 
@@ -448,7 +486,7 @@ class MathDescription:
 
     geometry: str
     subdomains: Annotated[list[Subdomain], Field(min_length=1)]
-    variables: Annotated[list[Variable], Field(min_length=1)]
+    variables: Annotated[list[Annotated[Variable, BeforeValidator(_listed_subdomain)]], Field(min_length=1)]
     equations: Annotated[list[Equation], Field(min_length=1)]
     parameters: list[Parameter] = field(default_factory=list)
     boundary_conditions: list[BoundaryCondition] = field(default_factory=list)

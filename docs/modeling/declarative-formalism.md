@@ -217,6 +217,8 @@ A variable is a named unknown function defined on exactly one subdomain class. I
 
 A MathDescription may contain many variables; multiple variables on the same subdomain class is the normal case (one membrane carries multiple species; cytoplasm carries ligand plus an intracellular signal plus a regulator). The pairing of `(name, subdomain)` is what uniquely identifies a variable — the same name `c` on `cytoplasm` and on `extracellular` would be two distinct variables.
 
+**A listed variable** (ADR 018 decision 2). The velocity of the cell force balance (T9, §1.4.2) lives on a *list* of volume classes, its **members** (`subdomain: [cyt__c1, nuc__c1, cyt__c2]`): one velocity, continuous across all of them. A list is accepted for no other template, and only for a vector. Its name is unique in the MathDescription — no other variable, on any subdomain, has it — and it is the same variable on each: by bare name on a member, by `trace(·)` on a surface bounding one (§1.8.6).
+
 A variable's *value field* exists on every region of its subdomain class; the user does not declare per-region values or per-region existence. If the subdomain has motion (§1.10), the value field is defined on the deforming manifold; the time derivative in any equation referring to this variable is taken in the appropriate frame, with the convention fixed by the equation's operator template (§1.4) or the user's UFL form (§1.5).
 
 #### 1.3.2 Variable types
@@ -408,9 +410,53 @@ In weak form with a region-constant test function $w$ this is $\int_R \dot u\, w
 
 Covers VCell's `VolumeRegionVariable` + `VolumeRegionEquation` (a **well-mixed species** in a spatial application; $r_R$ = its `VolumeRate`) and `MembraneRegionVariable` + `MembraneRegionEquation` (most often the **membrane potential**, $C\,dV/dt = -I_{\text{total}}$; $r_R$ = its `MembraneRate`). Both coupled solvers solve them — `integrate_interface_coupled` (two compartments) and `integrate_membrane_coupled` (two compartments plus membrane species): a region variable on either compartment or on the membrane between them is a scifem Real block in the method-of-lines system. The single-mesh and moving-boundary paths still refuse them (vcell-fenics #196). v1 is one region per subdomain: a subdomain realised as several disconnected regions needs per-region instancing (§1.2.6 (2)), so the solvers count the connected regions and refuse more than one.
 
+##### T9 — Cell force balance (`cell_force_balance`: one velocity on a list of cells)
+
+*ADR 018 (accepted 2026-11-14); the forms are ADR 017's.* A quasi-static, overdamped force balance for one vector velocity $\mathbf{v}$ on a list of volume classes, the **members** (the cells' compartments; §1.3.1), with a tension on the surfaces that bound them. For every test velocity $\boldsymbol{\varphi}$:
+
+$$\sum_{\text{members}} \int \bigl( 2\eta\, \operatorname{dev}\varepsilon(\mathbf{v}) : \varepsilon(\boldsymbol{\varphi}) + \eta_b\, \nabla\cdot\mathbf{v}\, \nabla\cdot\boldsymbol{\varphi} + \zeta\, \mathbf{v}\cdot\boldsymbol{\varphi} - P\, \nabla\cdot\boldsymbol{\varphi} \bigr)\, dV \;+\; \sum_{\text{surfaces}} \int_\Gamma \gamma\, \nabla_\Gamma\cdot\boldsymbol{\varphi}\, dS \;=\; 0,$$
+
+with $\operatorname{dev}\varepsilon = \varepsilon - \tfrac13 (\operatorname{tr}\varepsilon) I$, the 3D deviator, in 2D as well (ADR 018 decision 4). The slots are keyed by subdomain, in two maps that replace `terms`:
+
+| Map | Slot | Type | Default | Meaning |
+|---|---|---|---|---|
+| `volumes:` (one entry per member, all required) | `viscosity` | scalar | required | shear viscosity $\eta > 0$ |
+| | `bulk_viscosity` | scalar | 0 | $\eta_b \ge 0$ |
+| | `drag` | scalar | 0 | drag $\zeta \ge 0$ against the lab frame |
+| | `pressure` | scalar | 0 | $P$, **uniform on the member**: it may read constants, `sim.*`, `region_size`, region variables and parameters that read only these (`NonUniformPressure` otherwise) |
+| `surfaces:` (keyed by surface class) | `tension` | scalar | none | $\gamma$, a field allowed (the Marangoni force): it may read constants, `sim.*`, `region_size`, region variables, the surface's own species and the traces of adjacent ones, not `geom.*`; where given it must stay $> 0$ (`NonPositiveTension`, at run time) |
+
+No slot may read $\mathbf{v}$ (the solve would be nonlinear). Assembled as a volume term, a uniform pressure equals $P \oint \boldsymbol{\varphi}\cdot\mathbf{n}$ on the member's boundary; giving every compartment of a cell the same $P$ makes the internal envelopes cancel, so the cell feels $P_c \oint_{\partial\Omega_c}$ exactly (ADR 018 decision 3).
+
+```yaml
+equations:
+  - template: cell_force_balance
+    variable: v                                # declared with subdomain: [cyt__c1, cyt__c2], type: vector
+    subdomain: [cyt__c1, cyt__c2]
+    temporality: steady_state
+    volumes:
+      cyt__c1: { viscosity: eta, bulk_viscosity: eta_b, drag: zeta, pressure: "K * (V0 - region_size(cyt__c1))" }
+      cyt__c2: { viscosity: eta, bulk_viscosity: eta_b, drag: zeta, pressure: "K * (V0 - region_size(cyt__c2))" }
+    surfaces:
+      pm__c1:    { tension: T_c1 }
+      pm__c2:    { tension: T_c2 }
+      jn__c1_c2: { tension: "Lambda + T_c1 + T_c2" }
+```
+
+Structural rules (the validator's, §1.11):
+
+- `steady_state` only, and **no initial condition**: the velocity is solved at every step, and the initial configuration is the geometry (an exception to the unknown-motion IC rule of §1.9.5).
+- **Motion, both ways:** every member, and every surface in `surfaces:`, has `motion: {kind: unknown, variable: v}`; a volume that is not a member may not. A surface moves with the trace of $\mathbf{v}$, so a surface with that motion must bound a member (a geometry check).
+- **Boundaries:** a surface bounding a member needs no BC for $\mathbf{v}$; its condition is the natural one, its tension or none (an exception to §1.6.4). The only BC $\mathbf{v}$ takes is a **wall**: `dirichlet` with the value `0` (or an all-zero vector such as `[0, 0]`) on a box face a member touches, never on a subdomain; the box does not move.
+- **Rigid motion must be resisted** (`UnconstrainedRigidMotion`): some member has a `drag`, or $\mathbf{v}$ has a wall.
+
+Rules that need the realized geometry (§1.11.10) belong to the backend: each surface in `surfaces:` bounds a member; every surface that bounds a member moves with $\mathbf{v}$, and every surface that moves with it bounds one; a wall is a box face a member touches; a free membrane (a member against a non-member) has a tension (one between two members may omit it, and then carries no force); each connected component of the members has a drag or a wall; a member touching the box is held there (`MemberOnFreeBox`). A non-member volume is at rest; its domain moves with the members' membranes (§1.10.1).
+
+The validator implements T9 (ADR 018 staging step 1); no solver assembles it yet, and the runner refuses it by name.
+
 #### 1.4.3 Sketched for v2+
 
-The following templates are designed-for but not implemented in v1. The schema (§2) reserves space for them; the solver contract (§3) treats them as "the backend may decline." They are numbered **T6–T8** (renumbered 2026-10-08: T5 is `region_ode`, §1.4.2, which the backend implements; the earlier drafts called the Stokes template T5). The dedicated Stokes / FSI drivers in `backend/` (`stokes.py`, `multiphase.py`, `fsi.py`) solve these physics as Python entry points but are not templates: a template needs a declared slot envelope, validation rules and conformance examples.
+The following templates are designed-for but not implemented in v1. The schema (§2) reserves space for them; the solver contract (§3) treats them as "the backend may decline." (T9, the cell force balance, is specified in §1.4.2; T6 is not it — ADR 018 decision 1.) They are numbered **T6–T8** (renumbered 2026-10-08: T5 is `region_ode`, §1.4.2, which the backend implements; the earlier drafts called the Stokes template T5). The dedicated Stokes / FSI drivers in `backend/` (`stokes.py`, `multiphase.py`, `fsi.py`) solve these physics as Python entry points but are not templates: a template needs a declared slot envelope, validation rules and conformance examples.
 
 - **T6 — Stokes / Navier-Stokes momentum balance** (vector unknown, on bulk Ω): $\rho_0 (\partial_t \mathbf{v} + (\mathbf{v} \cdot \nabla) \mathbf{v}) = \nabla \cdot \mathbf{\sigma} + \mathbf{f}$, with $\mathbf{\sigma}$ filled by a constitutive template. Pairs with T3 incompressibility.
 - **T7 — Linear elasticity** (vector displacement, on bulk Ω): $\nabla \cdot \mathbf{\sigma}(\mathbf{u}) + \mathbf{f} = \rho_0 \, \partial_{tt} \mathbf{u}$, with linearized strain. Steady-state form drops the inertia term.
@@ -729,7 +775,7 @@ This is the standard PDE textbook convention and matches the natural BC of the w
 
 **Moving boundaries.** On a boundary that moves relative to the material (a front sweeping a surface-driven domain, ADR 013), the natural condition is zero **total** flux relative to the moving boundary, $(-D\nabla u + (\mathbf{c} - \mathbf{w})\,u)\cdot\mathbf{n} = 0$ with $\mathbf{w}\cdot\mathbf{n}$ the boundary's normal speed: the Rankine–Hugoniot condition, so no species crosses the front, and species at rest pile up ahead of a front that advances into them. A user's Neumann flux on such a boundary is likewise the total flux relative to the boundary (e.g. a binding flux at a moving membrane).
 
-**Internal boundaries.** No default. Every internal sub-boundary that a variable touches must carry an explicit BC — Dirichlet, Neumann, Robin, value-equality interface, or single-sided interface flux. The schema validates this; a missing internal BC is an error.
+**Internal boundaries.** No default. Every internal sub-boundary that a variable touches must carry an explicit BC — Dirichlet, Neumann, Robin, value-equality interface, or single-sided interface flux. The schema validates this; a missing internal BC is an error. *Exception:* the velocity of a cell force balance (T9) takes no BC on the surfaces that bound its members; their condition is their tension (ADR 018 decision 2).
 
 **Compatibility checks.** Validation rules (deferred in detail to §1.11) include:
 
@@ -1038,6 +1084,8 @@ Built-in quantities are **namespaced** (`geom.*`, `sim.*`; §1.8.3, ADR 006), so
 
 A name that matches none of the above is an error (caught by §1.11). A variable defined on a *different* subdomain than the expression's evaluation context may not be referenced by bare name — higher-dimensional variables must go through `trace(·)`; lower-dimensional variables cannot be referenced inside an expression at all (§1.8.7), and the coupling must be expressed structurally via a boundary condition.
 
+A **listed variable** (§1.3.1) is local on every one of its members, and on a surface bounding a member `trace(v)` is its trace. On a surface between two members that trace is not ambiguous (§1.11.7): the velocity is one continuous field there.
+
 Name shadowing — a parameter and a local variable with the same name — is an error at MathDescription construction time, not a precedence resolution.
 
 #### 1.8.7 Reserved for v2+
@@ -1122,7 +1170,7 @@ The validator checks the following at MathDescription construction time:
 **IC consistency (cross-references §1.7):**
 
 - A `time_dependent` equation must have an `initial_condition` field for its governed variable.
-- A `steady_state` equation must not have an `initial_condition` field — **except** when its governed variable is an unknown-motion variable (§1.10.3), whose IC sets the $t = 0$ configuration of the moving subdomain (§1.7.1, §1.7.7). There the IC is optional, not forbidden.
+- A `steady_state` equation must not have an `initial_condition` field — **except** when its governed variable is an unknown-motion variable (§1.10.3), whose IC sets the $t = 0$ configuration of the moving subdomain (§1.7.1, §1.7.7). There the IC is optional, not forbidden. The cell force balance (T9) refuses one: its velocity is solved at every step, and the geometry is the initial configuration (ADR 018 decision 2).
 
 These are the strict-matching rules; they catch a class of silent errors where a `time_dependent` equation forgets its time derivative (and silently becomes an algebraic constraint inside the time loop) or a `steady_state` equation accidentally introduces $\partial_t$ (and silently becomes an evolution equation without an IC).
 
@@ -1378,9 +1426,9 @@ Most rules below are errors. The few warning cases are noted explicitly. Example
 
 - Every variable must be governed by exactly one equation. A variable without an equation is undetermined; a variable with two or more equations is overdetermined.
 - Every equation declared `temporality: time_dependent` must have an `initial_condition` (§1.7.1, §1.9.5).
-- Every equation declared `temporality: steady_state` must **not** have an `initial_condition` (§1.7.1, §1.9.5) — except when its governed variable is an unknown-motion variable, whose IC sets the $t = 0$ configuration (§1.7.7); there the IC is optional, not forbidden.
+- Every equation declared `temporality: steady_state` must **not** have an `initial_condition` (§1.7.1, §1.9.5) — except when its governed variable is an unknown-motion variable, whose IC sets the $t = 0$ configuration (§1.7.7); there the IC is optional, not forbidden. A T9 equation refuses one (§1.4.2).
 - Every variable referenced in any equation, BC, or IC must be declared.
-- Every internal boundary touched by a variable must have at least one explicit BC for that variable (no zero-Neumann default on internal boundaries; §1.6.4).
+- Every internal boundary touched by a variable must have at least one explicit BC for that variable (no zero-Neumann default on internal boundaries; §1.6.4) — except a T9 velocity on the surfaces bounding its members.
 - For region-keyed parameter maps (`kind: region_map`), every region of the named subdomain class must have a value in the map (§1.2.5).
 
 External boundaries have a zero-Neumann default, so missing BCs there are *not* errors.
@@ -1414,7 +1462,8 @@ External boundaries have a zero-Neumann default, so missing BCs there are *not* 
 - Dirichlet BCs must be declared on a labelled boundary that exists; the boundary must be incident to a subdomain on which the variable lives.
 - For weak-form equations (template = `weak_form`), §1.6 BCs on the governed variable must all be Dirichlet. Non-Dirichlet §1.6 BCs on a weak-form-governed variable are an error (§1.5.6); the user must encode natural BCs in the form itself.
 - **`interface_flux` requires its `variable` to be a `volume` (bulk) subdomain.** The kind expresses transport across an interface where mass *crosses* into (or out of) a bulk compartment. Bulk-surface couplings where mass accumulates on the surface (e.g. ligand binding to membrane receptors) are not expressible as a flux *on the surface variable* and are an error here; use the composable Neumann + source pattern in §1.6.5 instead. The validator rejects `interface_flux` entries whose `variable` lives on a non-volume subdomain, with an error message pointing the user at §1.6.5.
-- Trace ambiguity: when an expression's `trace(u)` would have multiple resolutions (e.g. higher-dim $u$ contributes regions on both sides of the lower-dim evaluation context), the reference is ambiguous and rejected. In v1 the modeller's recourse is Tier 3 (separate subdomain classes); v2 will add side-or-region specifiers (§1.2.6, §1.8.2).
+- Trace ambiguity: when an expression's `trace(u)` would have multiple resolutions (e.g. higher-dim $u$ contributes regions on both sides of the lower-dim evaluation context), the reference is ambiguous and rejected. In v1 the modeller's recourse is Tier 3 (separate subdomain classes); v2 will add side-or-region specifiers (§1.2.6, §1.8.2). A listed variable (§1.3.1) is exempt: it is one continuous field across its members.
+- A T9 velocity takes only a wall: `dirichlet` with the zero vector, written `0` (§1.4.2). Any other kind or value is an error.
 
 #### 1.11.8 Initial-condition consistency
 
@@ -1458,7 +1507,7 @@ These checks require the Geometry to be available at MathDescription validation 
 
 The following are explicitly outside the validator's scope. They are the user's responsibility, and they are the deepest reason validation cannot prove a model is well-posed:
 
-- **Coercivity, ellipticity, inf-sup conditions.** Whether a given bilinear form admits a unique solution depends on the sign and structure of its terms (positive-definite diffusion, properly-paired mixed spaces, etc.). The validator does not check these.
+- **Coercivity, ellipticity, inf-sup conditions.** Whether a given bilinear form admits a unique solution depends on the sign and structure of its terms (positive-definite diffusion, properly-paired mixed spaces, etc.). The validator does not check these, with one structural exception: a T9 force balance must have a drag on some member or a wall (`UnconstrainedRigidMotion`, ADR 018 decision 4). The rest of that condition — per connected component, and the drag's values — needs the geometry and the run.
 - **Sign conventions.** Whether the user wrote $\nabla \cdot (D \nabla u)$ with the correct sign for a diffusion equation (or accidentally $-\nabla \cdot (D \nabla u)$) is invisible to a static walk of the AST.
 - **Physical consistency.** Whether $k_{on}$ and $k_{off}$ in a binding reaction have the right dimensions, whether $D$ has units of length²/time, whether the chosen $\sigma_T$ produces a meaningful tension — none of these can be checked without unit annotations the formalism does not currently require. Unit-aware validation is a possible v2 enhancement.
 - **Conservation across coupled bulk-surface expressions.** The §1.6.5 composable pattern relies on the user writing matched expressions in three places (bulk BC, surface source for the bound form, surface source for the free form, with appropriate signs). The validator does not enforce that they are consistent; silent mass leakage is a class of error the user is responsible for catching, e.g. through dedicated mass-balance test cases.
@@ -1545,7 +1594,7 @@ subdomains:
   ```yaml
   motion: { kind: unknown, variable: <variable_name> }
   ```
-  The referenced variable must be declared in `variables:`, must be `type: vector`, must have `subdomain: <this subdomain>`, and must be governed by some equation (§1.10.3, §1.11.4).
+  The referenced variable must be declared in `variables:`, must be `type: vector`, must have `subdomain: <this subdomain>`, and must be governed by some equation (§1.10.3, §1.11.4). For a T9 velocity (§1.4.2), "this subdomain" is one of its members; a surface names it when the surface bounds a member, and moves with its trace (ADR 018 decision 2).
 
 The `kind` discriminator in `motion` selects which fields are valid. Cross-mixing (e.g. `kind: none` with a `velocity` field, or `kind: prescribed` with both `velocity` and `displacement`) is rejected at construction time.
 
@@ -1562,6 +1611,8 @@ variables:
 The `space` hint values are catalogued in §1.3.3. Backends are not required to honour every hint; an unsupported hint is a solver-side error.
 
 The pair `(name, subdomain)` uniquely identifies a variable. The same variable name on different subdomains denotes two distinct variables (per §1.3.1).
+
+`subdomain` may instead be a **list** of volume classes, for the velocity of a cell force balance (T9) only (§1.3.1, §1.4.2): `subdomain: [cyt__c1, nuc__c1, cyt__c2]`. The data model stores the list as `members` and its first entry as `subdomain`.
 
 #### 2.2.3 Parameter
 
@@ -1628,9 +1679,11 @@ equations:
     initial_condition: "<expression>"   # required iff temporality = time_dependent
 ```
 
-Template names for v1: `bulk_radv_diff` (T1), `surface_pde_with_dilution` (T2), `algebraic_constraint` (T3), `lumped_ode` (T4). Template slot names per template are catalogued in §1.4.2.
+Template names for v1: `bulk_radv_diff` (T1), `surface_pde_with_dilution` (T2), `algebraic_constraint` (T3), `lumped_ode` (T4), `region_ode` (T5), and `cell_force_balance` (T9, with slot maps in place of `terms`, below). Template slot names per template are catalogued in §1.4.2.
 
 The validator checks that every slot in `terms` is a valid slot name for the template and that the expression types match the slot's declared types (§1.11.5).
+
+The cell force balance (T9, §1.4.2) differs: its `subdomain` is the velocity's list of members, and it replaces `terms` with two slot maps, `volumes:` (one entry per member) and `surfaces:` (one per surface carrying a tension), each mapping slot names to expressions. It takes no `initial_condition`.
 
 #### 2.2.5 Equation — weak-form
 
@@ -2219,7 +2272,7 @@ The three v1 conformance models run **through the formalism** (`tests/test_backe
 
 **Outside the DOLFINx backend as of 2026-10-08** (the earlier "Punted in v1" list; what has since landed is described in the bullets above and in [`docs/overview.md`](../overview.md)):
 
-- Operator templates: T3 `algebraic_constraint` (registered and validated, no backend lowering); T4 `lumped_ode` on a `point` subdomain (spatial T4 — a field without transport — runs on every fixed-geometry path via `backend/equations.as_field_equation` and is refused on a moving subdomain); the proposed mechanics templates T6–T8 (the Stokes / FSI drivers are Python entry points, not templates). `cahn_hilliard` is registered and runs through `run_cahn_hilliard`, not through `assemble()` or the CLI.
+- Operator templates: T3 `algebraic_constraint` (registered and validated, no backend lowering); T4 `lumped_ode` on a `point` subdomain (spatial T4 — a field without transport — runs on every fixed-geometry path via `backend/equations.as_field_equation` and is refused on a moving subdomain); the proposed mechanics templates T6–T8 (the Stokes / FSI drivers are Python entry points, not templates); T9 `cell_force_balance` (registered and validated, ADR 018 staging step 1; the runner refuses it by name until its term builders and solve land). `cahn_hilliard` is registered and runs through `run_cahn_hilliard`, not through `assemble()` or the CLI.
 - Nonlinear sources under **backward Euler** (the `lhs`/`rhs` split needs an affine residual; `NonlinearTermError` names the fix). The method of lines accepts them as a genuine nonlinear residual, and the FSI drivers have their own Newton backward-Euler step.
 - The **interface** BC kinds, in part. Single-sided `interface_flux` — bulk-bulk coupling on an *internal* interface — is wired in the coupled backend (`backend/interface_coupled.py`: backward-Euler `assemble_interface_coupled` and method-of-lines `integrate_interface_coupled`), and VCell jump conditions import to it. **Membrane species coupled to both bulks** (the receptor–ligand cell: an `interface_flux` referencing adjacent *surface* variables, and surface reactions referencing both compartments' bulk traces) are wired by both a backward-Euler stepper (`assemble_membrane_coupled`, fully-lagged/IMEX binding — termwise mass-conservative, conditionally stable for stiff binding) and a method-of-lines integrator (`integrate_membrane_coupled`, fully-implicit binding via a **matrix-free** Newton — the exact `∂(binding)/∂(membrane species)` Jacobian block is un-assemblable in DOLFINx 0.10/0.11 (a bulk-coefficient × membrane-trial term on the interface facet assembles to zero), so the implicit Jacobian is applied by finite-differencing the conservative residual, preconditioned by the assembled partial Jacobian; unconditionally stable for stiff binding). Both handle **any number** of bulk species per compartment and surface species — each region is a vector P1 space, with one symbol table putting every species in scope at the membrane, so a flux on a bulk species may reference any same-compartment, adjacent-compartment, or membrane species. Since 2026-09-28 the runner routes every fixed model whose equations span two or more subdomains to the **multi-compartment solver** (`backend/multi_compartment.py`: any number of compartments and membranes, one scalar P1 block per species per region, a Real per region variable, each membrane coupling only its two sides, in-compartment reactions, box-face values per compartment, 2D/3D, MPI; cross-validated against fvsolver), which supersedes the two older integrators for the CLI; they stay for their tests and cross-validation. Still deferred: value-equality (`u = k·u_adjacent`, a constrained solve, not a flux term — every coupled solver raises on it); membrane species on a *moving* membrane are the multi-compartment solver's (ADR 014; this solver refuses a prescribed velocity, decision 7, and keeps the force-balance one); and the §1.6.6 bulk↔surface pattern on the CLI (it runs through `assemble()` via `backend/coupled.py` as its own entry point). The single-mesh `assemble()` branch still rejects interface BCs with `NotImplementedError` (they need a coupled path). External Dirichlet/Neumann/Robin are implemented, including time-dependent data: `sim.t` is bound to a time Constant the drivers advance (`assemble.py`, `solver.run`, the method-of-lines callbacks), so `g(t)` tracks the integrator's time.
 - Prescribed-*displacement* motion (the schema accepts it; the backend lowers only `velocity`). (**Unknown / mechanics-driven** motion is now implemented for the §1.10.8 class — see the unknown-motion bullet above; remeshing / conservative field transfer is also implemented — see the ALE bullet.)

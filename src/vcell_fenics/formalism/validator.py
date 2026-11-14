@@ -21,6 +21,12 @@ Schema-level checks:
 - Boundary-condition consistency — conflicting kinds, value-equality
   adjacent-variable declaration, `interface_flux` bulk-only, weak-form
   Dirichlet-only (§1.11.7).
+- T9 `cell_force_balance` (ADR 018): the listed velocity and its members, motion
+  both ways, the slot maps, no initial condition, the zero-velocity wall as the
+  only BC, the static rigid-motion check (`UnconstrainedRigidMotion`), and a
+  uniform pressure (`NonUniformPressure`). What needs the geometry — that each
+  surface bounds a member, connected components, a member on the box — is the
+  backend's (§1.11.10).
 
 Expression-level checks (parse + AST walk):
 
@@ -67,6 +73,7 @@ from vcell_fenics.formalism.expr import (
 from vcell_fenics.formalism.parser import ExpressionSyntaxError, parse
 from vcell_fenics.formalism.schema import (
     REGION_SPACE,
+    BCDirichlet,
     BCInterfaceFlux,
     BCInterfaceValueEquality,
     BoundaryCondition,
@@ -86,7 +93,7 @@ from vcell_fenics.formalism.schema import (
     VariableType,
     WeakFormEquation,
 )
-from vcell_fenics.formalism.templates import REGISTRY
+from vcell_fenics.formalism.templates import CELL_FORCE_BALANCE, REGISTRY, TemplateSpec
 from vcell_fenics.formalism.vocabulary import (
     CALCULUS_OPERATORS,
     GEOMETRY_MEMBERS,
@@ -231,6 +238,15 @@ def _references_partial_t_of(node: Expr, variable: str) -> bool:
     return False
 
 
+def _is_zero_literal(node: Expr) -> bool:
+    """`0` or an all-zero vector literal such as `[0, 0]`: the zero vector, a wall's only value."""
+    if isinstance(node, Number):
+        return node.value == 0.0
+    if isinstance(node, VectorLiteral):
+        return all(_is_zero_literal(c) for c in node.components)
+    return False
+
+
 def _lagrange_order(space: str) -> int | None:
     """The polynomial order of a `lagrange_pN` space hint, or None for an unrecognised hint."""
 
@@ -307,6 +323,8 @@ class _Validator:
         # (variable, subdomain) pairs whose subdomain has unknown motion driven
         # by that variable — the IC-on-steady-state exception (§1.7.7).
         self._unknown_motion_vars: set[tuple[str, str]] = set()
+        # The names T9 equations govern (ADR 018 decision 2), with the first such equation.
+        self._t9_vars: dict[str, TemplateEquation] = {}
 
     # -- diagnostics ---------------------------------------------------------
 
@@ -324,6 +342,7 @@ class _Validator:
         self._check_parameter_subdomain_refs()
         self._check_motion_variables()
         self._check_equations()
+        self._check_cell_force_balances()
         self._check_boundary_conditions()
         self._check_expressions()
         self._check_dilution_on_moving_weak_forms()
@@ -338,12 +357,22 @@ class _Validator:
                 self._subdomain_by_name[s.name] = s
 
         for i, v in enumerate(self._md.variables):
-            key = (v.name, v.subdomain)
-            if key in self._var_by_key:
-                self._error(f"variables[{i}]", f"duplicate variable {v.name!r} on subdomain {v.subdomain!r}")
-            else:
-                self._var_by_key[key] = v
-            self._var_subdomains.setdefault(v.name, set()).add(v.subdomain)
+            if v.members and v.members[0] != v.subdomain:
+                self._error(
+                    f"variables[{i}]",
+                    f"listed variable {v.name!r}: 'subdomain' must be its first member {v.members[0]!r}",
+                )
+            for home in v.members or (v.subdomain,):
+                key = (v.name, home)
+                if key in self._var_by_key:
+                    self._error(f"variables[{i}]", f"duplicate variable {v.name!r} on subdomain {home!r}")
+                else:
+                    self._var_by_key[key] = v
+                self._var_subdomains.setdefault(v.name, set()).add(home)
+
+        for eq in self._md.equations:
+            if isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE:
+                self._t9_vars.setdefault(eq.variable, eq)
 
         for i, p in enumerate(self._md.parameters):
             if p.name in self._param_names:
@@ -365,8 +394,22 @@ class _Validator:
         for i, v in enumerate(self._md.variables):
             if v.name in RESERVED_NAMES:
                 self._error(f"variables[{i}]", f"variable name {v.name!r} is a reserved name (§2.4.1)")
-            if v.subdomain not in self._subdomain_by_name:
-                self._error(f"variables[{i}]", f"references undeclared subdomain {v.subdomain!r}")
+            for home in v.members or (v.subdomain,):
+                if home not in self._subdomain_by_name:
+                    self._error(f"variables[{i}]", f"references undeclared subdomain {home!r}")
+            if v.members:
+                self._check_listed_variable(v, f"variables[{i}]")
+        # A listed or T9 velocity's name is unique in the MathDescription (ADR 018 decision 2): T9's rules
+        # (its BCs, its wall) find it by name.
+        velocities = {v.name for v in self._md.variables if v.members} | set(self._t9_vars)
+        for name in sorted(velocities):
+            declared = [i for i, v in enumerate(self._md.variables) if v.name == name]
+            for i in declared[1:]:
+                self._error(
+                    f"variables[{i}]",
+                    f"{name!r} is a {CELL_FORCE_BALANCE!r} velocity; its name is unique in the MathDescription, "
+                    f"so no other variable may be called {name!r} (ADR 018 decision 2)",
+                )
         for i, p in enumerate(self._md.parameters):
             if p.name in RESERVED_NAMES:
                 self._error(f"parameters[{i}]", f"parameter name {p.name!r} is a reserved name (§2.4.1)")
@@ -384,9 +427,38 @@ class _Validator:
             if scope is not None and scope not in self._subdomain_by_name:
                 self._error(f"parameters[{i}]", f"references undeclared subdomain {scope!r}")
 
+    def _check_listed_variable(self, v: Variable, path: str) -> None:
+        """A variable on a list of subdomains (ADR 018 decision 2): a vector, on distinct volume classes,
+        governed by T9 alone (checked with the equations)."""
+        if len(set(v.members)) != len(v.members):  # an equation's list is checked against these members
+            self._error(path, f"listed variable {v.name!r} names a member more than once: {list(v.members)}")
+        if v.type != "vector":
+            self._error(path, f"only a vector governed by {CELL_FORCE_BALANCE!r} may live on a list of subdomains")
+        for home in v.members:
+            sub = self._subdomain_by_name.get(home)
+            if sub is not None and sub.kind != "volume":
+                self._error(
+                    path,
+                    f"listed variable {v.name!r}: member {home!r} is a {sub.kind}; members are volume classes "
+                    f"(ADR 018 decision 2)",
+                )
+
     def _check_motion_variables(self) -> None:
         for i, s in enumerate(self._md.subdomains):
             if not isinstance(s.motion, MotionUnknown):
+                continue
+            t9 = self._t9_vars.get(s.motion.variable)
+            if t9 is not None and (s.motion.variable, s.name) not in self._var_by_key:
+                # T9 (ADR 018 decision 2): a surface moves with the trace of the velocity of a member it
+                # bounds; which volumes a surface bounds is the geometry's, checked by the backend. A volume
+                # that is not a member cannot move with it.
+                if s.kind != "surface":
+                    self._error(
+                        f"subdomains[{i}].motion",
+                        f"{s.name!r} ({s.kind}) moves with {s.motion.variable!r} but is not one of its members "
+                        f"{list(self._t9_members(t9))}; only its members and the surfaces bounding them move with "
+                        f"a {CELL_FORCE_BALANCE!r} velocity (ADR 018 decision 2)",
+                    )
                 continue
             key = (s.motion.variable, s.name)
             var = self._var_by_key.get(key)
@@ -416,10 +488,13 @@ class _Validator:
             var = self._var_by_key.get(key)
             if var is None:
                 self._error(path, f"governs variable {eq.variable!r}, not declared on subdomain {eq.subdomain!r}")
-            governed_count[key] = governed_count.get(key, 0) + 1
+            # A listed variable is counted at its home, whichever member the equation's list starts with.
+            home = (var.name, var.subdomain) if var is not None else key
+            governed_count[home] = governed_count.get(home, 0) + 1
 
             self._check_ic_temporality(eq, key, path)
             self._check_region_pairing(eq, var, path)
+            self._check_listed_pairing(eq, var, path)
 
             if not isinstance(eq, WeakFormEquation):
                 self._check_template_equation(eq, var, subdomain, path)
@@ -452,7 +527,48 @@ class _Validator:
                 f"{REGION_SPACE!r} (§1.4.2 T5)",
             )
 
+    def _check_listed_pairing(self, eq: Equation, var: Variable | None, path: str) -> None:
+        """A listed variable is governed by T9, and only T9 takes a list of members or slot maps
+        (ADR 018 decision 2)."""
+        is_t9 = isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE
+        if var is not None and var.members and not is_t9:
+            self._error(
+                path,
+                f"{var.name!r} lives on a list of subdomains; only the {CELL_FORCE_BALANCE!r} template governs "
+                f"such a variable (ADR 018 decision 2)",
+            )
+        if isinstance(eq, TemplateEquation) and not is_t9 and (eq.members or eq.volumes or eq.surfaces):
+            self._error(
+                path,
+                f"a list of subdomains and the 'volumes:' / 'surfaces:' slot maps are for the "
+                f"{CELL_FORCE_BALANCE!r} template only (ADR 018 decision 2); use 'terms'",
+            )
+        if is_t9 and isinstance(eq, TemplateEquation) and len(set(eq.members)) != len(eq.members):
+            self._error(path, f"the equation names a member more than once: {list(eq.members)}")
+        if (
+            is_t9
+            and isinstance(eq, TemplateEquation)
+            and var is not None
+            and set(self._t9_members(eq)) != set(var.members or (var.subdomain,))
+        ):
+            self._error(
+                path,
+                f"the equation's subdomains {list(self._t9_members(eq))} must be the members of "
+                f"{var.name!r}, {list(var.members or (var.subdomain,))}",
+            )
+
+    def _t9_members(self, eq: TemplateEquation) -> tuple[str, ...]:
+        return eq.members or (eq.subdomain,)
+
     def _check_ic_temporality(self, eq: Equation, key: tuple[str, str], path: str) -> None:
+        if isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE:
+            if eq.initial_condition is not None:
+                self._error(
+                    path,
+                    f"a {CELL_FORCE_BALANCE!r} velocity is solved at every step and takes no initial_condition; "
+                    f"the initial configuration is the geometry (ADR 018 decision 2)",
+                )
+            return
         if eq.temporality == "time_dependent":
             if eq.initial_condition is None:
                 self._error(path, "time_dependent equation requires an initial_condition (§1.9.5)")
@@ -493,6 +609,10 @@ class _Validator:
                 f"template {template!r} governs a {sorted(spec.governed_types)} variable; {var.name!r} is {var.type!r}",
             )
 
+        if spec.slot_maps:
+            self._check_slot_maps(eq, spec, path)
+            return
+
         valid_slots = {s.name for s in spec.slots}
         for slot_name in terms:
             if slot_name not in valid_slots:
@@ -508,6 +628,82 @@ class _Validator:
                 f"{path}.terms",
                 f"template {template!r} requires at least one of {list(spec.require_any_of)}",
             )
+
+    def _check_slot_maps(self, eq: TemplateEquation, spec: TemplateSpec, path: str) -> None:
+        """T9's `volumes:` and `surfaces:` maps (ADR 018 decisions 2 and 3): every member has an entry, each
+        with the required slots; every surface entry names a declared surface; no slot is unknown."""
+        if eq.terms:
+            self._error(
+                f"{path}.terms",
+                f"template {eq.template!r} takes its slots in 'volumes:' (per member) and 'surfaces:' (per "
+                f"surface), not 'terms'",
+            )
+        members = self._t9_members(eq)
+        volume_slots = {s.name for s in spec.slots}
+        for name, slots in eq.volumes.items():
+            where = f"{path}.volumes.{name}"
+            if name not in members:
+                self._error(where, f"{name!r} is not one of the equation's members {list(members)}")
+            for slot_name in slots:
+                if slot_name not in volume_slots:
+                    self._error(where, f"unknown volume slot {slot_name!r} (slots: {sorted(volume_slots)})")
+        for name in members:
+            given = eq.volumes.get(name)
+            if given is None:
+                self._error(f"{path}.volumes", f"member {name!r} has no entry; every member needs a 'viscosity'")
+                continue
+            for slot in spec.slots:
+                if slot.required and slot.name not in given:
+                    self._error(f"{path}.volumes.{name}", f"template {eq.template!r} requires slot {slot.name!r}")
+        surface_slots = {s.name for s in spec.surface_slots}
+        for name, slots in eq.surfaces.items():
+            where = f"{path}.surfaces.{name}"
+            sub = self._subdomain_by_name.get(name)
+            if sub is None:
+                self._error(where, f"{name!r} is not a declared subdomain")
+            elif sub.kind != "surface":
+                self._error(where, f"{name!r} is a {sub.kind}; 'surfaces:' takes surface classes")
+            for slot_name in slots:
+                if slot_name not in surface_slots:
+                    self._error(where, f"unknown surface slot {slot_name!r} (slots: {sorted(surface_slots)})")
+
+    def _check_cell_force_balances(self) -> None:
+        """The T9 rules that span the model (ADR 018 decisions 2 and 4): each member and each surface with a
+        tension moves with the velocity, and some member has a drag or the velocity has a wall."""
+        for i, eq in enumerate(self._md.equations):
+            if not (isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE):
+                continue
+            if self._t9_vars.get(eq.variable) is not eq:
+                continue  # a second T9 equation for the same velocity is reported as overdetermined (coverage)
+            path = f"equations[{i}]"
+            movers = [*self._t9_members(eq), *eq.surfaces]
+            for name in movers:
+                sub = self._subdomain_by_name.get(name)
+                if sub is None:
+                    continue
+                motion = sub.motion
+                if not (isinstance(motion, MotionUnknown) and motion.variable == eq.variable):
+                    role = "member" if name in self._t9_members(eq) else "surface with a tension"
+                    self._error(
+                        path,
+                        f"{role} {name!r} must have motion {{kind: unknown, variable: {eq.variable}}}: it moves "
+                        f"with the velocity (ADR 018 decision 2)",
+                    )
+            has_drag = any("drag" in slots for slots in eq.volumes.values())
+            has_wall = any(
+                isinstance(bc, BCDirichlet)
+                and bc.variable == eq.variable
+                and bc.boundary not in self._subdomain_by_name
+                and (tree := self._quiet_parse(bc.expression)) is not None
+                and _is_zero_literal(tree)
+                for bc in self._md.boundary_conditions
+            )
+            if not (has_drag or has_wall):
+                self._error(
+                    path,
+                    f"UnconstrainedRigidMotion: nothing resists a rigid motion of {eq.variable!r} — no member has a "
+                    f"'drag' and no boundary holds it at v = 0 (ADR 018 decision 4)",
+                )
 
     # -- §1.11.7 boundary-condition consistency ------------------------------
 
@@ -622,6 +818,8 @@ class _Validator:
                     f"which feed its region balance; a {bc.kind!r} BC has nothing to constrain (§1.4.2 T5)",
                 )
             self._check_weak_form_dirichlet_only(bc, path, weak_form_vars)
+            if bc.variable in self._t9_vars:
+                self._check_wall_bc(bc, path)
             groups.setdefault((bc.variable, bc.boundary), set()).add(bc.kind)
 
         for (variable, boundary), kinds in groups.items():
@@ -630,6 +828,30 @@ class _Validator:
                     "boundary_conditions",
                     f"conflicting BC kinds {sorted(kinds)} for variable {variable!r} on boundary {boundary!r}",
                 )
+
+    def _check_wall_bc(self, bc: BoundaryCondition, path: str) -> None:
+        """A T9 velocity takes one BC, a wall holding it at rest: `dirichlet` with the zero vector, written
+        `0` (ADR 018 decision 4). Its surfaces need none: their condition is the natural one."""
+        if not isinstance(bc, BCDirichlet):
+            self._error(
+                path,
+                f"a {CELL_FORCE_BALANCE!r} velocity takes only a 'dirichlet' BC holding it at v = 0 on a wall; "
+                f"its surfaces' condition is their tension (ADR 018 decision 4), got {bc.kind!r}",
+            )
+            return
+        if bc.boundary in self._subdomain_by_name:
+            self._error(
+                path,
+                f"a wall holding a {CELL_FORCE_BALANCE!r} velocity is a box face; {bc.boundary!r} is a subdomain, "
+                f"and a surface bounding a member takes no BC (ADR 018 decision 4)",
+            )
+        tree = self._parse(bc.expression, f"{path}.expression")
+        if tree is not None and not _is_zero_literal(tree):
+            self._error(
+                f"{path}.expression",
+                f"a wall holds a {CELL_FORCE_BALANCE!r} velocity at rest: its value must be the zero vector, "
+                f"written 0; the box does not move (ADR 018 decision 4)",
+            )
 
     def _is_region_variable(self, name: str) -> bool:
         return any(v.name == name and v.space == REGION_SPACE for v in self._md.variables)
@@ -705,6 +927,8 @@ class _Validator:
                     self._check_weak_form_structure(eq, tree, path)
             else:
                 spec = REGISTRY.get(eq.template)
+                if spec is not None and spec.slot_maps:
+                    self._check_slot_map_expressions(eq, spec, path)
                 for slot, text in eq.terms.items():
                     slot_spec = spec.slot(slot) if spec is not None else None
                     expected = slot_spec.types if slot_spec is not None else None
@@ -720,6 +944,111 @@ class _Validator:
                     eq.variable,
                     expected,
                 )
+
+    def _check_slot_map_expressions(self, eq: TemplateEquation, spec: TemplateSpec, path: str) -> None:
+        """T9's slot expressions (ADR 018 decision 3): each is typed and resolved where it is evaluated (its
+        member or surface); none reads the velocity; a pressure is uniform on its member."""
+        for name, slots in eq.volumes.items():
+            for slot, text in slots.items():
+                slot_spec = spec.slot(slot)
+                where = f"{path}.volumes.{name}.{slot}"
+                tree = self._slot_map_site(text, where, name, eq.variable, slot_spec.types if slot_spec else None)
+                if tree is not None and slot == "pressure":
+                    found = sorted(self._nonuniform_names(tree, name, set()))
+                    if found:
+                        self._error(
+                            where,
+                            f"NonUniformPressure: a pressure is uniform on its member, so it may read constants, "
+                            f"sim.t, region_size and region variables (and parameters that read only these); "
+                            f"it reads {found} (ADR 018 decision 3)",
+                        )
+        for name, slots in eq.surfaces.items():
+            if name not in self._subdomain_by_name:
+                continue  # reported by the slot-map check
+            for slot, text in slots.items():
+                slot_spec = spec.surface_slot(slot)
+                where = f"{path}.surfaces.{name}.{slot}"
+                tree = self._slot_map_site(text, where, name, eq.variable, slot_spec.types if slot_spec else None)
+                geometry = sorted(self._geometry_names(tree, set())) if tree is not None else []
+                if geometry:
+                    self._error(
+                        where,
+                        f"a tension may read constants, sim.t, region_size, region variables, the surface's own "
+                        f"species and the traces of adjacent ones, not geometry; it reads {geometry} "
+                        f"(ADR 018 decision 3)",
+                    )
+
+    def _slot_map_site(
+        self, text: str, path: str, subdomain: str, velocity: str, expected: frozenset[VariableType] | None
+    ) -> Expr | None:
+        tree = self._parse(text, path)
+        if tree is None:
+            return None
+        if self._contains_name(tree, velocity):
+            self._error(
+                path,
+                f"a {CELL_FORCE_BALANCE!r} slot may not read the velocity {velocity!r}: a coefficient that "
+                f"depends on it would make the solve nonlinear (ADR 018 decision 3)",
+            )
+            return tree
+        ctx = _ExprContext(path, subdomain, "term_slot", velocity)
+        self._walk(tree, ctx)
+        if expected is not None:
+            self._check_expr_type(tree, ctx, expected)
+        return tree
+
+    def _quiet_parse(self, text: str) -> Expr | None:
+        try:
+            return parse(text)
+        except ExpressionSyntaxError:
+            return None  # reported where the expression itself is checked
+
+    def _geometry_names(self, node: Expr, seen: set[str]) -> set[str]:
+        """The `geom.*` names ``node`` reads, directly or through parameters (transitively)."""
+        found: set[str] = set()
+        for nm in _names_in(node):
+            if nm.startswith("geom."):
+                found.add(nm)
+            elif nm in self._param_by_name and nm not in seen:
+                seen.add(nm)
+                p = self._param_by_name[nm]
+                body = self._quiet_parse(p.expression) if isinstance(p, ParameterExpression) else None
+                if body is not None:
+                    found |= {f"{inner} (through {nm})" for inner in self._geometry_names(body, seen)}
+        return found
+
+    def _nonuniform_names(self, node: Expr, subdomain: str, seen: set[str]) -> set[str]:
+        """The names in ``node`` that can vary in space on ``subdomain``: anything but numbers, `sim.*`,
+        `region_size(...)`, region variables and parameters whose bodies read only these (transitively)."""
+        if isinstance(node, Number):
+            return set()
+        if isinstance(node, Name):
+            nm = node.name
+            if nm.startswith("sim."):
+                return set()
+            if nm in self._param_by_name:
+                p = self._param_by_name[nm]
+                if not isinstance(p, ParameterExpression) or nm in seen:
+                    return set()
+                seen.add(nm)
+                try:
+                    body = parse(p.expression)
+                except ExpressionSyntaxError:
+                    return set()  # reported where the parameter is checked
+                return {f"{nm} (through {inner})" for inner in self._nonuniform_names(body, subdomain, seen)}
+            if self._is_region_variable(nm):
+                return set()
+            return {nm}
+        if isinstance(node, FunctionCall):
+            if node.callee == "region_size":
+                return set()
+            if node.callee == "trace" and len(node.args) == 1 and isinstance(node.args[0], Name):
+                arg = node.args[0].name
+                return set() if self._is_region_variable(arg) else {f"trace({arg})"}
+        found: set[str] = set()
+        for child in self._children(node):
+            found |= self._nonuniform_names(child, subdomain, seen)
+        return found
 
     def _walk_site(
         self,
