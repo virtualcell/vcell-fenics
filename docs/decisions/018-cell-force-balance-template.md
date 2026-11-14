@@ -1,8 +1,9 @@
 # ADR 018 — A cell force-balance template
 
 **Date:** 2026-11-14
-**Status:** Proposed. Revised after an independent review (19 findings, none blocking, 5 major), each answered
-below and listed in "Review" at the end.
+**Status:** Accepted (Jim, 2026-11-14): decisions 1–8 as recommended (decision 2 with option (a), decision 5
+with option (b)). Revised before acceptance after an independent review (19 findings, none blocking, 5 major),
+each answered below and listed in "Review" at the end.
 **Builds on:**
 - ADR 017 (accepted 2026-11-13), decision 5: the FEM forms of vcell-core's shared-subset laws enter the formalism
   as one new template, a quasi-static, overdamped force balance for a vector velocity `v` on a set of cells.
@@ -25,7 +26,6 @@ below and listed in "Review" at the end.
 - Code: `formalism/schema.py`, `templates.py` and `validator.py`; `backend/discrete.py` (new term kinds and a
   quasi-static scheme); `backend/moving_partition.py` (several solved membranes, open arcs).
 
-Nothing changes until the decisions are accepted.
 
 *Checked* marks what was read in a source (file and line, or section) or run here. *Inferred* marks reasoning.
 *Background* marks a published result used without reading it here (cited in References). This repository was
