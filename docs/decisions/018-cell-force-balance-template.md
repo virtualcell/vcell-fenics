@@ -377,7 +377,10 @@ These are proposals; none of the names exists in vcell-core yet.
    with the semi-implicit term; `v` in the results bundle. Also here, since they need the realized geometry or
    the assembled coefficients (deferred from step 2, 2026-11-15): the realize-time checks of decision 4 (each
    component held, `MemberOnFreeBox`), the per-step positivity checks (`η > 0`, `γ > 0`), and decision 6's
-   locking warning above a measured `η_b/η`.
+   locking warning above a measured `η_b/η`. *Split (Jim, 2026-11-15):* 3a, the assembler from a MathDescription,
+   the checks and one solve on the fixed configuration (`backend/cell_force_balance.py`), with the disk and
+   the energy identity; 3b, the manufactured solution in `mms/`, and 3c, `v` in the results bundle, are held
+   until the cell-motility models driven from vcell-core show what they need first.
 4. The solve on a moving mesh in 2D: several solved membranes meeting at junctions, the end-pinned slide, the
    junction diagnostic and ADR 017 decision 3's convergence expectations, then ADR 016's remesh with the new
    contact check. Coefficients read only constants, `sim.t` and `region_size` here (decision 3).
