@@ -4,6 +4,9 @@
 **Status:** Accepted (Jim, 2026-11-14): decisions 1–8 as recommended (decision 2 with option (a), decision 5
 with option (b)). Revised before acceptance after an independent review (19 findings, none blocking, 5 major),
 each answered below and listed in "Review" at the end.
+**Amended by:** ADR 019 (accepted 2026-11-14), for a single cell: an `active_stress` slot, a choice of viscous
+operator, four conditions on a free membrane, a growing front, and a staging that puts one cell first. Its
+"Would amend" lists the decisions here that it changes.
 **Builds on:**
 - ADR 017 (accepted 2026-11-13), decision 5: the FEM forms of vcell-core's shared-subset laws enter the formalism
   as one new template, a quasi-static, overdamped force balance for a vector velocity `v` on a set of cells.
