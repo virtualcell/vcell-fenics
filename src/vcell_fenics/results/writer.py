@@ -27,7 +27,7 @@ import shutil
 import tempfile
 import warnings
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,6 +52,7 @@ from vcell_fenics.results.schema import (
     SourceInfo,
     Status,
     VariableInfo,
+    VectorComponent,
     manifest_to_attrs,
 )
 from vcell_fenics.results.vtu import write_vtu
@@ -66,6 +67,7 @@ class _Domain:
     variables: list[str]
     moving: bool = False
     sides: tuple[str, ...] | None = None  # a membrane's adjacent compartments
+    vectors: dict[str, VectorComponent] = field(default_factory=dict)  # a vector component's variable → its vector
 
 
 COORDS = "_coords"  # a moving domain's per-row point coordinates, (T_seg, N, 3)
@@ -127,11 +129,16 @@ class BundleWriter:
     def moving(self) -> bool:
         return any(domain.moving for domain in self._domains.values())
 
-    def add_variable(self, domain: str, name: str) -> None:
+    def add_variable(self, domain: str, name: str, *, vector: VectorComponent | None = None) -> None:
+        """Register a scalar P1 variable on ``domain``; ``vector`` marks it as a component of a vector field
+        (ADR 010 §3, "Vector fields")."""
+
         _check_name(name)
         if name in self._domains[domain].variables:
             raise ValueError(f"variable {name!r} added twice to domain {domain!r}")
         self._domains[domain].variables.append(name)
+        if vector is not None:
+            self._domains[domain].vectors[name] = vector
 
     def open(self) -> None:
         """Create the bundle: write each domain's VTU, preallocate the arrays, and publish the manifest
@@ -348,7 +355,7 @@ class BundleWriter:
             for name, domain in self._domains.items()
         }
         variables = tuple(
-            VariableInfo(name=v, domain=d, path=f"{d}/{v}", stats=f"stats/{d}/{v}")
+            VariableInfo(name=v, domain=d, path=f"{d}/{v}", stats=f"stats/{d}/{v}", vector=domain.vectors.get(v))
             for d, domain in self._domains.items()
             for v in domain.variables
         )

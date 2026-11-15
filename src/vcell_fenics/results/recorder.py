@@ -27,7 +27,7 @@ from dolfinx import fem
 from dolfinx.mesh import Mesh
 from mpi4py import MPI
 
-from vcell_fenics.results.schema import DomainKind
+from vcell_fenics.results.schema import DomainKind, VectorComponent
 from vcell_fenics.results.writer import BundleWriter, Stats
 
 
@@ -63,16 +63,19 @@ class BundleRecorder:
         *,
         moving: bool = False,
         sides: tuple[str, ...] | None = None,
+        vectors: Mapping[str, VectorComponent] | None = None,
     ) -> None:
         """Register a domain and its ``(variable name, default source)`` channels (collective). ``moving``:
         an ALE domain whose mesh moves in place (see the module docstring). ``sides``: a membrane's adjacent
         compartments, so the bundle maps its points onto theirs (:meth:`BundleWriter.add_domain`).
+        ``vectors``: the channels that are components of a vector field, each with its vector (ADR 010 §3,
+        "Vector fields"); every channel is still one scalar P1 field.
         A domain may have no channels: a membrane written only for its mesh and its maps."""
 
         space = fem.functionspace(mesh, ("Lagrange", 1))
         self._writer.add_domain(name, kind, space, moving=moving, sides=sides)
         for variable, _ in channels:
-            self._writer.add_variable(name, variable)
+            self._writer.add_variable(name, variable, vector=(vectors or {}).get(variable))
         self._domains.append(self._channels(name, space, [v for v, _ in channels], [s for _, s in channels], moving))
 
     def _channels(

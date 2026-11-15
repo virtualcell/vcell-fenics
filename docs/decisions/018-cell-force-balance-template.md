@@ -395,7 +395,9 @@ These are proposals; none of the names exists in vcell-core yet.
 - How the staggered mechano-chemical step fits ADR 015's stride (decision 8).
 - 3D: the remesher, quadruple points, and contract C (ADR 017).
 - The contact's compartments (ADR 017).
-- Exposing T9 through the CLI: the runner routes it only once stage 4 works.
+- ~~Exposing T9 through the CLI: the runner routes it only once stage 4 works.~~ Amended by ADR 020 decision 5
+  (accepted 2026-11-15): the runner routes ADR 020 decision 4's scope (a fixed skeleton, species on one
+  member), which cannot move, and refuses the rest until stage 4.
 
 ## Review
 

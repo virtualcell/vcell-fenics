@@ -93,7 +93,7 @@ Why this over VTKHDF, the strongest standard:
 | `planned_times` | all output times the run intends to write |
 | `segments` | list of `{index, t0, count, motion, prefix}` |
 | `domains` | `{name: {kind: "volume"\|"membrane", dim, gdim, mesh, n_points, n_cells, cell_type}}` |
-| `variables` | list of `{name, domain, assoc: "point", element: "P1", path, stats}` |
+| `variables` | list of `{name, domain, assoc: "point", element: "P1", path, stats, vector}` (`vector`: a component's vector, or null; below) |
 | `stats_columns` | `["mean", "total", "min", "max"]` |
 | `solver` | `{version, dolfinx, options, overrides, mpi_ranks}` |
 | `source` | `{kind, file, sim_key, job_index, task_id}` |
@@ -151,6 +151,15 @@ Why this over VTKHDF, the strongest standard:
     readers take the first domain as a default, and a membrane without variables must never be it. A
     reader must also not assume that every domain has a variable.
   - **Reserved name:** `_adjacent`.
+- **Vector fields** (added 2026-11-15 for ADR 020 decision 5, additive: still schema 1; older readers ignore it).
+  The first is the velocity of a cell force balance, written beside the species it carries.
+  - **One scalar variable per component,** named `<vector>_x`, `<vector>_y` and, in 3D, `<vector>_z`, each an
+    ordinary `(T, N)` P1 array with its statistics. A reader that knows nothing of vectors still shows each
+    component as a field.
+  - **Each component is tagged** `variables[i].vector = {name: <vector>, component: <0..gdim-1>}`; a scalar has
+    `vector: null`, and a bundle from an older writer has no key. A reader assembles a vector from the tagged
+    variables of one domain, ordered by `component`.
+  - **Names:** the runner refuses a model whose variables already use a component's name.
 - **Reader rules:**
   - Refuse a `schema` newer than you know.
   - Ignore unknown keys.

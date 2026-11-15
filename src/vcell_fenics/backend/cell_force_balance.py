@@ -23,7 +23,8 @@ This is the assembler between the formalism and the term builders of `force_bala
 - **`geom.normal`** is read only in a `traction`, where it points out of the surface's `inside`.
 
 The solve is quasi-static: `solve()` gives the velocity of the current configuration. Moving the cells with it
-is stage 4, and the runner refuses T9 until then (ADR 018, "Not decided here").
+is stage 4. The runner routes a T9 model only with species on a fixed skeleton (`cell_force_balance_run`, ADR 020
+decision 5) and refuses the rest until then.
 """
 
 from __future__ import annotations

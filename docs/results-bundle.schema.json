@@ -250,6 +250,17 @@
         "stats": {
           "title": "Stats",
           "type": "string"
+        },
+        "vector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VectorComponent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -259,6 +270,25 @@
         "stats"
       ],
       "title": "VariableInfo",
+      "type": "object"
+    },
+    "VectorComponent": {
+      "description": "Which vector a scalar variable is a component of (ADR 010 \u00a73, \"Vector fields\"; optional, added after\nschema 1 shipped \u2014 absent from older bundles and from every scalar variable).\n\nA vector field, such as the velocity of a cell force balance (ADR 020 decision 5), is written as one\nordinary scalar variable per component, ``<name>_x``, ``<name>_y`` (and ``<name>_z`` in 3D), so a reader\nthat does not know this key still reads each component as a field. ``component`` is the index into the\ngeometric axes, 0 to ``gdim - 1``.",
+      "properties": {
+        "component": {
+          "title": "Component",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "component"
+      ],
+      "title": "VectorComponent",
       "type": "object"
     }
   },

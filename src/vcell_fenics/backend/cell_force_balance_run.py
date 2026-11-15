@@ -20,8 +20,8 @@ The scope is decision 4's:
   refuses it (`NonlinearTermError`). The crowding cut-offs are stage 5.
 
 The force-balance slots `viscosity`, `bulk_viscosity`, `drag` and `active_stress` may read the species, at
-their values at `tⁿ`. Moving the cells is stage 4. Writing `v` to the results bundle and routing through the
-runner (decision 5) follow.
+their values at `tⁿ`. Moving the cells is stage 4. The runner (`runner.py`) routes this scope here and writes each
+species and `v`, by component, to the results bundle (decision 5).
 """
 
 from __future__ import annotations

@@ -42,6 +42,12 @@ Each case names the solver family it exercises; the dev runner dispatches on it:
   balance, then moved, then diluted, through `assemble_unknown_motion` (BE). The manufactured force `η v =
   η k x` yields `v = k x`, so the receptor obeys the same closed-form dilution as the prescribed case with
   the velocity now solved (`unknown_motion_receptor_dilution` → order ≈ 2, dt ∝ h²).
+- **`member_transport`** — a species on the member of a cell force balance (T9), carried by the velocity in
+  the conservative form `−∫ m (v + w)·∇q` (ADR 020 decision 2), with the velocity **prescribed** from the case's
+  `velocity` in place of the solve, through `assemble_cell_force_balance_run` (BE). Geometry: `disk_in_box`, the
+  membrane snapped onto the circle (issue #249). `member_transport_carried`: a compressible `v = (1 − r²)(x, y)`
+  that vanishes on the held membrane → order 1.8 (L∞), dt ∝ h²; with the carrier's sign flipped the error stays
+  at 2.0.
 
 `applicable_solvers` in each case declares which apply. The fv/mb runners author the case as VCML — the
 manufactured forcing is a **general-kinetics** volume source `∅ → u` with net rate `J = f` (mass-action
@@ -68,7 +74,7 @@ the native solver and compare to the same recorded `u*`:
 ```yaml
 name: ...
 description: ...            # what it exercises; note if it exposes a defect
-harness: bulk              # runner dispatch: bulk | membrane | coupled | unknown_motion
+harness: bulk              # runner dispatch: bulk | membrane | coupled | unknown_motion | member_transport
 dim: 2
 geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
 exact: {c: "2 + np.sin(x)*np.cos(y)"}   # u*(x,y,z,t) — numpy-evaluable, for the error norm

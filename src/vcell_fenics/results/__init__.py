@@ -20,6 +20,7 @@ from vcell_fenics.results.schema import (
     SolverInfo,
     SourceInfo,
     VariableInfo,
+    VectorComponent,
 )
 from vcell_fenics.results.writer import BundleWriter
 
@@ -38,4 +39,5 @@ __all__ = [
     "SolverInfo",
     "SourceInfo",
     "VariableInfo",
+    "VectorComponent",
 ]

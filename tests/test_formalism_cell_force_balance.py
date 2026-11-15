@@ -18,7 +18,7 @@ from vcell_fenics.formalism import dump_yaml, load_dict, load_yaml, validate
 from vcell_fenics.formalism.loader import FormalismLoadError
 from vcell_fenics.formalism.schema import MathDescription, TemplateEquation
 from vcell_fenics.formalism.templates import CELL_FORCE_BALANCE, REGISTRY
-from vcell_fenics.runner import RunError, _refuse_cell_force_balance
+from vcell_fenics.runner import _cell_force_balance
 
 _BASE = """
 math_description:
@@ -426,13 +426,12 @@ def test_the_velocity_takes_no_other_bc() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The runner refuses T9 until a solver assembles it
+# The runner routes a T9 model to the force-balance run (ADR 020 decision 5; tests/test_runner_cell_force_balance.py)
 # ---------------------------------------------------------------------------
 
 
-def test_the_runner_refuses_a_t9_model_by_name() -> None:
-    with pytest.raises(RunError, match=r"'cell_force_balance' template \(T9, ADR 018\), governing 'v'"):
-        _refuse_cell_force_balance(_md(_raw()))
+def test_the_runner_recognizes_a_t9_model() -> None:
+    assert _cell_force_balance(_md(_raw()))
 
 
 def test_the_runner_lets_other_models_through() -> None:
@@ -451,7 +450,7 @@ def test_the_runner_lets_other_models_through() -> None:
         }
     ]
     md["parameters"] = []
-    _refuse_cell_force_balance(_md(raw))
+    assert not _cell_force_balance(_md(raw))
 
 
 # ---------------------------------------------------------------------------
