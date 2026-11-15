@@ -319,7 +319,10 @@ narrowed. This note widens it instead of adding a second template.
         not touching the box: a material membrane with a tension, then a growing front (ZS, and ZV with
         `v_p` from the area and constants; a myosin-dependent `v_p` or `σ_a` waits for stage 5, as ADR 018
         decision 3 refuses species on a moving run until then). It reuses today's closed-loop slide and contact
-        check. **4b, several closed loops** (a nucleus; cells that do not touch). **4c, junctions:** cells in
+        check. *Recorded (Jim, 2026-11-15, asked in vcell-fenics #240):* 4a runs on the **moving partition**
+        (ADR 014–016), not ADR 013's single moving mesh, whatever the model's equation count. So `region_size`
+        is bound there and re-measured after every move (#232), which vcell-core's E3 front reads (`region_size(cell)`).
+        **4b, several closed loops** (a nucleus; cells that do not touch). **4c, junctions:** cells in
         contact or held at a box face, the end-pinned slide, the rewritten contact check, then ADR 016's
         remesh.
      5. Chemistry on the moving cells, with crowding cut-offs; UC-A's phase-diagram points.
