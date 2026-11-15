@@ -38,7 +38,7 @@ import sys
 import warnings
 from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -149,6 +149,8 @@ def run_model(
     reporter = _PhasedProgress(status if status is not None else NullReporter(), options.t_final)
     # a cell force balance (T9) is realized and assembled first: its scope is checked there (ADR 020 decision 5)
     force_balance = _prepare_cell_force_balance(model, options, reporter) if _cell_force_balance(model.math) else None
+    if force_balance is not None and options.time_integration != "backward_euler":
+        options = replace(options, time_integration="backward_euler")  # the manifest records what runs
     moving = [] if force_balance is not None else _moving_subdomains(model)
     # a moving membrane with equations on more than one subdomain (its species, both sides' species): the
     # multi-compartment solver moves the whole partition (ADR 014); one subdomain is the moving path's (ADR 013)
@@ -229,6 +231,8 @@ def run_model(
 
     reporter.phase(WRITING)
     records = recorder.records
+    vectors = force_balance.vectors() if force_balance is not None else {}
+    components = {name for parts in vectors.values() for name in parts}
     summary: dict[str, Any] = {
         "source": model.provenance,
         "bundle": str(bundle),
@@ -239,7 +243,8 @@ def run_model(
             "measure": sum(recorder.measure(domain) for domain in recorder.domains),
         },
         "run": run_info,
-        "species": list(records[0]["species"]) if records else [],
+        **({"vectors": vectors} if vectors else {}),
+        "species": [name for name in records[0]["species"] if name not in components] if records else [],
         "outputs": records,
     }
     writer.write_provenance("geometry.yaml", dump_geometry_yaml(model.geometry))
@@ -298,6 +303,15 @@ class _ForceBalanceRun:
     velocity: str
     cells: int
 
+    def components(self) -> list[str]:
+        """The velocity's component names in the bundle (ADR 010 §3, "Vector fields")."""
+
+        gdim = self.run.balance.members.mesh.geometry.dim
+        return [f"{self.velocity}{suffix}" for suffix in VECTOR_SUFFIXES[:gdim]]
+
+    def vectors(self) -> dict[str, list[str]]:
+        return {self.velocity: self.components()}
+
 
 def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: _PhasedProgress) -> _ForceBalanceRun:
     """Realize the geometry and assemble the force balance with its member species (ADR 018 step 3b; ADR 020
@@ -312,7 +326,10 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
     from vcell_fenics.formalism.validator import validate_or_raise
 
     if options.fe_degree != 1:
-        raise RunError("a cell force balance runs with P1 species and a P1 velocity; drop --fe-degree for this model")
+        raise RunError(
+            f"a cell force balance runs with P1 species and a P1 velocity; the element degree is "
+            f"{options.fe_degree} (set it to 1)"
+        )
     if options.time_integration != "backward_euler":
         log(
             "note: a cell force balance steps by backward Euler, staggered (ADR 020 decision 3); "
@@ -320,6 +337,13 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
         )
     validate_or_raise(model.math)
     eq = t9_equation(model.math)
+    moving = _moving_subdomains(model)  # a prescribed, non-zero velocity; a stationary front (zero) is not listed
+    if moving:
+        raise RunError(
+            f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only on a fixed skeleton "
+            f"(ADR 020 decision 4), but {', '.join(map(repr, moving))} has a prescribed motion; moving cells and "
+            f"growing fronts are stage 4"
+        )
     members = eq.members or (eq.subdomain,)
     comm = MPI.COMM_WORLD
     status.phase(MESHING)
@@ -331,11 +355,18 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
     status.phase(COMPILING)
     try:
         run = assemble_cell_force_balance_run(model.math, geometry)
-    except (ForceBalanceError, NonlinearTermError) as error:
+    except ForceBalanceError as error:
+        if not str(error).startswith(("SpeciesNotYetSupported", "MovingSkeleton")):
+            raise RunError(f"the cell force balance cannot be assembled: {error}") from error
         raise RunError(
             f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only in ADR 020 decision "
-            f"4's scope (a fixed skeleton, one member, species on it, linear transport); moving cells are stage 4 "
-            f"and the crowding cut-offs stage 5: {error}"
+            f"4's scope (a fixed skeleton, one member, species on it, linear transport); moving cells are stage 4: "
+            f"{error}"
+        ) from error
+    except NonlinearTermError as error:
+        raise RunError(
+            f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only in ADR 020 decision "
+            f"4's scope, with transport linear in the species; the crowding cut-offs are stage 5: {error}"
         ) from error
     (member,) = members  # the scope allows one member
     names = {*run.names, *(v.name for v in model.math.variables)}
@@ -346,7 +377,9 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
             f"the velocity {eq.variable!r} is written to the bundle as {', '.join(clash)}, which the model already "
             f"uses as names; rename them"
         )
-    return _ForceBalanceRun(run=run, member=member, velocity=eq.variable, cells=mesh_cell_count(geometry.parent_mesh))
+    return _ForceBalanceRun(
+        run=run, member=member, velocity=eq.variable, cells=mesh_cell_count(run.balance.members.mesh)
+    )
 
 
 def _run_cell_force_balance(
@@ -359,7 +392,7 @@ def _run_cell_force_balance(
     run = prepared.run
     mesh = run.balance.members.mesh
     gdim = mesh.geometry.dim
-    components = [f"{prepared.velocity}{s}" for s in VECTOR_SUFFIXES[:gdim]]
+    components = prepared.components()
     species = _channels(run.species.unknown, len(run.names))
     recorder.add_domain(
         prepared.member,
@@ -372,7 +405,7 @@ def _run_cell_force_balance(
     recorder.open()
     log(
         f"integrating to t = {options.t_final:g} (cell force balance, staggered backward Euler; {prepared.cells} "
-        f"cells; {', '.join(run.names)} on {prepared.member!r}, carried by {prepared.velocity!r})"
+        f"cells on the member; {', '.join(run.names)} on {prepared.member!r}, carried by {prepared.velocity!r})"
     )
 
     def capture(t: float) -> None:

@@ -126,13 +126,19 @@ def test_the_runner_writes_the_species_and_the_velocity_by_component(tmp_path: P
     totals = bundle.stats("cell", "m")[:, 1]
     assert np.allclose(totals, totals[0], rtol=1e-10, atol=0.0)
 
-    # row 0's velocity is the one solved from the initial myosin (decision 5), checked against an independent solve
+    assert summary["species"] == ["m"]
+    assert summary["vectors"] == {"v": ["v_x", "v_y"]}
+
+    # each row's velocity is the one solved from that row's myosin (decision 5), against an independent run
     run = assemble_cell_force_balance_run(load_dict(_raw()), realize_multi_compartment(_disk(), h=0.15))
-    v = run.solve_velocity()
     dx = ufl.dx(domain=run.balance.members.mesh)
-    for i, name in enumerate(("v_x", "v_y")):
-        expected = fem.assemble_scalar(fem.form(v[i] * dx)).real
-        assert bundle.stats("cell", name)[0, 1] == pytest.approx(expected, rel=1e-8, abs=1e-12)
+    for row in range(3):
+        if row:
+            run.advance(0.1 * row, 0.05)
+        v = run.solve_velocity()
+        for i, name in enumerate(("v_x", "v_y")):
+            expected = fem.assemble_scalar(fem.form(v[i] * dx)).real
+            assert bundle.stats("cell", name)[row, 1] == pytest.approx(expected, rel=1e-8, abs=1e-12), (row, name)
     assert np.abs(bundle.field("cell", "v_x", 0)).max() > 1e-3  # the gradient in m drives a flow
 
 
@@ -142,6 +148,31 @@ def test_a_moving_cell_is_refused_before_a_bundle_starts(tmp_path: Path) -> None
     with pytest.raises(RunError, match=r"ADR 020 decision 4's scope.*MovingSkeleton"):
         _run(raw, tmp_path)
     assert not (tmp_path / "results.fenics").exists()
+
+
+def test_a_prescribed_motion_elsewhere_is_refused(tmp_path: Path) -> None:
+    """The review's finding: a motion on the medium would otherwise be dropped without a word."""
+
+    raw = _raw()
+    raw["math_description"]["subdomains"][0]["motion"] = {"kind": "prescribed", "velocity": "[1.0, 0.0]"}
+    with pytest.raises(RunError, match=r"'ec' has a prescribed motion"):
+        _run(raw, tmp_path)
+    assert not (tmp_path / "results.fenics").exists()
+
+
+def test_a_model_error_is_not_blamed_on_the_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a scope refusal (SpeciesNotYetSupported, MovingSkeleton) points at ADR 020 decision 4."""
+
+    from vcell_fenics.backend import cell_force_balance_run
+    from vcell_fenics.backend.cell_force_balance import ForceBalanceError
+
+    def failing(*args: Any) -> None:
+        raise ForceBalanceError("surface 'pm' has no facets in the realized geometry")
+
+    monkeypatch.setattr(cell_force_balance_run, "assemble_cell_force_balance_run", failing)
+    with pytest.raises(RunError, match="cannot be assembled: surface 'pm' has no facets") as caught:
+        _run(_raw(), tmp_path)
+    assert "decision 4" not in str(caught.value)
 
 
 def test_a_velocity_with_no_species_is_refused(tmp_path: Path) -> None:

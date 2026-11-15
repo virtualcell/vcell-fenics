@@ -68,6 +68,7 @@ class CellForceBalanceRun:
     names: tuple[str, ...]
     t: float = 0.0
     _totals: dict[str, fem.Form] = field(default_factory=dict)
+    _solved: bool = False  # `velocity` is the one solved from the current species at `t`
 
     @property
     def velocity(self) -> fem.Function:
@@ -100,12 +101,17 @@ class CellForceBalanceRun:
     def solve_velocity(self) -> fem.Function:
         """The velocity of the current species (at `self.t`), without advancing them."""
 
-        return self.balance.solve(self.t)
+        velocity = self.balance.solve(self.t)
+        self._solved = True
+        return velocity
 
     def step(self, dt: float) -> None:
-        """One staggered step: `v` from `mⁿ` at `tⁿ`, then `mⁿ⁺¹` by backward Euler with that `v`."""
+        """One staggered step: `v` from `mⁿ` at `tⁿ`, then `mⁿ⁺¹` by backward Euler with that `v`. A velocity
+        `solve_velocity()` just solved from these species is reused, not solved again."""
 
-        self.balance.solve(self.t)
+        if not self._solved:
+            self.balance.solve(self.t)
+        self._solved = False
         self.species.dt.value = dt
         self.species.set_time(self.t + dt)
         self.species.step()

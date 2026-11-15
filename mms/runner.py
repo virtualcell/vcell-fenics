@@ -367,7 +367,7 @@ def _run_member_transport(case: dict[str, Any], solver: str, h: float) -> tuple[
         species.step()
         t += dt
     var = next(iter(case["exact"]))
-    linf, l2_sq = _field_error(species.unknown, case["exact"][var], case["t_final"])
+    linf, l2_sq = _field_error(species.unknown, case["exact"][var], t)  # at the time reached
     return linf, math.sqrt(l2_sq)
 
 
