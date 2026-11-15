@@ -1,9 +1,12 @@
 # ADR 020 — Species carried by the velocity of a cell force balance
 
 **Date:** 2026-11-15
-**Status:** Proposed. Answers issue #251, asked from vcell-core's E2. Jim asked for this note (2026-11-15).
-Revised after an independent review: 20 findings, 1 blocking, 6 major. Each is answered below and listed in
-"Review" at the end.
+**Status:** Accepted (Jim, 2026-11-15): decisions 1–6 as recommended. Decision 1 keeps the refusal of
+`advection` on a member species: directed transport relative to the cytoplasm is a drift in
+`relative_advection`, and a lab-frame velocity `c` is written as `relative_advection: c - v`. Answers issue
+#251, asked from vcell-core's E2. Jim asked for this note (2026-11-15). Revised before acceptance after an
+independent review: 20 findings, 1 blocking, 6 major. Each is answered below and listed in "Review" at the
+end.
 **Builds on:**
 - ADR 018 decision 8: a species on a member rides the solved `v`, and the first implementation refuses one.
   The decision's assembly is *inferred* there.
@@ -85,6 +88,10 @@ None of these paths reads a T9 velocity. The single-mesh assembler refuses unkno
      document follows it. The answer to question 1: nothing is written.
    - **`relative_advection`** (the drift `w`) is the only transport slot a member species takes. It holds a
      drift relative to the material.
+   - **Directed transport stays expressible** (Jim's question, 2026-11-15). Motors, vesicle trafficking and
+     drift relative to the cytoplasm are the drift `w`, which may be a field. A lab-frame velocity `c`, such
+     as tracks anchored to the substrate, is `w = c − v`. A drift that depends on the species' own
+     concentration is nonlinear, so it waits for stage 5.
    - **`advection` is refused on a member species,** by a new validator rule. A lab-frame carrier on top of
      the material's would be a second carrier. The review checked that no such rule exists today.
      `use-cases.md` UC-A's row that maps myosin to `advection` is amended: on a member, myosin rides `v` and a
