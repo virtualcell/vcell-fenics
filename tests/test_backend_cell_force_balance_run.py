@@ -363,7 +363,8 @@ def test_vcell_cores_e2_runs_and_conserves_its_myosin() -> None:
     """vcell-core's own lowering of E2 (#251), read from the sibling checkout, not copied: it runs as written,
     with no carrier slot and no BC for `m`."""
 
-    document = json.loads(_E2.read_text().splitlines()[0])["fenics"]
+    records = [json.loads(line) for line in _E2.read_text().splitlines() if line.strip()]
+    document = next(r for r in records if r.get("case") == "e2")["fenics"]
     geometry = realize_multi_compartment(
         GeometryDescription(
             name="disk_in_medium",
