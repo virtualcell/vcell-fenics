@@ -99,6 +99,16 @@ VCell's solvers are its comparison baselines, and VCell users' models are its su
 - **Polygon clipping** (`core/bulk_remap.py`). Sutherland IE, Hodgman GW. Reentrant polygon clipping.
   *Commun. ACM* 17:32–42 (1974). doi:10.1145/360767.360802. *Not read here.*
 
+**Cell mechanics (T9, `backend/force_balance.py`)**
+- **The semi-implicit surface tension** (ADR 018 decision 5): the tension form evaluated at the new
+  position, `Δt∫γ∇_Γv:∇_Γφ`.
+  - Dziuk G. An algorithm for evolutionary surfaces. *Numer. Math.* 58:603–611 (1991).
+  - Bänsch E. Finite element discretization of the Navier–Stokes equations with a free capillary
+    surface. *Numer. Math.* 88:203–235 (2001).
+  - *Not read here;* citations from ADR 018's References, not yet checked against the papers.
+- **The vector-Laplacian viscous operator and the isotropic active stress** (ADR 019 decisions 2–3):
+  Nickaeen et al. 2017, listed under the use cases below.
+
 **Verification and solvers**
 - **Manufactured solutions** (`mms/`). Roache PJ. Code verification by the method of manufactured
   solutions. *J. Fluids Eng.* 124:4–10 (2002). doi:10.1115/1.1436090. *Not read here.*
