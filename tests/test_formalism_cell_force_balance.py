@@ -149,8 +149,8 @@ def test_the_registry_spec_is_steady_vector_on_volumes_with_slot_maps() -> None:
     assert spec.slot_maps
     assert spec.temporalities == frozenset({"steady_state"})
     assert spec.governed_types == frozenset({"vector"})
-    assert [s.name for s in spec.slots] == ["viscosity", "bulk_viscosity", "drag", "pressure"]
-    assert [s.name for s in spec.surface_slots] == ["tension"]
+    assert [s.name for s in spec.slots] == ["viscosity", "bulk_viscosity", "drag", "pressure", "active_stress"]
+    assert [s.name for s in spec.surface_slots] == ["tension", "traction"]
     assert [s.name for s in spec.slots if s.required] == ["viscosity"]
 
 
@@ -228,10 +228,10 @@ def test_every_member_must_move_with_the_velocity() -> None:
     _assert_one_error(raw, "member 'nuc__c1' must have motion {kind: unknown, variable: v}")
 
 
-def test_every_surface_with_a_tension_must_move_with_the_velocity() -> None:
+def test_every_surface_with_a_load_must_move_with_the_velocity_or_be_a_growing_front() -> None:
     raw = _raw()
     del _subdomain(raw, "jn__c1_c2")["motion"]
-    _assert_one_error(raw, "surface with a tension 'jn__c1_c2' must have motion")
+    _assert_one_error(raw, "surface 'jn__c1_c2' carries a load, so it must have motion")
 
 
 def test_a_surface_without_a_tension_may_move_with_the_velocity() -> None:
@@ -511,14 +511,16 @@ def test_a_tension_may_not_read_geometry() -> None:
     _assert_one_error(raw, "not geometry; it reads ['geom.x']")
 
 
-def test_a_wall_on_a_surface_is_refused_and_does_not_count() -> None:
+def test_a_membrane_held_by_a_velocity_resists_rigid_motion_and_carries_no_load() -> None:
     raw = _without_drag(_raw())
     raw["math_description"]["boundary_conditions"] = [
         {"kind": "dirichlet", "variable": "v", "boundary": "pm__c1", "expression": "0"}
     ]
     errors = _errors(raw)
-    assert any("'pm__c1' is a subdomain" in e for e in errors), errors
-    assert any("UnconstrainedRigidMotion" in e for e in errors), errors
+    assert any("'pm__c1' holds 'v' by a 'dirichlet' condition" in e and "['tension']" in e for e in errors), errors
+    assert not any("UnconstrainedRigidMotion" in e for e in errors), errors
+    del _equation(raw)["surfaces"]["pm__c1"]
+    assert _errors(raw) == []
 
 
 def test_a_wall_may_be_written_as_a_zero_vector() -> None:
@@ -535,3 +537,274 @@ def test_members_given_as_a_python_list_compare_equal_to_a_loaded_model() -> Non
     built = Variable(name="v", subdomain="cyt__c1", type="vector", members=["cyt__c1", "nuc__c1", "cyt__c2"])  # type: ignore[arg-type]
     assert built == _md(_raw()).variables[0]
     hash(built)
+
+
+# ---------------------------------------------------------------------------
+# ADR 019: a single cell (active stress, viscous operator, membrane conditions, a growing front)
+# ---------------------------------------------------------------------------
+
+# Nickaeen et al. 2017's motile cell (ADR 019's UC-A), zero-stress variant, mechanics only: one member, the
+# vector Laplacian, an isotropic active stress, a drag, no tension, and a growing front.
+_ONE_CELL = """
+math_description:
+  geometry: one_cell
+  subdomains:
+    - { name: cyt, kind: volume, motion: { kind: unknown, variable: u } }
+    - { name: ec, kind: volume }
+    - name: pm
+      kind: surface
+      motion:
+        kind: prescribed
+        velocity: >-
+          trace(u) + (v0 * a0 / region_size(cyt)
+          - k * (region_size(cyt) - a0 * a0 * a0 / (region_size(cyt) * region_size(cyt)))) * geom.normal
+  variables:
+    - { name: u, subdomain: cyt, type: vector }
+  equations:
+    - template: cell_force_balance
+      variable: u
+      subdomain: cyt
+      temporality: steady_state
+      viscous_operator: laplacian
+      volumes:
+        cyt: { viscosity: alpha, drag: "1", active_stress: "beta * (1 + 0.1 * geom.x[0])" }
+  parameters:
+    - { name: alpha, value: 0.5 }
+    - { name: beta, value: 5.0 }
+    - { name: v0, value: 2.5 }
+    - { name: a0, value: 3.14159 }
+    - { name: k, value: 1.5 }
+"""
+
+
+def _one_cell() -> dict[str, Any]:
+    raw: dict[str, Any] = yaml.safe_load(_ONE_CELL)
+    return raw
+
+
+def test_a_single_motile_cell_validates_without_diagnostics() -> None:
+    assert validate(_md(_one_cell())) == []
+
+
+def test_the_viscous_operator_round_trips_and_defaults_to_omitted() -> None:
+    md = _md(_one_cell())
+    eq = md.equations[0]
+    assert isinstance(eq, TemplateEquation)
+    assert eq.viscous_operator == "laplacian"
+    assert load_yaml(dump_yaml(md)) == md
+    base = _md(_raw()).equations[0]
+    assert isinstance(base, TemplateEquation)
+    assert base.viscous_operator is None
+    assert "viscous_operator" not in yaml.safe_load(dump_yaml(_md(_raw())))["math_description"]["equations"][0]
+
+
+def test_an_unknown_viscous_operator_is_a_load_error() -> None:
+    raw = _one_cell()
+    _equation(raw)["viscous_operator"] = "newtonian"
+    with pytest.raises(FormalismLoadError):
+        _md(raw)
+
+
+def test_the_viscous_operator_is_for_t9_only() -> None:
+    raw = _raw()
+    raw["math_description"]["variables"].append({"name": "c", "subdomain": "ec", "type": "scalar"})
+    raw["math_description"]["equations"].append(
+        {
+            "template": "bulk_radv_diff",
+            "variable": "c",
+            "subdomain": "ec",
+            "temporality": "time_dependent",
+            "terms": {"diffusion": "1"},
+            "initial_condition": "0",
+            "viscous_operator": "laplacian",
+        }
+    )
+    _assert_one_error(raw, "'viscous_operator' is for the 'cell_force_balance' template only")
+
+
+def test_an_active_stress_may_vary_in_space_but_not_read_the_velocity() -> None:
+    raw = _raw()
+    _equation(raw)["volumes"]["cyt__c1"]["active_stress"] = "sigma * geom.x[0]"
+    assert _errors(raw) == []
+    _equation(raw)["volumes"]["cyt__c1"]["active_stress"] = "div(v)"
+    _assert_one_error(raw, "may not read the velocity 'v'")
+
+
+def test_a_nonuniform_pressure_points_to_the_active_stress() -> None:
+    raw = _raw()
+    _equation(raw)["volumes"]["cyt__c2"]["pressure"] = "geom.x[0]"
+    _assert_one_error(raw, "A stress that varies in space is an 'active_stress'")
+
+
+def test_a_free_membrane_may_omit_its_tension() -> None:
+    raw = _raw()
+    del _equation(raw)["surfaces"]["pm__c2"]
+    assert _errors(raw) == []
+
+
+def test_a_traction_is_a_vector_load_that_may_read_geometry() -> None:
+    raw = _raw()
+    _equation(raw)["surfaces"]["pm__c1"]["traction"] = "f0 * exp(-geom.x[0] * geom.x[0]) * geom.normal"
+    raw["math_description"]["parameters"].append({"name": "f0", "value": 0.3})
+    assert _errors(raw) == []
+    _equation(raw)["surfaces"]["pm__c1"]["traction"] = "f0"
+    assert _errors(raw) == ["expression has type scalar, expected vector (§1.11.5)"]
+    _equation(raw)["surfaces"]["pm__c1"]["traction"] = "trace(v)"
+    _assert_one_error(raw, "may not read the velocity 'v'")
+
+
+def test_a_growing_front_may_carry_a_traction_but_not_a_tension() -> None:
+    raw = _one_cell()
+    _equation(raw)["surfaces"] = {"pm": {"traction": "[0.1, 0]"}}
+    assert _errors(raw) == []
+    _equation(raw)["surfaces"] = {"pm": {"tension": "1"}}
+    _assert_one_error(raw, "'pm' is a growing front (a prescribed velocity) and may not carry a tension")
+
+
+def test_a_surface_with_a_prescribed_displacement_is_not_a_growing_front() -> None:
+    raw = _one_cell()
+    _subdomain(raw, "pm")["motion"] = {"kind": "prescribed", "displacement": "[0, 0]"}
+    _equation(raw)["surfaces"] = {"pm": {"traction": "[0.1, 0]"}}
+    _assert_one_error(raw, "surface 'pm' carries a load, so it must have motion")
+
+
+def test_a_zero_velocity_edge_on_a_growing_front_holds_the_cell() -> None:
+    raw = _one_cell()
+    _equation(raw)["volumes"]["cyt"].pop("drag")
+    _assert_one_error(raw, "UnconstrainedRigidMotion")
+    _subdomain(raw, "pm")["motion"]["velocity"] = (
+        "(v0 * a0 / region_size(cyt) - k * (region_size(cyt) - a0)) * geom.normal"
+    )
+    raw["math_description"]["boundary_conditions"] = [
+        {"kind": "dirichlet", "variable": "u", "boundary": "pm", "expression": "0"}
+    ]
+    assert _errors(raw) == []
+
+
+def test_a_membranes_given_velocity_may_be_a_field_of_position() -> None:
+    raw = _one_cell()
+    raw["math_description"]["boundary_conditions"] = [
+        {"kind": "dirichlet", "variable": "u", "boundary": "pm", "expression": "[0.1 * geom.x[1], 0]"}
+    ]
+    assert _errors(raw) == []
+
+
+def test_a_membranes_given_velocity_must_be_a_vector() -> None:
+    raw = _one_cell()
+    raw["math_description"]["boundary_conditions"] = [
+        {"kind": "dirichlet", "variable": "u", "boundary": "pm", "expression": "0.1"}
+    ]
+    assert _errors(raw) == ["expression has type scalar, expected vector (§1.11.5)"]
+
+
+def test_a_membranes_given_velocity_may_not_read_the_velocity_or_a_field_species() -> None:
+    raw = _one_cell()
+    md = raw["math_description"]
+    md["variables"].append({"name": "m", "subdomain": "cyt", "type": "scalar"})
+    md["equations"].append(
+        {
+            "template": "bulk_radv_diff",
+            "variable": "m",
+            "subdomain": "cyt",
+            "temporality": "time_dependent",
+            "terms": {"diffusion": "1"},
+            "initial_condition": "1",
+        }
+    )
+    md["boundary_conditions"] = [{"kind": "dirichlet", "variable": "u", "boundary": "pm", "expression": "trace(u)"}]
+    assert _errors(raw) == [
+        "a membrane's given velocity may not read the velocity 'u' itself",
+    ]
+    md["boundary_conditions"][0]["expression"] = "trace(m) * geom.normal"
+    assert _errors(raw) == [
+        "a membrane's given velocity may read constants, sim.t, geom.*, region variables and region_size, not a "
+        "field variable; it reads ['m'] (ADR 019 decision 4)",
+    ]
+
+
+def test_a_velocity_is_given_on_a_membrane_or_a_box_face_not_a_volume() -> None:
+    raw = _one_cell()
+    raw["math_description"]["boundary_conditions"] = [
+        {"kind": "dirichlet", "variable": "u", "boundary": "ec", "expression": "0"}
+    ]
+    _assert_one_error(raw, "'ec' is a volume")
+
+
+def test_a_membranes_given_velocity_may_read_region_quantities_and_time() -> None:
+    raw = _one_cell()
+    md = raw["math_description"]
+    md["variables"].append({"name": "R", "subdomain": "cyt", "type": "scalar", "space": "region"})
+    md["equations"].append(
+        {
+            "template": "region_ode",
+            "variable": "R",
+            "subdomain": "cyt",
+            "temporality": "time_dependent",
+            "terms": {"uniform_rate": "0"},
+            "initial_condition": "1",
+        }
+    )
+    md["boundary_conditions"] = [
+        {
+            "kind": "dirichlet",
+            "variable": "u",
+            "boundary": "pm",
+            "expression": "trace(R) * sim.t / region_size(cyt) * geom.normal",
+        }
+    ]
+    assert _errors(raw) == []
+
+
+def test_a_membrane_held_by_a_velocity_carries_no_traction() -> None:
+    raw = _one_cell()
+    _equation(raw)["surfaces"] = {"pm": {"traction": "[0.1, 0]"}}
+    raw["math_description"]["boundary_conditions"] = [
+        {"kind": "dirichlet", "variable": "u", "boundary": "pm", "expression": "0"}
+    ]
+    assert _errors(raw) == [
+        "'pm' holds 'u' by a 'dirichlet' condition, which gives its velocity, so it takes no ['traction'] "
+        "(ADR 019 decision 4)"
+    ]
+
+
+def test_two_velocities_on_one_membrane_are_refused() -> None:
+    raw = _one_cell()
+    raw["math_description"]["boundary_conditions"] = [
+        {"kind": "dirichlet", "variable": "u", "boundary": "pm", "expression": "0"},
+        {"kind": "dirichlet", "variable": "u", "boundary": "pm", "expression": "[1, 0]"},
+    ]
+    _assert_one_error(raw, "a second BC for 'u' on 'pm'")
+
+
+def test_a_listed_surface_at_rest_is_neither_moving_with_the_velocity_nor_a_growing_front() -> None:
+    raw = _one_cell()
+    _subdomain(raw, "pm")["motion"] = {"kind": "none"}
+    _equation(raw)["surfaces"] = {"pm": {"traction": "[0.1, 0]"}}
+    assert _errors(raw) == [
+        "surface 'pm' carries a load, so it must have motion {kind: unknown, variable: u} or be a growing front "
+        "with a prescribed velocity (ADR 018 decision 2, ADR 019 decision 5)"
+    ]
+
+
+def test_a_volume_in_surfaces_is_reported_once() -> None:
+    raw = _raw()
+    _equation(raw)["surfaces"]["ec"] = {"tension": "1"}
+    errors = _errors(raw)
+    assert [e for e in errors if "'ec'" in e] == ["'ec' is a volume; 'surfaces:' takes surface classes"], errors
+
+
+def test_an_explicit_symmetric_operator_round_trips() -> None:
+    raw = _raw()
+    _equation(raw)["viscous_operator"] = "symmetric"
+    md = _md(raw)
+    assert load_yaml(dump_yaml(md)) == md
+    assert yaml.safe_load(dump_yaml(md))["math_description"]["equations"][0]["viscous_operator"] == "symmetric"
+    assert validate(md) == []
+
+
+def test_a_misspelt_membrane_is_read_as_a_box_face() -> None:
+    raw = _one_cell()
+    raw["math_description"]["boundary_conditions"] = [
+        {"kind": "dirichlet", "variable": "u", "boundary": "pmm", "expression": "[1, 0]"}
+    ]
+    _assert_one_error(raw, "'pmm' is not a declared subdomain, so it is read as a box face")

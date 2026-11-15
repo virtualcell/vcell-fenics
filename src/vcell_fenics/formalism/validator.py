@@ -21,12 +21,13 @@ Schema-level checks:
 - Boundary-condition consistency — conflicting kinds, value-equality
   adjacent-variable declaration, `interface_flux` bulk-only, weak-form
   Dirichlet-only (§1.11.7).
-- T9 `cell_force_balance` (ADR 018): the listed velocity and its members, motion
-  both ways, the slot maps, no initial condition, the zero-velocity wall as the
-  only BC, the static rigid-motion check (`UnconstrainedRigidMotion`), and a
-  uniform pressure (`NonUniformPressure`). What needs the geometry — that each
-  surface bounds a member, connected components, a member on the box — is the
-  backend's (§1.11.10).
+- T9 `cell_force_balance` (ADRs 018 and 019): the listed velocity and its members,
+  motion both ways (a surface may instead be a growing front, with no tension), the
+  slot maps, the viscous operator, no initial condition, `dirichlet` as the only BC
+  (zero on a box face; a given velocity on a membrane, which then carries no load),
+  the static rigid-motion check (`UnconstrainedRigidMotion`), and a uniform pressure
+  (`NonUniformPressure`). What needs the geometry — that each surface bounds a
+  member, connected components, a member on the box — is the backend's (§1.11.10).
 
 Expression-level checks (parse + AST walk):
 
@@ -543,6 +544,11 @@ class _Validator:
                 f"a list of subdomains and the 'volumes:' / 'surfaces:' slot maps are for the "
                 f"{CELL_FORCE_BALANCE!r} template only (ADR 018 decision 2); use 'terms'",
             )
+        if isinstance(eq, TemplateEquation) and not is_t9 and eq.viscous_operator is not None:
+            self._error(
+                path,
+                f"'viscous_operator' is for the {CELL_FORCE_BALANCE!r} template only (ADR 019 decision 3)",
+            )
         if is_t9 and isinstance(eq, TemplateEquation) and len(set(eq.members)) != len(eq.members):
             self._error(path, f"the equation names a member more than once: {list(eq.members)}")
         if (
@@ -668,41 +674,64 @@ class _Validator:
                     self._error(where, f"unknown surface slot {slot_name!r} (slots: {sorted(surface_slots)})")
 
     def _check_cell_force_balances(self) -> None:
-        """The T9 rules that span the model (ADR 018 decisions 2 and 4): each member and each surface with a
-        tension moves with the velocity, and some member has a drag or the velocity has a wall."""
+        """The T9 rules that span the model (ADR 018 decisions 2 and 4, ADR 019 decisions 4 and 5): each member
+        moves with the velocity; each surface in `surfaces:` moves with it or is a growing front (a prescribed
+        velocity), and a growing front carries no tension; a membrane held by a velocity carries no tension or
+        traction; and some member has a drag or the velocity has a Dirichlet condition."""
         for i, eq in enumerate(self._md.equations):
             if not (isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE):
                 continue
             if self._t9_vars.get(eq.variable) is not eq:
                 continue  # a second T9 equation for the same velocity is reported as overdetermined (coverage)
             path = f"equations[{i}]"
-            movers = [*self._t9_members(eq), *eq.surfaces]
-            for name in movers:
+            for name in self._t9_members(eq):
                 sub = self._subdomain_by_name.get(name)
                 if sub is None:
                     continue
                 motion = sub.motion
                 if not (isinstance(motion, MotionUnknown) and motion.variable == eq.variable):
-                    role = "member" if name in self._t9_members(eq) else "surface with a tension"
                     self._error(
                         path,
-                        f"{role} {name!r} must have motion {{kind: unknown, variable: {eq.variable}}}: it moves "
-                        f"with the velocity (ADR 018 decision 2)",
+                        f"member {name!r} must have motion {{kind: unknown, variable: {eq.variable}}}: its material "
+                        f"moves with the velocity (ADR 018 decision 2)",
+                    )
+            held = {
+                bc.boundary
+                for bc in self._md.boundary_conditions
+                if isinstance(bc, BCDirichlet) and bc.variable == eq.variable
+            }
+            for name, slots in eq.surfaces.items():
+                sub = self._subdomain_by_name.get(name)
+                if sub is None or sub.kind != "surface":
+                    continue  # reported by the slot-map check
+                motion = sub.motion
+                if isinstance(motion, MotionPrescribedVelocity):
+                    if "tension" in slots:
+                        self._error(
+                            f"{path}.surfaces.{name}",
+                            f"{name!r} is a growing front (a prescribed velocity) and may not carry a tension: the "
+                            f"semi-implicit tension assumes the surface moves with {eq.variable!r} (ADR 019 "
+                            f"decision 5)",
+                        )
+                elif not (isinstance(motion, MotionUnknown) and motion.variable == eq.variable):
+                    self._error(
+                        path,
+                        f"surface {name!r} carries a load, so it must have motion {{kind: unknown, variable: "
+                        f"{eq.variable}}} or be a growing front with a prescribed velocity (ADR 018 decision 2, "
+                        f"ADR 019 decision 5)",
+                    )
+                if name in held and slots:
+                    self._error(
+                        f"{path}.surfaces.{name}",
+                        f"{name!r} holds {eq.variable!r} by a 'dirichlet' condition, which gives its velocity, so "
+                        f"it takes no {sorted(slots)} (ADR 019 decision 4)",
                     )
             has_drag = any("drag" in slots for slots in eq.volumes.values())
-            has_wall = any(
-                isinstance(bc, BCDirichlet)
-                and bc.variable == eq.variable
-                and bc.boundary not in self._subdomain_by_name
-                and (tree := self._quiet_parse(bc.expression)) is not None
-                and _is_zero_literal(tree)
-                for bc in self._md.boundary_conditions
-            )
-            if not (has_drag or has_wall):
+            if not (has_drag or held):
                 self._error(
                     path,
                     f"UnconstrainedRigidMotion: nothing resists a rigid motion of {eq.variable!r} — no member has a "
-                    f"'drag' and no boundary holds it at v = 0 (ADR 018 decision 4)",
+                    f"'drag' and no 'dirichlet' condition holds it (ADR 018 decision 4, ADR 019 decision 4)",
                 )
 
     # -- §1.11.7 boundary-condition consistency ------------------------------
@@ -819,7 +848,13 @@ class _Validator:
                 )
             self._check_weak_form_dirichlet_only(bc, path, weak_form_vars)
             if bc.variable in self._t9_vars:
-                self._check_wall_bc(bc, path)
+                if (bc.variable, bc.boundary) in groups:
+                    self._error(
+                        path,
+                        f"a second BC for {bc.variable!r} on {bc.boundary!r}: a {CELL_FORCE_BALANCE!r} velocity "
+                        f"takes one 'dirichlet' per boundary (ADR 019 decision 4)",
+                    )
+                self._check_cell_force_balance_bc(bc, path)
             groups.setdefault((bc.variable, bc.boundary), set()).add(bc.kind)
 
         for (variable, boundary), kinds in groups.items():
@@ -829,29 +864,57 @@ class _Validator:
                     f"conflicting BC kinds {sorted(kinds)} for variable {variable!r} on boundary {boundary!r}",
                 )
 
-    def _check_wall_bc(self, bc: BoundaryCondition, path: str) -> None:
-        """A T9 velocity takes one BC, a wall holding it at rest: `dirichlet` with the zero vector, written
-        `0` (ADR 018 decision 4). Its surfaces need none: their condition is the natural one."""
+    def _check_cell_force_balance_bc(self, bc: BoundaryCondition, path: str) -> None:
+        """A T9 velocity takes one kind of BC, `dirichlet` (ADR 018 decision 4, ADR 019 decision 4):
+        - on a box face, a wall holding it at rest, the zero vector written `0` (the box does not move);
+        - on a membrane, a given velocity `g` (a zero-velocity adhesion band, or a field of `geom.x`): a vector
+          expression that may read constants, `sim.t`, `geom.*`, region variables and `region_size`, not the
+          velocity or a field species.
+        Its other surfaces need none: their condition is the natural one (a tension, a traction, or zero
+        traction). Whether the membrane bounds a member is the geometry's, checked by the backend."""
         if not isinstance(bc, BCDirichlet):
             self._error(
                 path,
-                f"a {CELL_FORCE_BALANCE!r} velocity takes only a 'dirichlet' BC holding it at v = 0 on a wall; "
-                f"its surfaces' condition is their tension (ADR 018 decision 4), got {bc.kind!r}",
+                f"a {CELL_FORCE_BALANCE!r} velocity takes only a 'dirichlet' BC: v = 0 on a wall, or a given "
+                f"velocity on a membrane; its other surfaces' condition is natural (ADR 019 decision 4), got "
+                f"{bc.kind!r}",
             )
             return
-        if bc.boundary in self._subdomain_by_name:
+        sub = self._subdomain_by_name.get(bc.boundary)
+        tree = self._parse(bc.expression, f"{path}.expression")
+        if sub is None:
+            if tree is not None and not _is_zero_literal(tree):
+                self._error(
+                    f"{path}.expression",
+                    f"{bc.boundary!r} is not a declared subdomain, so it is read as a box face, where a wall holds a "
+                    f"{CELL_FORCE_BALANCE!r} velocity at rest: its value must be the zero vector, written 0; the "
+                    f"box does not move (ADR 018 decision 4)",
+                )
+            return
+        if sub.kind != "surface":
             self._error(
                 path,
-                f"a wall holding a {CELL_FORCE_BALANCE!r} velocity is a box face; {bc.boundary!r} is a subdomain, "
-                f"and a surface bounding a member takes no BC (ADR 018 decision 4)",
+                f"a {CELL_FORCE_BALANCE!r} velocity takes a 'dirichlet' BC on a box face or a membrane; "
+                f"{bc.boundary!r} is a {sub.kind} (ADR 019 decision 4)",
             )
-        tree = self._parse(bc.expression, f"{path}.expression")
-        if tree is not None and not _is_zero_literal(tree):
+            return
+        if tree is None:
+            return
+        where = f"{path}.expression"
+        if self._contains_name(tree, bc.variable):
+            self._error(where, f"a membrane's given velocity may not read the velocity {bc.variable!r} itself")
+            return
+        fields = sorted(nm for nm in _names_in(tree) if nm in self._var_subdomains and not self._is_region_variable(nm))
+        if fields:
             self._error(
-                f"{path}.expression",
-                f"a wall holds a {CELL_FORCE_BALANCE!r} velocity at rest: its value must be the zero vector, "
-                f"written 0; the box does not move (ADR 018 decision 4)",
+                where,
+                f"a membrane's given velocity may read constants, sim.t, geom.*, region variables and "
+                f"region_size, not a field variable; it reads {fields} (ADR 019 decision 4)",
             )
+        ctx = _ExprContext(where, bc.boundary, "term_slot", bc.variable)
+        self._walk(tree, ctx)
+        if not _is_zero_literal(tree):
+            self._check_expr_type(tree, ctx, _VECTOR_ONLY)
 
     def _is_region_variable(self, name: str) -> bool:
         return any(v.name == name and v.space == REGION_SPACE for v in self._md.variables)
@@ -960,7 +1023,8 @@ class _Validator:
                             where,
                             f"NonUniformPressure: a pressure is uniform on its member, so it may read constants, "
                             f"sim.t, region_size and region variables (and parameters that read only these); "
-                            f"it reads {found} (ADR 018 decision 3)",
+                            f"it reads {found}. A stress that varies in space is an 'active_stress' (a field "
+                            f"pressure P is active_stress: -P; ADR 018 decision 3, ADR 019 decision 2)",
                         )
         for name, slots in eq.surfaces.items():
             if name not in self._subdomain_by_name:
@@ -969,6 +1033,8 @@ class _Validator:
                 slot_spec = spec.surface_slot(slot)
                 where = f"{path}.surfaces.{name}.{slot}"
                 tree = self._slot_map_site(text, where, name, eq.variable, slot_spec.types if slot_spec else None)
+                if slot != "tension":
+                    continue  # a traction may be a field of geom.x and geom.normal (ADR 019 decision 4)
                 geometry = sorted(self._geometry_names(tree, set())) if tree is not None else []
                 if geometry:
                     self._error(

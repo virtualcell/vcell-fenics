@@ -43,6 +43,7 @@ _CONFIG = ConfigDict(extra="forbid", coerce_numbers_to_str=True)
 SubdomainKind: TypeAlias = Literal["volume", "surface", "curve", "point"]
 VariableType: TypeAlias = Literal["scalar", "vector", "symmetric_tensor"]
 Temporality: TypeAlias = Literal["time_dependent", "steady_state"]
+ViscousOperator: TypeAlias = Literal["symmetric", "laplacian"]  # T9's viscous operator (ADR 019 decision 3)
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +326,9 @@ class TemplateEquation:
     members: tuple[str, ...] = ()
     volumes: dict[str, dict[str, str]] = field(default_factory=dict)
     surfaces: dict[str, dict[str, str]] = field(default_factory=dict)
+    # T9 only (ADR 019 decision 3): the viscous operator, `symmetric` (2η dev ε, the default when omitted) or
+    # `laplacian` (η ∇v, the vector Laplacian of Nickaeen et al. 2017).
+    viscous_operator: ViscousOperator | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "members", tuple(self.members))

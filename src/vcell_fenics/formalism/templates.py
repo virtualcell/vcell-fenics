@@ -134,9 +134,13 @@ REGISTRY: dict[str, TemplateSpec] = {
     CELL_FORCE_BALANCE: TemplateSpec(  # T9 — ADR 018; the forms of ADR 017
         # A quasi-static, overdamped force balance for one velocity v on a list of volume classes (the
         # members: the cells' compartments). For every test velocity φ:
-        #   Σ_members ∫(2η dev ε(v):ε(φ) + η_b ∇·v ∇·φ + ζ v·φ − P ∇·φ) + Σ_surfaces ∫ γ ∇_Γ·φ = 0,
-        # with dev the 3D deviator in every dimension. Per member: viscosity η (required), bulk_viscosity η_b,
-        # drag ζ, and pressure P (uniform on the member); per surface: tension γ. Always steady_state.
+        #   Σ_members ∫(2η dev ε(v):ε(φ) + η_b ∇·v ∇·φ + ζ v·φ − P ∇·φ + σ_a ∇·φ)
+        #     + Σ_surfaces ∫(γ ∇_Γ·φ − t·φ) = 0,
+        # with dev the 3D deviator in every dimension, or, with `viscous_operator: laplacian`, η ∇v:∇φ in place
+        # of 2η dev ε(v):ε(φ) (ADR 019 decision 3). Per member: viscosity η (required), bulk_viscosity η_b,
+        # drag ζ, pressure P (uniform on the member) and active_stress σ_a (a field, contractile positive;
+        # ADR 019 decision 2); per surface: tension γ and traction t (a vector load; ADR 019 decision 4).
+        # Always steady_state.
         name=CELL_FORCE_BALANCE,
         governed_types=_VECTOR,
         subdomain_kinds=frozenset({"volume"}),
@@ -146,8 +150,12 @@ REGISTRY: dict[str, TemplateSpec] = {
             SlotSpec(name="bulk_viscosity", types=_SCALAR, required=False),
             SlotSpec(name="drag", types=_SCALAR, required=False),
             SlotSpec(name="pressure", types=_SCALAR, required=False),
+            SlotSpec(name="active_stress", types=_SCALAR, required=False),
         ),
-        surface_slots=(SlotSpec(name="tension", types=_SCALAR, required=False),),
+        surface_slots=(
+            SlotSpec(name="tension", types=_SCALAR, required=False),
+            SlotSpec(name="traction", types=_VECTOR, required=False),
+        ),
         slot_maps=True,
     ),
     "cahn_hilliard": TemplateSpec(  # diffuse-interface phase separation

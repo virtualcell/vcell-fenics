@@ -178,6 +178,8 @@ def _equation_to_dict(e: Equation) -> dict[str, object]:
             out["volumes"] = {name: dict(slots) for name, slots in e.volumes.items()}
         if e.surfaces:
             out["surfaces"] = {name: dict(slots) for name, slots in e.surfaces.items()}
+        if e.viscous_operator is not None:
+            out["viscous_operator"] = e.viscous_operator
         if e.initial_condition is not None:
             out["initial_condition"] = e.initial_condition
         return out
