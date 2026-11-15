@@ -1,10 +1,11 @@
 # ADR 019 — The cell force balance for a single cell
 
 **Date:** 2026-11-14
-**Status:** Proposed. Asked for by Jim (2026-11-14): "I don't want to move so strongly into multicellular
-modeling that would make modeling a single cell difficult … I don't want to lose what we had before." PR #246
-(ADR 018 staging step 1) is held until this note is decided. Revised after an independent review (23
-findings: none blocking, 7 major), each answered below and listed in "Review" at the end.
+**Status:** Accepted (Jim, 2026-11-14): decisions 1–6 as recommended (decision 2 with option (a), decision 5
+with option (a), decision 6 with option (a): the grammar lands in PR #246 before it merges). Asked for by Jim
+(2026-11-14): "I don't want to move so strongly into multicellular modeling that would make modeling a single
+cell difficult … I don't want to lose what we had before." Revised before acceptance after an independent
+review (23 findings: none blocking, 7 major), each answered below and listed in "Review" at the end.
 **Builds on:**
 - ADR 018 (accepted 2026-11-14): the template T9 `cell_force_balance`, its slots (decision 3), its
   well-posedness rules (decision 4), its time stepping (decision 5), its term kinds (decision 6), its motion
