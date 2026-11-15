@@ -3,7 +3,8 @@
 Per ADR 004 (docs/decisions/004-discreteproblem-ir.md), a `DiscreteProblem` is
 the FEniCSx-backend-internal representation of one coupled solve. It records the
 spatial weak-form residual as a small enum of **tagged terms** — each carrying a
-UFL integrand — plus a **time scheme** (`BackwardEuler` for v1). Lowering applies
+UFL integrand — plus a **time scheme** (`BackwardEuler`, or `QuasiStatic` for the cell force
+balance T9, ADR 018 decision 5). Lowering applies
 the scheme to the term list to compose the bilinear / linear forms and build a
 DOLFINx `LinearProblem`.
 
@@ -14,8 +15,9 @@ and operator invariants (`K·1 ≈ 0`, `A·1 = M·1`) can be checked on the asse
 matrices independently of any solution.
 
 This module owns no formalism types: the assembler (a separate module) builds the
-UFL integrands from a MathDescription and hands them here as `Term`s. v1 supports
-time-dependent problems only; steady-state lowering raises until a later increment.
+UFL integrands from a MathDescription and hands them here as `Term`s. `BackwardEuler` lowers
+time-dependent problems; `QuasiStatic` lowers a problem with no time derivative, solved afresh on the current
+geometry at every step (the T9 force balance; its term builders are `backend/force_balance.py`).
 """
 
 from __future__ import annotations
@@ -41,8 +43,8 @@ from vcell_fenics.backend.diagnostics import NonlinearTermError, nonlinear_backw
 
 
 class TermKind(Enum):
-    """The kinds of term a v1 template (T1 / T2) can contribute. A closed set,
-    extended deliberately as new templates land (ADR 004)."""
+    """The kinds of term a template can contribute. A closed set, extended deliberately as new templates land
+    (ADR 004): T1/T2 first, then the cell force balance T9 (ADR 018 decision 6, ADR 019 decisions 2–4)."""
 
     TIME_DERIVATIVE = "time_derivative"
     DIFFUSION = "diffusion"
@@ -52,6 +54,16 @@ class TermKind(Enum):
     # Boundary contributions (integrated over a labelled boundary measure, not dx).
     NEUMANN = "neumann"
     ROBIN = "robin"
+    # The cell force balance T9 (ADR 018 decision 6; ADR 019): each carries its own measure (a member's
+    # cells, or a surface's facets). Their operator invariants differ, which is why each has its own tag.
+    VISCOUS_STRESS = "viscous_stress"  # 2η dev ε(v):ε(φ) + η_b ∇·v ∇·φ, dev the 3D deviator
+    VISCOUS_LAPLACIAN = "viscous_laplacian"  # η ∇v:∇φ + η_b ∇·v ∇·φ (ADR 019 decision 3)
+    DRAG = "drag"  # ζ v·φ
+    CELL_PRESSURE = "cell_pressure"  # −P ∇·φ, a load
+    ACTIVE_STRESS = "active_stress"  # +σ_a ∇·φ, a load (ADR 019 decision 2)
+    SURFACE_TENSION = "surface_tension"  # γ ∇_Γ·φ, a load
+    TENSION_SEMI_IMPLICIT = "tension_semi_implicit"  # Δt γ ∇_Γv:∇_Γφ (ADR 018 decision 5)
+    SURFACE_TRACTION = "surface_traction"  # −t·φ, a load (ADR 019 decision 4)
 
 
 @dataclass(frozen=True)
@@ -66,6 +78,9 @@ class Term:
 
     kind: TermKind
     integrand: UflExpr | None = None
+    # The measure the integrand is integrated over; None means the problem's `dx`. The T9 terms set it: a
+    # member's `dx(tag)`, a free membrane's `ds(tag)`, or a surface between members' `dS(tag)`.
+    measure: ufl.Measure | None = None
 
 
 @dataclass(frozen=True)
@@ -135,15 +150,76 @@ class BackwardEuler:
                 continue
             if conservative and term.kind is TermKind.DILUTION:
                 continue  # subsumed into the conservative time term's changing measure
+            measure = problem.dx if term.measure is None else term.measure
             if term.kind is TermKind.SOURCE:
-                form = form - dt * term.integrand * problem.dx  # +s on the PDE's RHS ⇒ −s in the residual
+                form = form - dt * term.integrand * measure  # +s on the PDE's RHS ⇒ −s in the residual
             else:
-                form = form + dt * term.integrand * problem.dx  # diffusion, dilution, advection
+                form = form + dt * term.integrand * measure  # diffusion, dilution, advection
         # Boundary contributions integrate over their own (restricted) measure; the
         # assembler has baked the residual sign into each integrand.
         for boundary in problem.boundary_terms:
             form = form + dt * boundary.integrand * boundary.measure
         return ufl.lhs(form), ufl.rhs(form)
+
+
+@dataclass(frozen=True)
+class QuasiStatic:
+    """No time derivative: each step solves the residual on the current geometry,
+
+        F = Σ_terms ∫ integrand · measure = 0,
+
+    split with `ufl.lhs` / `ufl.rhs` as `BackwardEuler` does. The cell force balance T9 uses it (ADR 018 decision
+    5): the velocity is solved afresh at every step, so it carries no state and no mass term. Time enters only
+    through what the terms read (the semi-implicit tension's `Δt`, the lagged per-cell scalars). Each integrand
+    is the signed residual contribution; a load (a pressure, a tension) is a term with no trial function and
+    lands in the right-hand side."""
+
+    name: str = "quasi_static"
+
+    def compose(self, problem: DiscreteProblem) -> tuple[ufl.Form, ufl.Form]:
+        if TermKind.TIME_DERIVATIVE in problem.term_kinds():
+            raise TypeError("a quasi-static problem has no time derivative; use BackwardEuler")
+        foreign = problem.term_kinds() - _QUASI_STATIC_KINDS
+        if foreign:
+            raise TypeError(
+                f"the quasi-static scheme lowers the force-balance terms only, not {sorted(k.value for k in foreign)}"
+            )
+        form: ufl.Form | None = None
+        for term in problem.terms:
+            if term.integrand is None:
+                raise TypeError(f"a quasi-static {term.kind.value} term needs an integrand")
+            contribution = term.integrand * (problem.dx if term.measure is None else term.measure)
+            form = contribution if form is None else form + contribution
+        for boundary in problem.boundary_terms:
+            contribution = boundary.integrand * boundary.measure
+            form = contribution if form is None else form + contribution
+        if form is None:
+            raise TypeError("a quasi-static problem needs at least one term")
+        lhs, rhs = ufl.lhs(form), ufl.rhs(form)
+        if lhs.empty() or len(lhs.arguments()) < 2:
+            raise TypeError("a quasi-static problem needs a term in the unknown (a viscous term)")
+        if rhs.empty() or not rhs.arguments():
+            # no load (driven by its boundary values alone): a zero right-hand side, so the problem still has one
+            zero = fem.Constant(problem.V.mesh, np.zeros(problem.test.ufl_shape, dtype=PETSc.ScalarType))
+            rhs = ufl.inner(zero, problem.test) * problem.dx
+        return lhs, rhs
+
+
+TimeScheme = BackwardEuler | QuasiStatic
+
+# The kinds `QuasiStatic` lowers, each with the sign its builder baked in (the cell force balance, T9).
+_QUASI_STATIC_KINDS: frozenset[TermKind] = frozenset(
+    {
+        TermKind.VISCOUS_STRESS,
+        TermKind.VISCOUS_LAPLACIAN,
+        TermKind.DRAG,
+        TermKind.CELL_PRESSURE,
+        TermKind.ACTIVE_STRESS,
+        TermKind.SURFACE_TENSION,
+        TermKind.TENSION_SEMI_IMPLICIT,
+        TermKind.SURFACE_TRACTION,
+    }
+)
 
 
 # A motion is "degenerate" once the spread of cell sizes (max/min cell volume)
@@ -505,7 +581,7 @@ class DiscreteProblem:
     previous: fem.Function
     dt: fem.Constant
     terms: tuple[Term, ...]
-    scheme: BackwardEuler
+    scheme: TimeScheme
     bcs: list[fem.DirichletBC]
     # Non-zero Neumann / Robin contributions (Dirichlet BCs are strong, in `bcs`).
     boundary_terms: tuple[BoundaryTerm, ...] = ()

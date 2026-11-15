@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         BoundaryTerm,
         DiscreteProblem,
         MeshQualityError,
+        QuasiStatic,
         Term,
         TermKind,
     )
@@ -122,6 +123,7 @@ _EXPORTS: dict[str, str] = {
     "CoupledGeometry": "vcell_fenics.backend.geometry",
     "CoupledProblem": "vcell_fenics.backend.coupled",
     "DiscreteProblem": "vcell_fenics.backend.discrete",
+    "QuasiStatic": "vcell_fenics.backend.discrete",
     "ForceBalanceMeshMotion": "vcell_fenics.backend.interface_coupled",
     "Geometry": "vcell_fenics.backend.geometry",
     "IntegrationResult": "vcell_fenics.backend.reaction_diffusion",
@@ -247,6 +249,7 @@ __all__ = [
     "MembraneCoupledResult",
     "MeshQualityError",
     "NonlinearTermError",
+    "QuasiStatic",
     "SolveError",
     "SolverConfiguration",
     "StepTooLarge",

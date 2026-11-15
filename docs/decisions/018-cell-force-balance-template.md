@@ -249,6 +249,10 @@ vcell-core's lowering fills the slots: `P_c = K(V0 − V_c)`, a free membrane's 
      - It damps rigid rotation slightly: for a rotation `v = Wx`, `∇_Γ v = WP` (with `P` the tangential
        projector) is non-zero, and the added term dissipates `Δt∫γ|WP|² = Δt(d−1)ω²∫γ`. Translations are
        undamped.
+       *Correction (2026-11-15, found while testing it in staging step 2):* `|WP|² = |ω|²(1 + (ω̂·n)²)`, so
+       the dissipation is `Δt ω²∫γ` in 2D (where `ω̂ ⟂ n`) but `Δt|ω|²∫γ(1 + (ω̂·n)²)` in 3D, between
+       `Δt|ω|²∫γ` and `2Δt|ω|²∫γ`, not `(d−1)` times the first. The test checks the exact form
+       (`tests/test_backend_force_balance.py`).
      - The energy identity of ADR 017 decision 6 gains the added term:
        `δE[v] = −2R(v) − Δt∫γ|∇_Γ v|²`. The tests check that form.
    - **What (b) leaves:** the lagged scalars impose a step limit from `K` and `K_S` that does not shrink with
@@ -370,7 +374,10 @@ These are proposals; none of the names exists in vcell-core yet.
 2. The IR: the five term kinds and the quasi-static scheme, with ADR 017 decision 6's contract C tests and
    decision 6 above's invariants and the deviator test, on fixed meshes.
 3. The solve on a fixed mesh: the disk's exact solution, a manufactured solution in `mms/`, the energy identity
-   with the semi-implicit term; `v` in the results bundle.
+   with the semi-implicit term; `v` in the results bundle. Also here, since they need the realized geometry or
+   the assembled coefficients (deferred from step 2, 2026-11-15): the realize-time checks of decision 4 (each
+   component held, `MemberOnFreeBox`), the per-step positivity checks (`η > 0`, `γ > 0`), and decision 6's
+   locking warning above a measured `η_b/η`.
 4. The solve on a moving mesh in 2D: several solved membranes meeting at junctions, the end-pinned slide, the
    junction diagnostic and ADR 017 decision 3's convergence expectations, then ADR 016's remesh with the new
    contact check. Coefficients read only constants, `sim.t` and `region_size` here (decision 3).
