@@ -70,6 +70,24 @@ class DomainInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class VectorComponent:
+    """Which vector a scalar variable is a component of (ADR 010 §3, "Vector fields"; optional, added after
+    schema 1 shipped — absent from older bundles and from every scalar variable).
+
+    A vector field, such as the velocity of a cell force balance (ADR 020 decision 5), is written as one
+    ordinary scalar variable per component, ``<name>_x``, ``<name>_y`` (and ``<name>_z`` in 3D), so a reader
+    that does not know this key still reads each component as a field. ``component`` is the index into the
+    geometric axes, 0 to ``gdim - 1``."""
+
+    __pydantic_config__ = _IGNORE_EXTRA
+    name: str
+    component: int
+
+
+VECTOR_SUFFIXES = ("_x", "_y", "_z")
+
+
+@dataclass(frozen=True, slots=True)
 class VariableInfo:
     """A field on one domain: P1 point data whose columns follow the domain VTU's point order."""
 
@@ -80,6 +98,7 @@ class VariableInfo:
     stats: str  # bundle-relative zarr array, (T, len(STATS_COLUMNS))
     assoc: Literal["point"] = "point"
     element: str = "P1"
+    vector: VectorComponent | None = None  # a component of a vector field; None for a scalar
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +159,18 @@ class Manifest:
             if variable.domain == domain and variable.name == name:
                 return variable
         raise KeyError(f"no variable {name!r} on domain {domain!r}")
+
+    def vectors(self, domain: str) -> dict[str, list[VariableInfo]]:
+        """The vector fields on ``domain``: each vector's name and its component variables, in axis order."""
+
+        found: dict[str, list[VariableInfo]] = {}
+        for variable in self.variables:
+            if variable.domain == domain and variable.vector is not None:
+                found.setdefault(variable.vector.name, []).append(variable)
+        return {
+            name: sorted(parts, key=lambda v: v.vector.component if v.vector is not None else 0)
+            for name, parts in found.items()
+        }
 
 
 _ADAPTER: TypeAdapter[Manifest] = TypeAdapter(Manifest)

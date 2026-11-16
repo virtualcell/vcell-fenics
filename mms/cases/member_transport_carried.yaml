@@ -1,0 +1,48 @@
+name: member_transport_carried
+description: >
+  A species on the member of a cell force balance, carried by the velocity in the conservative form
+  `−∫ m (v + w)·∇q` (ADR 020 decision 2), with a PRESCRIBED velocity in place of the solved one (decision 6).
+  On the unit disk, v = ∇Φ with Φ = r²/2 − r⁴/4, so v = (1 − r²)(x, y): it vanishes on the membrane, where
+  the run holds it at v = 0, and is compressible (∇·v = 2 − 4r²), so the dilution `m∇·v` is exercised. The
+  exact m* = e^(−t)(2 + x(1 − r²)²) has ∂m*/∂r = 0 at r = 1, which is the natural condition of zero total
+  flux relative to a held edge. The source is f = ∂t m* − DΔm* + ∇·(m* v), with s = 1 − r²,
+  g = x s², Δg = 8x − 24xs, ∇g·v = s³x − 4xs²r², ∇·v = 4s − 2 (derived by hand; the order test checks it).
+  A wrong sign of the carrier leaves an O(1) error that does not shrink. Backward Euler is first order in
+  dt, so the runner refines dt ∝ h². The membrane is snapped onto the circle (issue #249).
+harness: member_transport
+dim: 2
+geometry: {kind: disk_in_box, radius: 1.0, cell: cell, outside: ec, membrane: pm}
+velocity: ["x*(1 - x**2 - y**2)", "y*(1 - x**2 - y**2)"]
+exact: {m: "np.exp(-t)*(2 + x*(1 - x**2 - y**2)**2)"}
+t_final: 0.25
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 2.0
+applicable_solvers: [fenics-be]
+math: |
+  math_description:
+    geometry: disk_in_medium
+    subdomains:
+      - { name: ec, kind: volume }
+      - { name: cell, kind: volume, motion: { kind: unknown, variable: v } }
+      - { name: pm, kind: surface, motion: { kind: unknown, variable: v } }
+    variables:
+      - { name: m, subdomain: cell }
+      - { name: v, subdomain: cell, type: vector }
+    equations:
+      - template: bulk_radv_diff
+        variable: m
+        subdomain: cell
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1"
+          source: "exp(-sim.t)*(-(2 + (geom.x[0]*(1 - geom.x[0]**2 - geom.x[1]**2)**2)) - 0.1*(8*geom.x[0] - 24*geom.x[0]*(1 - geom.x[0]**2 - geom.x[1]**2)) + (1 - geom.x[0]**2 - geom.x[1]**2)**3*geom.x[0] - 4*geom.x[0]*(1 - geom.x[0]**2 - geom.x[1]**2)**2*(geom.x[0]**2 + geom.x[1]**2) + (2 + (geom.x[0]*(1 - geom.x[0]**2 - geom.x[1]**2)**2))*(4*(1 - geom.x[0]**2 - geom.x[1]**2) - 2))"
+        initial_condition: "2 + (geom.x[0]*(1 - geom.x[0]**2 - geom.x[1]**2)**2)"
+      - template: cell_force_balance
+        variable: v
+        subdomain: cell
+        temporality: steady_state
+        viscous_operator: laplacian
+        volumes:
+          cell: { viscosity: "1", drag: "1" }
+    boundary_conditions:
+      - { kind: dirichlet, variable: v, boundary: pm, expression: "0" }

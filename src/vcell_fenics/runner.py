@@ -6,7 +6,7 @@ and writes the [ADR 010](../../docs/decisions/010-results-bundle-vtu-zarr.md) bu
 per-time statistics, the manifest — and, under ``provenance/``, the resolved native formalism
 (``math.yaml`` / ``geometry.yaml``) and ``summary.json``.
 
-Three solver paths, chosen by the model rather than by a flag:
+The solver path is chosen by the model rather than by a flag:
 
 - equations on **one** subdomain → ``realize`` → ``assemble`` → backward Euler (dt snapped per output
   interval) or adaptive method of lines (outputs recorded from the integrator's own monitor);
@@ -19,7 +19,13 @@ Three solver paths, chosen by the model rather than by a flag:
 - a **moving** subdomain (a VCell moving-boundary front: prescribed-velocity motion of the volume it
   encloses) → ``realize`` → ``assemble`` → backward Euler through the ALE driver, remeshing when the
   moving mesh degrades; the bundle records the mesh's coordinates every row and a new segment per
-  remesh (ADR 010 §2–3).
+  remesh (ADR 010 §2–3). A moving membrane with equations on several subdomains moves the whole partition
+  through the multi-compartment solver instead (ADR 014);
+- a **cell force balance** (T9, ADR 018) with species on its member, on a fixed skeleton (ADR 020 decision 4)
+  → ``realize_multi_compartment`` → ``assemble_cell_force_balance_run`` → the staggered step (the velocity
+  from the species, then the species by backward Euler, dt snapped per output interval); each row holds the
+  species and the velocity solved from them, by component (``v_x``, ``v_y``; ADR 010 §3, "Vector fields").
+  Any other T9 model is refused by name before a bundle starts.
 
 Out of scope, each with its own driver: Stokes/FSI, phase field, membrane species on a moving front, and
 a lone surface PDE coupled to a single bulk (§1.6.6) — those raise a message naming the limitation.
@@ -32,7 +38,7 @@ import sys
 import warnings
 from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -52,10 +58,11 @@ from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_ge
 from vcell_fenics.formalism.schema import REGION_SPACE, TemplateEquation
 from vcell_fenics.formalism.templates import CELL_FORCE_BALANCE
 from vcell_fenics.results import BundleRecorder, BundleWriter, SolverInfo, SourceInfo
-from vcell_fenics.results.schema import DomainKind
+from vcell_fenics.results.schema import VECTOR_SUFFIXES, DomainKind, VectorComponent
 from vcell_fenics.status import COMPILING, MESHING, SOLVING, WRITING, NullReporter, StatusReporter
 
 if TYPE_CHECKING:
+    from vcell_fenics.backend.cell_force_balance_run import CellForceBalanceRun
     from vcell_fenics.backend.multi_compartment import MultiCompartmentGeometry
 
 
@@ -139,15 +146,19 @@ def run_model(
     are the caller's, since they bracket more than the solve."""
 
     # The model's shape (and any refusal of it) is settled before anything is written.
-    _refuse_cell_force_balance(model.math)
-    moving = _moving_subdomains(model)
+    reporter = _PhasedProgress(status if status is not None else NullReporter(), options.t_final)
+    # a cell force balance (T9) is realized and assembled first: its scope is checked there (ADR 020 decision 5)
+    force_balance = _prepare_cell_force_balance(model, options, reporter) if _cell_force_balance(model.math) else None
+    if force_balance is not None and options.time_integration != "backward_euler":
+        options = replace(options, time_integration="backward_euler")  # the manifest records what runs
+    moving = [] if force_balance is not None else _moving_subdomains(model)
     # a moving membrane with equations on more than one subdomain (its species, both sides' species): the
     # multi-compartment solver moves the whole partition (ADR 014); one subdomain is the moving path's (ADR 013)
     moving_partition = _moving_partition_membrane(model, moving)
     multi = (not moving and _is_multi_compartment(model)) or moving_partition is not None
     if moving_partition is not None:
         moving = []
-    if not multi:
+    if not multi and force_balance is None:
         _refuse_region_variables(model.math)
     comm = MPI.COMM_WORLD
     bundle = out_dir / f"{prefix}.fenics"
@@ -170,17 +181,31 @@ def run_model(
         write_fields=write_fields,
     )
     recorder = BundleRecorder(writer, comm=comm)
-    reporter = _PhasedProgress(status if status is not None else NullReporter(), options.t_final)
     recorder.on_row(lambda t, row: reporter.row(t))
     run_info: dict[str, Any] = {
         "h": options.h,
         "t_final": options.t_final,
         "fe_degree": options.fe_degree,
         "mpi_ranks": comm.size,
-        "backend": "ale" if moving else "multi_compartment" if multi else "single_mesh",
+        "backend": "cell_force_balance"
+        if force_balance is not None
+        else "ale"
+        if moving
+        else "multi_compartment"
+        if multi
+        else "single_mesh",
     }
     try:
-        if moving:
+        if force_balance is not None:
+            cells, steps, dt_used = _run_cell_force_balance(force_balance, options, recorder, reporter)
+            run_info |= {
+                "dt": dt_used,
+                "dt_requested": options.dt,
+                "time_integration": "backward_euler",
+                "coupling": "staggered",
+                "steps": steps,
+            }
+        elif moving:
             cells, steps, dt_used, remeshes = _run_moving(model, moving, options, recorder, reporter)
             run_info |= {
                 "dt": dt_used,
@@ -206,6 +231,8 @@ def run_model(
 
     reporter.phase(WRITING)
     records = recorder.records
+    vectors = force_balance.vectors() if force_balance is not None else {}
+    components = {name for parts in vectors.values() for name in parts}
     summary: dict[str, Any] = {
         "source": model.provenance,
         "bundle": str(bundle),
@@ -216,7 +243,8 @@ def run_model(
             "measure": sum(recorder.measure(domain) for domain in recorder.domains),
         },
         "run": run_info,
-        "species": list(records[0]["species"]) if records else [],
+        **({"vectors": vectors} if vectors else {}),
+        "species": [name for name in records[0]["species"] if name not in components] if records else [],
         "outputs": records,
     }
     writer.write_provenance("geometry.yaml", dump_geometry_yaml(model.geometry))
@@ -260,20 +288,146 @@ class _PhasedProgress:
         return True
 
 
-def _refuse_cell_force_balance(math: MathDescription) -> None:
-    """T9 `cell_force_balance` (ADR 018) is in the formalism and its validator, but no solver assembles it
-    yet: its term builders, quasi-static scheme and moving cells are ADR 018's staging steps 2–4. Refuse it
-    by name before any bundle is started."""
-    governed = [
-        repr(eq.variable)
-        for eq in math.equations
-        if isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE
-    ]
-    if governed:
+def _cell_force_balance(math: MathDescription) -> bool:
+    """Whether the model has a T9 `cell_force_balance` (ADR 018)."""
+
+    return any(isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE for eq in math.equations)
+
+
+@dataclass
+class _ForceBalanceRun:
+    """A T9 model realized and assembled before the bundle starts, so a refusal writes nothing."""
+
+    run: CellForceBalanceRun
+    member: str
+    velocity: str
+    cells: int
+
+    def components(self) -> list[str]:
+        """The velocity's component names in the bundle (ADR 010 §3, "Vector fields")."""
+
+        gdim = self.run.balance.members.mesh.geometry.dim
+        return [f"{self.velocity}{suffix}" for suffix in VECTOR_SUFFIXES[:gdim]]
+
+    def vectors(self) -> dict[str, list[str]]:
+        return {self.velocity: self.components()}
+
+
+def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: _PhasedProgress) -> _ForceBalanceRun:
+    """Realize the geometry and assemble the force balance with its member species (ADR 018 step 3b; ADR 020
+    decision 5). Only ADR 020 decision 4's scope runs: a fixed skeleton, one member, species on the member only,
+    linear transport. Anything else (a moving cell, several members, species elsewhere, a velocity with no species,
+    the crowding cut-offs) is refused by name before any bundle is started, pointing at the stage that brings it."""
+
+    from vcell_fenics.backend.cell_force_balance import ForceBalanceError, t9_equation
+    from vcell_fenics.backend.cell_force_balance_run import assemble_cell_force_balance_run
+    from vcell_fenics.backend.diagnostics import NonlinearTermError
+    from vcell_fenics.backend.multi_compartment import realize_multi_compartment
+    from vcell_fenics.formalism.validator import validate_or_raise
+
+    if options.fe_degree != 1:
         raise RunError(
-            f"the {CELL_FORCE_BALANCE!r} template (T9, ADR 018), governing {', '.join(governed)}, is not solved "
-            f"yet: no solver assembles it until ADR 018's staging steps 2–4 land"
+            f"a cell force balance runs with P1 species and a P1 velocity; the element degree is "
+            f"{options.fe_degree} (set it to 1)"
         )
+    if options.time_integration != "backward_euler":
+        log(
+            "note: a cell force balance steps by backward Euler, staggered (ADR 020 decision 3); "
+            "--time-integration is ignored"
+        )
+    validate_or_raise(model.math)
+    eq = t9_equation(model.math)
+    moving = _moving_subdomains(model)  # a prescribed, non-zero velocity; a stationary front (zero) is not listed
+    if moving:
+        raise RunError(
+            f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only on a fixed skeleton "
+            f"(ADR 020 decision 4), but {', '.join(map(repr, moving))} has a prescribed motion; moving cells and "
+            f"growing fronts are stage 4"
+        )
+    members = eq.members or (eq.subdomain,)
+    comm = MPI.COMM_WORLD
+    status.phase(MESHING)
+    log(
+        f"realizing geometry {model.geometry.name!r} for the force balance on {', '.join(members)} at h = {options.h:g}"
+    )
+    with _logged_geometry_warnings():
+        geometry = realize_multi_compartment(model.geometry, h=options.h, comm=comm)
+    status.phase(COMPILING)
+    try:
+        run = assemble_cell_force_balance_run(model.math, geometry)
+    except ForceBalanceError as error:
+        if not str(error).startswith(("SpeciesNotYetSupported", "MovingSkeleton")):
+            raise RunError(f"the cell force balance cannot be assembled: {error}") from error
+        raise RunError(
+            f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only in ADR 020 decision "
+            f"4's scope (a fixed skeleton, one member, species on it, linear transport); moving cells are stage 4: "
+            f"{error}"
+        ) from error
+    except NonlinearTermError as error:
+        raise RunError(
+            f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only in ADR 020 decision "
+            f"4's scope, with transport linear in the species; the crowding cut-offs are stage 5: {error}"
+        ) from error
+    (member,) = members  # the scope allows one member
+    names = {*run.names, *(v.name for v in model.math.variables)}
+    gdim = run.balance.members.mesh.geometry.dim
+    clash = sorted(n for n in (f"{eq.variable}{s}" for s in VECTOR_SUFFIXES[:gdim]) if n in names)
+    if clash:
+        raise RunError(
+            f"the velocity {eq.variable!r} is written to the bundle as {', '.join(clash)}, which the model already "
+            f"uses as names; rename them"
+        )
+    return _ForceBalanceRun(
+        run=run, member=member, velocity=eq.variable, cells=mesh_cell_count(run.balance.members.mesh)
+    )
+
+
+def _run_cell_force_balance(
+    prepared: _ForceBalanceRun, options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
+) -> tuple[int, int, float]:
+    """The staggered step of ADR 020 decision 3 through each output interval, dt snapped so the interval is a
+    whole number of steps. Each row holds the species at `tⁿ` and the velocity solved from them, by component:
+    the velocity that carries the next step (decision 5). Returns (cells, steps, largest dt)."""
+
+    run = prepared.run
+    mesh = run.balance.members.mesh
+    gdim = mesh.geometry.dim
+    components = prepared.components()
+    species = _channels(run.species.unknown, len(run.names))
+    recorder.add_domain(
+        prepared.member,
+        "volume",
+        mesh,
+        [(name, source) for name, source in zip(run.names, species, strict=True)]
+        + [(name, None) for name in components],
+        vectors={name: VectorComponent(name=prepared.velocity, component=i) for i, name in enumerate(components)},
+    )
+    recorder.open()
+    log(
+        f"integrating to t = {options.t_final:g} (cell force balance, staggered backward Euler; {prepared.cells} "
+        f"cells on the member; {', '.join(run.names)} on {prepared.member!r}, carried by {prepared.velocity!r})"
+    )
+
+    def capture(t: float) -> None:
+        velocity = run.solve_velocity()  # the velocity of the species at t: it carries the next step
+        sources = [*species, *(velocity.sub(i).collapse() for i in range(gdim))]
+        recorder.capture(t, {prepared.member: sources}, progress=t / options.t_final)
+
+    capture(0.0)
+    steps, t, dt_max = 0, 0.0, 0.0
+    for t_out in options.output_times[1:]:
+        n = max(1, round((t_out - t) / options.dt))
+        dt = (t_out - t) / n
+        if abs(dt - options.dt) > 1e-12 * max(1.0, options.dt):
+            log(f"dt {options.dt:g} → {dt:g} over [{t:g}, {t_out:g}] so the output lands on a step")
+        for k in range(1, n + 1):
+            run.step(dt)
+            steps += 1
+            status.step(t + k * dt)
+        run.t = t_out  # the steps' sum, rounded onto the output time
+        t, dt_max = t_out, max(dt_max, dt)
+        capture(t_out)
+    return prepared.cells, steps, dt_max
 
 
 def _refuse_region_variables(math: MathDescription) -> None:

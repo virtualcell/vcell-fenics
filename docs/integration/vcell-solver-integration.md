@@ -96,7 +96,7 @@ Manifest (`.zattrs["vcell_fenics"]`): `schema: 1`, `profile: fixed|segmented`,
 `status: running|completed|failed`, `message`, `progress`, `times` (rows written so far —
 authoritative), `planned_times`, `segments`,
 `domains{name: {kind: volume|membrane, dim, gdim, mesh, n_points, n_cells, cell_type}}`,
-`variables[{name, domain, assoc: "point", element: "P1", path, stats}]`, `stats_columns`,
+`variables[{name, domain, assoc: "point", element: "P1", path, stats, vector}]`, `stats_columns`,
 `solver{version, dolfinx, options, overrides, mpi_ranks}`,
 `source{kind, file, sim_key, job_index, task_id}`, `updated`.
 
@@ -111,6 +111,9 @@ authoritative), `planned_times`, `segments`,
   is an int32 `(n_points,)` map of each membrane point onto that compartment's point (the same vertex).
   Multi-compartment runs also write species-less membranes (mesh and maps only), after the compartments.
   ADR 010 §3 has the details.
+- **Vector fields** (optional, 2026-11-15): a vector, such as a cell force balance's velocity `v`, is written as
+  scalar variables `v_x`, `v_y` (`v_z` in 3D), each tagged `vector{name, component}`. A reader that ignores the
+  tag shows each component as an ordinary field. ADR 010 §3 has the details.
 - **Reader rules:** reject an unknown `schema`; ignore unknown keys; take row counts from `times` /
   `count`, never from array shapes.
 - **Mid-run safety:** a row is written before its time is appended to `times`, so a reader polling
@@ -422,6 +425,19 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 ## Progress
 
 Newest first. One entry per landed step or notable finding.
+
+- **2026-11-15** — **A cell force balance with species runs through the runner (ADR 020 decision 5).**
+  - **What:** a T9 model in ADR 020 decision 4's scope (a fixed skeleton, one member, species on it, linear
+    transport) goes to `cell_force_balance_run` by the staggered step, `dt` snapped per output interval. Each row
+    holds the species and the velocity solved from them, the velocity as `v_x`, `v_y` tagged
+    `vector{name, component}` (ADR 010 §3, "Vector fields"; additive, schema 1). Any other T9 model is refused by
+    name before a bundle starts.
+  - **Verified** (`tests/test_runner_cell_force_balance.py`): the bundle's variables and tags; `∫m` kept row after
+    row; row 0's velocity equal to an independent solve; the refusals; the CLI; vcell-core's E2 through the CLI
+    (from the sibling checkout). The transport's order: `mms/cases/member_transport_carried.yaml`, order 1.8 (L∞)
+    for h 0.1 → 0.025; with the carrier's sign flipped the error stays at 2.0.
+  - **VCell side, not done:** the Java reader shows `v_x` and `v_y` as two scalar fields today; drawing them as one
+    vector (glyphs) needs the tag read there.
 
 - **2026-11-11** — **The lumped fallback is for positivity only (ADR 016 decision 3, amended by Jim).**
   - **What:** a compartment species takes the lumped transfer at a remesh only if it had no negative values and

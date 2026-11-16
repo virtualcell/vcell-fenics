@@ -146,6 +146,8 @@ def _run_fenics(case: dict[str, Any], solver: str, h: float) -> tuple[float, flo
         return _run_coupled(case, solver, h)
     if harness == "unknown_motion":
         return _run_unknown_motion(case, solver, h)
+    if harness == "member_transport":
+        return _run_member_transport(case, solver, h)
     geom = _geometry(case, h)
     var = next(iter(case["exact"]))
     dt = _dt_for(case, h)
@@ -313,6 +315,59 @@ def _run_unknown_motion(case: dict[str, Any], solver: str, h: float) -> tuple[fl
         t += dt
         problem.receptor.set_time(t)  # refresh a time-dependent receptor source at the new time
     linf, l2_sq = _field_error(problem.receptor.unknown, case["exact"][problem.receptor_var], case["t_final"])
+    return linf, math.sqrt(l2_sq)
+
+
+def _run_member_transport(case: dict[str, Any], solver: str, h: float) -> tuple[float, float]:
+    """A species on the member of a cell force balance, carried by the velocity (ADR 020 decisions 2 and 6), with
+    a PRESCRIBED velocity in place of the solved one so the transport has a closed form. The case's math is a T9
+    model whose species has the manufactured source; the force balance is assembled but not solved: each step sets
+    the velocity from the case's `velocity` and advances the species alone (backward Euler, the run's own form
+    `−∫ m v·∇q`). The geometry is a disk in a box (`realize_multi_compartment`) with its membrane snapped onto the
+    circle, since an analytic boundary realized by marching is first order (issue #249)."""
+    from dolfinx.mesh import entities_to_geometry
+
+    from vcell_fenics.backend.cell_force_balance_run import assemble_cell_force_balance_run
+    from vcell_fenics.backend.multi_compartment import realize_multi_compartment
+    from vcell_fenics.formalism.geometry_schema import SurfaceClass
+
+    g = case["geometry"]
+    radius = float(g["radius"])
+    desc = GeometryDescription(
+        name=yaml.safe_load(case["math"])["math_description"]["geometry"],
+        dim=2,
+        extent=(2 * radius + 1.0, 2 * radius + 1.0, 1.0),
+        origin=(-radius - 0.5, -radius - 0.5, 0.0),
+        subvolumes=(
+            SubVolume(name=g["cell"], type="analytic", expression=f"geom.x[0]**2 + geom.x[1]**2 < {radius**2}"),
+            SubVolume(name=g["outside"], type="analytic", expression="1.0"),
+        ),
+        surfaces=(SurfaceClass(name=g["membrane"], inside=g["cell"], outside=g["outside"]),),
+    )
+    geometry = realize_multi_compartment(desc, h=h)
+    parent = geometry.parent_mesh
+    facets = geometry.facet_tags.find(geometry.membranes[g["membrane"]].facet_tag)
+    nodes = np.unique(entities_to_geometry(parent, 1, facets))
+    x = parent.geometry.x
+    r = np.hypot(x[nodes, 0], x[nodes, 1])
+    x[nodes, 0] *= radius / r
+    x[nodes, 1] *= radius / r
+
+    run = assemble_cell_force_balance_run(load_yaml(case["math"]), geometry)
+    velocity = case["velocity"]
+    run.velocity.interpolate(
+        lambda p: np.vstack([_eval_exact(component, p.T, 0.0) for component in velocity])
+    )  # time-independent, in place of the solve
+    dt = _dt_for(case, h)
+    species = run.species
+    species.dt.value = dt
+    t = 0.0
+    for _ in range(round(case["t_final"] / dt)):
+        species.set_time(t + dt)
+        species.step()
+        t += dt
+    var = next(iter(case["exact"]))
+    linf, l2_sq = _field_error(species.unknown, case["exact"][var], t)  # at the time reached
     return linf, math.sqrt(l2_sq)
 
 
