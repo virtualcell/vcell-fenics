@@ -29,7 +29,7 @@ is stage 4, and the runner refuses T9 until then (ADR 018, "Not decided here").
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import basix
@@ -44,7 +44,7 @@ from petsc4py import PETSc
 from scipy.spatial import cKDTree
 
 from vcell_fenics.backend._typing import UflExpr
-from vcell_fenics.backend.compiler import CompileContext, compile_expression
+from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
 from vcell_fenics.backend.discrete import DiscreteProblem
 from vcell_fenics.backend.force_balance import (
     MemberLaw,
@@ -54,7 +54,6 @@ from vcell_fenics.backend.force_balance import (
     assemble_force_balance,
     velocity_dirichlet,
 )
-from vcell_fenics.backend.interface_coupled import _param_symbols
 from vcell_fenics.backend.multi_compartment import MultiCompartmentGeometry, realize_multi_compartment
 from vcell_fenics.backend.realize import _FACE_NAMES_2D, _FACE_NAMES_3D
 from vcell_fenics.formalism.expr import (
@@ -75,6 +74,8 @@ from vcell_fenics.formalism.schema import (
     MathDescription,
     MotionPrescribedVelocity,
     MotionUnknown,
+    ParameterConstant,
+    ParameterExpression,
     TemplateEquation,
 )
 from vcell_fenics.formalism.templates import CELL_FORCE_BALANCE
@@ -159,29 +160,36 @@ def assemble_cell_force_balance(
     *,
     semi_implicit_dt: float | None = None,
     degree: int = 1,
+    prebuilt: tuple[MembersMesh, dict[str, int]] | None = None,
+    fields: Mapping[str, UflExpr] | None = None,
+    time: fem.Constant | None = None,
 ) -> CellForceBalance:
     """The T9 equation of `md` on `geometry`, assembled but not solved. `md` must already be valid
-    (`validate_or_raise`; `solve_cell_force_balance` does it)."""
+    (`validate_or_raise`; `solve_cell_force_balance` does it).
 
-    equations = [eq for eq in md.equations if isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE]
-    if len(equations) != 1:
-        raise ForceBalanceError(
-            f"a force-balance solve takes one {CELL_FORCE_BALANCE!r} equation, got {len(equations)}"
-        )
-    (eq,) = equations
+    `prebuilt` (the members' mesh from `build_members_mesh`), `fields` and `time` are for a run with species on
+    the members (`cell_force_balance_run.py`, ADR 020): `fields` binds each member species to the Function
+    holding its current values, which the volume slots `viscosity`, `bulk_viscosity`, `drag` and
+    `active_stress` may read (decision 4); `time` is the `sim.t` Constant the species share."""
+
+    eq = t9_equation(md)
     members = eq.members or (eq.subdomain,)
-    _refuse_fields(md, eq)
+    fields = dict(fields or {})
+    _refuse_fields(md, eq, set(fields))
     missing = [m for m in members if m not in geometry.compartments]
     if missing:
         raise ForceBalanceError(f"member(s) {missing} have no cells in the realized geometry {geometry.name!r}")
     bcs = [bc for bc in md.boundary_conditions if bc.variable == eq.variable]
     unheld = _check_geometry(md, eq, members, bcs, geometry)
 
-    members_mesh, face_tags = _members_mesh(geometry, members)
+    members_mesh, face_tags = prebuilt if prebuilt is not None else _members_mesh(geometry, members)
     mesh = members_mesh.mesh
-    time = fem.Constant(mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
-    symbols = _param_symbols(md, mesh, geometry.sizes, time)
-    symbols["geom.x"] = ufl.SpatialCoordinate(mesh)
+    if time is None:
+        time = fem.Constant(mesh, PETSc.ScalarType(0.0))  # type: ignore[operator]
+    # The velocity is a zero placeholder here: no slot may read it (ADR 018 decision 3), but a parameter that
+    # reads it (one a species' source uses) must still compile.
+    placeholder = ufl.as_vector([0.0] * mesh.geometry.dim)
+    symbols = compile_parameters(md, mesh, geometry.sizes, time, {eq.variable: placeholder, **fields})
     ctx = CompileContext(mesh=mesh, symbols=symbols)
 
     def compiled(text: str | None, context: CompileContext = ctx) -> UflExpr | None:
@@ -254,6 +262,53 @@ def assemble_cell_force_balance(
     return balance
 
 
+def compile_parameters(
+    md: MathDescription,
+    mesh: Mesh,
+    sizes: Mapping[str, float],
+    time: fem.Constant,
+    extra: Mapping[str, UflExpr] | None = None,
+) -> dict[str, UflExpr]:
+    """The model's parameters on `mesh`, in declaration order, with `geom.x`, `sim.t`, `region_size(...)` and
+    the `extra` symbols (member species, the velocity) in scope, so a parameter may read a member species, as
+    VCell's lowered math does through function parameters. Returns them with those symbols."""
+
+    symbols: dict[str, UflExpr] = {
+        region_size_symbol(name): fem.Constant(mesh, PETSc.ScalarType(value))  # type: ignore[operator]
+        for name, value in sizes.items()
+    }
+    symbols["geom.x"] = ufl.SpatialCoordinate(mesh)
+    symbols["sim.t"] = time
+    symbols.update(extra or {})
+    ctx = CompileContext(mesh=mesh, symbols=symbols)
+    for p in md.parameters:
+        if isinstance(p, ParameterConstant):
+            symbols[p.name] = fem.Constant(mesh, PETSc.ScalarType(p.value))  # type: ignore[operator]
+        elif isinstance(p, ParameterExpression):
+            symbols[p.name] = compile_expression(parse(p.expression), ctx)
+        else:
+            raise ForceBalanceError(f"a force balance cannot bind parameter {p.name!r} of type {type(p).__name__}")
+    return symbols
+
+
+def t9_equation(md: MathDescription) -> TemplateEquation:
+    """The model's one `cell_force_balance` equation."""
+
+    equations = [eq for eq in md.equations if isinstance(eq, TemplateEquation) and eq.template == CELL_FORCE_BALANCE]
+    if len(equations) != 1:
+        raise ForceBalanceError(
+            f"a force-balance solve takes one {CELL_FORCE_BALANCE!r} equation, got {len(equations)}"
+        )
+    return equations[0]
+
+
+def build_members_mesh(md: MathDescription, geometry: MultiCompartmentGeometry) -> tuple[MembersMesh, dict[str, int]]:
+    """The members' mesh of `md`'s force balance on `geometry`, and the tag of each box face a member touches."""
+
+    eq = t9_equation(md)
+    return _members_mesh(geometry, eq.members or (eq.subdomain,))
+
+
 def term_powers(problem: DiscreteProblem) -> dict[str, float]:
     """Each term kind's power on the solved velocity: a bilinear term at `(v, v)`, a load at `v`. Testing the
     residual with `φ = v` makes them sum to zero (to solver precision, while every `dirichlet` value is zero):
@@ -296,9 +351,13 @@ def _names(node: Expr) -> set[str]:
     return set()
 
 
-def _refuse_fields(md: MathDescription, eq: TemplateEquation) -> None:
-    """Chemistry on the cells is staging step 5: a slot, a parameter it reads, or a membrane velocity that
-    reads a species or a region variable is refused by name (`FieldsNotYetSupported`). So is `geom.normal`
+_FIELD_SLOTS = frozenset({"viscosity", "bulk_viscosity", "drag", "active_stress"})
+
+
+def _refuse_fields(md: MathDescription, eq: TemplateEquation, allowed: set[str]) -> None:
+    """A slot, a parameter it reads, or a membrane velocity that reads a species or a region variable is refused
+    by name (`FieldsNotYetSupported`), except a member species in `allowed` read by a volume slot other than
+    `pressure` (ADR 020 decision 4; the rest is stage 5). So is `geom.normal`
     anywhere but in a `traction` (`NormalNotYetSupported`): a volume slot has no normal, a membrane velocity is
     interpolated at nodes, and a parameter is compiled once for every surface, without the side's sign."""
 
@@ -329,6 +388,8 @@ def _refuse_fields(md: MathDescription, eq: TemplateEquation) -> None:
     ]
     for where, text in texts:
         found = reads(text, set())
+        if where.startswith("volumes.") and where.rsplit(".", 1)[1] in _FIELD_SLOTS:
+            found -= allowed
         if found:
             raise ForceBalanceError(
                 f"FieldsNotYetSupported: {where} reads {sorted(found)}; a force balance that reads species or "
@@ -563,10 +624,10 @@ def _coefficient_checks(
     checks: list[Callable[[], None]] = []
 
     def volume_check(law: MemberLaw, slot: str, expr: UflExpr, strict: bool, refusal: str) -> Callable[[], None]:
-        cells = members.cell_tags.find(law.tag)
+        minimum = _CellMinimum(mesh, expr, members.cell_tags.find(law.tag))
 
         def check() -> None:
-            low = _minimum_in_cells(mesh, expr, cells)
+            low = minimum()
             if low < 0.0 or (strict and low <= 0.0):
                 bound = "> 0" if strict else ">= 0"
                 raise ForceBalanceError(
@@ -584,20 +645,21 @@ def _coefficient_checks(
             checks.append(volume_check(law, "drag", law.drag, False, "NegativeDrag"))
         if law.bulk_viscosity is not None:
             checks.append(_locking_check(mesh, members.cell_tags.find(law.tag), law, name_of_member[law.tag]))
-    for surface in surface_laws:
-        if surface.tension is None:
-            continue
-        gamma = surface.tension
 
-        def tension_check(tag: int = surface.tag, gamma: UflExpr = gamma) -> None:
-            low = _minimum_at_facets(mesh, gamma, members, tag)
+    def tension_check(tag: int, gamma: UflExpr) -> Callable[[], None]:
+        minimum = _FacetMinimum(mesh, gamma, members, tag)
+
+        def check() -> None:
+            low = minimum()
             if low <= 0.0:
                 raise ForceBalanceError(
                     f"NonPositiveTension: the tension of {name_of_surface[tag]!r} reaches {low:.6g} at "
                     f"t = {float(time.value):.6g}; a given tension must stay > 0 (ADR 018 decision 3)"
                 )
 
-        checks.append(tension_check)
+        return check
+
+    checks += [tension_check(s.tag, s.tension) for s in surface_laws if s.tension is not None]
     return checks
 
 
@@ -613,13 +675,14 @@ def _drag_check(
 
     mesh = members.mesh
     laws = {law.tag: law for law in member_laws}
+    negated = [
+        _CellMinimum(mesh, -drag, members.cell_tags.find(member_tags[m]))
+        for m in group
+        if (drag := laws[member_tags[m]].drag) is not None
+    ]
 
     def check() -> None:
-        highest = -np.inf
-        for m in group:
-            drag = laws[member_tags[m]].drag
-            if drag is not None:
-                highest = max(highest, -_minimum_in_cells(mesh, -drag, members.cell_tags.find(member_tags[m])))
+        highest = max((-minimum() for minimum in negated), default=-np.inf)
         if not highest > 0.0:
             raise ForceBalanceError(
                 f"UnconstrainedRigidMotion: the drag of {group} is nowhere positive at t = {float(time.value):.6g} "
@@ -631,10 +694,10 @@ def _drag_check(
 
 def _locking_check(mesh: Mesh, cells: NDArray[np.int32], law: MemberLaw, name: str) -> Callable[[], None]:
     assert law.bulk_viscosity is not None
-    ratio = law.bulk_viscosity / law.viscosity
+    negated = _CellMinimum(mesh, -law.bulk_viscosity / law.viscosity, cells)
 
     def check() -> None:
-        high = -_minimum_in_cells(mesh, -ratio, cells)
+        high = -negated()
         if high > LOCKING_RATIO:
             warnings.warn(
                 f"member {name!r}: bulk_viscosity / viscosity reaches {high:.3g}, above {LOCKING_RATIO:g}; a "
@@ -646,47 +709,60 @@ def _locking_check(mesh: Mesh, cells: NDArray[np.int32], law: MemberLaw, name: s
     return check
 
 
-def _minimum_in_cells(mesh: Mesh, expr: UflExpr, cells: NDArray[np.int32]) -> float:
-    """The minimum of a scalar `expr` over the owned `cells`, at degree-2 quadrature points and the vertices."""
+class _CellMinimum:
+    """The minimum of a scalar `expr` over the owned `cells`, at degree-2 quadrature points and the vertices. The
+    expression is compiled once: building one every step costs a JIT-cache lookup each (~50 ms). Bound to the
+    mesh and its cells at construction, so a moving or remeshed mesh (stage 4) must rebuild it."""
 
-    tdim = mesh.topology.dim
-    cell_type = mesh.basix_cell()
-    points, _ = basix.make_quadrature(cell_type, 2)
-    points = np.vstack([points, basix.geometry(cell_type)])
-    owned = cells[cells < mesh.topology.index_map(tdim).size_local]
-    local = np.inf
-    if owned.size:
-        values = fem.Expression(expr, points).eval(mesh, owned)
-        local = float(np.min(np.real(values)))
-    return float(mesh.comm.allreduce(local, op=MPI.MIN))
+    def __init__(self, mesh: Mesh, expr: UflExpr, cells: NDArray[np.int32]) -> None:
+        cell_type = mesh.basix_cell()
+        points, _ = basix.make_quadrature(cell_type, 2)
+        self._mesh = mesh
+        self._cells = cells[cells < mesh.topology.index_map(mesh.topology.dim).size_local]
+        self._expression = fem.Expression(expr, np.vstack([points, basix.geometry(cell_type)]))
+
+    def __call__(self) -> float:
+        local = np.inf
+        if self._cells.size:
+            local = float(np.min(np.real(self._expression.eval(self._mesh, self._cells))))
+        return float(self._mesh.comm.allreduce(local, op=MPI.MIN))
 
 
-def _minimum_at_facets(mesh: Mesh, expr: UflExpr, members: MembersMesh, tag: int) -> float:
+class _FacetMinimum:
     """The minimum of a scalar `expr` (one that reads no normal) at the midpoints of the owned facets tagged
-    `tag`, evaluated in a cell beside each."""
+    `tag`, evaluated in a cell beside each; compiled once per local facet index."""
 
-    tdim = mesh.topology.dim
-    fdim = tdim - 1
-    mesh.topology.create_connectivity(fdim, tdim)
-    mesh.topology.create_connectivity(tdim, fdim)
-    f2c = mesh.topology.connectivity(fdim, tdim)
-    c2f = mesh.topology.connectivity(tdim, fdim)
-    facets = members.facet_tags.find(tag)
-    facets = facets[facets < mesh.topology.index_map(fdim).size_local]
-    cell_type = mesh.basix_cell()
-    reference = basix.geometry(cell_type)
-    facet_vertices = basix.topology(cell_type)[fdim]
-    by_local: dict[int, list[int]] = {}
-    for f in facets:
-        c = int(f2c.links(f)[0])
-        local = int(np.flatnonzero(c2f.links(c) == f)[0])
-        by_local.setdefault(local, []).append(c)
-    low = np.inf
-    for local, cells in by_local.items():
-        midpoint = reference[facet_vertices[local]].mean(axis=0, keepdims=True)
-        values = fem.Expression(expr, midpoint).eval(mesh, np.asarray(cells, dtype=np.int32))
-        low = min(low, float(np.min(np.real(values))))
-    return float(mesh.comm.allreduce(low, op=MPI.MIN))
+    def __init__(self, mesh: Mesh, expr: UflExpr, members: MembersMesh, tag: int) -> None:
+        tdim = mesh.topology.dim
+        fdim = tdim - 1
+        mesh.topology.create_connectivity(fdim, tdim)
+        mesh.topology.create_connectivity(tdim, fdim)
+        f2c = mesh.topology.connectivity(fdim, tdim)
+        c2f = mesh.topology.connectivity(tdim, fdim)
+        facets = members.facet_tags.find(tag)
+        facets = facets[facets < mesh.topology.index_map(fdim).size_local]
+        cell_type = mesh.basix_cell()
+        reference = basix.geometry(cell_type)
+        facet_vertices = basix.topology(cell_type)[fdim]
+        by_local: dict[int, list[int]] = {}
+        for f in facets:
+            c = int(f2c.links(f)[0])
+            local = int(np.flatnonzero(c2f.links(c) == f)[0])
+            by_local.setdefault(local, []).append(c)
+        self._mesh = mesh
+        self._groups = [
+            (
+                fem.Expression(expr, reference[facet_vertices[local]].mean(axis=0, keepdims=True)),
+                np.asarray(cells, dtype=np.int32),
+            )
+            for local, cells in by_local.items()
+        ]
+
+    def __call__(self) -> float:
+        low = np.inf
+        for expression, cells in self._groups:
+            low = min(low, float(np.min(np.real(expression.eval(self._mesh, cells)))))
+        return float(self._mesh.comm.allreduce(low, op=MPI.MIN))
 
 
 __all__ = [

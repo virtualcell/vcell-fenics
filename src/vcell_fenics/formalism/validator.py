@@ -673,6 +673,51 @@ class _Validator:
                 if slot_name not in surface_slots:
                     self._error(where, f"unknown surface slot {slot_name!r} (slots: {sorted(surface_slots)})")
 
+    def _check_member_species(self, t9: TemplateEquation) -> None:
+        """ADR 020 decisions 1 and 3: a species on a member rides the force balance's velocity, so it takes no
+        lab-frame carrier (`advection`); a drift relative to the material goes in `relative_advection`. A source
+        that reads the velocity's divergence is warned of: the dilution `m∇·v` is already in the transport."""
+
+        members = set(self._t9_members(t9))
+        for j, other in enumerate(self._md.equations):
+            if other is t9 or not isinstance(other, TemplateEquation) or other.subdomain not in members:
+                continue
+            path = f"equations[{j}]"
+            if "advection" in other.terms:
+                self._error(
+                    f"{path}.terms.advection",
+                    f"{other.variable!r} lives on {other.subdomain!r}, a member of the {CELL_FORCE_BALANCE!r} "
+                    f"velocity {t9.variable!r}, which already carries it; a drift relative to the material goes in "
+                    f"'relative_advection' (a lab-frame velocity c is 'c - {t9.variable}') (ADR 020 decision 1)",
+                )
+            source = other.terms.get("source")
+            tree = self._quiet_parse(source) if source is not None else None
+            if tree is not None and self._reads_divergence_of(tree, t9.variable):
+                self._warn(
+                    f"{path}.terms.source",
+                    f"the source of {other.variable!r} reads div({t9.variable}); the transport by "
+                    f"{t9.variable!r} already contains the dilution {other.variable}·div({t9.variable}), so a "
+                    f"hand-written dilution counts it twice (ADR 020 decision 3)",
+                )
+
+    def _reads_divergence_of(self, node: Expr, velocity: str, seen: set[str] | None = None) -> bool:
+        """Whether `node` reads `div(...velocity...)`, directly or through parameters (transitively)."""
+
+        seen = set() if seen is None else seen
+        if (
+            isinstance(node, FunctionCall)
+            and node.callee == "div"
+            and len(node.args) == 1
+            and self._contains_name(node.args[0], velocity)
+        ):
+            return True
+        if isinstance(node, Name) and node.name in self._param_by_name and node.name not in seen:
+            seen.add(node.name)
+            p = self._param_by_name[node.name]
+            body = self._quiet_parse(p.expression) if isinstance(p, ParameterExpression) else None
+            return body is not None and self._reads_divergence_of(body, velocity, seen)
+        return any(self._reads_divergence_of(child, velocity, seen) for child in self._children(node))
+
     def _check_cell_force_balances(self) -> None:
         """The T9 rules that span the model (ADR 018 decisions 2 and 4, ADR 019 decisions 4 and 5): each member
         moves with the velocity; each surface in `surfaces:` moves with it or is a growing front (a prescribed
@@ -684,6 +729,7 @@ class _Validator:
             if self._t9_vars.get(eq.variable) is not eq:
                 continue  # a second T9 equation for the same velocity is reported as overdetermined (coverage)
             path = f"equations[{i}]"
+            self._check_member_species(eq)
             for name in self._t9_members(eq):
                 sub = self._subdomain_by_name.get(name)
                 if sub is None:

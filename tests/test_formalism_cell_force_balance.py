@@ -808,3 +808,49 @@ def test_a_misspelt_membrane_is_read_as_a_box_face() -> None:
         {"kind": "dirichlet", "variable": "u", "boundary": "pmm", "expression": "[1, 0]"}
     ]
     _assert_one_error(raw, "'pmm' is not a declared subdomain, so it is read as a box face")
+
+
+# ---------------------------------------------------------------------------
+# ADR 020: species on a member ride the velocity
+# ---------------------------------------------------------------------------
+
+
+def _with_member_species(terms: dict[str, str]) -> dict[str, Any]:
+    raw = _one_cell()
+    md = raw["math_description"]
+    md["variables"].append({"name": "m", "subdomain": "cyt", "type": "scalar"})
+    md["equations"].append(
+        {
+            "template": "bulk_radv_diff",
+            "variable": "m",
+            "subdomain": "cyt",
+            "temporality": "time_dependent",
+            "terms": terms,
+            "initial_condition": "1",
+        }
+    )
+    return raw
+
+
+def test_a_member_species_takes_no_lab_frame_carrier() -> None:
+    _assert_one_error(
+        _with_member_species({"diffusion": "1", "advection": "u"}),
+        "'m' lives on 'cyt', a member of the 'cell_force_balance' velocity 'u', which already carries it",
+    )
+
+
+def test_a_member_species_may_drift_relative_to_the_material() -> None:
+    assert _errors(_with_member_species({"diffusion": "1", "relative_advection": "[0.1, 0] - u"})) == []
+
+
+def test_a_hand_written_dilution_is_warned_of() -> None:
+    diagnostics = validate(_md(_with_member_species({"diffusion": "1", "source": "-m * div(u)"})))
+    assert [d.severity for d in diagnostics] == ["warning"]
+    assert "already contains the dilution m·div(u)" in diagnostics[0].message
+
+
+def test_a_dilution_hand_written_through_a_parameter_is_warned_of() -> None:
+    raw = _with_member_species({"diffusion": "1", "source": "-m * dv"})
+    raw["math_description"]["parameters"].append({"name": "dv", "subdomain": "cyt", "expression": "div(u)"})
+    diagnostics = validate(_md(raw))
+    assert any("already contains the dilution" in d.message for d in diagnostics if d.severity == "warning")
