@@ -114,7 +114,7 @@ def test_a_vertex_with_no_zero_nearby_stays_where_netgen_put_it() -> None:
     material = np.array([2, 1], dtype=np.int32)
 
     # φ ≥ 1 everywhere: Newton cannot converge, and says so
-    with pytest.warns(GeometryProjectionWarning, match="1 membrane vertices"):
+    with pytest.warns(GeometryProjectionWarning, match="1 membrane vertices of analytic shape 0"):
         out = _project_interfaces(points, cells, material, _flat("geom.x[0]**2 + geom.x[1]**2 + 1.0 < 0.0"), [1], h=2.0)
     np.testing.assert_array_equal(out, points)
 

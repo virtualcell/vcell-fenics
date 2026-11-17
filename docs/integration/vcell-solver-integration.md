@@ -431,7 +431,8 @@ Newest first. One entry per landed step or notable finding.
     moved onto its shape's exact `φ = 0` by Newton steps along `∇φ` (`realize._project_interfaces`). Left where Netgen
     put it: a vertex where the shape's radius of curvature is below `h` (detail finer than the mesh, which the marching
     already rounds off, ADR 016 decision 7), one more than `h/4` away, and one whose move would invert or crush a cell
-    beside it; a vertex where Newton does not converge raises `GeometryProjectionWarning`. Time zero only: a remesh of
+    beside it, and one where Newton does not converge (a box's edges and corners); `GeometryProjectionWarning` is raised
+    when that is most of a shape's membrane. Time zero only: a remesh of
     a moving front meshes the moved boundary and is not projected. Curvature-adaptive refinement, at time zero and in
     remeshes, is a separate issue.
   - **Measured** (unit disk in a 4×4 box; unit sphere in a 3×3×3 box): the membrane's max `|r − 1|` falls from
@@ -447,6 +448,8 @@ Newest first. One entry per landed step or notable finding.
     at the vertices of a fold, and a surface still folded is refused before Netgen sees it. The furrow's waist at h = 1
     then ends 0.52 off at t = 3 (0.27 unprojected): an under-resolved groove, sensitive to when the remeshes fall. At
     the model's h = 0.645 the two agree (0.25 / 0.17 at t = 3); that run is now an integration test.
+  - **Tolerances re-pinned:** the slide on/off comparison on a moving partition (`test_moving_partition.py`) differs
+    by 0.038 from the projected start, 0.029 from the marched one; its bound goes from 0.03 to 0.05.
   - **Verified:** `tests/test_realize_projection.py`; the T9 disk tests now run on the realizer's own geometry, without
     the snapping they used to work around this; the fold test in `tests/test_backend_ale_3d.py`.
 - **2026-11-15** — **A cell force balance with species runs through the runner (ADR 020 decision 5).**

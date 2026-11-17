@@ -737,8 +737,9 @@ def _project_interfaces(
       them. Curvature-adaptive refinement is a separate question (it would apply to remeshes too);
     - where the shape is more than ``h/4`` away: only detail the marching path rounded off (finer than the
       mesh, as above) puts it that far;
-    - where Newton does not converge (a discontinuous indicator in the expression, a vanishing gradient),
-      reported as a :class:`GeometryProjectionWarning`;
+    - where Newton does not converge: a kink (a box's edges and corners, Rvachev ``min`` / ``max``), a
+      discontinuous indicator, a vanishing gradient. Normal at a few vertices; when it is most of a shape's
+      membrane, something is wrong with the field, and a :class:`GeometryProjectionWarning` says so;
     - where its move would invert or crush a cell beside it (pulled back halfway a few times, then reset).
 
     This is the time-zero realization only. A remesh of a moving front meshes the moved boundary, not the
@@ -756,7 +757,7 @@ def _project_interfaces(
     low, high = pairs[first[two], 1], pairs[first[two] + 1, 1]
 
     moved = np.zeros(nverts, dtype=bool)
-    unprojected = 0
+    failed: list[tuple[int, int]] = []  # (shape, vertices where Newton did not converge), when most of it failed
     for i, field in enumerate(fields):
         a, b = sorted((i + 2, outside[i]))
         on = two[(low == a) & (high == b)]
@@ -779,7 +780,8 @@ def _project_interfaces(
         if near.any():
             resolved[near] = _max_curvature(field, x[near], h) * _MIN_RADIUS * h < 1.0
         good = near & resolved
-        unprojected += int((~converged).sum())
+        if (~converged).sum() > 0.5 * on.size:
+            failed.append((i, int((~converged).sum())))
         out[on[good]] = x[good]
         moved[on[good]] = True
 
@@ -799,9 +801,9 @@ def _project_interfaces(
             out[culprits] = points[culprits]
             moved[culprits] = False
         attempt += 1
-    if unprojected:
+    for i, count_failed in failed:
         warnings.warn(
-            f"{unprojected} membrane vertices could not be projected onto their analytic shape at h = {h:g} "
+            f"{count_failed} membrane vertices of analytic shape {i} could not be projected onto it at h = {h:g} "
             "(Newton did not converge on its implicit function); they keep the marched boundary's position",
             GeometryProjectionWarning,
             stacklevel=2,
