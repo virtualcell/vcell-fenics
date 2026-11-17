@@ -487,8 +487,7 @@ def _toothed_cell(teeth: int) -> GeometryDescription:
 def test_2d_teeth_finer_than_the_grid_leave_no_sub_resolution_membrane_segment() -> None:
     """The 35-tooth cell's crests (radius 34 nm) and valleys (59 nm) are finer than the marching grid. Without
     ADR 016 decision 7 they left membrane segments of ~0.07 h and cells of ~2e-5 beside them at h = 0.1
-    (measured); with it no membrane segment is far below h, and the area stays within the realization's
-    usual fidelity of the analytic one."""
+    (measured); with it no membrane segment is far below h, and the area stays close to the analytic one."""
     h = 0.1
     geom = realize(_toothed_cell(35), h=h)
 
@@ -502,7 +501,11 @@ def test_2d_teeth_finer_than_the_grid_leave_no_sub_resolution_membrane_segment()
     xp, cells = parent.geometry.x[:, :2], parent.geometry.dofmap
     u, v = xp[cells[:, 1]] - xp[cells[:, 0]], xp[cells[:, 2]] - xp[cells[:, 0]]
     areas = 0.5 * np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])  # not np.cross: NumPy 2.5 dropped 2D vectors
-    assert areas.min() > 1e-4  # 3.2e-4 measured; 2.4e-5 without the fix
+    assert areas.min() > 1e-4  # 2.2e-4 measured (3.2e-4 before #249's projection); 2.4e-5 without the fix
 
     exact = math.pi * (6.25 + 1.0 + 0.08)  # ½ ∫ r² dθ
-    assert _measure(geom, "cell") == pytest.approx(exact, rel=1e-3)  # -7.0e-4 measured (-6.6e-4 without)
+    # -1.4e-3 measured. Where the shape is resolved its membrane vertices are projected onto it (#249); the crests
+    # (radius 0.034 < h) are not, and keep the marched contour's rounding. That is a one-sided loss at this h: the
+    # marched contour's -7.0e-4 came partly from its errors at crests and valleys cancelling. At h = 0.025 (crests
+    # resolved and projected) the area is off by -2.1e-5.
+    assert _measure(geom, "cell") == pytest.approx(exact, rel=2e-3)

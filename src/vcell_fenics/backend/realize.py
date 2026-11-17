@@ -22,17 +22,21 @@ the formalism.
   boundary in a Netgen model that partitions the box into the regions (nested shapes nest; disjoint
   shapes sit side by side; LGPL Netgen replaces GPL gmsh — ADR 008). Each cell is then assigned to the
   subvolume whose priority-resolved field is negative at its midpoint; membrane facets between two
-  regions are named by the ``SurfaceClass`` for that pair.
+  regions are named by the ``SurfaceClass`` for that pair. Before that, every membrane vertex of
+  Netgen's mesh is **projected onto its shape's exact ``φ = 0``** (:func:`_project_interfaces`, #249):
+  the marched, simplified and resampled boundary otherwise sits off the curve by an error that falls only
+  about as ``h``, and would cap a P1 solve's order there.
 
-- **3D body-fitted (``dim = 3``)**: the same recipe with marching cubes and a Netgen volume mesh.
+- **3D body-fitted (``dim = 3``)**: the same recipe with marching cubes and a Netgen volume mesh, the
+  membrane vertices projected the same way.
 - **Image geometries (2D and 3D)**, any topology — nested regions, regions cut by the box, and
   junctions where three or more subvolumes meet: the image's smoothed label field (`labels.py`), the
   conforming boundaries between its subvolumes (`label_surfaces.py`, VTK SurfaceNets with a sentinel
   label per box face), and a Netgen mesh with those boundaries embedded — Netgen's domain is the
   region, so no classification is needed (:func:`_realize_label_partition`).
 - **Analytic subvolumes touching the box (2D and 3D, #187)** take the same label route: the lattice is
-  rasterized by VCell's priority rule (no smoothing), and the boundary is projected onto the **exact**
-  priority-resolved implicit functions, so it lies on the analytic shapes (second-order in ``h``) while
+  rasterized by VCell's priority rule (no smoothing), and the boundary is projected onto the bilinear / trilinear
+  interpolant of the exact priority-resolved implicit functions, so it lies within ``O(h²)`` of the shapes while
   the box faces close each region. Analytic geometries strictly inside the box keep the marching path.
 
 **Not yet here:** the unfitted (level-set / cut-FEM) consumption of the same field. Unsupported
@@ -226,18 +230,21 @@ def _realize_2d_partition(
     if has_junction(description, h=h):  # three subvolumes meet: closed per-subvolume contours can't share it
         return _realize_label_partition(description, h=h, comm=comm, analytic=True)
     contours: list[NDArray[np.float64]] = []
+    contour_fields: list[Expr] = []  # the raw field each contour is the zero set of (projection, #249)
     try:
         for subvolume in subvolumes[:-1]:
             assert subvolume.expression is not None  # checked above
             raw_field = lower_predicate(parse(subvolume.expression))
-            contours.extend(_march_contours(raw_field, ox=ox, oy=oy, lx=lx, ly=ly, nx=nx, ny=ny, name=subvolume.name))
+            marched = _march_contours(raw_field, ox=ox, oy=oy, lx=lx, ly=ly, nx=nx, ny=ny, name=subvolume.name)
+            contours.extend(marched)
+            contour_fields.extend([raw_field] * len(marched))
     except _TouchesBox:
         return _realize_label_partition(description, h=h, comm=comm, analytic=True)
     if not contours:
         raise RealizationError(f"2D geometry {description.name!r} has no interior contours to mesh")
 
     parent, cell_face = _mesh_box_with_contours(
-        contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name
+        contours, contour_fields, ox=ox, oy=oy, lx=lx, ly=ly, h=h, comm=comm, name=description.name
     )
     fields = subvolume_implicit_functions(description)  # priority-resolved; classifies each cell
     tagging = _classify_and_tag(parent, description, fields, cell_face=cell_face, origin=(ox, oy), extent=(lx, ly))
@@ -581,6 +588,7 @@ def _mesh_on_rank0(
 
 def _mesh_box_with_contours(
     contours: list[NDArray[np.float64]],
+    fields: list[Expr],
     *,
     ox: float,
     oy: float,
@@ -591,12 +599,19 @@ def _mesh_box_with_contours(
     name: str,
 ) -> tuple[dmesh.Mesh, dmesh.MeshTags]:
     """The body-fitted DOLFINx mesh of the box with every ``contours`` polyline as a conforming internal
-    boundary, **and** its cell→region tag — :func:`_netgen_box_with_contours` meshed on rank 0 and
+    boundary, **and** its cell→region tag — :func:`_netgen_box_with_contours` meshed on rank 0, its
+    membrane vertices projected onto ``fields`` (one per contour, :func:`_project_interfaces`), and
     distributed by :func:`_mesh_on_rank0`."""
+
+    def build() -> _NetgenArrays:
+        points, cells, material, outside = _netgen_box_with_contours(
+            contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, name=name
+        )
+        return _project_interfaces(points, cells, material, fields, outside, h=h), cells, material
 
     return _mesh_on_rank0(
         comm,
-        lambda: _netgen_box_with_contours(contours, ox=ox, oy=oy, lx=lx, ly=ly, h=h, name=name),
+        build,
         cell="triangle",
         gdim=2,
     )
@@ -611,9 +626,10 @@ def _netgen_box_with_contours(
     ly: float,
     h: float,
     name: str,
-) -> _NetgenArrays:
+) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.int32], list[int]]:
     """Build a Netgen model of the box with every ``contours`` polyline embedded as a conforming
-    internal boundary, returning its points, cells and per-cell material index (serial). Netgen assigns
+    internal boundary, returning its points, cells, per-cell material index (serial), and the material
+    outside each contour (contour ``i`` encloses material ``i + 2``; the box background is 1). Netgen assigns
     a material index per element (``el.index``) from the leftdomain/rightdomain of the embedded curves;
     that index is one owner per body-fit region — exactly the tag :func:`_classify_and_tag` needs to
     keep each region whole. The containment forest of the (non-intersecting) contours supplies those
@@ -671,7 +687,194 @@ def _netgen_box_with_contours(
     points = np.array([list(p.p)[:2] for p in ngmesh.Points()], dtype=np.float64)
     cells = np.array([[v.nr - 1 for v in el.vertices] for el in ngmesh.Elements2D()], dtype=np.int64)
     material = np.array([el.index for el in ngmesh.Elements2D()], dtype=np.int32)
-    return points, cells, material
+    outsides = [1 if parents[i] < 0 else interior_domain[parents[i]] for i in range(len(polys))]
+    return points, cells, material, outsides
+
+
+# Projecting the membrane onto the exact shape (#249): Newton steps along ∇φ, the gradient by central
+# differences of step _FD_STEP·h. A vertex moves only if it converges to |φ|/|∇φ| < _PROJECT_TOL·h within
+# _PROJECT_MAX_MOVE·h of where Netgen put it (the marching error on a resolved shape is about 0.05·h at most),
+# and only where the shape is resolved: its largest principal curvature there (the Hessian by differences of
+# step _HESSIAN_STEP·h) is below 1/(_MIN_RADIUS·h). A cell the moves would invert, or crush below
+# _MIN_CELL_RATIO of its measure, has its moved vertices pulled back halfway, _PULLBACKS times, then put back.
+_FD_STEP = 1e-6
+_HESSIAN_STEP = 1e-3
+_PROJECT_TOL = 1e-8
+_PROJECT_MAX_MOVE = 0.25
+_PROJECT_STEPS = 12
+_MIN_RADIUS = 1.0
+_MIN_CELL_RATIO = 0.2
+_PULLBACKS = 5
+
+
+class GeometryProjectionWarning(UserWarning):
+    """Some membrane vertices of an analytic shape could not be projected onto it (#249) and keep the
+    marched boundary's position, which converges only at about first order in ``h``."""
+
+
+def _project_interfaces(
+    points: NDArray[np.float64],
+    cells: NDArray[np.int64],
+    material: NDArray[np.int32],
+    fields: list[Expr],
+    outside: list[int],
+    *,
+    h: float,
+) -> NDArray[np.float64]:
+    """Move every membrane vertex of a marching-path mesh onto its shape's exact ``φ = 0`` (#249) and
+    return the new points; the topology is unchanged.
+
+    Shape ``i`` encloses material ``i + 2`` and has material ``outside[i]`` outside it. Its zero set is
+    ``fields[i]``'s: the subvolume's own (not priority-resolved) implicit function, the field it was
+    marched from. A vertex shared by cells of exactly those two materials lies on shape ``i``, and is
+    moved by Newton steps ``x ← x − φ ∇φ / |∇φ|²``.
+
+    A vertex stays where Netgen put it:
+
+    - **where the shape is finer than the mesh**: a principal curvature radius below ``h`` at the point it
+      would move to. The marching path already rounds such detail off (segments under ``h/4`` are dropped,
+      ADR 016 decision 7); restoring some of its vertices and not others would leave thin cells beside
+      them. Curvature-adaptive refinement is a separate question (it would apply to remeshes too);
+    - where the shape is more than ``h/4`` away: only detail the marching path rounded off (finer than the
+      mesh, as above) puts it that far;
+    - where Newton does not converge (a discontinuous indicator in the expression, a vanishing gradient),
+      reported as a :class:`GeometryProjectionWarning`;
+    - where its move would invert or crush a cell beside it (pulled back halfway a few times, then reset).
+
+    This is the time-zero realization only. A remesh of a moving front meshes the moved boundary, not the
+    shape, and is not projected.
+    """
+
+    gdim = points.shape[1]
+    nverts = points.shape[0]
+    out = points.copy()
+    # each vertex's materials: the sorted (vertex, material) incidences
+    pairs = np.unique(np.column_stack([cells.ravel(), np.repeat(material, cells.shape[1])]), axis=0)
+    count = np.bincount(pairs[:, 0], minlength=nverts)
+    first = np.searchsorted(pairs[:, 0], np.arange(nverts))
+    two = np.flatnonzero(count == 2)
+    low, high = pairs[first[two], 1], pairs[first[two] + 1, 1]
+
+    moved = np.zeros(nverts, dtype=bool)
+    unprojected = 0
+    for i, field in enumerate(fields):
+        a, b = sorted((i + 2, outside[i]))
+        on = two[(low == a) & (high == b)]
+        if on.size == 0:
+            continue
+        x = points[on].copy()
+        for _ in range(_PROJECT_STEPS):
+            phi, grad = _value_and_gradient(field, x, h)
+            norm2 = np.einsum("ij,ij->i", grad, grad)
+            ok = norm2 > 0.0
+            x[ok] -= (phi[ok] / norm2[ok])[:, None] * grad[ok]
+        phi, grad = _value_and_gradient(field, x, h)
+        norm = np.sqrt(np.einsum("ij,ij->i", grad, grad))
+        residual = np.full(on.size, np.inf)
+        np.divide(np.abs(phi), norm, out=residual, where=norm > 0.0)
+        shift = np.linalg.norm(x - points[on], axis=1)
+        converged = residual < _PROJECT_TOL * h
+        near = converged & (shift < _PROJECT_MAX_MOVE * h)  # farther: the marching rounded off finer detail
+        resolved = np.zeros(on.size, dtype=bool)
+        if near.any():
+            resolved[near] = _max_curvature(field, x[near], h) * _MIN_RADIUS * h < 1.0
+        good = near & resolved
+        unprojected += int((~converged).sum())
+        out[on[good]] = x[good]
+        moved[on[good]] = True
+
+    # keep every cell the right way round and not crushed: pull the moved vertices of a bad cell back
+    before = _signed_measures(points, cells, gdim)
+    attempt = 0
+    while True:
+        after = _signed_measures(out, cells, gdim)
+        bad = (np.sign(after) != np.sign(before)) | (np.abs(after) < _MIN_CELL_RATIO * np.abs(before))
+        culprits = np.unique(cells[bad])
+        culprits = culprits[moved[culprits]]
+        if culprits.size == 0:
+            break  # a bad cell with no moved vertex has Netgen's own measure, so cannot be bad
+        if attempt < _PULLBACKS:
+            out[culprits] = 0.5 * (out[culprits] + points[culprits])
+        else:
+            out[culprits] = points[culprits]
+            moved[culprits] = False
+        attempt += 1
+    if unprojected:
+        warnings.warn(
+            f"{unprojected} membrane vertices could not be projected onto their analytic shape at h = {h:g} "
+            "(Newton did not converge on its implicit function); they keep the marched boundary's position",
+            GeometryProjectionWarning,
+            stacklevel=2,
+        )
+    return out
+
+
+def _max_curvature(field: Expr, x: NDArray[np.float64], h: float) -> NDArray[np.float64]:
+    """The largest absolute principal curvature of ``φ``'s level set at the points ``x``: the eigenvalues of
+    ``P H P / |∇φ|`` (``H`` the Hessian by central differences of step ``_HESSIAN_STEP·h``, ``P`` the projector
+    onto the tangent plane)."""
+
+    gdim = x.shape[1]
+    eps = _HESSIAN_STEP * h
+
+    def at(y: NDArray[np.float64]) -> NDArray[np.float64]:
+        return _eval_field(field, tuple(y[:, k] for k in range(gdim)))
+
+    def shifted(*steps: tuple[int, float]) -> NDArray[np.float64]:
+        y = x.copy()
+        for k, d in steps:
+            y[:, k] += d
+        return at(y)
+
+    centre = at(x)
+    grad = np.empty_like(x)
+    hessian = np.empty((x.shape[0], gdim, gdim))
+    for k in range(gdim):
+        plus, minus = shifted((k, eps)), shifted((k, -eps))
+        grad[:, k] = (plus - minus) / (2 * eps)
+        hessian[:, k, k] = (plus - 2 * centre + minus) / eps**2
+        for j in range(k):
+            mixed = (
+                shifted((k, eps), (j, eps))
+                - shifted((k, eps), (j, -eps))
+                - shifted((k, -eps), (j, eps))
+                + shifted((k, -eps), (j, -eps))
+            ) / (4 * eps**2)
+            hessian[:, k, j] = hessian[:, j, k] = mixed
+    norm = np.linalg.norm(grad, axis=1)
+    normal = grad / np.where(norm > 0.0, norm, 1.0)[:, None]
+    tangent = np.eye(gdim)[None, :, :] - normal[:, :, None] * normal[:, None, :]
+    shape = tangent @ hessian @ tangent / np.where(norm > 0.0, norm, np.inf)[:, None, None]
+    curvature: NDArray[np.float64] = np.abs(np.linalg.eigvalsh(shape)).max(axis=1)
+    return curvature
+
+
+def _value_and_gradient(
+    field: Expr, x: NDArray[np.float64], h: float
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """``φ`` at the points ``x``, and its gradient by central differences of step ``_FD_STEP·h``."""
+
+    gdim = x.shape[1]
+    phi = _eval_field(field, tuple(x[:, k] for k in range(gdim)))
+    grad = np.empty_like(x)
+    eps = _FD_STEP * h
+    for k in range(gdim):
+        plus, minus = x.copy(), x.copy()
+        plus[:, k] += eps
+        minus[:, k] -= eps
+        grad[:, k] = (
+            _eval_field(field, tuple(plus[:, j] for j in range(gdim)))
+            - _eval_field(field, tuple(minus[:, j] for j in range(gdim)))
+        ) / (2.0 * eps)
+    return phi, grad
+
+
+def _signed_measures(points: NDArray[np.float64], cells: NDArray[np.int64], gdim: int) -> NDArray[np.float64]:
+    """Each simplex's signed measure, up to the factor ``1/d!``."""
+
+    corners = points[cells]
+    measures: NDArray[np.float64] = np.linalg.det(corners[:, 1:, :gdim] - corners[:, :1, :gdim])
+    return measures
 
 
 def _drop_short_segments(verts: NDArray[np.float64], min_length: float) -> NDArray[np.float64]:
@@ -813,7 +1016,7 @@ def _realize_3d_partition(
     parents = _surface_containment(raw_fields, origin=origin, extent=extent, counts=counts)
 
     parent, cell_face = _mesh_box_with_surfaces(
-        surfaces, parents, origin=origin, extent=extent, h=h, comm=comm, name=description.name
+        surfaces, parents, raw_fields, origin=origin, extent=extent, h=h, comm=comm, name=description.name
     )
     fields = subvolume_implicit_functions(description)
     tagging = _classify_and_tag(parent, description, fields, cell_face=cell_face, origin=origin, extent=extent)
@@ -899,6 +1102,7 @@ def _surface_containment(
 def _mesh_box_with_surfaces(
     surfaces: list[tuple[NDArray[np.float64], NDArray[np.int64]]],
     parents: list[int],
+    fields: list[Expr],
     *,
     origin: tuple[float, float, float],
     extent: tuple[float, float, float],
@@ -907,12 +1111,20 @@ def _mesh_box_with_surfaces(
     name: str,
 ) -> tuple[dmesh.Mesh, dmesh.MeshTags]:
     """The body-fitted DOLFINx tetrahedral mesh of the box partitioned by the marched ``surfaces``,
-    **and** its cell→region tag — :func:`_netgen_box_with_surfaces` meshed on rank 0 and distributed by
+    **and** its cell→region tag — :func:`_netgen_box_with_surfaces` meshed on rank 0, its membrane
+    vertices projected onto ``fields`` (one per surface, :func:`_project_interfaces`), and distributed by
     :func:`_mesh_on_rank0`."""
+
+    def build() -> _NetgenArrays:
+        points, cells, material = _netgen_box_with_surfaces(
+            surfaces, parents, origin=origin, extent=extent, h=h, name=name
+        )
+        outside = [1 if parent < 0 else parent + 2 for parent in parents]
+        return _project_interfaces(points, cells, material, fields, outside, h=h), cells, material
 
     return _mesh_on_rank0(
         comm,
-        lambda: _netgen_box_with_surfaces(surfaces, parents, origin=origin, extent=extent, h=h, name=name),
+        build,
         cell="tetrahedron",
         gdim=3,
     )

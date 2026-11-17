@@ -141,10 +141,12 @@ for multi-compartment domains. For unfitted approaches it is a background mesh p
 - **`analytic`** (any boolean predicate, primitive or not) → lower it to a single real-valued
   **implicit function** `φ` via the Rvachev lowering below (`formalism/rvachev.py`), extract its
   boundary — marched with scikit-image in 2D, marching cubes in 3D, or, for shapes that touch the
-  bounding box, rasterized by VCell's priority rule and projected onto the exact implicit functions
-  — and embed it as a conforming internal boundary in a **Netgen** model that partitions the box
+  bounding box, rasterized by VCell's priority rule and projected onto the bilinear (2D) or trilinear (3D)
+  interpolant of the exact implicit functions sampled at about `h` — and embed it as a conforming internal boundary in a **Netgen** model that partitions the box
   (`backend/realize.py`; nested shapes nest, disjoint shapes sit side by side, junctions go through
-  the label route of ADR 012). Each region is tagged with its subvolume name, each shared interface
+  the label route of ADR 012). On the marching route, each membrane vertex of Netgen's mesh is then
+  projected onto its shape's exact `φ = 0` by Newton steps (#249), where the shape is resolved (radius of
+  curvature at least `h`), at time zero only (a remesh meshes the moved boundary). Each region is tagged with its subvolume name, each shared interface
   with its surface name, and each outer face with its face name → a conforming `Geometry`. *(As
   originally planned this was gmsh OCC booleans for the primitive/CSG subset and a level-set for the
   rest; ADR 008 replaced gmsh with Netgen, and the implicit-field route turned out to serve every

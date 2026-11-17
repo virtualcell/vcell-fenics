@@ -21,7 +21,6 @@ import pytest
 import ufl
 import yaml
 from dolfinx import fem
-from dolfinx import mesh as dmesh
 from scipy.special import iv
 
 from vcell_fenics.backend.cell_force_balance import (
@@ -105,28 +104,11 @@ def _exact(operator: str) -> tuple[float, float]:
     return (P - GAMMA / R) / per_a, ell
 
 
-def _snapped_disk(h: float) -> MultiCompartmentGeometry:
-    """The realized disk with its membrane's vertices moved radially onto the circle `r = R`. The realizer's
-    marched boundary sits up to ~1e-3 off the circle and converges only at first order in `h` (issue #249;
-    1.5e-3 at h = 0.1, 7.8e-4 at h = 0.05), which would hide the solver's order behind the geometry's. The
-    geometry's `sizes` and membrane submeshes are left unsnapped (unused here)."""
-
-    geometry = realize_multi_compartment(_disk(), h=h)
-    parent = geometry.parent_mesh
-    facets = geometry.facet_tags.find(geometry.membranes["pm"].facet_tag)
-    nodes = np.unique(dmesh.entities_to_geometry(parent, 1, facets))
-    x = parent.geometry.x
-    r = np.hypot(x[nodes, 0], x[nodes, 1])
-    x[nodes, 0] *= R / r
-    x[nodes, 1] *= R / r
-    return geometry
-
-
 def _error(operator: str, h: float) -> float:
     raw = _raw()
     if operator == "laplacian":
         _equation(raw)["viscous_operator"] = "laplacian"
-    balance = assemble_cell_force_balance(load_dict(raw), _snapped_disk(h))
+    balance = assemble_cell_force_balance(load_dict(raw), realize_multi_compartment(_disk(), h=h))
     balance.solve()
     A, ell = _exact(operator)
     mesh = balance.members.mesh

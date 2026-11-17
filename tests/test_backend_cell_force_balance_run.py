@@ -18,7 +18,6 @@ import pytest
 import ufl
 import yaml
 from dolfinx import fem
-from dolfinx import mesh as dmesh
 
 from vcell_fenics.backend.cell_force_balance import ForceBalanceError
 from vcell_fenics.backend.cell_force_balance_run import (
@@ -174,28 +173,13 @@ def test_the_instability_sets_in_above_threshold_and_decays_below() -> None:
 # -- the transport against a known answer (a prescribed velocity) ---------------------------------------------
 
 
-def _snapped(h: float) -> MultiCompartmentGeometry:
-    """The disk with its membrane on the circle `r = 1` (issue #249's first-order boundary would set the order)."""
-
-    geometry = realize_multi_compartment(_disk(), h=h)
-    parent = geometry.parent_mesh
-    nodes = np.unique(
-        dmesh.entities_to_geometry(parent, 1, geometry.facet_tags.find(geometry.membranes["pm"].facet_tag))
-    )
-    x = parent.geometry.x
-    r = np.hypot(x[nodes, 0], x[nodes, 1])
-    x[nodes, 0] /= r
-    x[nodes, 1] /= r
-    return geometry
-
-
 def _steady_error(h: float, sign: float = 1.0) -> float:
     """Carried by a prescribed `v = ∇Φ`, `Φ = r²/2`, with `D = 1` and zero total flux at the edge, `m` relaxes
     to `C exp(Φ)` (the flux `−∇m + m∇Φ` vanishes everywhere). The relative L² error of the steady state."""
 
     raw = _raw()
     _myosin(raw)["initial_condition"] = "1"
-    run = assemble_cell_force_balance_run(load_dict(raw), _snapped(h))
+    run = assemble_cell_force_balance_run(load_dict(raw), realize_multi_compartment(_disk(), h=h))
     run.velocity.interpolate(lambda x: np.vstack([sign * x[0], sign * x[1]]))  # in place of the solve
     total = run.total("m")
     run.species.dt.value = 0.25
