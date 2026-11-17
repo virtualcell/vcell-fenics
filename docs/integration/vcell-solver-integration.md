@@ -426,6 +426,32 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-17** — **The marching path's membrane lies on the analytic shape (#249).**
+  - **What:** after Netgen meshes a 2D or 3D analytic geometry strictly inside the box, every membrane vertex is
+    moved onto its shape's exact `φ = 0` by Newton steps along `∇φ` (`realize._project_interfaces`). Left where Netgen
+    put it: a vertex where the shape's radius of curvature is below `h` (detail finer than the mesh, which the marching
+    already rounds off, ADR 016 decision 7), one more than `h/4` away, and one whose move would invert or crush a cell
+    beside it, and one where Newton does not converge (a box's edges and corners); `GeometryProjectionWarning` is raised
+    when that is most of a shape's membrane. Time zero only: a remesh of
+    a moving front meshes the moved boundary and is not projected. Curvature-adaptive refinement, at time zero and in
+    remeshes, is a separate issue.
+  - **Measured** (unit disk in a 4×4 box; unit sphere in a 3×3×3 box): the membrane's max `|r − 1|` falls from
+    4.4e-3 / 1.5e-3 / 7.9e-4 / 3.1e-4 (h = 0.2 … 0.025) to 1e-16. The disk's area error at h = 0.2 / 0.1 / 0.05 /
+    0.025 goes from −9.4e-3 / −7.1e-3 / −2.8e-3 / −8.6e-4 to −4.3e-3 / −2.6e-3 / −1.3e-3 / −3.3e-4; in 3D the vertices
+    sat 3.3e-3 off at every h (the grid's floor of 33 points per axis), and the volume error at h = 0.4 / 0.2 / 0.1
+    goes from −0.318 / −0.102 / −0.046 (ratios 3.1, 2.2) to −0.291 / −0.075 / −0.019 (ratios 3.9, 4.0). vcell-core's
+    E1 (#249's thread), spatial error by Richardson in `dt`: rates 1.50 / 1.92 / 1.96 for h = 0.1 … 0.0125, the same as
+    with the boundary snapped by hand (1.66 / 1.75 / 1.35 before).
+  - **The 3D remesh refuses a folded surface.** With the projected start, the 3D furrow's first remesh (h = 1) built
+    a snapped surface with two triangles folded back on each other, and Netgen segfaulted on it. Netgen already met
+    such folds on main (cos −0.995 at t = 2.9) and refused them or filled part of them, by luck. Now snapping is undone
+    at the vertices of a fold, and a surface still folded is refused before Netgen sees it. The furrow's waist at h = 1
+    then ends 0.52 off at t = 3 (0.27 unprojected): an under-resolved groove, sensitive to when the remeshes fall. At
+    the model's h = 0.645 the two agree (0.25 / 0.17 at t = 3); that run is now an integration test.
+  - **Tolerances re-pinned:** the slide on/off comparison on a moving partition (`test_moving_partition.py`) differs
+    by 0.038 from the projected start, 0.029 from the marched one; its bound goes from 0.03 to 0.05.
+  - **Verified:** `tests/test_realize_projection.py`; the T9 disk tests now run on the realizer's own geometry, without
+    the snapping they used to work around this; the fold test in `tests/test_backend_ale_3d.py`.
 - **2026-11-15** — **A cell force balance with species runs through the runner (ADR 020 decision 5).**
   - **What:** a T9 model in ADR 020 decision 4's scope (a fixed skeleton, one member, species on it, linear
     transport) goes to `cell_force_balance_run` by the staggered step, `dt` snapped per output interval. Each row
