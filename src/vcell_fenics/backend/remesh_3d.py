@@ -26,8 +26,10 @@ the machinery the image-geometry realization already relies on (ADR 012):
 
 **Fallbacks.** Steps 3 and 5 fit the new surface tightly to the old one, and near a narrowing neck that
 can fold a few triangles over each other; Netgen then refuses the surface ("boundary mesh is
-overlapping") or — worse — gives up part-way and returns a *partial* volume mesh ("too many attempts"),
-which step 6 would then inflate to the old volume. Whether it happens depends on floating-point details,
+overlapping"), gives up part-way and returns a *partial* volume mesh ("too many attempts"), which step 6
+would then inflate to the old volume, or — worst — segfaults. So where snapping folds the surface
+(neighbouring triangles turned back on each other), those triangles' vertices are left unsnapped, and a
+surface still folded is refused before Netgen sees it. Whether a fold happens depends on floating-point details,
 so the same run can pass on one platform and fail on another (the 3D furrow at h = 0.645 ran on macOS/arm64
 and failed on the cluster's linux/amd64). So each remesh tries surfaces of decreasing fidelity
 (:data:`_SURFACE_LEVELS`), the way an image geometry is meshed (``realize._SURFACE_LEVELS``), and accepts a
@@ -68,6 +70,10 @@ _SURFACE_LEVELS: tuple[tuple[int, bool, bool, str], ...] = (
 # volume matches the enclosed volume to round-off; a partial fill ("Stop meshing since too many attempts")
 # is short by whole regions.
 _COMPLETE_RTOL = 1e-6
+# A rebuilt surface whose neighbouring triangles turn back on each other (normals at more than ~154°) is not
+# handed to Netgen: it may refuse it, fill part of it, or segfault, which no fallback can catch. The surfaces
+# Netgen filled in the 3D furrow run had folds of at most cos −0.60; those it refused or crashed on, −0.99.
+_MAX_FOLD_COS = -0.9
 
 
 class RemeshWarning(UserWarning):
@@ -101,7 +107,11 @@ def remesh_region_3d(mesh: Mesh, h: float, *, min_h: float | None = None, lattic
         boundary = extract_boundary(grid, extent=extent, passes=passes, project=project)
         inside = (boundary.pairs == (0, 1)).all(axis=1)  # outside (0) | region (1); no box faces (padded)
         triangles_new = boundary.elements[inside][:, ::-1]  # the normal pointed into the region: outward
-        surface_points = snap_to_surface(boundary.points, points, triangles) if snap else boundary.points
+        surface_points = boundary.points
+        if snap:
+            surface_points = _unfold(
+                snap_to_surface(boundary.points, points, triangles), boundary.points, triangles_new
+            )
         filled = _fill_checked(surface_points, triangles_new, spacing, target)
         if isinstance(filled, str):
             failures.append(f"{label}: {filled}")
@@ -127,6 +137,11 @@ def _fill_checked(points: Floats, triangles: Ints, spacing: float, target: float
 
     from vcell_fenics.backend.realize import RealizationError
 
+    fold = _sharpest_fold(points, triangles)
+    if fold < _MAX_FOLD_COS:
+        # Netgen may refuse such a surface, fill part of it, or segfault (the 3D furrow at h = 1, #249) —
+        # so it is not handed over
+        return f"folded (neighbouring triangles turn back on each other, cos {fold:.3f})"
     try:
         new_points, cells = _netgen_fill(points, triangles, spacing)
     except RealizationError as error:
@@ -140,6 +155,52 @@ def _fill_checked(points: Floats, triangles: Ints, spacing: float, target: float
     if not (np.all(signed > 0.0) or np.all(signed < 0.0)):
         return "the volume restore inverted a tetrahedron"
     return new_points, cells
+
+
+def _unfold(snapped: Floats, unsnapped: Floats, triangles: Ints, rounds: int = 4) -> Floats:
+    """``snapped`` with the vertices of every folded pair of triangles put back where they were before
+    snapping, a few rounds (putting some back can fold a neighbour)."""
+
+    out = snapped.copy()
+    for _ in range(rounds):
+        folded = _folded_vertices(out, triangles)
+        if folded.size == 0:
+            break
+        out[folded] = unsnapped[folded]
+    return out
+
+
+def _folded_vertices(points: Floats, triangles: Ints) -> Ints:
+    """The vertices of the triangle pairs that share an edge and fold back on each other (``_MAX_FOLD_COS``)."""
+
+    cosines, first, second = _edge_neighbours(points, triangles)
+    folded = cosines < _MAX_FOLD_COS
+    return np.unique(np.concatenate([triangles[first[folded]].ravel(), triangles[second[folded]].ravel()]))
+
+
+def _sharpest_fold(points: Floats, triangles: Ints) -> float:
+    """The smallest cosine between the normals of two triangles sharing an edge: −1 is a surface folded flat
+    back onto itself."""
+
+    cosines, _, _ = _edge_neighbours(points, triangles)
+    return float(cosines.min()) if cosines.size else 1.0
+
+
+def _edge_neighbours(points: Floats, triangles: Ints) -> tuple[Floats, Ints, Ints]:
+    """For each pair of triangles sharing an edge: the cosine between their unit normals, and the two."""
+
+    a, b, c = points[triangles[:, 0]], points[triangles[:, 1]], points[triangles[:, 2]]
+    normals = np.cross(b - a, c - a)
+    lengths = np.linalg.norm(normals, axis=1)
+    normals = normals / np.where(lengths > 0.0, lengths, 1.0)[:, None]
+    edges = np.sort(triangles[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1)
+    owner = np.repeat(np.arange(len(triangles)), 3)
+    order = np.lexsort((edges[:, 1], edges[:, 0]))
+    edges, owner = edges[order], owner[order]
+    shared = np.flatnonzero((edges[1:] == edges[:-1]).all(axis=1))
+    first, second = owner[shared], owner[shared + 1]
+    cosines: Floats = np.einsum("ij,ij->i", normals[first], normals[second])
+    return cosines, first, second
 
 
 def _enclosed_volume(points: Floats, triangles: Ints) -> float:

@@ -233,3 +233,30 @@ def test_when_every_surface_fails_the_remesh_says_so(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(remesh_3d, "_netgen_fill", refuse)
     with pytest.raises(remesh_3d.RemeshError, match=r"no rebuilt surface could be tetrahedralized.*unsmoothed"):
         remesh_3d.remesh_region_3d(_ball_mesh(), 0.25)  # type: ignore[arg-type]
+
+
+def test_a_snapped_surface_that_folds_is_unsnapped_there_and_never_handed_to_netgen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Netgen can segfault on a surface folded back on itself (the 3D furrow at h = 1, #249). Snapping's folds are
+    undone vertex by vertex; a surface still folded is refused before Netgen sees it."""
+
+    import vcell_fenics.backend.remesh_3d as remesh_3d
+
+    # two triangles on the edge (0, 1): flat before snapping, folded flat back onto each other after
+    unsnapped = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1.0, 0.0], [0.5, -1.0, 0.0]])
+    triangles = np.array([[0, 1, 2], [1, 0, 3]], dtype=np.int64)
+    snapped = unsnapped.copy()
+    snapped[3] = [0.5, 1.0, 0.01]  # vertex 3 swung over the edge onto vertex 2's side
+    assert remesh_3d._sharpest_fold(unsnapped, triangles) == pytest.approx(1.0)
+    assert remesh_3d._sharpest_fold(snapped, triangles) < -0.99
+
+    np.testing.assert_array_equal(remesh_3d._unfold(snapped, unsnapped, triangles), unsnapped)
+
+    def never(*args: object) -> None:
+        raise AssertionError("a folded surface reached Netgen")
+
+    monkeypatch.setattr(remesh_3d, "_netgen_fill", never)
+    assert remesh_3d._fill_checked(snapped, triangles, 0.5, 1.0) == (
+        "folded (neighbouring triangles turn back on each other, cos -1.000)"
+    )

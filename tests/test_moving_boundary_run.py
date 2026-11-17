@@ -201,16 +201,34 @@ def test_the_3d_furrow_remeshes_and_keeps_its_mass(tmp_path: Path) -> None:
         assert bundle.coords("Cyt", row).shape[0] == bundle.field("Cyt", "Dex", row).shape[0]
 
 
-def test_the_3d_furrow_mid_plane_follows_the_exact_waist(tmp_path: Path) -> None:
+def _furrow_waist_errors(tmp_path: Path, h: float) -> list[tuple[float, float]]:
     # at z = 0 the ring's velocity is the 2D furrow's, so the waist obeys dx/dt = −tanh(x/5) exactly:
-    # sinh(x(t)/5) = sinh(√30/5)·e^{−t/5}. At h = 1 the 3D surface resolves the 0.5 µm groove only coarsely,
-    # so the waist lags (it converges with h — cross_validation/furrow3d_midplane.py); pin the current accuracy
-    argv = ["--simtask", str(_FURROW_3D), "--out", str(tmp_path), "--h", "1.0", "--t-final", "3.0", "--output-dt", "1"]
+    # sinh(x(t)/5) = sinh(√30/5)·e^{−t/5}
+    argv = ["--simtask", str(_FURROW_3D), "--out", str(tmp_path), "--h", str(h), "--t-final", "3.0", "--output-dt", "1"]
     assert main(argv) == 0
     bundle = Bundle.open(tmp_path / "SimID_516481304_0_.fenics")
+    errors = []
     for row, t in enumerate(bundle.times):
         exact = 5.0 * math.asinh(math.sinh(math.sqrt(30.0) / 5.0) * math.exp(-t / 5.0))
-        assert abs(_waist_3d(bundle, row) - exact) < 0.3, (t, _waist_3d(bundle, row), exact)  # 0.18 at t = 2
+        errors.append((t, abs(_waist_3d(bundle, row) - exact)))
+    return errors
+
+
+def test_the_3d_furrow_mid_plane_follows_the_exact_waist(tmp_path: Path) -> None:
+    # At h = 1 the 3D surface resolves the 0.5 µm groove only coarsely, so the waist lags (it converges with h —
+    # cross_validation/furrow3d_midplane.py), and how far depends on when the remeshes fall: the starting membrane
+    # projected onto the shape (#249) starts closer (0.03 off, 0.05 unprojected) but ends 0.52 off at t = 3, against
+    # 0.27 unprojected. Pin the current accuracy; the finer run below holds the tighter bound.
+    for t, error in _furrow_waist_errors(tmp_path, 1.0):
+        assert error < 0.6, (t, error)
+
+
+@pytest.mark.integration
+def test_the_3d_furrow_mid_plane_follows_the_exact_waist_at_the_models_mesh_size(tmp_path: Path) -> None:
+    # the model's own h = 0.645: 0.012 / 0.038 / 0.167 / 0.246 off at t = 0 … 3 (unprojected 0.034 / 0.037 / 0.173 /
+    # 0.173), about two minutes
+    for t, error in _furrow_waist_errors(tmp_path, 0.645):
+        assert error < 0.3, (t, error)
 
 
 def _waist_3d(bundle: Bundle, row: int) -> float:
