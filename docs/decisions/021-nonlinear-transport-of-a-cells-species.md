@@ -257,9 +257,21 @@ At `t = 10`:
          ratios).
        - The steps per stride (about 50 at rtol 1e-6, t = 4) are set by the dynamics inside a stride, not by
          BDF's restart at order 1. The restart was not the cost.
-     - **The larger lever is the tolerance.** The stagger's error dominates (total ≫ integration). At t = 4,
-       rtol 1e-4 instead of 1e-6 takes 3.9× fewer steps and 2.9× less wall time, and raises the total error from
-       3.0e-2 to 3.3e-2. Matching rtol to the stride is a question for decision 7's cost measurement.
+     - **On this model, a looser tolerance saved more.** The stagger's error dominates (total ≫ integration). At
+       t = 4, rtol 1e-4 instead of 1e-6 takes 3.9× fewer steps and 2.9× less wall time, and raises the total error
+       from 3.0e-2 to 3.3e-2.
+     - **This is not a default to loosen** (Jim, 2026-11-18: many models are not well scaled). This model is O(1)
+       in one species. The integrator weighs each unknown's error by `atol + rtol·|uᵢ|`, with one scalar `atol` for
+       every species (`make_ts`), so (*inferred* from that weight):
+       - a species far below `atol / rtol` is controlled by `atol` alone, and loosening `rtol` changes nothing
+         for it. If `atol` is already above its scale, it is effectively uncontrolled;
+       - a species far above that is controlled by `rtol`;
+       - a quantity that matters through a difference or a small fraction of a large total can lose its
+         significant digits at a looser `rtol`, whatever its scale.
+     - **What would make a looser tolerance safe** is a question for decision 7, not settled here:
+       - per-species absolute tolerances from each species' own scale, as a PETSc vector `atol`;
+       - a measured indicator of the stagger's error (the change in `v` over a stride), so that `rtol` follows
+         the error the stride commits rather than a fixed number.
 
 2. **A slot may read the species on every route, and a model nonlinear in its species runs by the method of
    lines.** The switch was decided by Jim on 2026-11-17, for the T9 route. The amendment widens it to every
