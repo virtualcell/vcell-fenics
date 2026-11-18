@@ -1,10 +1,12 @@
 # ADR 022 — Error tolerances that mean the same thing for every species
 
 **Date:** 2026-11-18
-**Status:** Proposed. Asked for by Jim on 2026-11-18 ("start on per-species tolerances"), after he pointed out
-that a looser tolerance is unsafe because many models are not well scaled (ADR 021 decision 1's notes). Jim's
-scope: every solver that uses the method of lines (decision 3). Reviewed once (16 findings, 1 blocking; "Review"
-at the end).
+**Status:** Accepted (Jim, 2026-11-18): decisions 1–6 as recommended — 1 (b), the running maximum with the floor;
+2 (c), balanced vector tolerances; 3, every method-of-lines integrator; 4 as written; 5, `species` by default
+unless the implementation PR's measurement shows a cost the accuracy does not justify; 6 as listed. Asked for by
+Jim on 2026-11-18 ("start on per-species tolerances"), after he pointed out that a looser tolerance is unsafe
+because many models are not well scaled (ADR 021 decision 1's notes). Reviewed once (16 findings, 1 blocking;
+"Review" at the end).
 
 **Builds on:**
 - ADR 011: the SimulationTask's `ErrorTolerance` (one absolute and one relative tolerance) reaches the runner as
