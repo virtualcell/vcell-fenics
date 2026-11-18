@@ -271,11 +271,14 @@ def _nonlinear(tmp_path: Path) -> Path:
     return task
 
 
-def test_nonlinear_kinetics_on_a_moving_mesh_ask_for_the_method_of_lines(
+def test_nonlinear_kinetics_on_a_moving_mesh_switch_to_the_method_of_lines(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["--simtask", str(_nonlinear(tmp_path)), "--out", str(tmp_path)]) != 0
-    assert "--time-integration method_of_lines" in capsys.readouterr().err
+    # asked for nothing (backward Euler by default), the run sees the nonlinear binding and strides by the method
+    # of lines (ADR 021 decision 2)
+    assert main(["--simtask", str(_nonlinear(tmp_path)), "--out", str(tmp_path)]) == 0
+    assert "runs by the method of lines" in capsys.readouterr().err
+    assert Bundle.open(tmp_path / _BUNDLE).manifest.solver.options["time_integration"] == "method_of_lines"
 
 
 def test_nonlinear_kinetics_run_on_a_moving_mesh_with_the_method_of_lines(tmp_path: Path) -> None:

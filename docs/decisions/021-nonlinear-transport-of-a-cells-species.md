@@ -237,12 +237,18 @@ At `t = 10`:
        `source`: with the species' trial functions bound. Its method of lines then replaces `trial → unknown`,
        as it already does for a source.
      - **The multi-compartment solver** compiles them in `bulk_ctx` (a compartment's species and the region
-       variables), or in its membrane counterpart for a surface species. Its Jacobian follows by
-       `ufl.derivative` (the Context).
+       variables). Its Jacobian follows by `ufl.derivative` (the Context).
+     - **A membrane species' transport** reads only the membrane's own species. Its forms are on the
+       membrane's own mesh, where neither the bulk traces nor the region variables (Reals on the parent) live.
+       A membrane diffusion or drift that reads one is refused by name (*recorded in the implementation,
+       2026-11-17*).
      - **On a member,** the T9 velocity is bound as a lagged coefficient (decision 8).
      - A tensor `diffusion` is bound the same way.
    - **The linearity check.** A pure function of the model decides which expressions are nonlinear in its
-     unknowns, before anything is assembled. It is the same on every route.
+     unknowns, before anything is assembled. It is the same on every route. Its rules follow what backward
+     Euler can split, not affinity alone: `u**1` and a literal such as `[u, 0]` are affine, but UFL cannot split
+     them, so they count as nonlinear (*recorded in the implementation, 2026-11-17*). A Dirichlet value is
+     imposed rather than assembled, so it is not checked.
      - **The unknowns** are the model's variables: species and region variables. The velocity of a T9 force
        balance is excluded, because it is lagged (ADR 020 decision 3). Parameters cannot read a variable (the
        Context), so no closure through parameters is needed.

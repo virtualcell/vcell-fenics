@@ -226,16 +226,20 @@ def _build_problem(
     surface_driven = driving_surface is not None and motion is not None
 
     terms: list[Term] = [Term(TermKind.TIME_DERIVATIVE)]
+    # Every slot reads the species (ADR 021 decision 2): a diffusion or a drift that reads one is nonlinear, so
+    # backward Euler refuses it at composition (`NonlinearTermError`) and the method of lines takes it (its
+    # residual replaces trial → unknown).
+    species_ctx = CompileContext(mesh, {**ctx.symbols, **var_trials})
     for (u, w), eq in zip(components, equations, strict=True):
         if "diffusion" in eq.terms:
-            diffusion = compile_expression(parse(eq.terms["diffusion"]), ctx)
+            diffusion = compile_expression(parse(eq.terms["diffusion"]), species_ctx)
             terms.append(Term(TermKind.DIFFUSION, diffusion * ufl.dot(ufl.grad(u), ufl.grad(w))))
         if surface_driven and "advection" not in eq.terms:
             # Drift relative to a substrate at rest is the lab-frame velocity, so it takes the lab-frame
             # assembly; with no drift the carrier is 0 and the term is u w·∇q (decision 3).
             assert motion is not None  # implied by `surface_driven`
             drift = (
-                compile_expression(parse(eq.terms["relative_advection"]), ctx)
+                compile_expression(parse(eq.terms["relative_advection"]), species_ctx)
                 if "relative_advection" in eq.terms
                 else ufl.as_vector([0.0] * mesh.geometry.dim)
             )
@@ -246,7 +250,7 @@ def _build_problem(
             # setup, motion=none + fluid velocity here); on a mesh that moves at v_Ω it is
             # the drift on top of the substrate motion the mesh already carries. `grad` on
             # a (sub)mesh is the surface gradient, so the same term serves bulk and surface.
-            drift = compile_expression(parse(eq.terms["relative_advection"]), ctx)
+            drift = compile_expression(parse(eq.terms["relative_advection"]), species_ctx)
             # Conservation form ∇·(u·v_rel) = v_rel·∇u + u·(∇·v_rel). A divergence-free drift — the
             # incompressible fluid case this slot was designed around — leaves just the advective v_rel·∇u; a
             # COMPRESSIBLE drift also dilutes by u·(∇·v_rel), the volume analogue of the mandatory surface
@@ -262,7 +266,7 @@ def _build_problem(
             # natural boundary condition is zero *total* flux (−D∇u + (c − w)u)·n = 0 — at a moving front
             # (w·n = v_b·n) exactly the Rankine–Hugoniot condition VCell's moving-boundary solver imposes —
             # and mass is conserved exactly (q = 1 kills the term; the swept volume is in the time term).
-            carrier = compile_expression(parse(eq.terms["advection"]), ctx)
+            carrier = compile_expression(parse(eq.terms["advection"]), species_ctx)
             frame_relative = carrier - motion.velocity() if motion is not None else carrier
             terms.append(Term(TermKind.ADVECTION, -u * ufl.dot(frame_relative, ufl.grad(w))))
         if motion is not None:
@@ -274,7 +278,7 @@ def _build_problem(
             # conservative time term (`volume_ratio`) instead — see `BackwardEuler.compose`.
             terms.append(Term(TermKind.DILUTION, motion.effective_dilution_rate() * u * w))
         if "source" in eq.terms:
-            source = compile_expression(parse(eq.terms["source"]), CompileContext(mesh, {**ctx.symbols, **var_trials}))
+            source = compile_expression(parse(eq.terms["source"]), species_ctx)
             terms.append(Term(TermKind.SOURCE, source * w))
 
     bcs, boundary_terms, dirichlet_refreshers = (

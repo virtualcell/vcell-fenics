@@ -34,6 +34,7 @@ a lone surface PDE coupled to a single bulk (§1.6.6) — those raise a message 
 from __future__ import annotations
 
 import json
+import math
 import sys
 import warnings
 from collections.abc import Callable, Collection, Iterator, Mapping
@@ -160,6 +161,7 @@ def run_model(
         moving = []
     if not multi and force_balance is None:
         _refuse_region_variables(model.math)
+        options = _scheme_for_nonlinear(model, options)
     comm = MPI.COMM_WORLD
     bundle = out_dir / f"{prefix}.fenics"
     if comm.rank == 0:
@@ -206,7 +208,7 @@ def run_model(
                 "steps": steps,
             }
         elif moving:
-            cells, steps, dt_used, remeshes = _run_moving(model, moving, options, recorder, reporter)
+            cells, steps, dt_used, remeshes, strides = _run_moving(model, moving, options, recorder, reporter)
             run_info |= {
                 "dt": dt_used,
                 "dt_requested": options.dt,
@@ -214,17 +216,21 @@ def run_model(
                 "steps": steps,
                 "remeshes": remeshes,
             }
+            if options.time_integration == "method_of_lines":  # dt is the stride; steps are the integrator's
+                run_info |= {"strides": strides, "rtol": options.rtol, "atol": options.atol}
         elif multi:
             cells, steps = _run_multi_compartment(model, options, recorder, reporter, motion_membrane=moving_partition)
             run_info |= {"time_integration": "method_of_lines", "steps": steps}
         else:
             cells, steps, dt_used = _run_single_mesh(model, options, recorder, reporter)
             run_info |= {
-                "dt": dt_used,
+                "dt": None if math.isnan(dt_used) else dt_used,  # the method of lines has no fixed step here
                 "dt_requested": options.dt,
                 "time_integration": options.time_integration,
                 "steps": steps,
             }
+            if options.time_integration == "method_of_lines":
+                run_info |= {"rtol": options.rtol, "atol": options.atol}
     except BaseException as error:
         writer.finalize("failed", f"{type(error).__name__}: {error}")
         raise
@@ -430,6 +436,30 @@ def _run_cell_force_balance(
     return prepared.cells, steps, dt_max
 
 
+def _scheme_for_nonlinear(model: ModelInput, options: RunOptions) -> RunOptions:
+    """The single-mesh routes' time scheme (ADR 021 decision 2): a model with an expression nonlinear in its
+    unknowns runs by the method of lines whatever was asked, since backward Euler assembles only affine terms. A
+    linear model keeps the requested scheme. The returned options are what the manifest records."""
+
+    from vcell_fenics.formalism.linearity import nonlinear_expressions
+    from vcell_fenics.formalism.validator import validate_or_raise
+
+    validate_or_raise(model.math)  # refused before the bundle starts, under either scheme
+    if options.time_integration != "backward_euler":
+        return options
+    nonlinear = nonlinear_expressions(model.math)
+    if not nonlinear:
+        return options
+    shown = "; ".join(str(e) for e in nonlinear[:3]) + (
+        f"; and {len(nonlinear) - 3} more" if len(nonlinear) > 3 else ""
+    )
+    log(
+        f"note: the model is nonlinear in its species ({shown}); backward Euler cannot assemble it, so it runs by "
+        f"the method of lines (ADR 021 decision 2)"
+    )
+    return replace(options, time_integration="method_of_lines")
+
+
 def _refuse_region_variables(math: MathDescription) -> None:
     """Region variables (§1.4.2 T5: a well-mixed species, the membrane potential) are solved by the
     multi-compartment solver. The single-mesh and moving paths refuse them before any bundle is started (#196)."""
@@ -529,10 +559,11 @@ def _moving_subdomains(model: ModelInput) -> list[str]:
 
 def _run_moving(
     model: ModelInput, moving: list[str], options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
-) -> tuple[int, int, float, int]:
+) -> tuple[int, int, float, int, int]:
     """Backward Euler through the ALE driver on the moving domain: the mesh moves every step (the
     conservative ALE time term keeps each species' mass), remeshing when it has degraded and continuing
-    on the new mesh (conservatively remapped). Returns (cells, steps, largest dt, remeshes).
+    on the new mesh (conservatively remapped). Returns (cells, steps, largest dt, remeshes, strides): under the
+    method of lines `steps` are the integrator's and the strides are the mesh moves.
 
     The equations live on one subdomain, and one subdomain moves (ADR 013 decision 4). Either they are the
     same (a prescribed volume, whose substrate moves its mesh, or a membrane carrying its own species), or
@@ -632,7 +663,7 @@ def _run_moving(
             f"the moving mesh needed a remesh near t = {state.t:g}, which is not possible here: {error}"
         ) from error
     # under the method of lines, the adaptive integrator's own steps (the strides are the mesh moves)
-    return cells, state.steps if mol else steps, dt_max, state.remesh_count
+    return cells, state.steps if mol else steps, dt_max, state.remesh_count, steps
 
 
 def _named(problem: DiscreteProblem, names: list[str]) -> list[tuple[str, Any]]:
