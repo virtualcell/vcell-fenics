@@ -23,8 +23,10 @@ This is the assembler between the formalism and the term builders of `force_bala
 - **`geom.normal`** is read only in a `traction`, where it points out of the surface's `inside`.
 
 The solve is quasi-static: `solve()` gives the velocity of the current configuration. Moving the cells with it
-is stage 4. The runner routes a T9 model only with species on a fixed skeleton (`cell_force_balance_run`, ADR 020
-decision 5) and refuses the rest until then.
+is stage 4. With one member, the members' mesh is the member compartment's own submesh, so the velocity and the
+member's species share one mesh. The multi-compartment solver hands a T9 model with species to this assembler and
+strides with it, in the scope `member_species` checks (ADR 021 decisions 3 and 8); the runner routes only that
+scope and refuses the rest until then.
 """
 
 from __future__ import annotations
@@ -71,6 +73,7 @@ from vcell_fenics.formalism.expr import (
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
+    REGION_SPACE,
     BCDirichlet,
     MathDescription,
     MotionPrescribedVelocity,
@@ -308,6 +311,105 @@ def build_members_mesh(md: MathDescription, geometry: MultiCompartmentGeometry) 
 
     eq = t9_equation(md)
     return _members_mesh(geometry, eq.members or (eq.subdomain,))
+
+
+def member_species(md: MathDescription, geometry: MultiCompartmentGeometry) -> tuple[str, list[TemplateEquation]]:
+    """The member and the species it carries, after checking the scope of a force balance with species in the
+    multi-compartment solver (ADR 021 decisions 3 and 8; ADR 020 decision 4 widened):
+
+    - **a fixed skeleton:** each membrane bounding the member is held (`dirichlet v = 0`) or is a stationary
+      front (a prescribed velocity of zero), and each box face it touches is a wall at rest;
+    - **one member,** carrying `bulk_radv_diff` species (at least one) and any region variables;
+    - **species in the other compartments and on membranes elsewhere,** coupled across a held membrane by its
+      flux conditions: on a held membrane `v = 0`, so a flux there is relative to the material;
+    - **refused by name:** several members, a non-diffusing species on the member, a membrane species on a
+      membrane bounding the member (its `ρ∇_Γ·v_Γ` is stage 5b), and at a stationary front, where the material
+      crosses the edge, any species' BC and any region variable.
+
+    Returns the member's name and its carried species' equations, in declaration order."""
+
+    eq = t9_equation(md)
+    members = eq.members or (eq.subdomain,)
+    if len(members) != 1:
+        raise ForceBalanceError(
+            f"SpeciesNotYetSupported: species with a force balance on several members {list(members)} wait for a "
+            f"later stage (ADR 021 decision 3)"
+        )
+    (member,) = members
+    if member not in geometry.compartments:
+        raise ForceBalanceError(f"the member {member!r} has no cells in the realized geometry {geometry.name!r}")
+    bounding = {name for name, membrane in geometry.membranes.items() if member in (membrane.inside, membrane.outside)}
+    region = {v.name for v in md.variables if v.space == REGION_SPACE}
+    species: list[TemplateEquation] = []
+    for other in md.equations:
+        if other is eq or not isinstance(other, TemplateEquation) or other.variable in region:
+            continue
+        if other.subdomain == member:
+            if other.template != "bulk_radv_diff":
+                raise ForceBalanceError(
+                    f"SpeciesNotYetSupported: {other.variable!r} on the member {member!r} is governed by "
+                    f"{other.template!r}; the member's species ride {eq.variable!r} as 'bulk_radv_diff' (ADR 020 "
+                    f"decision 4)"
+                )
+            species.append(other)
+        elif other.subdomain in bounding:
+            raise ForceBalanceError(
+                f"SpeciesNotYetSupported: {other.variable!r} lives on the membrane {other.subdomain!r}, which bounds "
+                f"the member {member!r}; membrane species on a cell's membrane wait for stage 5b (ADR 021 decision 3)"
+            )
+    if not species:
+        raise ForceBalanceError(
+            f"a force-balance run needs a species on the member {member!r}; for the velocity alone use "
+            f"solve_cell_force_balance"
+        )
+    held = {
+        bc.boundary
+        for bc in md.boundary_conditions
+        if bc.variable == eq.variable and isinstance(bc, BCDirichlet) and _is_zero(parse(bc.expression))
+    }
+    motion = {s.name: s.motion for s in md.subdomains}
+    stationary: set[str] = set()
+    for name in sorted(bounding):
+        front = motion.get(name)
+        still = isinstance(front, MotionPrescribedVelocity) and _is_zero(parse(front.velocity))
+        if isinstance(front, MotionPrescribedVelocity) and not still:
+            raise ForceBalanceError(
+                f"MovingSkeleton: the membrane {name!r} is a growing front, so it moves, held or not; species on a "
+                f"moving cell wait for stage 5b (ADR 021 decision 3)"
+            )
+        if name not in held and not still:
+            raise ForceBalanceError(
+                f"MovingSkeleton: the membrane {name!r} is neither held at {eq.variable} = 0 nor a stationary "
+                f"front, so it would move; species on a moving cell wait for stage 5b (ADR 021 decision 3)"
+            )
+        if still and name not in held:  # a front held at v = 0 is a held membrane
+            stationary.add(name)
+            if "tension" in eq.surfaces.get(name, {}):
+                raise ForceBalanceError(f"the stationary front {name!r} carries a tension; a front carries none")
+    for bc in md.boundary_conditions:
+        if (
+            bc.variable == eq.variable
+            and bc.boundary in geometry.compartments[member].faces
+            and not (isinstance(bc, BCDirichlet) and _is_zero(parse(bc.expression)))
+        ):
+            raise ForceBalanceError(
+                f"MovingSkeleton: the box face {bc.boundary!r} gives {eq.variable!r} a non-zero value; with species "
+                f"on the member, a box face it touches is a wall at rest (ADR 020 decision 4)"
+            )
+    for bc in md.boundary_conditions:
+        if bc.variable != eq.variable and bc.boundary in stationary:
+            raise ForceBalanceError(
+                f"SpeciesNotYetSupported: a {bc.kind} BC on {bc.variable!r} at the stationary front {bc.boundary!r}, "
+                f"where the material crosses the edge; a flux there needs its own decision, and a member species "
+                f"takes the natural zero total flux (ADR 021 decision 3)"
+            )
+    for v in md.variables:
+        if v.space == REGION_SPACE and v.subdomain in stationary:
+            raise ForceBalanceError(
+                f"SpeciesNotYetSupported: the region variable {v.name!r} lives on the stationary front "
+                f"{v.subdomain!r}, where the material crosses the edge (ADR 021 decision 3)"
+            )
+    return member, species
 
 
 def term_powers(problem: DiscreteProblem) -> dict[str, float]:
@@ -550,11 +652,18 @@ def _meets_another_boundary(geometry: MultiCompartmentGeometry, name: str) -> bo
 
 
 def _members_mesh(geometry: MultiCompartmentGeometry, members: tuple[str, ...]) -> tuple[MembersMesh, dict[str, int]]:
+    """One member: its compartment's own submesh, so the velocity and the member's species share one mesh object
+    and each is a coefficient in the other's forms (ADR 021 decision 8). Several: a submesh of their cells."""
+
     parent = geometry.parent_mesh
     tdim = parent.topology.dim
-    region_tags = [geometry.compartments[m].region_tag for m in members]
-    cells = np.unique(np.concatenate([geometry.cell_tags.find(t) for t in region_tags])).astype(np.int32)
-    sub, cell_map, *_ = dmesh.create_submesh(parent, tdim, cells)
+    if len(members) == 1:
+        compartment = geometry.compartments[members[0]]
+        sub, cell_map = compartment.mesh, compartment.entity_map
+    else:
+        region_tags = [geometry.compartments[m].region_tag for m in members]
+        cells = np.unique(np.concatenate([geometry.cell_tags.find(t) for t in region_tags])).astype(np.int32)
+        sub, cell_map, *_ = dmesh.create_submesh(parent, tdim, cells)
 
     sub_index = sub.topology.index_map(tdim)
     sub_cells = np.arange(sub_index.size_local + sub_index.num_ghosts, dtype=np.int32)

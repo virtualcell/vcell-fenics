@@ -7,8 +7,9 @@ description: >
   exact m* = e^(−t)(2 + x(1 − r²)²) has ∂m*/∂r = 0 at r = 1, which is the natural condition of zero total
   flux relative to a held edge. The source is f = ∂t m* − DΔm* + ∇·(m* v), with s = 1 − r²,
   g = x s², Δg = 8x − 24xs, ∇g·v = s³x − 4xs²r², ∇·v = 4s − 2 (derived by hand; the order test checks it).
-  A wrong sign of the carrier leaves an O(1) error that does not shrink. Backward Euler is first order in
-  dt, so the runner refines dt ∝ h². The membrane is snapped onto the circle (issue #249).
+  A wrong sign of the carrier leaves an O(1) error that does not shrink. It runs through the multi-compartment
+  solver (ADR 021 decision 8), by the method of lines at a tight tolerance, so the error measured is the spatial
+  one. The membrane is snapped onto the circle (issue #249).
 harness: member_transport
 dim: 2
 geometry: {kind: disk_in_box, radius: 1.0, cell: cell, outside: ec, membrane: pm}
@@ -17,7 +18,8 @@ exact: {m: "np.exp(-t)*(2 + x*(1 - x**2 - y**2)**2)"}
 t_final: 0.25
 resolutions_h: [0.1, 0.05, 0.025]
 expected_order_h: 2.0
-applicable_solvers: [fenics-be]
+applicable_solvers: [fenics-mol]
+mol_rtol: 1.0e-9
 math: |
   math_description:
     geometry: disk_in_medium

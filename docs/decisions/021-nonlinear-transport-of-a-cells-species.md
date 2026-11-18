@@ -414,6 +414,13 @@ At `t = 10`:
        a ratio between 0.4 and 0.6 per halving.
      - `_run_member_transport` (`mms/runner.py`) moves to the new path, and `member_transport_carried` keeps
        its order there.
+     - *Recorded in the implementation, 2026-11-17:*
+       - The difference's ratio per halving, measured at h = 0.15 on the step 3b model (E2 as written there): 0.652
+         from Δt = 0.05, then 0.577, 0.539 and 0.52 down to 0.003125. The first halving is pre-asymptotic, so the
+         test (`tests/test_member_species.py`) starts at Δt = 0.025 and asserts the next three.
+       - `member_transport_carried` runs by the method of lines in one stride (its velocity is steady), at
+         `rtol = 1e-9`: order 1.83 in L∞ for h 0.1 → 0.025 (1.8 by backward Euler). With the carrier's sign
+         flipped the error stays at 2.0.
    - **A transport slot reading a species, on every route** (decision 2): a diffusion and a drift that read
      the species compile and run on the single mesh (fixed and moving) and on the multi-compartment solver.
      They are checked against a manufactured solution with their spatial order: a new case of the
@@ -490,6 +497,27 @@ At `t = 10`:
        (decision 1; −1.4e-12 here). Both are far inside every criterion.
    - **What is not moved.** The single-mesh routes keep their own assembly, which decision 2 extends. Merging
      them into the multi-compartment solver is not this note's question.
+   - *Recorded in the implementation, 2026-11-17:*
+     - **The scope check** is `member_species` in `cell_force_balance.py`. The solver runs it, and the runner runs
+       it before a bundle starts, with the force balance assembled once on placeholders for the species, so a
+       refusal still writes nothing.
+     - **The velocity is a coefficient** of the member's species forms, which are on the parent mesh with the
+       compartment's entity map, as the species' own functions are. Its Jacobian has no `v` column: `v` is held.
+     - **Strides** reuse the moving partition's loop, with no move when no membrane moves. The `v` solved for an
+       output carries the next stride, so an output costs no second solve there.
+     - **`velocity_override(t, v)`** fills `v` in place of the solve, for verification (the MMS case, the known
+       steady state).
+     - **The runner's summary** gives `backend: multi_compartment`, `coupling: staggered`, `dt` the longest stride,
+       `strides`, `steps` (TS steps), `rtol` and `atol`. The bundle gains the membrane as a domain without
+       species, as on every multi-compartment run. As there, `geometry.cells` counts the whole partition (it was
+       the member's cells) and `geometry.measure` sums every domain's, the membrane's length included.
+     - **At a stationary front** any species' BC and any region variable are refused, not only a member
+       species' BC: a flux there, on either side, is decision 3's open question. A front also held at `v = 0`
+       counts as held.
+     - **The solver refuses** a T9 run with a restart (`t_start`, `initial`), a pending move or a remesh stop, an
+       output time that is not a stride's end, and a `velocity_override` without T9.
+     - **Parameters cannot read the species** on this path, since the solver validates the model (the Context).
+       The T9 driver, which did not validate, compiled such a parameter; its test of that is not ported.
    - **The options:**
      - **(a) At 5a,** as above.
      - **(b) At 5b.**
