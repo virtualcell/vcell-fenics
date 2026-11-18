@@ -426,6 +426,16 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-18** — **One integrator across a force balance's strides, as a solver option (ADR 021 decision 1's notes).**
+  - **What:** `--persistent-integrator` (`RunOptions.persistent_integrator`, `integrate_multi_compartment(...,
+    persistent_integrator=True)`) keeps one PETSc TS across the strides, its BDF history carried over each new `v`.
+    Off by default; refused with a moving membrane. The summary records `integrator`.
+  - **Finding:** it saves no steps (except at rtol 1e-3) and up to 30 % of wall time, and its integration error is
+    4–17× larger. The steps per stride come from the dynamics inside a stride, not from BDF restarting at order 1.
+    On this O(1) model the stagger's error dominates, so a looser rtol saved more (2.9× less wall time at t = 4 for
+    a 10 % larger total error). It is not a safe default: one scalar `atol` across badly scaled species (Jim,
+    2026-11-18). Per-species tolerances, or an indicator of the stagger's error, go to decision 7.
+
 - **2026-11-17** — **A cell's species run in the multi-compartment solver (ADR 021 decision 8; stage 5a, part 2).**
   - **What:** a T9 model with species goes to `integrate_multi_compartment`, which assembles the force balance on
     the member compartment's own mesh and strides on the fixed partition: `v` solved from the species before each

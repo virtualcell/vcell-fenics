@@ -423,6 +423,7 @@ def _resolve(model: ModelInput, args: argparse.Namespace) -> tuple[RunOptions, d
         time_integration=str(time_integration),
         rtol=float(model.suggested_rtol) if model.suggested_rtol is not None else 1.0e-6,
         atol=float(model.suggested_atol) if model.suggested_atol is not None else 1.0e-8,
+        persistent_integrator=bool(args.persistent_integrator),
     )
     return options, overrides
 
@@ -476,6 +477,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "fixed-step backward Euler, or adaptive PETSc TS (BDF; required for nonlinear kinetics). "
             "Default: method_of_lines for a --simtask, else backward_euler"
+        ),
+    )
+    discretisation.add_argument(
+        "--persistent-integrator",
+        action="store_true",
+        help=(
+            "a cell force balance: keep one integrator across the strides, its BDF history carried over each "
+            "new velocity, instead of a fresh one per stride. Measured (ADR 021 decision 1's notes): about as many "
+            "steps, and a larger integration error"
         ),
     )
 
