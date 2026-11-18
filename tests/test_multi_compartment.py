@@ -245,7 +245,9 @@ def test_a_box_face_value_holds_on_the_compartments_share_of_that_face() -> None
             BCDirichlet(variable="c", boundary="x_plus", expression="5.0"),  # c never reaches x_plus: dropped
         ],
     )
-    result = integrate_multi_compartment(md, geometry, t_final=20.0, rtol=1e-8, atol=1e-11)
+    # atol 1e-8: the tolerance this test always ran with, before the order of `setTolerances` was fixed. Both
+    # species start at 0 against Dirichlet values of 1-5, and an absolute 1e-11 near zero rejects every step.
+    result = integrate_multi_compartment(md, geometry, t_final=20.0, rtol=1e-8, atol=1e-8)
     # no membrane flux: each compartment relaxes to its own face's value (the nucleus is a hole in ec)
     assert np.allclose(result.fields["c"].x.array, 1.0, atol=1e-4)
     assert np.allclose(result.fields["e"].x.array, 2.0, atol=1e-4)

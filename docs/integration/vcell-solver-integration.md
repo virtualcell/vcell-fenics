@@ -426,6 +426,18 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-18** — **The method of lines had its tolerances swapped (fixed).**
+  - **What:** since the first method-of-lines integrator (2026-06-16, `1c75601`), all four `TS.setTolerances` calls
+    passed `(atol, rtol)` positionally; petsc4py's order is `(rtol, atol)`. Every run used the absolute tolerance
+    as the relative one and vice versa. Now passed by keyword (`multi_compartment.py`, `reaction_diffusion.py`,
+    `interface_coupled.py` ×2).
+  - **Effect:** small for O(1) species, where the two weights nearly coincide, which is why the MMS suite and
+    cross-validation did not see it. For a species of size 1e-3 at `rtol = 1e-6`, `atol = 1e-12`: 2.2e-2 relative
+    error swapped, 1.4e-4 fixed (`tests/test_ts_tolerances.py`, single mesh and multi-compartment). One test had
+    asked for `atol = 1e-11` but always ran at 1e-8; with species starting at 0 against Dirichlet values the true
+    1e-11 rejected every step, so it now asks for the 1e-8 it ran with.
+  - **Next:** ADR 022, per-species tolerances for every method-of-lines path.
+
 - **2026-11-18** — **One integrator across a force balance's strides, as a solver option (ADR 021 decision 1's notes).**
   - **What:** `--persistent-integrator` (`RunOptions.persistent_integrator`, `integrate_multi_compartment(...,
     persistent_integrator=True)`) keeps one PETSc TS across the strides, its BDF history carried over each new `v`.
