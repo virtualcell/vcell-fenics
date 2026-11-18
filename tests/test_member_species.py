@@ -125,6 +125,7 @@ def _integrate(
     on_output: Callable[[float, dict[str, fem.Function]], None] | None = None,
     override: Callable[[float, fem.Function], None] | None = None,
     rtol: float = 1e-8,
+    persistent: bool = False,
 ) -> MultiCompartmentResult:
     return integrate_multi_compartment(
         load_dict(raw),
@@ -136,6 +137,7 @@ def _integrate(
         velocity_override=override,
         rtol=rtol,
         atol=rtol * 1e-2,
+        persistent_integrator=persistent,
     )
 
 
@@ -512,6 +514,51 @@ def test_the_two_species_paths_agree_to_backward_eulers_error() -> None:
             ratios.append(error / previous)
         previous = error
     assert all(0.4 < r < 0.6 for r in ratios), ratios
+
+
+# -- the persistent integrator (a solver option) ------------------------------------------------------------------
+
+
+def test_one_integrator_across_the_strides_keeps_the_myosin_and_the_same_stagger() -> None:
+    """`persistent_integrator`: one integrator across the strides, its BDF history carried over each new `v`. It
+    integrates the same staggered model, so it agrees with a fresh integrator per stride to the integrators'
+    error, and the conservative form still keeps ∫m. Measured 2026-11-18 (h = 0.15, Δt = 0.025, rtol 1e-6): the
+    persistent run's relative L² error against a tight run of the same stagger was 3.4e-5, a fresh integrator's
+    9.1e-6, both far inside the stagger's own 7.5e-4."""
+
+    raw = _raw()
+    _myosin(raw)["initial_condition"] = "1.5 + 0.5 * geom.x[0]"
+    totals: list[float] = []
+
+    def record(t: float, fields: dict[str, fem.Function]) -> None:
+        m = fields["m"]
+        totals.append(_integral(m * ufl.dx(domain=m.function_space.mesh), m.function_space.mesh))
+
+    kept = _integrate(raw, 0.3, 0.02, outputs=(0.0, 0.3), on_output=record, rtol=1e-6, persistent=True)
+    fresh = _integrate(raw, 0.3, 0.02, rtol=1e-6)
+    assert kept.strides == fresh.strides == 15
+    assert kept.steps > 0
+    assert np.allclose(totals, totals[0], rtol=1e-11, atol=0.0), np.array(totals) / totals[0] - 1
+    a, b = kept.fields["m"], fresh.fields["m"]
+    difference = fem.Function(a.function_space)
+    difference.x.array[:] = a.x.array - b.x.array
+    mesh = a.function_space.mesh
+    relative = math.sqrt(
+        _integral(difference**2 * ufl.dx(domain=mesh), mesh) / _integral(b**2 * ufl.dx(domain=mesh), mesh)
+    )
+    assert relative < 1e-3, relative
+
+
+def test_one_integrator_across_a_moving_membranes_strides_is_refused() -> None:
+    with pytest.raises(ValueError, match="persistent_integrator with a moving membrane 'pm'"):
+        integrate_multi_compartment(
+            load_dict(_raw()),
+            _geometry(0.15),
+            t_final=0.1,
+            stride_ends=[0.1],
+            motion_membrane="pm",
+            persistent_integrator=True,
+        )
 
 
 # -- vcell-core's E2, when the sibling checkout is present ----------------------------------------------------

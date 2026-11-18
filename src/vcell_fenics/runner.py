@@ -107,6 +107,8 @@ class RunOptions:
     `output_times` are the rows the bundle will hold, starting with the initial state at 0 and ending
     at `t_final`; they need not be uniform. `dt` is the backward-Euler step (snapped per output
     interval so every output lands on a step); `rtol`/`atol` drive the adaptive method of lines.
+    `persistent_integrator` keeps one integrator across a cell force balance's strides (a solver option, off
+    by default; `integrate_multi_compartment`).
     """
 
     h: float
@@ -117,6 +119,7 @@ class RunOptions:
     time_integration: str  # "backward_euler" | "method_of_lines"
     rtol: float = 1.0e-6
     atol: float = 1.0e-8
+    persistent_integrator: bool = False
 
     def __post_init__(self) -> None:
         times = self.output_times
@@ -153,6 +156,8 @@ def run_model(
     force_balance = _prepare_cell_force_balance(model, options, reporter) if _cell_force_balance(model.math) else None
     if force_balance is not None and options.time_integration != "method_of_lines":
         options = replace(options, time_integration="method_of_lines")  # the manifest records what runs
+    if options.persistent_integrator and force_balance is None:
+        log("note: --persistent-integrator applies to a cell force balance's strides only; it is ignored")
     moving = [] if force_balance is not None else _moving_subdomains(model)
     # a moving membrane with equations on more than one subdomain (its species, both sides' species): the
     # multi-compartment solver moves the whole partition (ADR 014); one subdomain is the moving path's (ADR 013)
@@ -206,6 +211,7 @@ def run_model(
                 "strides": strides,
                 "rtol": options.rtol,
                 "atol": options.atol,
+                "integrator": "persistent" if options.persistent_integrator else "fresh per stride",
             }
         elif moving:
             cells, steps, dt_used, remeshes, strides = _run_moving(model, moving, options, recorder, reporter)
@@ -822,6 +828,7 @@ def _run_multi_compartment(
             on_output=on_output,
             on_progress=status.step,
             stride_ends=_stride_ends(options) if force_balance is not None else (),
+            persistent_integrator=options.persistent_integrator and force_balance is not None,
         )
         return cells, int(result.steps), int(result.strides)
     return (

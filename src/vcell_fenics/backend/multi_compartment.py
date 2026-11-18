@@ -336,6 +336,7 @@ def integrate_multi_compartment(
     pending_move: tuple[float, float] | None = None,
     stop_for_remesh: bool = False,
     velocity_override: Callable[[float, fem.Function], None] | None = None,
+    persistent_integrator: bool = False,
 ) -> MultiCompartmentResult:
     """Integrate ``md`` on ``geometry`` to ``t_final`` (the module docstring). ``on_output(t, fields)`` receives
     every species and region variable by name (snapshots valid for the call) at each of ``output_times``,
@@ -358,9 +359,19 @@ def integrate_multi_compartment(
     partition: before each stride ``v`` is solved from the species, then held while a fresh integrator covers the
     stride (ADR 021 decision 1). ``on_output`` also receives ``v``, solved from the species at that time (ADR 020
     decision 5), and the result carries it. ``velocity_override(t, v)``, for verification, fills ``v`` at each
-    solve in place of the force balance."""
+    solve in place of the force balance.
+
+    ``persistent_integrator`` keeps one integrator across a force balance's strides instead of a fresh one per
+    stride: its BDF history and order carry over the change of ``v`` between strides, and its error control
+    meets the kink this puts in the species' rate. A solver option, off by default; refused with a moving
+    membrane, whose mesh moves change the unknowns' meaning between strides."""
 
     validate_or_raise(md)
+    if persistent_integrator and motion_membrane is not None:
+        raise ValueError(
+            f"persistent_integrator with a moving membrane {motion_membrane!r}: each mesh move remaps the species, "
+            f"so the integrator's history would describe another mesh; it restarts every stride"
+        )
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
     t9 = next((eq for eq in template_eqs if eq.template == CELL_FORCE_BALANCE), None)
     member: str | None = None
@@ -981,6 +992,7 @@ def integrate_multi_compartment(
             return any(abs(time_now - r) <= 1.0e-12 * max(1.0, abs(r)) for r in recorded)
 
         needs_remesh, pending = False, None
+        kept: PETSc.TS | None = None  # the one integrator across strides (persistent_integrator)
         if pending_move is not None:  # the second half of a stride, left undone before the remesh
             moved(*pending_move)
             if on_progress is not None:
@@ -996,12 +1008,22 @@ def integrate_multi_compartment(
             if balance is not None and not solved:
                 solve_velocity(t)
             solved = False
-            ts = make_ts(t, t_end, min(dt, t_end - t))
-            ts.solve(state_vec)
-            steps += ts.getStepNumber()
+            if kept is None:
+                ts = make_ts(t, t_end, min(dt, t_end - t))
+                ts.solve(state_vec)
+                steps += ts.getStepNumber()
+                dt = float(ts.getTimeStep())
+                if persistent_integrator:
+                    kept = ts
+                else:
+                    ts.destroy()
+            else:  # the same integrator, its history carried over the new velocity
+                before = kept.getStepNumber()
+                kept.setMaxTime(t_end)
+                kept.solve(state_vec)
+                steps += kept.getStepNumber() - before
+                dt = float(kept.getTimeStep())
             strides += 1
-            dt = float(ts.getTimeStep())
-            ts.destroy()
             if not moved(t_end, 0.5 * (t_end - t)):
                 needs_remesh, pending = True, (t_end, 0.5 * (t_end - t))
                 t = t_end
@@ -1017,6 +1039,8 @@ def integrate_multi_compartment(
             if not solved:
                 solve_velocity(t)
             final_velocity = _copy(cast(fem.Function, velocity))
+        if kept is not None:
+            kept.destroy()
         for mass in masses.values():
             mass.destroy()
         for petsc_object in (state_vec, precond, parent_matrix, own_matrix):

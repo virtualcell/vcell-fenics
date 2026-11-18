@@ -229,6 +229,38 @@ At `t = 10`:
 
    *Recommendation: (a).*
 
+   - *Recorded in the implementation, 2026-11-18: one integrator across the strides, a solver option.*
+     - **What it is.** `integrate_multi_compartment(..., persistent_integrator=True)` (CLI
+       `--persistent-integrator`, `RunOptions.persistent_integrator`) keeps one TS across a force balance's
+       strides. Between strides `v` is re-solved and the TS continues, its BDF history and order carried over the
+       new `v`. Off by default. Refused with a moving membrane, whose moves remap the species, so the history
+       would describe another mesh. A remesh changes the unknowns, so it always needs a fresh integrator. The
+       summary records `integrator` ("fresh per stride" or "persistent").
+     - **Checked first:** PETSc's TSBDF keeps its history across repeated `TSSolve` calls with a raised max time.
+       On `u' = −u` in 50 solves it took 193 steps, against 171 for one solve and 338 restarting each time.
+     - **Measured on this ADR's myosin model** (h = 0.15, β = 5). "Integration error" is the relative L² error
+       against the same stagger integrated tightly; "total" is against a run with 4× shorter strides.
+
+       | run | rtol | fresh per stride: steps, integration / total error | persistent: steps, integration / total error |
+       |---|---|---|---|
+       | t = 0.5, Δt = 0.025 | 1e-6 | 105, 9.1e-6 / 7.5e-4 | 140, 3.4e-5 / 7.7e-4 |
+       | t = 0.5, Δt = 0.025 | 1e-4 | 26, 1.2e-4 / 8.6e-4 | 26, 5.4e-4 / 1.3e-3 |
+       | t = 4, Δt = 0.05 | 1e-6 | 3902, 1.2e-5 / 3.0e-2 | 4058, 2.1e-4 / 3.0e-2 |
+       | t = 4, Δt = 0.05 | 1e-4 | 1011, 3.3e-3 / 3.3e-2 | 1016, 1.7e-2 / 4.7e-2 |
+       | t = 4, Δt = 0.05 | 1e-3 | 532, 8.1e-3 / 3.8e-2 | 403, 6.7e-2 / 9.5e-2 |
+
+     - **What it shows.**
+       - Keeping the integrator saves no steps, except at rtol 1e-3, and saves 0–30 % of the wall time (the TS
+         set-up per stride).
+       - Its integration error is 4–17× larger. Its BDF history spans the kink each new `v` puts in the species'
+         rate, and its error estimate, built from that history, under-reports it (*inferred* from the error
+         ratios).
+       - The steps per stride (about 50 at rtol 1e-6, t = 4) are set by the dynamics inside a stride, not by
+         BDF's restart at order 1. The restart was not the cost.
+     - **The larger lever is the tolerance.** The stagger's error dominates (total ≫ integration). At t = 4,
+       rtol 1e-4 instead of 1e-6 takes 3.9× fewer steps and 2.9× less wall time, and raises the total error from
+       3.0e-2 to 3.3e-2. Matching rtol to the stride is a question for decision 7's cost measurement.
+
 2. **A slot may read the species on every route, and a model nonlinear in its species runs by the method of
    lines.** The switch was decided by Jim on 2026-11-17, for the T9 route. The amendment widens it to every
    route.

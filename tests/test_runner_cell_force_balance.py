@@ -114,6 +114,7 @@ def test_the_runner_writes_the_species_and_the_velocity_by_component(tmp_path: P
     assert summary["run"]["strides"] == 4
     assert summary["run"]["dt"] == pytest.approx(0.05)
     assert (summary["run"]["rtol"], summary["run"]["atol"]) == (1e-6, 1e-8)
+    assert summary["run"]["integrator"] == "fresh per stride"
 
     bundle = Bundle.open(tmp_path / "results.fenics")
     manifest = bundle.manifest
@@ -234,6 +235,18 @@ def test_the_cli_runs_a_force_balance(tmp_path: Path) -> None:
     bundle = Bundle.open(out / "results.fenics")
     assert bundle.times == (0.0, 0.05, 0.1)
     assert set(bundle.manifest.vectors("cell")) == {"v"}
+
+
+def test_the_cli_keeps_one_integrator_when_asked(tmp_path: Path) -> None:
+    (tmp_path / "math.yaml").write_text(_MYOSIN)
+    (tmp_path / "geom.yaml").write_text(_GEOMETRY)
+    argv = ["--math", str(tmp_path / "math.yaml"), "--geometry", str(tmp_path / "geom.yaml")]
+    out = tmp_path / "out"
+    discretisation = ["--h", "0.2", "--dt", "0.05", "--t-final", "0.1", "--output-dt", "0.05"]
+    assert main([*argv, *discretisation, "--persistent-integrator", "--out", str(out)]) == 0
+    summary = json.loads((out / "results.fenics" / "provenance" / "summary.json").read_text())
+    assert summary["run"]["integrator"] == "persistent"
+    assert summary["run"]["strides"] == 2
 
 
 _E2 = Path(__file__).resolve().parents[2] / "vcell-core" / "conformance" / "math" / "resolved-cell.jsonl"
