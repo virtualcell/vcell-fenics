@@ -89,6 +89,7 @@ from vcell_fenics.backend.realize import (
     _realize_3d_partition,
 )
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
+from vcell_fenics.formalism.linearity import TRANSPORT_SLOTS, reads
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
@@ -509,12 +510,25 @@ def integrate_multi_compartment(
     for eq in field_eqs:
         blk, _ = where[eq.variable]
         w, u, rate = part(tests, eq.variable), part(states, eq.variable), part(rates, eq.variable)
+        # The transport slots read the species (ADR 021 decision 2): a compartment's own species and the region
+        # variables, or on a membrane its own species (the forms on its own mesh, where no region Real lives).
+        # The Jacobian is `ufl.derivative` of the residual, so a coefficient that reads a species enters it.
         if eq.subdomain in geometry.compartments:
             dx = cells(geometry.compartments[eq.subdomain].region_tag)
-            local = ctx
+            local = bulk_ctx(eq.subdomain)
         else:
             dx = ufl.Measure("dx", domain=geometry.membranes[eq.subdomain].mesh)
-            local = surface_ctx[eq.subdomain]
+            on_membrane = surface_ctx[eq.subdomain]
+            membrane_species = {e.variable: part(states, e.variable) for e in members.get(eq.subdomain, [])}
+            elsewhere = frozenset(names) - membrane_species.keys()
+            for slot in TRANSPORT_SLOTS & eq.terms.keys():
+                if reads(parse(eq.terms[slot]), elsewhere):
+                    raise NotImplementedError(
+                        f"the {slot} of membrane species {eq.variable!r} reads a bulk species or a region variable; "
+                        f"a membrane's transport is assembled on its own mesh, where only its own species are "
+                        f"bound (ADR 021 decision 2)"
+                    )
+            local = CompileContext(on_membrane.mesh, {**on_membrane.symbols, **membrane_species})
         form = rate * w * dx
         if "diffusion" in eq.terms:
             d = compile_expression(parse(eq.terms["diffusion"]), local)

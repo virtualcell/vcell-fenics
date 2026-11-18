@@ -41,6 +41,15 @@ from ufl.algorithms.check_arities import ArityMismatch, check_form_arity
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.diagnostics import NonlinearTermError, nonlinear_backward_euler_message
 
+# The messages of UFL's `lhs`/`rhs` split (`ufl.algorithms.formtransformations`) when an argument sits where a
+# linear form cannot hold it: inside a nonlinear operator or a denominator, or in a sum whose terms carry
+# different arguments (a product of two unknowns beside a linear term).
+_UFL_NONLINEAR_SPLIT = (
+    "Found Argument in",
+    "sums with different Arguments",
+    "non-zero components providing fewer arguments",
+)
+
 
 class TermKind(Enum):
     """The kinds of term a template can contribute. A closed set, extended deliberately as new templates land
@@ -639,8 +648,14 @@ class DiscreteProblem:
             try:
                 a, ell = self.scheme.compose(self)
                 check_form_arity(a, a.arguments())
-            except (ArityMismatch, ValueError) as nonlinear:
+            except ArityMismatch as nonlinear:
                 raise NonlinearTermError(nonlinear_backward_euler_message()) from nonlinear
+            except ValueError as error:
+                # only UFL's own errors for an argument it cannot split off (ADR 021 decision 2): any other
+                # ValueError is a defect, not a nonlinear model, and propagates as one
+                if not any(fragment in str(error) for fragment in _UFL_NONLINEAR_SPLIT):
+                    raise
+                raise NonlinearTermError(nonlinear_backward_euler_message()) from error
             self._a, self._L = a, ell
         return a, ell
 
