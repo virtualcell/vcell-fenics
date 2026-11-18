@@ -1144,7 +1144,7 @@ def integrate_interface_coupled(
     ts.setTimeStep(dt_initial if dt_initial is not None else t_final / 1.0e4)
     ts.setMaxTime(t_final)
     ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-    ts.setTolerances(atol, rtol)
+    ts.setTolerances(rtol=rtol, atol=atol)
     ts.setMaxSNESFailures(-1)
     snes = ts.getSNES()
     snes.setUseEW(False)
@@ -2044,7 +2044,7 @@ def integrate_membrane_coupled(
         ts.setTimeStep(dt_initial if dt_initial is not None else (t1 - t0) / 1.0e4)
         ts.setMaxTime(t1)
         ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-        ts.setTolerances(atol, rtol)
+        ts.setTolerances(rtol=rtol, atol=atol)
         ts.setMaxSNESFailures(-1)
         snes = ts.getSNES()
         snes.setUseEW(False)

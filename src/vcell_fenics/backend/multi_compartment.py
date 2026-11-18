@@ -852,7 +852,7 @@ def integrate_multi_compartment(
         ts.setTimeStep(dt)
         ts.setMaxTime(t_end)
         ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-        ts.setTolerances(atol, rtol)
+        ts.setTolerances(rtol=rtol, atol=atol)
         ts.setMaxSNESFailures(-1)
         snes = ts.getSNES()
         snes.setUseEW(False)

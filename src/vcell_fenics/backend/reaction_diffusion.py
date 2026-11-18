@@ -219,7 +219,7 @@ def _run_time_stepper(
     ts.setTime(t_start)  # integrate the sub-interval [t_start, t_final] (the moving driver strides over these)
     ts.setMaxTime(options.t_final)
     ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-    ts.setTolerances(options.atol, options.rtol)
+    ts.setTolerances(rtol=options.rtol, atol=options.atol)
     ts.setMaxSNESFailures(-1)  # let the adaptive controller cut the step and retry when Newton fails
     # Inner Newton (SNES) linear solver. The MOL default is a **Krylov solve (GMRES) with an
     # ILU preconditioner** — VCell's reaction-diffusion solver uses CVODE with SPGMR + ILU for
