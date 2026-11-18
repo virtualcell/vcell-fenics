@@ -45,6 +45,12 @@ every move, so a stride reads the sizes of the midpoint mesh it integrates on. R
 non-diffusing species where the mesh moves are refused. A run is carried through remeshes in segments (ADR 016:
 `stop_for_remesh`, `t_start`, `initial`, `pending_move`; the runner drives them).
 
+**A cell force balance** (T9, ADR 021 decision 8): handed to ``cell_force_balance.py``, assembled on the member
+compartment's own mesh. The member's species ride its velocity ``v`` in the conservative form ``−∫ u (v + w)·∇q``
+(ADR 020 decision 2), and ``v`` is bound in the member's slots. The run strides on the fixed partition: ``v`` is
+solved from the species before each stride and held over it, a fresh integrator per stride (ADR 021 decision 1).
+The scope is ``member_species``'s: a fixed skeleton, one member, species elsewhere across a held membrane.
+
 Lab-frame ``advection`` and the interface value-equality constraint are refused.
 """
 
@@ -305,6 +311,9 @@ class MultiCompartmentResult:
     needs_remesh: bool = False
     pending_move: tuple[float, float] | None = None
     last_dt: float | None = None
+    # A cell force balance (T9): its velocity, solved from the final species (ADR 021 decision 8)
+    velocity: fem.Function | None = None
+    strides: int = 0  # strides integrated (a moving membrane or a force balance), each a fresh integrator
 
 
 def integrate_multi_compartment(
@@ -326,6 +335,7 @@ def integrate_multi_compartment(
     initial: Mapping[str, fem.Function] | None = None,
     pending_move: tuple[float, float] | None = None,
     stop_for_remesh: bool = False,
+    velocity_override: Callable[[float, fem.Function], None] | None = None,
 ) -> MultiCompartmentResult:
     """Integrate ``md`` on ``geometry`` to ``t_final`` (the module docstring). ``on_output(t, fields)`` receives
     every species and region variable by name (snapshots valid for the call) at each of ``output_times``,
@@ -339,15 +349,44 @@ def integrate_multi_compartment(
     transferred scalar P1 field on this geometry, doing first any ``pending_move``. With ``stop_for_remesh`` it
     returns early, ``needs_remesh`` set, when a cell has shrunk below a quarter of its as-built area or a move would
     tangle the mesh (the move undone); without it, a tangle raises. A geometry that was just remeshed must take its
-    first move: if that tangles, the front cannot advance (`FrontCannotAdvance`, decision 6)."""
+    first move: if that tangles, the front cannot advance (`FrontCannotAdvance`, decision 6).
+
+    A cell force balance (T9) is handed to its own assembler (``cell_force_balance.py``) on the member
+    compartment's mesh, in the scope of ``member_species`` (ADR 021 decisions 3 and 8). The member's species
+    ride its velocity ``v`` in the conservative form ``−∫ u (v + w)·∇q`` (ADR 020 decision 2, the mesh at rest),
+    and ``v`` may be read by any of the member's slots. The run then strides over ``stride_ends`` on the fixed
+    partition: before each stride ``v`` is solved from the species, then held while a fresh integrator covers the
+    stride (ADR 021 decision 1). ``on_output`` also receives ``v``, solved from the species at that time (ADR 020
+    decision 5), and the result carries it. ``velocity_override(t, v)``, for verification, fills ``v`` at each
+    solve in place of the force balance."""
 
     validate_or_raise(md)
     template_eqs = [eq for eq in md.equations if isinstance(eq, TemplateEquation)]
-    if any(eq.template == CELL_FORCE_BALANCE for eq in template_eqs):
-        raise NotImplementedError(
-            f"the {CELL_FORCE_BALANCE!r} template (T9, ADR 018) is not assembled by the multi-compartment solver; "
-            f"its own solve is ADR 018's staging steps 2–4"
-        )
+    t9 = next((eq for eq in template_eqs if eq.template == CELL_FORCE_BALANCE), None)
+    member: str | None = None
+    if t9 is not None:
+        from vcell_fenics.backend.cell_force_balance import member_species
+
+        if motion_membrane is not None:
+            raise NotImplementedError(
+                f"a cell force balance ({t9.variable!r}) beside a moving membrane {motion_membrane!r}: species on a "
+                f"moving cell are stage 5b (ADR 021 decision 3)"
+            )
+        member, _ = member_species(md, geometry)
+        _check_stride_ends(stride_ends, t_final)
+        if t_start != 0.0 or initial is not None or pending_move is not None or stop_for_remesh:
+            raise NotImplementedError(
+                "a cell force balance runs from t = 0 on a fixed partition: no restart, pending move or remesh stop"
+            )
+        ends = [0.0, *stride_ends]
+        missed = [t for t in output_times if not any(abs(t - e) <= 1.0e-12 * max(1.0, abs(e)) for e in ends)]
+        if on_output is not None and missed:
+            raise ValueError(
+                f"output times {missed} are not stride ends: a force balance records only at a stride's end"
+            )
+        template_eqs = [eq for eq in template_eqs if eq is not t9]
+    elif velocity_override is not None:
+        raise ValueError("velocity_override fills a cell force balance's velocity; this model has none")
     kind_of = {sd.name: sd.kind for sd in md.subdomains}
     region_eqs = [eq for eq in template_eqs if eq.template == "region_ode"]
     field_eqs = [as_field_equation(eq, kind_of[eq.subdomain]) for eq in template_eqs if eq.template != "region_ode"]
@@ -477,13 +516,26 @@ def integrate_multi_compartment(
         )
         size_constants += motion.size_constants
 
+    # A cell force balance (ADR 021 decision 8): assembled on the member compartment's own mesh, reading the
+    # member's species as they are (the states), so its velocity and the species share one mesh
+    balance = None
+    velocity: fem.Function | None = None
+    if t9 is not None:
+        from vcell_fenics.backend.cell_force_balance import assemble_cell_force_balance, build_members_mesh
+
+        carried = {eq.variable: part(states, eq.variable) for eq in members.get(cast(str, member), [])}
+        balance = assemble_cell_force_balance(md, geometry, prebuilt=build_members_mesh(md, geometry), fields=carried)
+        velocity = balance.velocity
+
     def trace(compartment: str, f: UflExpr) -> UflExpr:
         return f("+") * chi[compartment]("+") + f("-") * chi[compartment]("-")
 
     def bulk_ctx(compartment: str) -> CompileContext:
-        """A compartment's own species (the states) and every region variable, beside the parameters."""
+        """A compartment's own species (the states) and every region variable, beside the parameters; on a
+        force balance's member, its velocity too (lagged: a coefficient, held over a stride)."""
         own_species = {eq.variable: part(states, eq.variable) for eq in members.get(compartment, [])}
-        return CompileContext(parent, {**ctx.symbols, **region_value, **own_species})
+        carrier = {cast(TemplateEquation, t9).variable: velocity} if compartment == member else {}
+        return CompileContext(parent, {**ctx.symbols, **region_value, **own_species, **carrier})
 
     def membrane_ctx(membrane: str) -> CompileContext:
         """On a membrane's dS: both sides' species by their traces, its own species, every region variable."""
@@ -538,7 +590,13 @@ def integrate_multi_compartment(
             if "relative_advection" in eq.terms
             else None
         )
-        if motion is not None and eq.subdomain in geometry.compartments:
+        if velocity is not None and eq.subdomain == member:
+            # riding the force balance's velocity (ADR 020 decision 2): the material's velocity plus the drift,
+            # relative to the mesh (at rest), integrated by parts, so ∫u is conserved by the transport and the
+            # natural condition is zero total flux relative to the cell's boundary
+            carrier = velocity if drift is None else velocity + drift
+            form += -u * ufl.dot(carrier, ufl.grad(w)) * dx
+        elif motion is not None and eq.subdomain in geometry.compartments:
             # material at rest, on a moving mesh (ADR 014 decision 3): the carrier (the drift, 0 by default)
             # relative to the mesh, integrated by parts, so the natural flux is total and relative to the
             # moving membrane; the mass across a mesh move is carried by the moments (ADR 015)
@@ -792,7 +850,8 @@ def integrate_multi_compartment(
         ts.setFromOptions()
         return ts
 
-    if motion is not None:
+    if motion is not None or balance is not None:
+        # Strides: a moving membrane, a cell force balance's velocity, or both later (stage 5b).
         # A moving membrane (ADR 015): each stride moves the mesh by half a stride, integrates the whole stride on
         # that midpoint mesh with a fresh integrator (so the BDF history never spans a move), then moves the
         # other half. Each move carries every species' nodal moments ∫φᵢu exactly, M⁺u⁺ = M⁻u⁻ with the mass
@@ -800,10 +859,13 @@ def integrate_multi_compartment(
         # transported back relative to the mesh by the stride, and each species' total is kept exactly.
         # One mass matrix per mesh and block size, shared by the species on it, assembled once per move: the
         # mesh does not change between moves, so the matrix after one move is the one before the next.
+        # A force balance's velocity (ADR 021 decisions 1 and 8): solved from the species before each stride and
+        # held over it, so each stride's integrator sees a fixed operator; a fresh one per stride keeps the BDF
+        # history from spanning a change of velocity.
         mass_key = [(id(V.mesh), V.dofmap.index_map_bs) for V in spaces[:n_fields]]
         mass_forms: dict[tuple[int, int], fem.Form] = {}
         for key, V in zip(mass_key, spaces[:n_fields], strict=True):
-            if key not in mass_forms:
+            if motion is not None and key not in mass_forms:
                 mass_forms[key] = fem.form(ufl.inner(ufl.TrialFunction(V), ufl.TestFunction(V)) * ufl.dx)
 
         def assemble_masses() -> dict[tuple[int, int], PETSc.Mat]:
@@ -825,6 +887,7 @@ def integrate_multi_compartment(
                 b = masses[mass_key[k]].createVecLeft()
                 masses[mass_key[k]].mult(states[k].x.petsc_vec, b)
                 moments.append(b)
+            assert motion is not None
             try:
                 motion.advance(t_move, length)
             except Exception:  # undone (or a stop): the moments are not needed
@@ -862,17 +925,41 @@ def integrate_multi_compartment(
         from vcell_fenics.backend.discrete import MeshTangled
         from vcell_fenics.backend.moving_partition import FrontCannotAdvance
 
-        steps, t = 0, t_start
+        solved = False  # the velocity is the one solved from the species as they are now
+
+        def solve_velocity(t_now: float) -> None:
+            nonlocal solved
+            assert balance is not None and velocity is not None
+            scatter(state_vec, states)  # the force balance reads the species through the states
+            if velocity_override is not None:
+                velocity_override(t_now, velocity)
+            else:
+                balance.solve(t_now)
+            solved = True
+
+        def output_fields(t_now: float) -> dict[str, fem.Function]:
+            """Every variable at ``t_now``; with a force balance, the velocity solved from these species (ADR 020
+            decision 5): it carries the next stride, which reuses it."""
+            scatter(state_vec, states)
+            fields = views.of(states)
+            if balance is not None:
+                solve_velocity(t_now)
+                fields[cast(TemplateEquation, t9).variable] = cast(fem.Function, velocity)
+            return fields
+
+        steps, strides, t = 0, 0, t_start
         dt = dt_initial if dt_initial is not None else (stride_ends[0] - t_start) / 10.0
         recorded = sorted(output_times) if on_output is not None else []
         if on_output is not None and recorded and t_start <= 0.0 and recorded[0] <= 0.0:
-            on_output(0.0, views.of(states))
+            on_output(0.0, output_fields(0.0))
         fresh = initial is not None  # a geometry just remeshed: its first move must succeed
 
         def moved(t_move: float, length: float) -> bool:
             """Make a half-move; False if the mesh needs a remesh first (it has degraded, or the move would have
-            tangled it and was undone) and the caller should stop for one."""
+            tangled it and was undone) and the caller should stop for one. Without a moving membrane, nothing."""
             nonlocal fresh
+            if motion is None:
+                return True
             if stop_for_remesh and not fresh and motion.degraded():
                 return False
             try:
@@ -899,17 +986,20 @@ def integrate_multi_compartment(
             if on_progress is not None:
                 on_progress(t)
             if on_output is not None and at_output(t):  # recorded once, on the new mesh, after the redone move
-                scatter(state_vec, states)
-                on_output(t, views.of(states))
+                on_output(t, output_fields(t))
         for t_end in stride_ends:
             if t_end <= t + 1.0e-12 * max(1.0, abs(t)):
                 continue
             if not moved(0.5 * (t + t_end), 0.5 * (t_end - t)):
                 needs_remesh = True
                 break
+            if balance is not None and not solved:
+                solve_velocity(t)
+            solved = False
             ts = make_ts(t, t_end, min(dt, t_end - t))
             ts.solve(state_vec)
             steps += ts.getStepNumber()
+            strides += 1
             dt = float(ts.getTimeStep())
             ts.destroy()
             if not moved(t_end, 0.5 * (t_end - t)):
@@ -920,9 +1010,13 @@ def integrate_multi_compartment(
             if on_progress is not None:
                 on_progress(t)
             if on_output is not None and at_output(t):
-                scatter(state_vec, states)
-                on_output(t, views.of(states))
+                on_output(t, output_fields(t))
         scatter(state_vec, states)
+        final_velocity = None
+        if balance is not None:
+            if not solved:
+                solve_velocity(t)
+            final_velocity = _copy(cast(fem.Function, velocity))
         for mass in masses.values():
             mass.destroy()
         for petsc_object in (state_vec, precond, parent_matrix, own_matrix):
@@ -932,7 +1026,15 @@ def integrate_multi_compartment(
             operator.destroy()
         final = {name: _copy(f) for name, f in views.of(states).items()}
         return MultiCompartmentResult(
-            final, subdomain_of, steps, t, needs_remesh=needs_remesh, pending_move=pending, last_dt=dt
+            final,
+            subdomain_of,
+            steps,
+            t,
+            needs_remesh=needs_remesh,
+            pending_move=pending,
+            last_dt=dt,
+            velocity=final_velocity,
+            strides=strides,
         )
 
     ts = make_ts(0.0, t_final, dt_initial if dt_initial is not None else t_final / 1.0e4)
@@ -1001,6 +1103,10 @@ def _refuse_on_a_moving_partition(
                 f"a non-diffusing species ({eq.variable!r}) on {eq.subdomain!r}, which the moving membrane moves, is "
                 "not supported yet: VCell sweeps it with the front, and pure advection needs stabilization (#186)"
             )
+    _check_stride_ends(stride_ends, t_final)
+
+
+def _check_stride_ends(stride_ends: Sequence[float], t_final: float) -> None:
     if (
         not stride_ends
         or abs(stride_ends[-1] - t_final) > 1.0e-12 * max(1.0, t_final)

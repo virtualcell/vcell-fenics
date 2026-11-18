@@ -44,10 +44,12 @@ Each case names the solver family it exercises; the dev runner dispatches on it:
   the velocity now solved (`unknown_motion_receptor_dilution` → order ≈ 2, dt ∝ h²).
 - **`member_transport`** — a species on the member of a cell force balance (T9), carried by the velocity in
   the conservative form `−∫ m (v + w)·∇q` (ADR 020 decision 2), with the velocity **prescribed** from the case's
-  `velocity` in place of the solve, through `assemble_cell_force_balance_run` (BE). Geometry: `disk_in_box`, the
-  membrane snapped onto the circle (issue #249). `member_transport_carried`: a compressible `v = (1 − r²)(x, y)`
-  that vanishes on the held membrane → order 1.8 (L∞), dt ∝ h²; with the carrier's sign flipped the error stays
-  at 2.0.
+  `velocity` in place of the solve (`velocity_override`), through the multi-compartment solver, which carries a
+  cell's species (ADR 021 decision 8), by the method of lines (`mol_rtol: 1e-9`, one stride, the velocity being
+  steady). Geometry: `disk_in_box`, the membrane snapped onto the circle on the parent mesh and the cell's submesh
+  (issue #249). `member_transport_carried`: a compressible `v = (1 − r²)(x, y)` that vanishes on the held membrane
+  → order 1.83 (L∞; 1.8 by the earlier backward-Euler path, before 2026-11-17); with the carrier's sign flipped
+  the error stays at 2.0.
 
 `applicable_solvers` in each case declares which apply. The fv/mb runners author the case as VCML — the
 manufactured forcing is a **general-kinetics** volume source `∅ → u` with net rate `J = f` (mass-action

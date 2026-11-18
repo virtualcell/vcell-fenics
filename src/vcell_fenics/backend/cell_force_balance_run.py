@@ -1,5 +1,9 @@
 """A cell force balance with species on its members, run in time on a fixed skeleton (ADR 018 step 3b; ADR 020).
 
+**Superseded** by the multi-compartment solver, which carries a cell's species (ADR 021 decision 8): the runner
+and the MMS harness use that path. This driver stays only until its species problem retires, after the two paths'
+agreement test (`tests/test_member_species.py`, ADR 021 decision 7).
+
 The species on the members (the cells' compartments) ride the solved velocity `v` (ADR 020 decision 1): no
 slot names the carrier. Each is transported in the conservative lab-frame form `−∫ m (v + w − v_mesh)·∇q`
 (decision 2), with `w` its `relative_advection` drift and `v_mesh = 0` here. So it is diluted by `m∇·v`, its

@@ -321,16 +321,25 @@ def _run_unknown_motion(case: dict[str, Any], solver: str, h: float) -> tuple[fl
 def _run_member_transport(case: dict[str, Any], solver: str, h: float) -> tuple[float, float]:
     """A species on the member of a cell force balance, carried by the velocity (ADR 020 decisions 2 and 6), with
     a PRESCRIBED velocity in place of the solved one so the transport has a closed form. The case's math is a T9
-    model whose species has the manufactured source; the force balance is assembled but not solved: each step sets
-    the velocity from the case's `velocity` and advances the species alone (backward Euler, the run's own form
-    `−∫ m v·∇q`). The geometry is a disk in a box (`realize_multi_compartment`) with its membrane snapped onto the
-    circle, since an analytic boundary realized by marching is first order (issue #249)."""
+    model whose species has the manufactured source. It runs through the multi-compartment solver, which carries a
+    cell's species (ADR 021 decision 8), with `velocity_override` filling the velocity from the case's `velocity`
+    in place of the force balance's solve: the solver's own form `−∫ m (v + w)·∇q`, integrated by the method of
+    lines, one stride over the run (the velocity does not change). The geometry is a disk in a box
+    (`realize_multi_compartment`) with its membrane snapped onto the circle, on the parent mesh and on the cell's
+    own submesh, since an analytic boundary realized by marching is first order (issue #249)."""
+    from dolfinx import fem
     from dolfinx.mesh import entities_to_geometry
+    from scipy.spatial import cKDTree
 
-    from vcell_fenics.backend.cell_force_balance_run import assemble_cell_force_balance_run
-    from vcell_fenics.backend.multi_compartment import realize_multi_compartment
+    from vcell_fenics.backend.multi_compartment import integrate_multi_compartment, realize_multi_compartment
     from vcell_fenics.formalism.geometry_schema import SurfaceClass
 
+    if solver != "fenics-mol":
+        raise ValueError(f"the member_transport harness runs by the method of lines, not {solver!r}")
+    from mpi4py import MPI
+
+    if MPI.COMM_WORLD.size > 1:
+        raise RuntimeError("the member_transport harness snaps the membrane rank by rank: run it on one process")
     g = case["geometry"]
     radius = float(g["radius"])
     desc = GeometryDescription(
@@ -344,30 +353,39 @@ def _run_member_transport(case: dict[str, Any], solver: str, h: float) -> tuple[
         ),
         surfaces=(SurfaceClass(name=g["membrane"], inside=g["cell"], outside=g["outside"]),),
     )
-    geometry = realize_multi_compartment(desc, h=h)
+    geometry = realize_multi_compartment(desc, h=h, compartments={g["cell"]})
     parent = geometry.parent_mesh
     facets = geometry.facet_tags.find(geometry.membranes[g["membrane"]].facet_tag)
     nodes = np.unique(entities_to_geometry(parent, 1, facets))
     x = parent.geometry.x
-    r = np.hypot(x[nodes, 0], x[nodes, 1])
-    x[nodes, 0] *= radius / r
-    x[nodes, 1] *= radius / r
+    on_membrane = x[nodes, :2].copy()
+    sub = geometry.compartments[g["cell"]].mesh.geometry.x  # a copy of the parent's nodes: snapped too
+    distance, twin = cKDTree(sub[:, :2]).query(on_membrane)
+    assert distance.max() < 1e-12 * radius
+    for points, index in ((x, nodes), (sub, twin)):
+        r = np.hypot(points[index, 0], points[index, 1])
+        points[index, 0] *= radius / r
+        points[index, 1] *= radius / r
 
-    run = assemble_cell_force_balance_run(load_yaml(case["math"]), geometry)
     velocity = case["velocity"]
-    run.velocity.interpolate(
-        lambda p: np.vstack([_eval_exact(component, p.T, 0.0) for component in velocity])
-    )  # time-independent, in place of the solve
-    dt = _dt_for(case, h)
-    species = run.species
-    species.dt.value = dt
-    t = 0.0
-    for _ in range(round(case["t_final"] / dt)):
-        species.set_time(t + dt)
-        species.step()
-        t += dt
+
+    def prescribed(t: float, v: fem.Function) -> None:  # time-independent, in place of the solve
+        v.interpolate(lambda p: np.vstack([_eval_exact(component, p.T, 0.0) for component in velocity]))
+
+    t_final = float(case["t_final"])
+    rtol = float(case.get("mol_rtol", 1.0e-6))
+    result = integrate_multi_compartment(
+        load_yaml(case["math"]),
+        geometry,
+        t_final=t_final,
+        stride_ends=[t_final],
+        velocity_override=prescribed,
+        rtol=rtol,
+        atol=rtol * 1e-2,
+        dt_initial=float(case["mol_dt_initial"]) if "mol_dt_initial" in case else None,
+    )
     var = next(iter(case["exact"]))
-    linf, l2_sq = _field_error(species.unknown, case["exact"][var], t)  # at the time reached
+    linf, l2_sq = _field_error(result.fields[var], case["exact"][var], t_final)
     return linf, math.sqrt(l2_sq)
 
 

@@ -21,11 +21,13 @@ The solver path is chosen by the model rather than by a flag:
   moving mesh degrades; the bundle records the mesh's coordinates every row and a new segment per
   remesh (ADR 010 §2–3). A moving membrane with equations on several subdomains moves the whole partition
   through the multi-compartment solver instead (ADR 014);
-- a **cell force balance** (T9, ADR 018) with species on its member, on a fixed skeleton (ADR 020 decision 4)
-  → ``realize_multi_compartment`` → ``assemble_cell_force_balance_run`` → the staggered step (the velocity
-  from the species, then the species by backward Euler, dt snapped per output interval); each row holds the
-  species and the velocity solved from them, by component (``v_x``, ``v_y``; ADR 010 §3, "Vector fields").
-  Any other T9 model is refused by name before a bundle starts.
+- a **cell force balance** (T9, ADR 018) with species on its member, on a fixed skeleton (ADR 021 decision 3)
+  → ``realize_multi_compartment`` → the multi-compartment solver, which hands the force balance to its own
+  assembler on the member's mesh and strides (ADR 021 decisions 1 and 8): the velocity from the species, then
+  the species by the method of lines with it held, strides of at most dt snapped per output interval. Species
+  in the other compartments run beside them, coupled across a held membrane. Each row holds the species and
+  the velocity solved from them, by component (``v_x``, ``v_y``; ADR 010 §3, "Vector fields"). Any other T9
+  model is refused by name before a bundle starts.
 
 Out of scope, each with its own driver: Stokes/FSI, phase field, membrane species on a moving front, and
 a lone surface PDE coupled to a single bulk (§1.6.6) — those raise a message naming the limitation.
@@ -63,7 +65,6 @@ from vcell_fenics.results.schema import VECTOR_SUFFIXES, DomainKind, VectorCompo
 from vcell_fenics.status import COMPILING, MESHING, SOLVING, WRITING, NullReporter, StatusReporter
 
 if TYPE_CHECKING:
-    from vcell_fenics.backend.cell_force_balance_run import CellForceBalanceRun
     from vcell_fenics.backend.multi_compartment import MultiCompartmentGeometry
 
 
@@ -148,15 +149,15 @@ def run_model(
 
     # The model's shape (and any refusal of it) is settled before anything is written.
     reporter = _PhasedProgress(status if status is not None else NullReporter(), options.t_final)
-    # a cell force balance (T9) is realized and assembled first: its scope is checked there (ADR 020 decision 5)
+    # a cell force balance (T9) is realized and checked first, so a refusal writes nothing (ADR 021 decision 3)
     force_balance = _prepare_cell_force_balance(model, options, reporter) if _cell_force_balance(model.math) else None
-    if force_balance is not None and options.time_integration != "backward_euler":
-        options = replace(options, time_integration="backward_euler")  # the manifest records what runs
+    if force_balance is not None and options.time_integration != "method_of_lines":
+        options = replace(options, time_integration="method_of_lines")  # the manifest records what runs
     moving = [] if force_balance is not None else _moving_subdomains(model)
     # a moving membrane with equations on more than one subdomain (its species, both sides' species): the
     # multi-compartment solver moves the whole partition (ADR 014); one subdomain is the moving path's (ADR 013)
     moving_partition = _moving_partition_membrane(model, moving)
-    multi = (not moving and _is_multi_compartment(model)) or moving_partition is not None
+    multi = (not moving and _is_multi_compartment(model)) or moving_partition is not None or force_balance is not None
     if moving_partition is not None:
         moving = []
     if not multi and force_balance is None:
@@ -189,23 +190,22 @@ def run_model(
         "t_final": options.t_final,
         "fe_degree": options.fe_degree,
         "mpi_ranks": comm.size,
-        "backend": "cell_force_balance"
-        if force_balance is not None
-        else "ale"
-        if moving
-        else "multi_compartment"
-        if multi
-        else "single_mesh",
+        "backend": "ale" if moving else "multi_compartment" if multi else "single_mesh",
     }
     try:
         if force_balance is not None:
-            cells, steps, dt_used = _run_cell_force_balance(force_balance, options, recorder, reporter)
+            cells, steps, strides = _run_multi_compartment(
+                model, options, recorder, reporter, force_balance=force_balance
+            )
             run_info |= {
-                "dt": dt_used,
+                "dt": max(b - a for a, b in pairwise([0.0, *_stride_ends(options)])),  # the longest stride
                 "dt_requested": options.dt,
-                "time_integration": "backward_euler",
+                "time_integration": "method_of_lines",
                 "coupling": "staggered",
                 "steps": steps,
+                "strides": strides,
+                "rtol": options.rtol,
+                "atol": options.atol,
             }
         elif moving:
             cells, steps, dt_used, remeshes, strides = _run_moving(model, moving, options, recorder, reporter)
@@ -219,7 +219,9 @@ def run_model(
             if options.time_integration == "method_of_lines":  # dt is the stride; steps are the integrator's
                 run_info |= {"strides": strides, "rtol": options.rtol, "atol": options.atol}
         elif multi:
-            cells, steps = _run_multi_compartment(model, options, recorder, reporter, motion_membrane=moving_partition)
+            cells, steps, _ = _run_multi_compartment(
+                model, options, recorder, reporter, motion_membrane=moving_partition
+            )
             run_info |= {"time_integration": "method_of_lines", "steps": steps}
         else:
             cells, steps, dt_used = _run_single_mesh(model, options, recorder, reporter)
@@ -302,32 +304,42 @@ def _cell_force_balance(math: MathDescription) -> bool:
 
 @dataclass
 class _ForceBalanceRun:
-    """A T9 model realized and assembled before the bundle starts, so a refusal writes nothing."""
+    """A T9 model realized and checked before the bundle starts, so a refusal writes nothing. The run itself is
+    the multi-compartment solver's (ADR 021 decision 8)."""
 
-    run: CellForceBalanceRun
+    geometry: MultiCompartmentGeometry
+    compartments: set[str]
     member: str
     velocity: str
-    cells: int
+    gdim: int
 
     def components(self) -> list[str]:
         """The velocity's component names in the bundle (ADR 010 §3, "Vector fields")."""
 
-        gdim = self.run.balance.members.mesh.geometry.dim
-        return [f"{self.velocity}{suffix}" for suffix in VECTOR_SUFFIXES[:gdim]]
+        return [f"{self.velocity}{suffix}" for suffix in VECTOR_SUFFIXES[: self.gdim]]
 
     def vectors(self) -> dict[str, list[str]]:
         return {self.velocity: self.components()}
 
 
 def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: _PhasedProgress) -> _ForceBalanceRun:
-    """Realize the geometry and assemble the force balance with its member species (ADR 018 step 3b; ADR 020
-    decision 5). Only ADR 020 decision 4's scope runs: a fixed skeleton, one member, species on the member only,
-    linear transport. Anything else (a moving cell, several members, species elsewhere, a velocity with no species,
-    the crowding cut-offs) is refused by name before any bundle is started, pointing at the stage that brings it."""
+    """Realize the geometry and check a cell force balance with species (ADR 021 decisions 3 and 8): a fixed
+    skeleton, one member carrying species, species elsewhere coupled across a held membrane. The force balance is
+    assembled once here, on placeholders for the species, so that what the scope check and the force balance refuse
+    (a moving cell, several members, a membrane species on the cell's membrane, a slot that reads what it may not)
+    is refused by name before any bundle is started, pointing at the stage that brings it. The multi-compartment
+    solver's own refusals (a BC it does not apply, lab-frame advection) still come once the bundle has started,
+    as on every multi-compartment run, and mark it failed."""
 
-    from vcell_fenics.backend.cell_force_balance import ForceBalanceError, t9_equation
-    from vcell_fenics.backend.cell_force_balance_run import assemble_cell_force_balance_run
-    from vcell_fenics.backend.diagnostics import NonlinearTermError
+    from dolfinx import fem
+
+    from vcell_fenics.backend.cell_force_balance import (
+        ForceBalanceError,
+        assemble_cell_force_balance,
+        build_members_mesh,
+        member_species,
+        t9_equation,
+    )
     from vcell_fenics.backend.multi_compartment import realize_multi_compartment
     from vcell_fenics.formalism.validator import validate_or_raise
 
@@ -336,9 +348,9 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
             f"a cell force balance runs with P1 species and a P1 velocity; the element degree is "
             f"{options.fe_degree} (set it to 1)"
         )
-    if options.time_integration != "backward_euler":
+    if options.time_integration != "method_of_lines":
         log(
-            "note: a cell force balance steps by backward Euler, staggered (ADR 020 decision 3); "
+            "note: a cell force balance runs by method-of-lines strides, staggered (ADR 021 decision 1); "
             "--time-integration is ignored"
         )
     validate_or_raise(model.math)
@@ -347,36 +359,34 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
     if moving:
         raise RunError(
             f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only on a fixed skeleton "
-            f"(ADR 020 decision 4), but {', '.join(map(repr, moving))} has a prescribed motion; moving cells and "
-            f"growing fronts are stage 4"
+            f"(ADR 021 decision 3), but {', '.join(map(repr, moving))} has a prescribed motion; moving cells and "
+            f"growing fronts are stage 5b"
         )
-    members = eq.members or (eq.subdomain,)
+    kinds = {sd.name: sd.kind for sd in model.math.subdomains}
+    compartments = {e.subdomain for e in model.math.equations if kinds.get(e.subdomain) == "volume"}
     comm = MPI.COMM_WORLD
     status.phase(MESHING)
-    log(
-        f"realizing geometry {model.geometry.name!r} for the force balance on {', '.join(members)} at h = {options.h:g}"
-    )
+    log(f"realizing geometry {model.geometry.name!r} for the force balance on {eq.subdomain!r} at h = {options.h:g}")
     with _logged_geometry_warnings():
-        geometry = realize_multi_compartment(model.geometry, h=options.h, comm=comm)
+        geometry = realize_multi_compartment(model.geometry, h=options.h, compartments=compartments, comm=comm)
     status.phase(COMPILING)
     try:
-        run = assemble_cell_force_balance_run(model.math, geometry)
+        member, species = member_species(model.math, geometry)
+        mesh = geometry.compartments[member].mesh
+        placeholders = {s.variable: fem.Function(fem.functionspace(mesh, ("Lagrange", 1))) for s in species}
+        assemble_cell_force_balance(
+            model.math, geometry, prebuilt=build_members_mesh(model.math, geometry), fields=placeholders
+        )
     except ForceBalanceError as error:
         if not str(error).startswith(("SpeciesNotYetSupported", "MovingSkeleton")):
             raise RunError(f"the cell force balance cannot be assembled: {error}") from error
         raise RunError(
-            f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only in ADR 020 decision "
-            f"4's scope (a fixed skeleton, one member, species on it, linear transport); moving cells are stage 4: "
-            f"{error}"
+            f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only in ADR 021 decision "
+            f"3's scope (a fixed skeleton, one member carrying species, species elsewhere across a held membrane); "
+            f"moving cells are stage 5b: {error}"
         ) from error
-    except NonlinearTermError as error:
-        raise RunError(
-            f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only in ADR 020 decision "
-            f"4's scope, with transport linear in the species; the crowding cut-offs are stage 5: {error}"
-        ) from error
-    (member,) = members  # the scope allows one member
-    names = {*run.names, *(v.name for v in model.math.variables)}
-    gdim = run.balance.members.mesh.geometry.dim
+    names = {v.name for v in model.math.variables}
+    gdim = mesh.geometry.dim
     clash = sorted(n for n in (f"{eq.variable}{s}" for s in VECTOR_SUFFIXES[:gdim]) if n in names)
     if clash:
         raise RunError(
@@ -384,56 +394,8 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
             f"uses as names; rename them"
         )
     return _ForceBalanceRun(
-        run=run, member=member, velocity=eq.variable, cells=mesh_cell_count(run.balance.members.mesh)
+        geometry=geometry, compartments=compartments, member=member, velocity=eq.variable, gdim=gdim
     )
-
-
-def _run_cell_force_balance(
-    prepared: _ForceBalanceRun, options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
-) -> tuple[int, int, float]:
-    """The staggered step of ADR 020 decision 3 through each output interval, dt snapped so the interval is a
-    whole number of steps. Each row holds the species at `tⁿ` and the velocity solved from them, by component:
-    the velocity that carries the next step (decision 5). Returns (cells, steps, largest dt)."""
-
-    run = prepared.run
-    mesh = run.balance.members.mesh
-    gdim = mesh.geometry.dim
-    components = prepared.components()
-    species = _channels(run.species.unknown, len(run.names))
-    recorder.add_domain(
-        prepared.member,
-        "volume",
-        mesh,
-        [(name, source) for name, source in zip(run.names, species, strict=True)]
-        + [(name, None) for name in components],
-        vectors={name: VectorComponent(name=prepared.velocity, component=i) for i, name in enumerate(components)},
-    )
-    recorder.open()
-    log(
-        f"integrating to t = {options.t_final:g} (cell force balance, staggered backward Euler; {prepared.cells} "
-        f"cells on the member; {', '.join(run.names)} on {prepared.member!r}, carried by {prepared.velocity!r})"
-    )
-
-    def capture(t: float) -> None:
-        velocity = run.solve_velocity()  # the velocity of the species at t: it carries the next step
-        sources = [*species, *(velocity.sub(i).collapse() for i in range(gdim))]
-        recorder.capture(t, {prepared.member: sources}, progress=t / options.t_final)
-
-    capture(0.0)
-    steps, t, dt_max = 0, 0.0, 0.0
-    for t_out in options.output_times[1:]:
-        n = max(1, round((t_out - t) / options.dt))
-        dt = (t_out - t) / n
-        if abs(dt - options.dt) > 1e-12 * max(1.0, options.dt):
-            log(f"dt {options.dt:g} → {dt:g} over [{t:g}, {t_out:g}] so the output lands on a step")
-        for k in range(1, n + 1):
-            run.step(dt)
-            steps += 1
-            status.step(t + k * dt)
-        run.t = t_out  # the steps' sum, rounded onto the output time
-        t, dt_max = t_out, max(dt_max, dt)
-        capture(t_out)
-    return prepared.cells, steps, dt_max
 
 
 def _scheme_for_nonlinear(model: ModelInput, options: RunOptions) -> RunOptions:
@@ -745,37 +707,43 @@ def _run_multi_compartment(
     status: _PhasedProgress,
     *,
     motion_membrane: str | None = None,
-) -> tuple[int, int]:
+    force_balance: _ForceBalanceRun | None = None,
+) -> tuple[int, int, int]:
     """Any number of compartments and membranes, any number of species and region variables on each,
     coupled by the membrane fluxes (``integrate_multi_compartment``); every output time recorded from the
-    integrator's monitor. Returns (cells, steps)."""
+    integrator's monitor. With a cell force balance (``force_balance``, realized and checked already) the run
+    strides, and its velocity is written by component on the member. Returns (cells, steps, strides)."""
 
     from vcell_fenics.backend.multi_compartment import integrate_multi_compartment, realize_multi_compartment
 
     if options.fe_degree != 1:
         raise RunError("the multi-compartment solver is P1 only; drop --fe-degree for this model")
-    if options.time_integration != "method_of_lines":
+    if options.time_integration != "method_of_lines" and force_balance is None:
         log("note: the multi-compartment solver is method-of-lines; --time-integration is ignored")
     kinds = {sd.name: sd.kind for sd in model.math.subdomains}
     variables: dict[str, list[str]] = {}
     for eq in model.math.equations:
-        variables.setdefault(eq.subdomain, []).append(eq.variable)
+        if force_balance is None or eq.variable != force_balance.velocity:
+            variables.setdefault(eq.subdomain, []).append(eq.variable)
     regions = {v.name for v in model.math.variables if v.space == REGION_SPACE}
 
     comm = MPI.COMM_WORLD
-    status.phase(MESHING)
-    log(
-        f"realizing multi-compartment geometry {model.geometry.name!r} at h = {options.h:g}: "
-        + ", ".join(f"{name} ({kinds.get(name, '?')})" for name in variables)
-    )
-    wanted = {name for name in variables if kinds.get(name) == "volume"}
-    if motion_membrane is not None:
-        # the moving membrane's normal is its inside compartment's outward one, so that compartment is realized
-        inside = next((s.inside for s in model.geometry.surfaces if s.name == motion_membrane), None)
-        if inside is not None:
-            wanted.add(inside)
-    with _logged_geometry_warnings():
-        geometry = realize_multi_compartment(model.geometry, h=options.h, compartments=wanted, comm=comm)
+    if force_balance is not None:
+        geometry, wanted = force_balance.geometry, force_balance.compartments
+    else:
+        status.phase(MESHING)
+        log(
+            f"realizing multi-compartment geometry {model.geometry.name!r} at h = {options.h:g}: "
+            + ", ".join(f"{name} ({kinds.get(name, '?')})" for name in variables)
+        )
+        wanted = {name for name in variables if kinds.get(name) == "volume"}
+        if motion_membrane is not None:
+            # the moving membrane's normal is its inside compartment's outward one, so that compartment is realized
+            inside = next((s.inside for s in model.geometry.surfaces if s.name == motion_membrane), None)
+            if inside is not None:
+                wanted.add(inside)
+        with _logged_geometry_warnings():
+            geometry = realize_multi_compartment(model.geometry, h=options.h, compartments=wanted, comm=comm)
     missing = sorted(name for name in variables if name not in geometry.compartments and name not in geometry.membranes)
     if missing:
         raise RunError(
@@ -785,16 +753,27 @@ def _run_multi_compartment(
     status.phase(COMPILING)  # the integrator compiles and assembles its forms before the first step
     # Compartments first: a reader takes the first domain as its default, and a membrane (above all one with no
     # species, below) should never be it.
+    components = force_balance.components() if force_balance is not None else []
     for name, names in sorted(variables.items(), key=lambda item: item[0] not in geometry.compartments):
         kind: DomainKind = "volume" if name in geometry.compartments else "membrane"
         sides = _sides(geometry, name)
+        carries = force_balance is not None and name == force_balance.member
         recorder.add_domain(
             name,
             kind,
             geometry.mesh_of(name),
-            [(variable, None) for variable in names],
+            [(variable, None) for variable in names] + [(c, None) for c in (components if carries else [])],
             sides=sides,
             moving=motion_membrane is not None,
+            **(
+                {
+                    "vectors": {
+                        c: VectorComponent(name=force_balance.velocity, component=i) for i, c in enumerate(components)
+                    }
+                }
+                if carries and force_balance is not None
+                else {}
+            ),
         )
     # A membrane without species beside a compartment with some: written for its mesh and its maps onto its
     # sides, so a membrane function of the adjacent volume values (a flux) can be drawn on it (ADR 010 §3).
@@ -809,6 +788,11 @@ def _run_multi_compartment(
     log(
         f"integrating to t = {options.t_final:g} (multi-compartment method of lines, {cells} cells; "
         + "; ".join(f"{name}: {', '.join(names)}" for name, names in variables.items())
+        + (
+            f"; carried by {force_balance.velocity!r} on {force_balance.member!r}, solved before each stride"
+            if force_balance is not None
+            else ""
+        )
         + ")"
     )
 
@@ -821,11 +805,11 @@ def _run_multi_compartment(
         return lambda x: np.full(x.shape[1], value)
 
     def on_output(t: float, fields: dict[str, Any]) -> None:
-        recorder.capture(
-            t,
-            {name: [source(v, fields[v]) for v in names] for name, names in variables.items()},
-            progress=t / options.t_final,
-        )
+        sources = {name: [source(v, fields[v]) for v in names] for name, names in variables.items()}
+        if force_balance is not None:  # the velocity solved from these species, by component
+            velocity = fields[force_balance.velocity]
+            sources[force_balance.member] += [velocity.sub(i).collapse() for i in range(len(components))]
+        recorder.capture(t, sources, progress=t / options.t_final)
 
     if motion_membrane is None:
         result = integrate_multi_compartment(
@@ -837,10 +821,15 @@ def _run_multi_compartment(
             output_times=options.output_times,
             on_output=on_output,
             on_progress=status.step,
+            stride_ends=_stride_ends(options) if force_balance is not None else (),
         )
-        return cells, int(result.steps)
-    return cells, _run_moving_partition(
-        model, options, recorder, status, geometry, wanted, motion_membrane, variables, on_output, comm
+        return cells, int(result.steps), int(result.strides)
+    return (
+        cells,
+        _run_moving_partition(
+            model, options, recorder, status, geometry, wanted, motion_membrane, variables, on_output, comm
+        ),
+        0,
     )
 
 

@@ -97,8 +97,9 @@ It drives the fixed-domain paths:
 
 It also drives VCell moving boundaries: a prescribed front with species inside it, ALE with remeshing, in 2D
 and 3D (the tracker's "Moving boundaries" section). Not yet: membrane species on a moving front.
-It runs a cell force balance (T9) with species on its member on a fixed skeleton (ADR 020 decisions 4–5),
-writing the velocity by component; other T9 models are refused until the cells move (stage 4). The older
+It runs a cell force balance (T9) with species on its member on a fixed skeleton, through the multi-compartment
+solver (ADR 021 decisions 3 and 8: the velocity solved before each stride, species beside the cell coupled across a
+held membrane), writing the velocity by component; other T9 models are refused until the cells move (stages 4a, 5b). The older
 two-compartment integrators (`integrate_interface_coupled`, `integrate_membrane_coupled`) stay for their tests
 and cross-validation; the runner no longer routes to them.
 Stokes/FSI, phase field and unknown-motion mechanics keep their own drivers — extend the CLI

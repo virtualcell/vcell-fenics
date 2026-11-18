@@ -1,8 +1,9 @@
 """A cell force balance with species on its member, through the runner and the CLI (ADR 020 decision 5).
 
-The runner routes a T9 model in ADR 020 decision 4's scope to the staggered run (a fixed skeleton, one member,
-species on it, linear transport) and writes each species and the velocity, by component, to the results bundle
-(ADR 010 §3, "Vector fields"). Anything outside the scope is refused by name before a bundle is started.
+The runner routes a T9 model in ADR 021 decision 3's scope (a fixed skeleton, one member carrying species, species
+elsewhere across a held membrane) to the multi-compartment solver, which strides (decisions 1 and 8), and writes
+each species and the velocity, by component, to the results bundle (ADR 010 §3, "Vector fields"). Anything outside
+the scope is refused by name before a bundle is started.
 """
 
 from __future__ import annotations
@@ -17,8 +18,7 @@ import ufl
 import yaml
 from dolfinx import fem
 
-from vcell_fenics.backend.cell_force_balance_run import assemble_cell_force_balance_run
-from vcell_fenics.backend.multi_compartment import realize_multi_compartment
+from vcell_fenics.backend.multi_compartment import integrate_multi_compartment, realize_multi_compartment
 from vcell_fenics.cli import main
 from vcell_fenics.formalism import load_dict
 from vcell_fenics.formalism.geometry_schema import GeometryDescription, SubVolume, SurfaceClass
@@ -108,14 +108,18 @@ def _run(raw: dict[str, Any], out: Path, **overrides: Any) -> dict[str, Any]:
 
 def test_the_runner_writes_the_species_and_the_velocity_by_component(tmp_path: Path) -> None:
     summary = _run(_raw(), tmp_path)
-    assert summary["run"]["backend"] == "cell_force_balance"
-    assert summary["run"]["steps"] == 4
+    assert summary["run"]["backend"] == "multi_compartment"
+    assert summary["run"]["time_integration"] == "method_of_lines"  # backward Euler was asked for (ADR 021 d1)
+    assert summary["run"]["coupling"] == "staggered"
+    assert summary["run"]["strides"] == 4
+    assert summary["run"]["dt"] == pytest.approx(0.05)
+    assert (summary["run"]["rtol"], summary["run"]["atol"]) == (1e-6, 1e-8)
 
     bundle = Bundle.open(tmp_path / "results.fenics")
     manifest = bundle.manifest
     assert manifest.status == "completed"
     assert bundle.times == (0.0, 0.1, 0.2)
-    assert list(manifest.domains) == ["cell"]
+    assert list(manifest.domains) == ["cell", "pm"]  # the membrane, for its mesh (ADR 010 §3)
     assert [v.name for v in manifest.variables] == ["m", "v_x", "v_y"]
     assert manifest.variable("cell", "m").vector is None
     components = manifest.vectors("cell")
@@ -129,23 +133,33 @@ def test_the_runner_writes_the_species_and_the_velocity_by_component(tmp_path: P
     assert summary["species"] == ["m"]
     assert summary["vectors"] == {"v": ["v_x", "v_y"]}
 
-    # each row's velocity is the one solved from that row's myosin (decision 5), against an independent run
-    run = assemble_cell_force_balance_run(load_dict(_raw()), realize_multi_compartment(_disk(), h=0.15))
-    dx = ufl.dx(domain=run.balance.members.mesh)
+    # each row's velocity is the one solved from that row's myosin (ADR 020 decision 5), against a run of the
+    # solver itself, which checks that velocity and myosin against each other (test_member_species.py)
+    expected: list[list[float]] = []
+
+    def record(t: float, fields: dict[str, Any]) -> None:
+        v = fields["v"]
+        dx = ufl.dx(domain=v.function_space.mesh)
+        expected.append([fem.assemble_scalar(fem.form(v[i] * dx)).real for i in range(2)])
+
+    integrate_multi_compartment(
+        load_dict(_raw()),
+        realize_multi_compartment(_disk(), h=0.15, compartments={"cell"}),
+        t_final=0.2,
+        stride_ends=[0.05, 0.1, 0.15, 0.2],
+        output_times=(0.0, 0.1, 0.2),
+        on_output=record,
+    )
     for row in range(3):
-        if row:
-            run.advance(0.1 * row, 0.05)
-        v = run.solve_velocity()
         for i, name in enumerate(("v_x", "v_y")):
-            expected = fem.assemble_scalar(fem.form(v[i] * dx)).real
-            assert bundle.stats("cell", name)[row, 1] == pytest.approx(expected, rel=1e-8, abs=1e-12), (row, name)
+            assert bundle.stats("cell", name)[row, 1] == pytest.approx(expected[row][i], rel=1e-8, abs=1e-12)
     assert np.abs(bundle.field("cell", "v_x", 0)).max() > 1e-3  # the gradient in m drives a flow
 
 
 def test_a_moving_cell_is_refused_before_a_bundle_starts(tmp_path: Path) -> None:
     raw = _raw()
-    raw["math_description"]["boundary_conditions"] = []  # a free membrane: the cell would move (stage 4)
-    with pytest.raises(RunError, match=r"ADR 020 decision 4's scope.*MovingSkeleton"):
+    raw["math_description"]["boundary_conditions"] = []  # a free membrane: the cell would move (stage 5b)
+    with pytest.raises(RunError, match=r"ADR 021 decision 3's scope.*MovingSkeleton"):
         _run(raw, tmp_path)
     assert not (tmp_path / "results.fenics").exists()
 
@@ -161,18 +175,19 @@ def test_a_prescribed_motion_elsewhere_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_model_error_is_not_blamed_on_the_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only a scope refusal (SpeciesNotYetSupported, MovingSkeleton) points at ADR 020 decision 4."""
+    """Only a scope refusal (SpeciesNotYetSupported, MovingSkeleton) points at ADR 021 decision 3."""
 
-    from vcell_fenics.backend import cell_force_balance_run
+    from vcell_fenics.backend import cell_force_balance
     from vcell_fenics.backend.cell_force_balance import ForceBalanceError
 
-    def failing(*args: Any) -> None:
+    def failing(*args: Any, **kwargs: Any) -> None:
         raise ForceBalanceError("surface 'pm' has no facets in the realized geometry")
 
-    monkeypatch.setattr(cell_force_balance_run, "assemble_cell_force_balance_run", failing)
+    monkeypatch.setattr(cell_force_balance, "assemble_cell_force_balance", failing)
     with pytest.raises(RunError, match="cannot be assembled: surface 'pm' has no facets") as caught:
         _run(_raw(), tmp_path)
-    assert "decision 4" not in str(caught.value)
+    assert "decision 3" not in str(caught.value)
+    assert not (tmp_path / "results.fenics").exists()
 
 
 def test_a_velocity_with_no_species_is_refused(tmp_path: Path) -> None:

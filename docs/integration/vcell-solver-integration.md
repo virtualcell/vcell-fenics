@@ -426,6 +426,22 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-17** — **A cell's species run in the multi-compartment solver (ADR 021 decision 8; stage 5a, part 2).**
+  - **What:** a T9 model with species goes to `integrate_multi_compartment`, which assembles the force balance on
+    the member compartment's own mesh and strides on the fixed partition: `v` solved from the species before each
+    stride, held over it, the species integrated by the method of lines (decision 1). The member's species ride `v`
+    in `−∫ u (v + w)·∇q`, and their slots may read `v` and the species (E4's cut-offs). Species in the other
+    compartments run beside them, coupled across a held membrane (decision 3). The runner routes T9 there; the
+    summary gives `strides`, `rtol` and `atol`, and the bundle the membrane as a domain without species.
+  - **Verified** (`tests/test_member_species.py`, `tests/test_runner_cell_force_balance.py`): step 3b's tests on
+    the new path (conservation, the uniform state, the onset, the known steady state at second order, the
+    stationary front); each output's `v` equal to a fresh solve from that output's species; a species in the
+    medium exchanging with the cell's across the held membrane, the total kept to 1e-10; the cut-offs running
+    with `∫m` kept; the refusals. The two paths agree to backward Euler's error, which halves with `Δt` (ratios
+    0.58, 0.54, 0.52). `member_transport_carried` runs on the new path: order 1.83 (L∞).
+  - **Next:** the T9 driver's own species problem retires; decisions 4 (the diffusion check), 6 (the centroid)
+    and 7 (E4a against vcell-core's criteria).
+
 - **2026-11-17** — **The marching path's membrane lies on the analytic shape (#249).**
   - **What:** after Netgen meshes a 2D or 3D analytic geometry strictly inside the box, every membrane vertex is
     moved onto its shape's exact `φ = 0` by Newton steps along `∇φ` (`realize._project_interfaces`). Left where Netgen
