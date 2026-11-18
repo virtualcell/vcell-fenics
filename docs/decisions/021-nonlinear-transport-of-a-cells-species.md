@@ -1,7 +1,8 @@
 # ADR 021 — Transport that reads the species, and the species a cell force balance carries
 
 **Date:** 2026-11-17
-**Status:** Proposed. Answers issue #255, asked from vcell-core's E4.
+**Status:** Accepted (Jim, 2026-11-17): decisions 1–8 as recommended, with decision 8 at stage 5a and 5a's
+scope widened as decision 3 states. Answers issue #255, asked from vcell-core's E4.
 - Jim asked for this note on 2026-11-17, and decided then that a nonlinear model switches to the method of
   lines automatically (decision 2).
 - **Amended the same day, at Jim's request.** Jim asked whether the work overfits E4, or makes
