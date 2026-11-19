@@ -73,6 +73,12 @@ from ufl.algorithms import expand_derivatives
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.compiler import CompileContext, compile_expression, region_size_symbol
+from vcell_fenics.backend.diffusion_check import (
+    DiffusionCoefficient,
+    DiffusionSignCheck,
+    DiffusionSignError,
+    raised_by,
+)
 from vcell_fenics.backend.equations import as_field_equation
 from vcell_fenics.backend.interface_coupled import (
     _RESERVOIR_PENALTY,
@@ -578,6 +584,7 @@ def integrate_multi_compartment(
         current = residual[blk]
         residual[blk] = form if current is None else current + form
 
+    signed: list[DiffusionCoefficient] = []  # diffusions that read a species, checked for sign (ADR 021 d4)
     for eq in field_eqs:
         blk, _ = where[eq.variable]
         w, u, rate = part(tests, eq.variable), part(states, eq.variable), part(rates, eq.variable)
@@ -604,6 +611,8 @@ def integrate_multi_compartment(
         if "diffusion" in eq.terms:
             d = compile_expression(parse(eq.terms["diffusion"]), local)
             form += d * ufl.dot(ufl.grad(u), ufl.grad(w)) * dx
+            if reads(parse(eq.terms["diffusion"]), frozenset(names)):
+                signed.append(DiffusionCoefficient(eq.variable, d, geometry.mesh_of(eq.subdomain)))
         drift = (
             compile_expression(parse(eq.terms["relative_advection"]), local)
             if "relative_advection" in eq.terms
@@ -828,6 +837,24 @@ def integrate_multi_compartment(
     tolerances = ToleranceControl(
         state_vec, layout, rtol=rtol, atol=atol, scaling=tolerance_scaling, scales=tolerance_scales
     )
+
+    def at_state(t: float, x: PETSc.Vec) -> None:
+        set_time(t)
+        scatter(x, states)
+
+    sign_check = DiffusionSignCheck(signed, refresh=at_state)
+
+    def solve(ts: PETSc.TS) -> None:
+        """`ts.solve`, with a diffusion that lost its sign named (ADR 021 decision 4)."""
+        try:
+            ts.solve(state_vec)
+        except PETSc.Error as original:
+            if (stopped := raised_by(original)) is not None:
+                raise stopped from original
+            if (reason := sign_check.explain(ts)) is not None:  # Newton's iterate crossed zero first
+                raise DiffusionSignError(reason) from original
+            raise
+
     shift.value = 1.0
     for constant in shift_surface.values():
         constant.value = 1.0
@@ -874,6 +901,7 @@ def integrate_multi_compartment(
         ts.setMaxTime(t_end)
         ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
         tolerances.attach(ts)
+        sign_check.attach(ts)  # before any output monitor, so a state whose diffusion went negative is not recorded
         ts.setMaxSNESFailures(-1)
         snes = ts.getSNES()
         snes.setUseEW(False)
@@ -1031,7 +1059,7 @@ def integrate_multi_compartment(
             solved = False
             if kept is None:
                 ts = make_ts(t, t_end, min(dt, t_end - t))
-                ts.solve(state_vec)
+                solve(ts)
                 steps += ts.getStepNumber()
                 dt = float(ts.getTimeStep())
                 if persistent_integrator:
@@ -1041,7 +1069,7 @@ def integrate_multi_compartment(
             else:  # the same integrator, its history carried over the new velocity
                 before = kept.getStepNumber()
                 kept.setMaxTime(t_end)
-                kept.solve(state_vec)
+                solve(kept)
                 steps += kept.getStepNumber() - before
                 dt = float(kept.getTimeStep())
             strides += 1
@@ -1106,7 +1134,7 @@ def integrate_multi_compartment(
         )
         ts.setMonitor(monitor)
 
-    ts.solve(state_vec)
+    solve(ts)
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
     if monitor is not None:
         monitor.finish(ts, final_time, state_vec)

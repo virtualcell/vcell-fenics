@@ -426,6 +426,17 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-19** — **A diffusion that loses its sign stops the run (ADR 021 decision 4; stage 5a, part 4).**
+  - **What:** `backend/diffusion_check.py`. Every species' diffusion that reads a species is checked at the
+    vertices after each accepted step, on the single mesh (fixed, moving, ALE strides) and in the
+    multi-compartment solver (members, strides, the persistent integrator); a tensor by its least eigenvalue. A
+    negative one stops the run with `DiffusionSignError`, naming the species, the time and the least value; a
+    failed solve whose last iterate is negative is reported the same way.
+  - **Verified** (`tests/test_diffusion_sign.py`, `tests/test_member_species.py`): `c = 1 + t` with `D = 1 − c/2`
+    stops just past t = 1 on the single mesh and in a cell beside a medium; on a member just past t = 0.5;
+    through a region variable and a parameter; a diffusion that stays positive, or reads no species, runs.
+    Cost 3–8 % on the member with E4's cut-offs.
+
 - **2026-11-18** — **The T9 driver's own species problem retires (ADR 021 decision 8; stage 5a, part 3).**
   - **What:** `backend/cell_force_balance_run.py` and `tests/test_backend_cell_force_balance_run.py` are deleted,
     with the agreement test that compared the two paths (ratios 0.58, 0.54, 0.52, recorded in decision 7). A cell's

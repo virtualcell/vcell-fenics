@@ -396,6 +396,26 @@ At `t = 10`:
      - **(c) Clamp the coefficient at 0.** That changes the model the document wrote.
 
    *Recommendation: (a).*
+   - *Recorded in the implementation, 2026-11-19* (`backend/diffusion_check.py`):
+     - **Where it runs.** The single mesh's stepper (`_run_time_stepper`, so fixed, moving and ALE strides) and
+       the multi-compartment solver's `make_ts` (fixed runs, strides, the persistent integrator) install it as a
+       TS monitor ahead of any output monitor, so a state with a negative diffusion is never recorded. The two
+       older two-compartment integrators, which the runner no longer uses, do not.
+     - **Which coefficients.** On the single mesh, those that read the trial function (`extract_arguments`); on
+       the multi-compartment solver, those whose expression reads a variable. They are carried in the IR as
+       `DiscreteProblem.diffusion_coefficients`.
+     - **Zero is let through,** and so is a value below zero by round-off (1e-12 of the coefficient's largest
+       magnitude): `D (1 − m/m_max)` at exactly `m_max` is degenerate, not backwards. The note said "positive".
+     - **Evaluated at each cell's vertices** with `fem.Expression`, on the species' own mesh. A species on a
+       compartment's submesh reads parameters, the time and region variables on the parent mesh; the check
+       mirrors each onto the submesh as a Constant, refreshed before every evaluation. A coefficient that reads
+       any other field on another mesh is not checked, with a warning.
+     - **The failure path.** A monitor's exception leaves `ts.solve` as a `PETSc.Error`; the integrators find the
+       `DiffusionSignError` in its chain and raise it. When the solve fails before any step is accepted, the
+       check runs on the last iterate and, if it is negative, names the diffusion. The multi-compartment solver
+       had no failure translation and still re-raises any other `PETSc.Error` unchanged.
+     - **The cost,** measured on the member with E4's cut-offs (h = 0.075, t = 1, 972 steps): 1,012 checks added
+       0.08–0.23 s to 2.7–2.8 s, 3–8 %.
 
 5. **A front speed that reads `trace(m)`: nothing is missing in the grammar, and stage 5b wires it.**
    - **The grammar admits it.** vcell-core's six documents validate with no diagnostics (*checked*, run here

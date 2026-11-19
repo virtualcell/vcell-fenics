@@ -29,6 +29,7 @@ from vcell_fenics.backend.cell_force_balance import (
     assemble_cell_force_balance,
     build_members_mesh,
 )
+from vcell_fenics.backend.diffusion_check import DiffusionSignError
 from vcell_fenics.backend.multi_compartment import (
     MultiCompartmentGeometry,
     MultiCompartmentResult,
@@ -366,6 +367,16 @@ def test_the_crowding_cut_offs_run_and_keep_the_myosin() -> None:
 
 
 # -- the scope's refusals (ADR 021 decision 3) -------------------------------------------------------------------
+
+
+def test_a_member_diffusion_that_turns_negative_stops_the_run_naming_the_species() -> None:
+    """ADR 021 decision 4 on a member: with no flow (`beta = 0`) and a uniform source, `m = 1.5 + t`, and its
+    diffusion `1 − m/2` turns negative at t = 0.5. The check runs in every stride's integrator."""
+    raw = _raw(beta=0.0)
+    _myosin(raw)["terms"] = {"diffusion": "1 - m/2", "source": "1"}
+    _myosin(raw)["initial_condition"] = "1.5"
+    with pytest.raises(DiffusionSignError, match=r"the diffusion of 'm' became negative at t ≈ 0\.5"):
+        _integrate(raw, 1.0, 0.1)
 
 
 def test_a_membrane_that_would_move_is_refused() -> None:
