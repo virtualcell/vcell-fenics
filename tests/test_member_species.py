@@ -4,9 +4,10 @@ The force balance is assembled on the member compartment's own mesh, and the mem
 `v` in the conservative form `−∫ u (v + w)·∇q` (ADR 020 decision 2). The run strides on the fixed partition: `v`
 is solved from the species before each stride and held while a fresh integrator covers it (ADR 021 decision 1).
 
-The model is Nickaeen et al. 2017's zero-velocity cell in a fixed circle, as in
-`tests/test_backend_cell_force_balance_run.py` (step 3b's tests of the T9 driver's own species problem, which these
-port). Without the crowding cut-offs it is singular past the instability, so these tests look at the onset only.
+The model is Nickaeen et al. 2017's zero-velocity cell in a fixed circle. These tests port step 3b's tests of the T9
+driver's own species problem, which retired once the two paths agreed (ADR 021 decision 7: their difference fell
+as backward Euler's error, ratios 0.58, 0.54, 0.52 per halving of Δt). Without the crowding cut-offs it is
+singular past the instability, so these tests look at the onset only.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from vcell_fenics.backend.cell_force_balance import (
     assemble_cell_force_balance,
     build_members_mesh,
 )
-from vcell_fenics.backend.cell_force_balance_run import assemble_cell_force_balance_run
 from vcell_fenics.backend.multi_compartment import (
     MultiCompartmentGeometry,
     MultiCompartmentResult,
@@ -483,37 +483,6 @@ def test_an_output_between_stride_ends_is_refused() -> None:
 def test_a_force_balance_needs_strides() -> None:
     with pytest.raises(ValueError, match="stride_ends must rise strictly"):
         integrate_multi_compartment(load_dict(_raw()), _geometry(0.15), t_final=0.1)
-
-
-# -- the two species paths agree (ADR 021 decision 7) ------------------------------------------------------------
-
-
-def test_the_two_species_paths_agree_to_backward_eulers_error() -> None:
-    """Before the T9 driver's own species problem retires: both paths carry the same stagger (`v` from `mⁿ`, held
-    over the step), so their difference is backward Euler's own error, first order in `Δt`. Over `t ∈ [0, 0.5]`,
-    before the instability grows, at four `Δt` halving from 0.025, with the method of lines at `rtol = 1e-9`.
-
-    Measured 2026-11-17 (h = 0.15), the L² difference and its ratio per halving: 1.56e-3 at Δt = 0.05, then
-    ratios 0.652, 0.577, 0.539, 0.52 to Δt = 0.003125. The first halving, from 0.05, is pre-asymptotic, so the
-    test starts at 0.025."""
-
-    md = load_dict(_raw())
-    geometry = _geometry(0.15)
-    previous = None
-    ratios = []
-    for dt in (0.025, 0.0125, 0.00625, 0.003125):
-        run = assemble_cell_force_balance_run(md, geometry)
-        run.advance(0.5, dt)
-        result = _integrate(_raw(), 0.5, dt, rtol=1e-9)
-        new = result.fields["m"]
-        difference = fem.Function(new.function_space)
-        difference.x.array[:] = run.species.unknown.x.array - new.x.array
-        mesh = new.function_space.mesh
-        error = math.sqrt(_integral(difference**2 * ufl.dx(domain=mesh), mesh))
-        if previous is not None:
-            ratios.append(error / previous)
-        previous = error
-    assert all(0.4 < r < 0.6 for r in ratios), ratios
 
 
 # -- the persistent integrator (a solver option) ------------------------------------------------------------------

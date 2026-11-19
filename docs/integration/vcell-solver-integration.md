@@ -426,6 +426,14 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-18** — **The T9 driver's own species problem retires (ADR 021 decision 8; stage 5a, part 3).**
+  - **What:** `backend/cell_force_balance_run.py` and `tests/test_backend_cell_force_balance_run.py` are deleted,
+    with the agreement test that compared the two paths (ratios 0.58, 0.54, 0.52, recorded in decision 7). A cell's
+    species run only through the multi-compartment solver. `assemble_cell_force_balance` and its checks stay in
+    `cell_force_balance.py`.
+  - **Next in 5a:** decision 4 (the diffusion check), decision 6 (the centroid), decision 7 (E4a against
+    vcell-core's criteria, the kink, the measurements).
+
 - **2026-11-18** — **ADR 022 implemented: per-species error tolerances on every method-of-lines path.**
   - **What:** `backend/tolerances.py`; every method-of-lines integrator (single mesh, multi-compartment,
     two-compartment, ALE with remeshing) takes `tolerance_scaling` and `tolerance_scales`; one `SpeciesScales`

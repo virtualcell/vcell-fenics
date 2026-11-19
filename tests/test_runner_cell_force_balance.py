@@ -37,7 +37,7 @@ _GEOMETRY = """geometry_description:
     - { name: pm, inside: cell, outside: ec }
 """
 
-# Nickaeen et al. 2017's zero-velocity cell (as in tests/test_backend_cell_force_balance_run.py)
+# Nickaeen et al. 2017's zero-velocity cell (as in tests/test_member_species.py)
 _MYOSIN = """
 math_description:
   geometry: disk_in_medium

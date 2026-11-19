@@ -172,7 +172,7 @@ def assemble_cell_force_balance(
     (`validate_or_raise`; `solve_cell_force_balance` does it).
 
     `prebuilt` (the members' mesh from `build_members_mesh`), `fields` and `time` are for a run with species on
-    the members (`cell_force_balance_run.py`, ADR 020): `fields` binds each member species to the Function
+    the members (the multi-compartment solver, ADR 021 decision 8): `fields` binds each member species to the Function
     holding its current values, which the volume slots `viscosity`, `bulk_viscosity`, `drag` and
     `active_stress` may read (decision 4); `time` is the `sim.t` Constant the species share."""
 
