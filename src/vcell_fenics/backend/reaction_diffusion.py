@@ -51,6 +51,7 @@ from vcell_fenics.backend.diagnostics import SolveError, preflight_failure_messa
 from vcell_fenics.backend.discrete import DiscreteProblem, TermKind
 from vcell_fenics.backend.linear_solvers import set_preconditioner
 from vcell_fenics.backend.output_times import OutputMonitor
+from vcell_fenics.backend.tolerances import SpeciesScales, ToleranceControl, ToleranceScaling
 
 
 @dataclass
@@ -79,6 +80,8 @@ def integrate_reaction_diffusion(
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
     ksp_rtol: float = 1.0e-9,
+    tolerance_scaling: ToleranceScaling = "species",
+    tolerance_scales: SpeciesScales | None = None,
 ) -> IntegrationResult:
     """Integrate the `n`-species reaction–diffusion–advection system on `mesh` to `t_final`
     with PETSc `TS` (adaptive BDF by default), method-of-lines.
@@ -115,8 +118,10 @@ def integrate_reaction_diffusion(
     if reaction is not None:
         residual -= ufl.inner(reaction(state), test)  # − R(c)·v  (may be nonlinear)
 
-    options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
-    steps, final_time = _run_time_stepper(state, rate, residual * dx, options)
+    options = _TimeStepperOptions(
+        t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol, tolerance_scaling
+    )
+    steps, final_time = _run_time_stepper(state, rate, residual * dx, options, scales=tolerance_scales)
     return IntegrationResult(solution=state, steps=steps, time=final_time)
 
 
@@ -130,6 +135,7 @@ class _TimeStepperOptions:
     ksp_type: str
     pc_type: str
     ksp_rtol: float
+    tolerance_scaling: ToleranceScaling = "species"
 
 
 def _run_time_stepper(
@@ -144,6 +150,8 @@ def _run_time_stepper(
     output_times: Sequence[float] = (),
     on_output: Callable[[float, fem.Function], None] | None = None,
     on_progress: Callable[[float], None] | None = None,
+    names: Sequence[str] | None = None,
+    scales: SpeciesScales | None = None,
 ) -> tuple[int, float]:
     """Integrate the implicit residual `F(state, rate) = 0` to `options.t_final` with PETSc `TS`,
     mutating `state` in place. `residual` is the UFL form of `F` (`rate` the time derivative `ċ`,
@@ -160,7 +168,11 @@ def _run_time_stepper(
     as a snapshot `Function` (`t_start` itself being the initial state), recorded from a `TS` monitor
     by interpolation so the adaptive step sequence is exactly an unmonitored run's
     (`backend/output_times.py`); the snapshot is reused between calls. `on_progress(t)` follows every
-    accepted step."""
+    accepted step.
+
+    Error control (ADR 022, `backend/tolerances.py`): with `options.tolerance_scaling == "species"`, each
+    component of `state` (a species, named by `names`) gets its own absolute tolerance from its running maximum,
+    kept in `scales` across calls, and the Dirichlet-held unknowns are left out of the error norm."""
 
     space = state.function_space
     mesh = space.mesh
@@ -219,7 +231,6 @@ def _run_time_stepper(
     ts.setTime(t_start)  # integrate the sub-interval [t_start, t_final] (the moving driver strides over these)
     ts.setMaxTime(options.t_final)
     ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-    ts.setTolerances(rtol=options.rtol, atol=options.atol)
     ts.setMaxSNESFailures(-1)  # let the adaptive controller cut the step and retry when Newton fails
     # Inner Newton (SNES) linear solver. The MOL default is a **Krylov solve (GMRES) with an
     # ILU preconditioner** — VCell's reaction-diffusion solver uses CVODE with SPGMR + ILU for
@@ -240,6 +251,8 @@ def _run_time_stepper(
     if bcs:  # make the initial state consistent with the Dirichlet boundary values g(t=0)
         fem_petsc.set_bc(state.x.petsc_vec, bcs)
         state.x.scatter_forward()
+    tolerances = _tolerance_control(state, options, bcs, names, scales)  # from the initial state
+    tolerances.attach(ts)
 
     # t = 0 pre-flight: catch a model that is already broken at the initial condition (a non-finite
     # residual — a divide-by-zero, a fractional power / log of a non-positive value at the IC)
@@ -281,7 +294,38 @@ def _run_time_stepper(
     if monitor is not None:
         monitor.finish(ts, final_time, state.x.petsc_vec)
     ts.destroy()
+    tolerances.destroy()
     return steps, final_time
+
+
+def _tolerance_control(
+    state: fem.Function,
+    options: _TimeStepperOptions,
+    bcs: Sequence[fem.DirichletBC],
+    names: Sequence[str] | None,
+    scales: SpeciesScales | None,
+) -> ToleranceControl:
+    """The tolerances of `state`'s vector (ADR 022): one species per component, interleaved by node; the
+    unknowns a strong Dirichlet condition holds left out."""
+    index_map = state.function_space.dofmap.index_map
+    bs = state.function_space.dofmap.index_map_bs
+    if names is None or len(names) != bs:
+        names = [str(k) for k in range(bs)] if bs > 1 else ["u"]
+    nodes = np.arange(index_map.size_local)
+    layout = {name: bs * nodes + k for k, name in enumerate(names)}
+    held = None
+    if bcs:
+        owned = [bc.dof_indices()[0][: bc.dof_indices()[1]] for bc in bcs]
+        held = np.unique(np.concatenate(owned)).astype(np.int64)
+    return ToleranceControl(
+        state.x.petsc_vec,
+        layout,
+        rtol=options.rtol,
+        atol=options.atol,
+        scaling=options.tolerance_scaling,
+        scales=scales,
+        held=held,
+    )
 
 
 def _localize_nonfinite_term(problem: DiscreteProblem) -> str | None:
@@ -322,6 +366,8 @@ def integrate_discrete_problem(
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
     ksp_rtol: float = 1.0e-9,
+    tolerance_scaling: ToleranceScaling = "species",
+    tolerance_scales: SpeciesScales | None = None,
     output_times: Sequence[float] = (),
     on_output: Callable[[float, fem.Function], None] | None = None,
     on_progress: Callable[[float], None] | None = None,
@@ -354,7 +400,9 @@ def integrate_discrete_problem(
         raise NotImplementedError("method-of-lines integrates time-dependent problems only")
 
     state, rate, residual = _mol_residual(problem)
-    options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
+    options = _TimeStepperOptions(
+        t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol, tolerance_scaling
+    )
     steps, final_time = _run_time_stepper(
         state,
         rate,
@@ -364,6 +412,8 @@ def integrate_discrete_problem(
         on_time=problem.set_time,
         localize=lambda: _localize_nonfinite_term(problem),  # attribute a pre-flight failure to a tagged term
         output_times=output_times,
+        names=problem.variable_name.split(","),
+        scales=tolerance_scales,
         on_output=on_output,
         on_progress=on_progress,
     )
@@ -404,6 +454,8 @@ def integrate_discrete_problem_moving(
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
     ksp_rtol: float = 1.0e-9,
+    tolerance_scaling: ToleranceScaling = "species",
+    tolerance_scales: SpeciesScales | None = None,
 ) -> IntegrationResult:
     """Method-of-lines on a **moving** subdomain (strided ALE), to `t_final`.
 
@@ -441,6 +493,7 @@ def integrate_discrete_problem_moving(
     h = t_final / motion_steps
     problem.dt.value = h  # the per-stride mesh-move magnitude (advance_mesh moves by dt·v)
     total_steps = 0
+    scales = tolerance_scales if tolerance_scales is not None else SpeciesScales()  # kept across the strides
     for i in range(motion_steps):
         problem.advance_mesh()  # move the mesh by h·v, carrying the field (material frame)
         total_steps += integrate_discrete_problem_stride(
@@ -454,6 +507,8 @@ def integrate_discrete_problem_moving(
             ksp_type=ksp_type,
             pc_type=pc_type,
             ksp_rtol=ksp_rtol,
+            tolerance_scaling=tolerance_scaling,
+            tolerance_scales=scales,
         )
     return IntegrationResult(solution=problem.unknown, steps=total_steps, time=motion_steps * h)
 
@@ -470,6 +525,8 @@ def integrate_discrete_problem_stride(
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
     ksp_rtol: float = 1.0e-9,
+    tolerance_scaling: ToleranceScaling = "species",
+    tolerance_scales: SpeciesScales | None = None,
 ) -> int:
     """Method-of-lines over **one fixed-mesh interval** `[t_start, t_final]`, returning the `TS` step
     count. The IR's tagged terms (incl. DILUTION) build the residual, so on a moving subdomain's mesh
@@ -480,7 +537,9 @@ def integrate_discrete_problem_stride(
     (and `previous`) in place."""
 
     state, rate, residual = _mol_residual(problem)
-    options = _TimeStepperOptions(t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol)
+    options = _TimeStepperOptions(
+        t_final, dt_initial, ts_type, rtol, atol, ksp_type, pc_type, ksp_rtol, tolerance_scaling
+    )
     steps, _ = _run_time_stepper(
         state,
         rate,
@@ -490,6 +549,8 @@ def integrate_discrete_problem_stride(
         on_time=problem.set_time,
         localize=lambda: _localize_nonfinite_term(problem),
         t_start=t_start,
+        names=problem.variable_name.split(","),
+        scales=tolerance_scales,
     )
     problem.previous.x.array[:] = state.x.array
     return steps

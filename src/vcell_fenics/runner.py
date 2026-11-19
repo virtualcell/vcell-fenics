@@ -57,6 +57,12 @@ from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
 from vcell_fenics.backend.realize import ImageGeometryWarning, realize
 from vcell_fenics.backend.remesh_3d import RemeshWarning
+from vcell_fenics.backend.tolerances import (
+    DEFAULT_TOLERANCE_FLOOR,
+    SpeciesScales,
+    ToleranceScaling,
+    tolerance_summary,
+)
 from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_geometry_yaml, dump_yaml
 from vcell_fenics.formalism.schema import REGION_SPACE, TemplateEquation
 from vcell_fenics.formalism.templates import CELL_FORCE_BALANCE
@@ -108,7 +114,10 @@ class RunOptions:
     at `t_final`; they need not be uniform. `dt` is the backward-Euler step (snapped per output
     interval so every output lands on a step); `rtol`/`atol` drive the adaptive method of lines.
     `persistent_integrator` keeps one integrator across a cell force balance's strides (a solver option, off
-    by default; `integrate_multi_compartment`).
+    by default; `integrate_multi_compartment`). `tolerance_scaling` (ADR 022): `"species"` gives each species
+    its own absolute tolerance from its scale, `atol` the ceiling; `"scalar"` keeps `rtol`/`atol` for every
+    unknown. `tolerance_floor`: a species whose scale is at most this fraction of the largest species' keeps `atol`
+    (machine epsilon by default; raise it so a trace species cannot set the step).
     """
 
     h: float
@@ -120,11 +129,15 @@ class RunOptions:
     rtol: float = 1.0e-6
     atol: float = 1.0e-8
     persistent_integrator: bool = False
+    tolerance_scaling: ToleranceScaling = "species"
+    tolerance_floor: float = DEFAULT_TOLERANCE_FLOOR
 
     def __post_init__(self) -> None:
         times = self.output_times
         if not times or times[0] != 0.0 or times[-1] != self.t_final or any(b <= a for a, b in pairwise(times)):
             raise RunError(f"output times must rise strictly from 0 to t_final={self.t_final}, got {list(times)}")
+        if not (math.isfinite(self.tolerance_floor) and 0.0 <= self.tolerance_floor < 1.0):
+            raise RunError(f"tolerance floor must lie in [0, 1), got {self.tolerance_floor!r}")
 
 
 def uniform_output_times(t_final: float, output_dt: float) -> tuple[float, ...]:
@@ -197,10 +210,12 @@ def run_model(
         "mpi_ranks": comm.size,
         "backend": "ale" if moving else "multi_compartment" if multi else "single_mesh",
     }
+    # each species' running maximum, across strides and remeshes (ADR 022)
+    scales = SpeciesScales(floor=options.tolerance_floor)
     try:
         if force_balance is not None:
             cells, steps, strides = _run_multi_compartment(
-                model, options, recorder, reporter, force_balance=force_balance
+                model, options, recorder, reporter, scales, force_balance=force_balance
             )
             run_info |= {
                 "dt": max(b - a for a, b in pairwise([0.0, *_stride_ends(options)])),  # the longest stride
@@ -209,12 +224,11 @@ def run_model(
                 "coupling": "staggered",
                 "steps": steps,
                 "strides": strides,
-                "rtol": options.rtol,
-                "atol": options.atol,
+                **_tolerances(options, scales),
                 "integrator": "persistent" if options.persistent_integrator else "fresh per stride",
             }
         elif moving:
-            cells, steps, dt_used, remeshes, strides = _run_moving(model, moving, options, recorder, reporter)
+            cells, steps, dt_used, remeshes, strides = _run_moving(model, moving, options, recorder, reporter, scales)
             run_info |= {
                 "dt": dt_used,
                 "dt_requested": options.dt,
@@ -223,14 +237,14 @@ def run_model(
                 "remeshes": remeshes,
             }
             if options.time_integration == "method_of_lines":  # dt is the stride; steps are the integrator's
-                run_info |= {"strides": strides, "rtol": options.rtol, "atol": options.atol}
+                run_info |= {"strides": strides, **_tolerances(options, scales)}
         elif multi:
             cells, steps, _ = _run_multi_compartment(
-                model, options, recorder, reporter, motion_membrane=moving_partition
+                model, options, recorder, reporter, scales, motion_membrane=moving_partition
             )
-            run_info |= {"time_integration": "method_of_lines", "steps": steps}
+            run_info |= {"time_integration": "method_of_lines", "steps": steps, **_tolerances(options, scales)}
         else:
-            cells, steps, dt_used = _run_single_mesh(model, options, recorder, reporter)
+            cells, steps, dt_used = _run_single_mesh(model, options, recorder, reporter, scales)
             run_info |= {
                 "dt": None if math.isnan(dt_used) else dt_used,  # the method of lines has no fixed step here
                 "dt_requested": options.dt,
@@ -238,7 +252,7 @@ def run_model(
                 "steps": steps,
             }
             if options.time_integration == "method_of_lines":
-                run_info |= {"rtol": options.rtol, "atol": options.atol}
+                run_info |= _tolerances(options, scales)
     except BaseException as error:
         writer.finalize("failed", f"{type(error).__name__}: {error}")
         raise
@@ -456,8 +470,18 @@ def _source_info(model: ModelInput) -> SourceInfo:
 # -- the single-mesh path -----------------------------------------------------------------------------
 
 
+def _tolerances(options: RunOptions, scales: SpeciesScales) -> dict[str, Any]:
+    """The run's error control for its summary (ADR 022 decision 4): the tolerances asked for, the scaling, the
+    norm, and each species' final scale and absolute tolerance."""
+    return tolerance_summary(options.rtol, options.atol, options.tolerance_scaling, scales)
+
+
 def _run_single_mesh(
-    model: ModelInput, options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
+    model: ModelInput,
+    options: RunOptions,
+    recorder: BundleRecorder,
+    status: _PhasedProgress,
+    scales: SpeciesScales,
 ) -> tuple[int, int, float]:
     """realize → assemble → integrate, writing a row at every output time. Returns (cells, steps, dt)."""
 
@@ -495,6 +519,8 @@ def _run_single_mesh(
             t_final=options.t_final,
             rtol=options.rtol,
             atol=options.atol,
+            tolerance_scaling=options.tolerance_scaling,
+            tolerance_scales=scales,
             output_times=options.output_times,
             on_output=on_output,
             on_progress=status.step,
@@ -526,7 +552,12 @@ def _moving_subdomains(model: ModelInput) -> list[str]:
 
 
 def _run_moving(
-    model: ModelInput, moving: list[str], options: RunOptions, recorder: BundleRecorder, status: _PhasedProgress
+    model: ModelInput,
+    moving: list[str],
+    options: RunOptions,
+    recorder: BundleRecorder,
+    status: _PhasedProgress,
+    scales: SpeciesScales,
 ) -> tuple[int, int, float, int, int]:
     """Backward Euler through the ALE driver on the moving domain: the mesh moves every step (the
     conservative ALE time term keeps each species' mass), remeshing when it has degraded and continuing
@@ -600,6 +631,8 @@ def _run_moving(
                             target_h=options.h,
                             rtol=options.rtol,
                             atol=options.atol,
+                            tolerance_scaling=options.tolerance_scaling,
+                            tolerance_scales=scales,
                         )
                     else:
                         step_with_remeshing(state, quality_limit=_REMESH_QUALITY_LIMIT, target_h=options.h)
@@ -711,6 +744,7 @@ def _run_multi_compartment(
     options: RunOptions,
     recorder: BundleRecorder,
     status: _PhasedProgress,
+    scales: SpeciesScales,
     *,
     motion_membrane: str | None = None,
     force_balance: _ForceBalanceRun | None = None,
@@ -829,12 +863,14 @@ def _run_multi_compartment(
             on_progress=status.step,
             stride_ends=_stride_ends(options) if force_balance is not None else (),
             persistent_integrator=options.persistent_integrator and force_balance is not None,
+            tolerance_scaling=options.tolerance_scaling,
+            tolerance_scales=scales,
         )
         return cells, int(result.steps), int(result.strides)
     return (
         cells,
         _run_moving_partition(
-            model, options, recorder, status, geometry, wanted, motion_membrane, variables, on_output, comm
+            model, options, recorder, status, geometry, wanted, motion_membrane, variables, on_output, comm, scales
         ),
         0,
     )
@@ -851,6 +887,7 @@ def _run_moving_partition(
     variables: Mapping[str, list[str]],
     on_output: Callable[[float, dict[str, Any]], None],
     comm: MPI.Comm,
+    scales: SpeciesScales,
 ) -> int:
     """A moving partition in segments (vcell-fenics ADR 016 decision 4): integrate until the mesh needs a remesh
     (a cell shrunk below a quarter of its as-built area, or a move that would tangle it, undone), remesh the whole
@@ -894,6 +931,8 @@ def _run_moving_partition(
                 initial=initial,
                 pending_move=pending,
                 stop_for_remesh=can_remesh,
+                tolerance_scaling=options.tolerance_scaling,
+                tolerance_scales=scales,
             )
         except MeshQualityError as error:
             raise RunError(f"the moving partition failed: {error}") from error

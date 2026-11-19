@@ -94,6 +94,7 @@ from vcell_fenics.backend.realize import (
     _realize_2d_partition,
     _realize_3d_partition,
 )
+from vcell_fenics.backend.tolerances import SpeciesScales, ToleranceControl, ToleranceScaling, blocked_layout
 from vcell_fenics.formalism.geometry_schema import GeometryDescription
 from vcell_fenics.formalism.linearity import TRANSPORT_SLOTS, reads
 from vcell_fenics.formalism.parser import parse
@@ -337,6 +338,8 @@ def integrate_multi_compartment(
     stop_for_remesh: bool = False,
     velocity_override: Callable[[float, fem.Function], None] | None = None,
     persistent_integrator: bool = False,
+    tolerance_scaling: ToleranceScaling = "species",
+    tolerance_scales: SpeciesScales | None = None,
 ) -> MultiCompartmentResult:
     """Integrate ``md`` on ``geometry`` to ``t_final`` (the module docstring). ``on_output(t, fields)`` receives
     every species and region variable by name (snapshots valid for the call) at each of ``output_times``,
@@ -364,7 +367,12 @@ def integrate_multi_compartment(
     ``persistent_integrator`` keeps one integrator across a force balance's strides instead of a fresh one per
     stride: its BDF history and order carry over the change of ``v`` between strides, and its error control
     meets the kink this puts in the species' rate. A solver option, off by default; refused with a moving
-    membrane, whose mesh moves change the unknowns' meaning between strides."""
+    membrane, whose mesh moves change the unknowns' meaning between strides.
+
+    ``tolerance_scaling`` (ADR 022): ``"species"`` gives each species and region variable an absolute tolerance
+    from its own running maximum and weighs them equally in the error norm (`backend/tolerances.py`);
+    ``"scalar"`` keeps ``rtol`` and ``atol`` as given for every unknown. ``tolerance_scales`` carries the running
+    maxima across calls (a restart after a remesh); the caller reads them for its summary."""
 
     validate_or_raise(md)
     if persistent_integrator and motion_membrane is not None:
@@ -807,6 +815,19 @@ def integrate_multi_compartment(
     state_vec = petsc.create_vector(spaces, kind="mpi")
     for k, state in enumerate(states):
         state_vec.array[offsets[k] : offsets[k + 1]] = state.x.array[: sizes[k]]
+    # ADR 022: each species' entries in the state vector, for its own tolerances. A block of `bs` species holds
+    # them interleaved by node; a region variable's Real is one entry, on its owning rank.
+    layout = blocked_layout(
+        [
+            (offsets[k], sizes[k], spaces[k].dofmap.index_map_bs, names_k)
+            for k, names_k in enumerate(
+                [*([eq.variable for eq in g] for g in groups), *([eq.variable] for eq in region_eqs)]
+            )
+        ]
+    )
+    tolerances = ToleranceControl(
+        state_vec, layout, rtol=rtol, atol=atol, scaling=tolerance_scaling, scales=tolerance_scales
+    )
     shift.value = 1.0
     for constant in shift_surface.values():
         constant.value = 1.0
@@ -852,7 +873,7 @@ def integrate_multi_compartment(
         ts.setTimeStep(dt)
         ts.setMaxTime(t_end)
         ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-        ts.setTolerances(rtol=rtol, atol=atol)
+        tolerances.attach(ts)
         ts.setMaxSNESFailures(-1)
         snes = ts.getSNES()
         snes.setUseEW(False)
@@ -1041,6 +1062,7 @@ def integrate_multi_compartment(
             final_velocity = _copy(cast(fem.Function, velocity))
         if kept is not None:
             kept.destroy()
+        tolerances.destroy()
         for mass in masses.values():
             mass.destroy()
         for petsc_object in (state_vec, precond, parent_matrix, own_matrix):
@@ -1089,6 +1111,7 @@ def integrate_multi_compartment(
     if monitor is not None:
         monitor.finish(ts, final_time, state_vec)
     scatter(state_vec, states)
+    tolerances.destroy()
     for obj in (ts, state_vec, precond, parent_matrix, own_matrix, work):
         if obj is not None:
             obj.destroy()

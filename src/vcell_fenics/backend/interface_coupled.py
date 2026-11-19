@@ -65,6 +65,7 @@ from vcell_fenics.backend.geometry import InterfaceCoupledGeometry, membrane_tra
 from vcell_fenics.backend.linear_solvers import set_preconditioner
 from vcell_fenics.backend.output_times import OutputMonitor
 from vcell_fenics.backend.stokes import solve_incompressible_stokes_surface_tension
+from vcell_fenics.backend.tolerances import SpeciesScales, ToleranceControl, ToleranceScaling, blocked_layout
 from vcell_fenics.formalism.parser import parse
 from vcell_fenics.formalism.schema import (
     BCDirichlet,
@@ -883,6 +884,8 @@ def integrate_interface_coupled(
     atol: float = 1.0e-8,
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
+    tolerance_scaling: ToleranceScaling = "species",
+    tolerance_scales: SpeciesScales | None = None,
     output_times: Sequence[float] = (),
     on_output: Callable[[float, fem.Function, fem.Function], None] | None = None,
     on_progress: Callable[[float], None] | None = None,
@@ -1144,7 +1147,15 @@ def integrate_interface_coupled(
     ts.setTimeStep(dt_initial if dt_initial is not None else t_final / 1.0e4)
     ts.setMaxTime(t_final)
     ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-    ts.setTolerances(rtol=rtol, atol=atol)
+    tolerances = ToleranceControl(  # ADR 022: one scalar block per species and region variable
+        state_vec,
+        blocked_layout([(offsets[k], sizes[k], 1, [eq.variable]) for k, eq in enumerate((*eqs, *region_eqs))]),
+        rtol=rtol,
+        atol=atol,
+        scaling=tolerance_scaling,
+        scales=tolerance_scales,
+    )
+    tolerances.attach(ts)
     ts.setMaxSNESFailures(-1)
     snes = ts.getSNES()
     snes.setUseEW(False)
@@ -1188,6 +1199,7 @@ def integrate_interface_coupled(
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
     if monitor is not None:
         monitor.finish(ts, final_time, state_vec)
+    tolerances.destroy()
     for obj in (ts, state_vec, jacobian_matrix, work):
         if obj is not None:
             obj.destroy()
@@ -1649,6 +1661,8 @@ def integrate_membrane_coupled(
     atol: float = 1.0e-8,
     ksp_type: str = "gmres",
     pc_type: str = "ilu",
+    tolerance_scaling: ToleranceScaling = "species",
+    tolerance_scales: SpeciesScales | None = None,
     velocity: str | None = None,
     motion: MembraneCoupledMeshMotion | ForceBalanceMeshMotion | None = None,
     motion_steps: int = 10,
@@ -2009,6 +2023,19 @@ def integrate_membrane_coupled(
     state_vec = petsc.create_vector(spaces, kind="mpi")
     for k, fn in enumerate(state_fns):
         state_vec.array[offsets[k] : offsets[k + 1]] = fn.x.array[: sizes[k]]
+    # ADR 022: the three field blocks hold their species interleaved by node (a placeholder block's component
+    # is no species, so it stays out of the norm); then one Real per region variable.
+    block_names = [inner_species, outer_species, membrane_species, *([eq.variable] for eq in region_eqs)]
+    tolerances = ToleranceControl(
+        state_vec,
+        blocked_layout(
+            [(offsets[k], sizes[k], spaces[k].dofmap.index_map_bs, names) for k, names in enumerate(block_names)]
+        ),
+        rtol=rtol,
+        atol=atol,
+        scaling=tolerance_scaling,
+        scales=tolerance_scales,
+    )
 
     mf = _MatrixFreeShiftedJacobian(residual, state_vec)
     vec_sizes = state_vec.getSizes()  # (local, global); petsc4py types it loosely as int | tuple
@@ -2044,7 +2071,7 @@ def integrate_membrane_coupled(
         ts.setTimeStep(dt_initial if dt_initial is not None else (t1 - t0) / 1.0e4)
         ts.setMaxTime(t1)
         ts.setExactFinalTime(PETSc.TS.ExactFinalTime.MATCHSTEP)  # type: ignore[arg-type]
-        ts.setTolerances(rtol=rtol, atol=atol)
+        tolerances.attach(ts)
         ts.setMaxSNESFailures(-1)
         snes = ts.getSNES()
         snes.setUseEW(False)
@@ -2109,6 +2136,7 @@ def integrate_membrane_coupled(
             ts.destroy()
         final_time = t_final
     unpack(state_vec)
+    tolerances.destroy()
     for obj in (state_vec, operator, precond):
         obj.destroy()
     return MembraneCoupledResult(
