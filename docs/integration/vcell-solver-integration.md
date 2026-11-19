@@ -426,6 +426,15 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-18** — **ADR 022 accepted: error tolerances that mean the same thing for every species.**
+  - **Decided** (Jim, all as recommended): each species' absolute tolerance from its own running maximum, capped
+    by the user's `atol` with a round-off floor; balanced vector tolerances `√(n_s/n)` so the 2-norm weighs every
+    species equally, mesh-independently; on every method-of-lines path (multi-compartment, single mesh,
+    two-compartment); `--tolerance-scaling species|scalar`, `species` by default unless the implementation's cost
+    measurement says otherwise.
+  - **Next:** the implementation PR, with the cost measurement across the MMS suite, cross-validation, the
+    integration tests and the runnable BioModels.
+
 - **2026-11-18** — **The method of lines had its tolerances swapped (fixed).**
   - **What:** since the first method-of-lines integrator (2026-06-16, `1c75601`), all four `TS.setTolerances` calls
     passed `(atol, rtol)` positionally; petsc4py's order is `(rtol, atol)`. Every run used the absolute tolerance
