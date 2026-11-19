@@ -1,0 +1,37 @@
+name: bulk_species_reading_transport_disk
+description: >
+  The single-mesh twin of `member_transport_reading` (ADR 021 decisions 2 and 7): on a fixed disk, a diffusion
+  D(c) = 0.1 + 0.01 c and a drift w = [c/10, 0] that read the species, with the exact c* = e^(−t)(2 + sin x cos y)
+  held on the boundary. The source f = ∂t c* − ∇·(D(c*)∇c*) + ∇·(c* w(c*)) was derived with sympy (pyvcell's env,
+  a dev-time tool); it reads `sim.t`. Nonlinear in c, so it runs by the method of lines only (backward Euler
+  refuses it, `NonlinearTermError`). A slot that did not read c leaves an O(1) error.
+harness: bulk
+dim: 2
+geometry: {kind: disk, radius: 1.0, volume_subdomain: cyto, boundary: edge}
+exact: {c: "np.exp(-t)*(2 + np.sin(x)*np.cos(y))"}
+t_final: 0.25
+dt: 0.05
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 2.0
+applicable_solvers: [fenics-mol]
+mol_rtol: 1.0e-9
+mol_dt_initial: 2.5e-7
+math: |
+  math_description:
+    geometry: disk
+    subdomains:
+      - { name: cyto, kind: volume }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1 + 0.01*c"
+          relative_advection: "[c/10, 0]"
+          source: "((-sin(geom.x[0])**2*sin(geom.x[1])**2 + 2*sin(geom.x[0])**2*cos(geom.x[1])**2 + 20*sin(geom.x[0])*cos(geom.x[0])*cos(geom.x[1])**2 + 4*sin(geom.x[0])*cos(geom.x[1]) - cos(geom.x[0])**2*cos(geom.x[1])**2 + 40*cos(geom.x[0])*cos(geom.x[1]))*exp(-sim.t)/100 - 4*sin(geom.x[0])*cos(geom.x[1])/5 - 2)*exp(-sim.t)"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "exp(-sim.t)*(2 + sin(geom.x[0])*cos(geom.x[1]))" }

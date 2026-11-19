@@ -526,6 +526,42 @@ At `t = 10`:
      - a run on 2 MPI ranks, which must match 1 rank to the solver's tolerance. ILU becomes block Jacobi in
        parallel, so the iterations differ, not the answer (*inferred*).
 
+   - *Recorded in the implementation, 2026-11-19 (stage 5a, part 6):*
+     - **E4a** (`tests/test_e4a.py`, integration; vcell-core's document and criteria from the sibling checkout)
+       through the CLI at h = 0.1, Δt = 0.05 to t = 10 (200 strides, 2,607 steps): every criterion holds at every
+       output. The band share ratio is 6.07 at t = 10 (criterion ≥ 3); the peak 13.3 (≤ 125); `min m / mean`
+       0.048 (≥ −0.01); `∫m` kept to 7e-15 (≤ 1e-8).
+     - **The transient's dependence on Δt** (h = 0.1), the band share ratio at t = 2 and t = 10:
+
+       | Δt | 0.1 | 0.05 | 0.025 | 0.0125 |
+       |---|---|---|---|---|
+       | t = 2 | 2.72 | 3.70 | 4.23 | 4.47 |
+       | t = 10 | 6.070 | 6.070 | 6.070 | 6.070 |
+
+       The transient is first order in Δt (the stagger), as the Context's prototype found (the same t = 2 values);
+       the state it reaches is not. On h (Δt = 0.05): 6.07, 6.25, 6.23 at h = 0.1, 0.075, 0.05, the peak 13.30,
+       13.28, 13.26.
+     - **The cost per stride:** 0.07–0.2 s at Δt = 0.05 (11–22 s for 200 strides on this Mac, the spread from JIT
+       and load), set by the TS steps inside a stride (11–13 per stride). Decision 4's check adds 3–8 %.
+     - **Two MPI ranks** match one: the same 2,607 steps, the band share and the peak equal to six digits, `∫m`
+       kept to 5e-14.
+     - **The kink** (`tests/test_member_species.py`): a prescribed `v = −x` with the cut-off at `m_max,u` = 1.5 and
+       D = 0.02. The peak settles at 1.586 (h = 0.1) and 1.500 (h = 0.05) by t = 5, against 24 without the
+       cut-off; the strides converge and `∫m` is kept to 2e-13. The test asserts 1.5–1.65 at t = 2 (1.549).
+     - **The manufactured solutions** with a diffusion and a drift that read the species: `member_transport_reading`
+       (order 1.75 in L∞), its single-mesh twin `bulk_species_reading_transport_disk` (order 1.7; with either slot
+       frozen the error does not shrink), and the moving single mesh, `bulk_species_reading_transport_moving_disk`
+       (a rigid translation, order 1.51 in L∞, the plain translation case's rate; frozen, it stays at 1.7e-3). The
+       fixed cases read `sim.t` in their sources. Strided ALE is first order in the stride even for a rigid
+       translation (the mesh moves in jumps while the boundary value follows the motion): at a fixed stride of 0.05
+       the moving case floored at 3.5e-3, so it refines the stride with h (`2h²`) over a short run.
+     - **Decision 4's check in a failed solve** (`tests/test_diffusion_sign.py`): with the monitor off, a non-uniform
+       `c` diffuses backwards past `D = 0` until the integrator fails, on the single mesh and in the
+       multi-compartment solver; the failure path finds the diffusion negative on the last iterate and raises
+       `DiffusionSignError` from the solver's error.
+     - The structural tests (the linearity check, the switch) were part 1's (#259); the agreement of the two
+       species paths, part 2's (#260).
+
    *Recommendation: yes.*
 
 8. **One species path: a cell's species run through the multi-compartment solver.**

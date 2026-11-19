@@ -49,7 +49,15 @@ Each case names the solver family it exercises; the dev runner dispatches on it:
   steady). Geometry: `disk_in_box`, the membrane snapped onto the circle on the parent mesh and the cell's submesh
   (issue #249). `member_transport_carried`: a compressible `v = (1 − r²)(x, y)` that vanishes on the held membrane
   → order 1.83 (L∞; 1.8 by the earlier backward-Euler path, before 2026-11-17); with the carrier's sign flipped
-  the error stays at 2.0.
+  the error stays at 2.0. `member_transport_reading` (ADR 021 decision 7): the same, with a diffusion
+  `0.1 + 0.01 m` and E4's drift cut-off `(max(0, 1 − m/15) − 1) v` that read the species → order 1.75 (L∞; L² 2.1).
+- **Transport that reads the species on the single mesh** (`bulk` harness, ADR 021 decision 7):
+  `bulk_species_reading_transport_disk`, a diffusion `0.1 + 0.01 c` and a drift `[c/10, 0]` on a fixed disk with
+  the exact solution held on the boundary, by the method of lines → order 1.7 (L∞; L² 2.06). With either slot
+  frozen at a constant the error stays at 1.7e-3 / 4.4e-2 at every h. Both cases' sources were derived with sympy
+  (in pyvcell's env, a dev-time tool) and read `sim.t`. `bulk_species_reading_transport_moving_disk`: the same slots
+  on a rigidly translating disk → order 1.51 (L∞), with `dt_rule: 2*h**2` over t = 0.2 (strided ALE is first order
+  in the stride, even for a translation: a fixed stride floors the error).
 
 `applicable_solvers` in each case declares which apply. The fv/mb runners author the case as VCML — the
 manufactured forcing is a **general-kinetics** volume source `∅ → u` with net rate `J = f` (mass-action

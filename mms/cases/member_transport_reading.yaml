@@ -1,0 +1,48 @@
+name: member_transport_reading
+description: >
+  The member case of `member_transport_carried` with a diffusion and a drift that READ the species (ADR 021
+  decisions 2 and 7): D(m) = 0.1 + 0.01 m, and E4's drift cut-off w = (max(0, 1 − m/15) − 1) v, so the material
+  rides v(1 − m/15) while m < 15 (the manufactured m stays below 3·e^(−t), away from the kink, which
+  `tests/test_member_species.py` drives separately). Same velocity, exact m* and natural condition as the carried
+  case. The source f = ∂t m* − ∇·(D(m*)∇m*) + ∇·(m* (1 − m*/15) v) was derived with sympy (pyvcell's env, a
+  dev-time tool) and expanded; it reads `sim.t`, so the time is checked in the stride. A slot that did not read
+  m leaves an O(1) error that does not shrink. Through the multi-compartment solver by the method of lines.
+harness: member_transport
+dim: 2
+geometry: {kind: disk_in_box, radius: 1.0, cell: cell, outside: ec, membrane: pm}
+velocity: ["x*(1 - x**2 - y**2)", "y*(1 - x**2 - y**2)"]
+exact: {m: "np.exp(-t)*(2 + x*(1 - x**2 - y**2)**2)"}
+t_final: 0.25
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 2.0
+applicable_solvers: [fenics-mol]
+mol_rtol: 1.0e-9
+math: |
+  math_description:
+    geometry: disk_in_medium
+    subdomains:
+      - { name: ec, kind: volume }
+      - { name: cell, kind: volume, motion: { kind: unknown, variable: v } }
+      - { name: pm, kind: surface, motion: { kind: unknown, variable: v } }
+    variables:
+      - { name: m, subdomain: cell }
+      - { name: v, subdomain: cell, type: vector }
+    equations:
+      - template: bulk_radv_diff
+        variable: m
+        subdomain: cell
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1 + 0.01*m"
+          relative_advection: "(max(0, 1 - m/15) - 1) * v"
+          source: "(-9*geom.x[0]**7 - 27*geom.x[0]**5*geom.x[1]**2 + 20*geom.x[0]**5 - 27*geom.x[0]**3*geom.x[1]**4 + 40*geom.x[0]**3*geom.x[1]**2 - 77*geom.x[0]**3/5 - 8*geom.x[0]**2 - 9*geom.x[0]*geom.x[1]**6 + 20*geom.x[0]*geom.x[1]**4 - 77*geom.x[0]*geom.x[1]**2/5 + 18*geom.x[0]/5 - 8*geom.x[1]**2 + (280*geom.x[0]**12 + 1400*geom.x[0]**10*geom.x[1]**2 - 1200*geom.x[0]**10 + 2800*geom.x[0]**8*geom.x[1]**4 - 4800*geom.x[0]**8*geom.x[1]**2 + 1853*geom.x[0]**8 + 720*geom.x[0]**7 + 2800*geom.x[0]**6*geom.x[1]**6 - 7200*geom.x[0]**6*geom.x[1]**4 + 5556*geom.x[0]**6*geom.x[1]**2 - 1228*geom.x[0]**6 + 2160*geom.x[0]**5*geom.x[1]**2 - 1680*geom.x[0]**5 + 1400*geom.x[0]**4*geom.x[1]**8 - 4800*geom.x[0]**4*geom.x[1]**6 + 5550*geom.x[0]**4*geom.x[1]**4 - 2444*geom.x[0]**4*geom.x[1]**2 + 294*geom.x[0]**4 + 2160*geom.x[0]**3*geom.x[1]**4 - 3360*geom.x[0]**3*geom.x[1]**2 + 1056*geom.x[0]**3 + 280*geom.x[0]**2*geom.x[1]**10 - 1200*geom.x[0]**2*geom.x[1]**8 + 1844*geom.x[0]**2*geom.x[1]**6 - 1204*geom.x[0]**2*geom.x[1]**4 + 276*geom.x[0]**2*geom.x[1]**2 + 324*geom.x[0]**2 + 720*geom.x[0]*geom.x[1]**6 - 1680*geom.x[0]*geom.x[1]**4 + 1056*geom.x[0]*geom.x[1]**2 - 144*geom.x[0] - 3*geom.x[1]**8 + 12*geom.x[1]**6 - 18*geom.x[1]**4 + 332*geom.x[1]**2 - 163)*exp(-sim.t)/300 + 2)*exp(-sim.t)"
+        initial_condition: "2 + (geom.x[0]*(1 - geom.x[0]**2 - geom.x[1]**2)**2)"
+      - template: cell_force_balance
+        variable: v
+        subdomain: cell
+        temporality: steady_state
+        viscous_operator: laplacian
+        volumes:
+          cell: { viscosity: "1", drag: "1" }
+    boundary_conditions:
+      - { kind: dirichlet, variable: v, boundary: pm, expression: "0" }

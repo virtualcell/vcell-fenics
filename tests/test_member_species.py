@@ -366,6 +366,33 @@ def test_the_crowding_cut_offs_run_and_keep_the_myosin() -> None:
     assert cut.fields["m"].x.array.max() < plain.fields["m"].x.array.max()
 
 
+def test_the_drift_cut_off_saturates_the_myosin_near_its_kink() -> None:
+    """ADR 021 decision 7: E4a's peak (13.3) never reaches `m_max,u` (15), so the cut-off's kink is driven here.
+    A prescribed `v = −x` converges on the centre; with the cut-off `max(0, 1 − m/m_max,u)` on the carrier, the
+    material stops riding `v` where `m` reaches `m_max,u = 1.5` (mean 1), and the strides still converge.
+
+    Saturation is not a bound of the continuous model (at `m = m_max,u` the transport contributes `∇m·v` to
+    `∂m/∂t`), so the band is set from a measurement (2026-11-19, D = 0.02): at h = 0.1 the peak is 1.549 by t = 2
+    and settles at 1.586 by t = 5 (1.500 at h = 0.05), where without the cut-off it reaches 14.7 by t = 2 and 24
+    by t = 5. ∫m drifts by 2e-13."""
+
+    raw = _raw()
+    _myosin(raw)["initial_condition"] = "1"
+    peaks: dict[str, float] = {}
+    for label, terms in (
+        ("cut", {"diffusion": "0.02", "relative_advection": "(max(0, 1 - m / 1.5) - 1) * v"}),
+        ("uncut", {"diffusion": "0.02"}),
+    ):
+        _myosin(raw)["terms"] = terms
+        result, (start, end) = _totals(
+            raw, 2.0, 0.05, h=0.1, override=lambda _t, v: v.interpolate(lambda x: np.vstack([-x[0], -x[1]]))
+        )
+        assert abs(end["m"] - start["m"]) < 1e-10 * start["m"]
+        peaks[label] = float(result.fields["m"].x.array.max())
+    assert 1.5 < peaks["cut"] < 1.65, peaks  # near m_max,u, a few percent over at this h
+    assert peaks["uncut"] > 10.0, peaks
+
+
 # -- the scope's refusals (ADR 021 decision 3) -------------------------------------------------------------------
 
 

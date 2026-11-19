@@ -426,6 +426,18 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-19** — **E4a meets vcell-core's criteria (ADR 021 decision 7; stage 5a, part 6). Stage 5a is done.**
+  - **E4a** (`tests/test_e4a.py`): vcell-core's own document, through the CLI, h = 0.1, Δt = 0.05 to t = 10: the
+    left-edge band holds 6.07 times its initial share of myosin (≥ 3), the peak is 13.3 (≤ 125), `min m / mean`
+    0.048, `∫m` kept to 7e-15, at every output. The transient is first order in Δt (band share at t = 2: 2.72 →
+    4.47 for Δt 0.1 → 0.0125); the state at t = 10 is not (6.070 at every Δt). Two MPI ranks match one to six
+    digits with the same steps.
+  - **The cut-off's kink**, driven by a converging `v`: the peak settles at `m_max,u` (1.500 at h = 0.05).
+  - **Manufactured solutions** with a diffusion and a drift that read the species: order 1.75 on the member, 1.7
+    on the fixed single mesh, 1.51 on a translating one; a frozen slot does not converge.
+  - **Decision 4's check in a real failed solve** names the diffusion on both routes.
+  - **Next:** stage 4a (the cell moves), then 5b; vcell-core's E4a result is ready to report on #255 when Jim says.
+
 - **2026-11-19** — **The bundle carries a moving volume's centroid (ADR 021 decision 6; stage 5a, part 5).**
   - **What:** every moving volume domain records `∫x dx / |Ω|` at each row in `<prefix>centroid/<domain>`
     `(T_seg, gdim)`, named in its manifest entry (`centroid`); `Bundle.centroid(domain)` reads it across segments.
