@@ -55,7 +55,9 @@ Each case names the solver family it exercises; the dev runner dispatches on it:
   `bulk_species_reading_transport_disk`, a diffusion `0.1 + 0.01 c` and a drift `[c/10, 0]` on a fixed disk with
   the exact solution held on the boundary, by the method of lines → order 1.7 (L∞; L² 2.06). With either slot
   frozen at a constant the error stays at 1.7e-3 / 4.4e-2 at every h. Both cases' sources were derived with sympy
-  (in pyvcell's env, a dev-time tool) and read `sim.t`.
+  (in pyvcell's env, a dev-time tool) and read `sim.t`. `bulk_species_reading_transport_moving_disk`: the same slots
+  on a rigidly translating disk → order 1.51 (L∞), with `dt_rule: 2*h**2` over t = 0.2 (strided ALE is first order
+  in the stride, even for a translation: a fixed stride floors the error).
 
 `applicable_solvers` in each case declares which apply. The fv/mb runners author the case as VCML — the
 manufactured forcing is a **general-kinetics** volume source `∅ → u` with net rate `J = f` (mass-action

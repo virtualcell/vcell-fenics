@@ -434,7 +434,8 @@ Newest first. One entry per landed step or notable finding.
     digits with the same steps.
   - **The cut-off's kink**, driven by a converging `v`: the peak settles at `m_max,u` (1.500 at h = 0.05).
   - **Manufactured solutions** with a diffusion and a drift that read the species: order 1.75 on the member, 1.7
-    on the single mesh; a frozen slot does not converge.
+    on the fixed single mesh, 1.51 on a translating one; a frozen slot does not converge.
+  - **Decision 4's check in a real failed solve** names the diffusion on both routes.
   - **Next:** stage 4a (the cell moves), then 5b; vcell-core's E4a result is ready to report on #255 when Jim says.
 
 - **2026-11-19** — **The bundle carries a moving volume's centroid (ADR 021 decision 6; stage 5a, part 5).**

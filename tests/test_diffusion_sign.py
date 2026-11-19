@@ -217,3 +217,37 @@ def test_a_diffusion_that_reads_a_region_variable_and_a_parameter_is_checked() -
     with pytest.raises(DiffusionSignError, match=r"the diffusion of 'c' became negative") as stopped:
         integrate_multi_compartment(load_dict(raw), _disk_in_medium(), t_final=2.0)  # type: ignore[arg-type]
     assert 1.0 < _time_in(str(stopped.value)) < 1.5
+
+
+# --- the failure path, in a real failed solve ---------------------------------------------------------------------
+
+
+def test_a_solve_that_fails_on_a_negative_diffusion_names_it_on_the_single_mesh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the monitor off, a non-uniform `c` diffuses backwards past t = 1 until the integrator fails; its failure
+    path finds the diffusion negative on the last iterate and names it, not the generic solver failure."""
+    monkeypatch.setattr(DiffusionSignCheck, "attach", lambda self, ts: None)
+    md = load_yaml(
+        _MODEL.replace("DIFFUSION", "1 - c/2").replace(
+            'initial_condition: "1.0"', 'initial_condition: "1 + 0.2*geom.x[0]"'
+        )
+    )
+    geometry = make_disk_geometry("disk_2d", volume_subdomain="cyto", boundary="wall", radius=1.0, h=0.1)
+    problem = assemble(md, geometry, dt=0.1, fe_degree=1)
+    with pytest.raises(DiffusionSignError, match=r"the diffusion of 'c' became negative") as stopped:
+        integrate_discrete_problem(problem, t_final=3.0)
+    assert isinstance(stopped.value.__cause__, PETSc.Error)  # raised by the failure path, from the solver's error
+
+
+def test_a_solve_that_fails_on_a_negative_diffusion_names_it_in_the_multi_compartment_solver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vcell_fenics.backend.multi_compartment import integrate_multi_compartment
+
+    monkeypatch.setattr(DiffusionSignCheck, "attach", lambda self, ts: None)
+    raw = yaml.safe_load(_TWO.replace("1 - c_never/2", "1"))
+    raw["math_description"]["equations"][0]["initial_condition"] = "1 + 0.2*geom.x[0]"
+    with pytest.raises(DiffusionSignError, match=r"the diffusion of 'c' became negative") as stopped:
+        integrate_multi_compartment(load_dict(raw), _disk_in_medium(), t_final=3.0)  # type: ignore[arg-type]
+    assert isinstance(stopped.value.__cause__, PETSc.Error)

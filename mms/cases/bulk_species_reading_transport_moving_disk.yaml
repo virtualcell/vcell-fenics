@@ -1,0 +1,40 @@
+name: bulk_species_reading_transport_moving_disk
+description: >
+  The moving twin of `bulk_species_reading_transport_disk` (ADR 021 decisions 2 and 7): on a RIGIDLY TRANSLATING
+  disk (v = [0.4, 0]), a diffusion D(c) = 0.1 + 0.01 c and a drift w = [c/10, 0] relative to the substrate, both
+  reading the species, hold the lab-steady c* = 2 + sin(x)·cos(y). With ∇·v = 0 and ∂t c* = 0 the source is
+  f = v·∇c* + ∇·(c* w(c*)) − ∇·(D(c*)∇c*), derived with sympy (pyvcell's env, a dev-time tool). Dirichlet c* on the
+  moving boundary. Nonlinear in c, so by the method of lines only (strided ALE). A slot that did not read c leaves
+  an O(1) error. Same geometry and order as `bulk_translation_diffusion_disk`.
+harness: bulk
+dim: 2
+geometry: {kind: nested_disk, radius: 1.0, base_h: 0.1, volume_subdomain: cyto, boundary: edge}
+exact: {c: "2 + np.sin(x)*np.cos(y)"}
+t_final: 0.2
+# strided ALE is first order in the stride, so it refines with h (dt = 2h²: 10, 40, 160 strides); the run is
+# short so that the finest h stays affordable
+dt_rule: "2*h**2"
+resolutions_h: [0.1, 0.05, 0.025]
+expected_order_h: 1.5
+applicable_solvers: [fenics-mol]
+mol_rtol: 1.0e-8
+mol_dt_initial: 1.0e-6
+math: |
+  math_description:
+    geometry: disk
+    subdomains:
+      - { name: cyto, kind: volume, motion: { kind: prescribed, velocity: "[0.4, 0.0]" } }
+    variables:
+      - { name: c, subdomain: cyto }
+    equations:
+      - template: bulk_radv_diff
+        variable: c
+        subdomain: cyto
+        temporality: time_dependent
+        terms:
+          diffusion: "0.1 + 0.01*c"
+          relative_advection: "[c/10, 0]"
+          source: "(-sin(geom.x[0])**2*sin(geom.x[1])**2 + 2*sin(geom.x[0])**2*cos(geom.x[1])**2 + 20*sin(geom.x[0])*cos(geom.x[0])*cos(geom.x[1])**2 + 24*sin(geom.x[0])*cos(geom.x[1]) - cos(geom.x[0])**2*cos(geom.x[1])**2 + 80*cos(geom.x[0])*cos(geom.x[1]))/100"
+        initial_condition: "2 + sin(geom.x[0])*cos(geom.x[1])"
+    boundary_conditions:
+      - { kind: dirichlet, variable: c, boundary: edge, expression: "2 + sin(geom.x[0])*cos(geom.x[1])" }

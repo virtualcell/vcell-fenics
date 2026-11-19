@@ -549,8 +549,16 @@ At `t = 10`:
        D = 0.02. The peak settles at 1.586 (h = 0.1) and 1.500 (h = 0.05) by t = 5, against 24 without the
        cut-off; the strides converge and `∫m` is kept to 2e-13. The test asserts 1.5–1.65 at t = 2 (1.549).
      - **The manufactured solutions** with a diffusion and a drift that read the species: `member_transport_reading`
-       (order 1.75 in L∞) and its single-mesh twin `bulk_species_reading_transport_disk` (order 1.7; with either
-       slot frozen the error does not shrink). Both read `sim.t` in their sources.
+       (order 1.75 in L∞), its single-mesh twin `bulk_species_reading_transport_disk` (order 1.7; with either slot
+       frozen the error does not shrink), and the moving single mesh, `bulk_species_reading_transport_moving_disk`
+       (a rigid translation, order 1.51 in L∞, the plain translation case's rate; frozen, it stays at 1.7e-3). The
+       fixed cases read `sim.t` in their sources. Strided ALE is first order in the stride even for a rigid
+       translation (the mesh moves in jumps while the boundary value follows the motion): at a fixed stride of 0.05
+       the moving case floored at 3.5e-3, so it refines the stride with h (`2h²`) over a short run.
+     - **Decision 4's check in a failed solve** (`tests/test_diffusion_sign.py`): with the monitor off, a non-uniform
+       `c` diffuses backwards past `D = 0` until the integrator fails, on the single mesh and in the
+       multi-compartment solver; the failure path finds the diffusion negative on the last iterate and raises
+       `DiffusionSignError` from the solver's error.
      - The structural tests (the linearity check, the switch) were part 1's (#259); the agreement of the two
        species paths, part 2's (#260).
 
