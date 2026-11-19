@@ -1,8 +1,9 @@
 # ADR 023 — Stage 4a: one cell moving in 2D
 
 **Date:** 2026-11-19
-**Status:** Proposed. Asked for by Jim on 2026-11-19 ("start on stage 4a"). Reviewed once (16 findings, 1
-blocking; "Review" at the end).
+**Status:** Accepted (Jim, 2026-11-19): decisions 1–8 as recommended — 1, the stride loop with no species; 2 (a),
+`trace(v)`; 3 (c), the explicit midpoint rule; 4 (a), the half-move's length; 5; 6; 7; 8 as listed. Asked for by
+Jim on 2026-11-19 ("start on stage 4a"). Reviewed once (16 findings, 1 blocking; "Review" at the end).
 
 **Builds on:**
 - ADR 019 decision 6, item 4 (the scope, *checked*): one closed membrane in 2D, solved rather than prescribed, with
