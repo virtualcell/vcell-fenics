@@ -41,7 +41,7 @@ import sys
 from collections.abc import Sequence
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from mpi4py import MPI
@@ -49,6 +49,7 @@ from mpi4py import MPI
 import vcell_fenics
 from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
 from vcell_fenics.backend.realize import RealizationError
+from vcell_fenics.backend.tolerances import TOLERANCE_SCALINGS, ToleranceScaling
 from vcell_fenics.formalism import (
     FormalismLoadError,
     GeometryDescription,
@@ -424,6 +425,7 @@ def _resolve(model: ModelInput, args: argparse.Namespace) -> tuple[RunOptions, d
         rtol=float(model.suggested_rtol) if model.suggested_rtol is not None else 1.0e-6,
         atol=float(model.suggested_atol) if model.suggested_atol is not None else 1.0e-8,
         persistent_integrator=bool(args.persistent_integrator),
+        tolerance_scaling=cast(ToleranceScaling, args.tolerance_scaling),
     )
     return options, overrides
 
@@ -486,6 +488,18 @@ def build_parser() -> argparse.ArgumentParser:
             "a cell force balance: keep one integrator across the strides, its BDF history carried over each "
             "new velocity, instead of a fresh one per stride. Measured (ADR 021 decision 1's notes): about as many "
             "steps, and a larger integration error"
+        ),
+    )
+
+    discretisation.add_argument(
+        "--tolerance-scaling",
+        choices=TOLERANCE_SCALINGS,
+        default="species",
+        help=(
+            "the method of lines' error control (ADR 022). species (default): each species gets its own absolute "
+            "tolerance, min(atol, rtol x its largest |value| so far), and the error norm weighs every species "
+            "equally whatever its number of unknowns, so a small or badly scaled species is controlled relative "
+            "to its own size; atol is then a ceiling. scalar: one rtol and atol for every unknown"
         ),
     )
 

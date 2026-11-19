@@ -48,6 +48,7 @@ from vcell_fenics.backend.discrete import DiscreteProblem, MeshQualityError, Mes
 from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem_stride
 from vcell_fenics.backend.solver import SolverConfiguration
+from vcell_fenics.backend.tolerances import SpeciesScales, ToleranceScaling
 from vcell_fenics.core import BulkBoundaryTrace, ordered_membrane_loop
 from vcell_fenics.formalism.schema import MathDescription
 
@@ -187,6 +188,8 @@ def stride_with_remeshing(
     rtol: float = 1.0e-6,
     atol: float = 1.0e-8,
     dt_initial: float | None = None,
+    tolerance_scaling: ToleranceScaling = "species",
+    tolerance_scales: SpeciesScales | None = None,
 ) -> ALEState:
     """Advance `state` by one **method-of-lines stride** of length `h`, remeshing first if the moving
     mesh has distorted past `quality_limit`. The MOL analogue of `step_with_remeshing`: remesh on the
@@ -216,7 +219,14 @@ def stride_with_remeshing(
             f"this large — reduce h (raise motion_steps) (ALE driver subtlety 5)."
         ) from exc
     state.steps += integrate_discrete_problem_stride(
-        state.problem, t_start=t_start, t_final=t_start + h, rtol=rtol, atol=atol, dt_initial=dt_initial
+        state.problem,
+        t_start=t_start,
+        t_final=t_start + h,
+        rtol=rtol,
+        atol=atol,
+        dt_initial=dt_initial,
+        tolerance_scaling=tolerance_scaling,
+        tolerance_scales=tolerance_scales,
     )
     state.t = t_start + h
     return state
@@ -252,6 +262,7 @@ def run_moving_with_remeshing(
         raise NotImplementedError("run_moving_with_remeshing needs a moving subdomain; a static one uses run()")
     h = config.t_final / motion_steps
     state.problem.dt.value = h  # the per-stride mesh-move magnitude (advance_mesh moves by dt·v)
+    scales = SpeciesScales()  # each species' running maximum, across strides and remeshes (ADR 022)
     for i in range(motion_steps):
         stride_with_remeshing(
             state,
@@ -262,6 +273,7 @@ def run_moving_with_remeshing(
             rtol=rtol,
             atol=atol,
             dt_initial=dt_initial,
+            tolerance_scales=scales,
         )
     return state
 
