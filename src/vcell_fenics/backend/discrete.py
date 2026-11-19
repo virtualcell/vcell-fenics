@@ -618,6 +618,9 @@ class DiscreteProblem:
     # (value, expression) pairs for each Dirichlet BC: re-interpolating the value from
     # its expression re-evaluates g against the (advanced) time Constant.
     dirichlet_refreshers: tuple[tuple[fem.Function, fem.Expression], ...] = ()
+    # Each species' diffusion coefficient that reads an unknown, in terms of `trial` (as the terms are): the
+    # method of lines checks its sign after every accepted step (ADR 021 decision 4, `backend/diffusion_check.py`).
+    diffusion_coefficients: tuple[tuple[str, UflExpr], ...] = ()
 
     def __post_init__(self) -> None:
         # The backward-Euler `ufl.lhs`/`rhs` split is composed LAZILY (`_compose_backward_euler`), not

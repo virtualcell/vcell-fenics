@@ -48,6 +48,12 @@ from petsc4py import PETSc
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.diagnostics import SolveError, preflight_failure_message, ts_failure_message
+from vcell_fenics.backend.diffusion_check import (
+    DiffusionCoefficient,
+    DiffusionSignCheck,
+    DiffusionSignError,
+    raised_by,
+)
 from vcell_fenics.backend.discrete import DiscreteProblem, TermKind
 from vcell_fenics.backend.linear_solvers import set_preconditioner
 from vcell_fenics.backend.output_times import OutputMonitor
@@ -152,6 +158,7 @@ def _run_time_stepper(
     on_progress: Callable[[float], None] | None = None,
     names: Sequence[str] | None = None,
     scales: SpeciesScales | None = None,
+    diffusion: Sequence[tuple[str, UflExpr]] = (),
 ) -> tuple[int, float]:
     """Integrate the implicit residual `F(state, rate) = 0` to `options.t_final` with PETSc `TS`,
     mutating `state` in place. `residual` is the UFL form of `F` (`rate` the time derivative `ċ`,
@@ -172,7 +179,11 @@ def _run_time_stepper(
 
     Error control (ADR 022, `backend/tolerances.py`): with `options.tolerance_scaling == "species"`, each
     component of `state` (a species, named by `names`) gets its own absolute tolerance from its running maximum,
-    kept in `scales` across calls, and the Dirichlet-held unknowns are left out of the error norm."""
+    kept in `scales` across calls, and the Dirichlet-held unknowns are left out of the error norm.
+
+    `diffusion` names each species' diffusion coefficient that reads `state` (ADR 021 decision 4): its sign is
+    checked after every accepted step and, if the solve fails, on the last iterate; a negative one stops the run
+    with a `DiffusionSignError` naming the species."""
 
     space = state.function_space
     mesh = space.mesh
@@ -266,6 +277,13 @@ def _run_time_stepper(
         culprit = localize() if localize is not None else None  # attribute it to a term, if we can
         raise SolveError(preflight_failure_message(culprit) if culprit else preflight_failure_message())
 
+    # first, so a state whose diffusion went negative is never recorded
+    sign_check = DiffusionSignCheck(
+        [DiffusionCoefficient(name, coefficient, mesh) for name, coefficient in diffusion],
+        refresh=lambda _t, _x: state.x.scatter_forward(),  # TS integrates `state`'s own vector
+    )
+    sign_check.attach(ts)
+
     monitor: OutputMonitor | None = None
     if on_output is not None or on_progress is not None:
         snapshot = fem.Function(space)
@@ -288,6 +306,10 @@ def _run_time_stepper(
     try:
         ts.solve(state.x.petsc_vec)
     except PETSc.Error as original:  # re-express the failure in model terms (see backend/diagnostics)
+        if (stopped := raised_by(original)) is not None:
+            raise stopped from original
+        if (reason := sign_check.explain(ts)) is not None:  # Newton's iterate crossed zero before any step
+            raise DiffusionSignError(reason) from original
         raise SolveError(ts_failure_message(ts)) from original
     state.x.scatter_forward()
     steps, final_time = ts.getStepNumber(), float(ts.getTime())
@@ -414,11 +436,17 @@ def integrate_discrete_problem(
         output_times=output_times,
         names=problem.variable_name.split(","),
         scales=tolerance_scales,
+        diffusion=_diffusion_of(problem, state),
         on_output=on_output,
         on_progress=on_progress,
     )
     problem.previous.x.array[:] = state.x.array
     return IntegrationResult(solution=state, steps=steps, time=final_time)
+
+
+def _diffusion_of(problem: DiscreteProblem, state: fem.Function) -> list[tuple[str, UflExpr]]:
+    """The problem's species-reading diffusion coefficients, `trial → state` (ADR 021 decision 4)."""
+    return [(name, ufl.replace(d, {problem.trial: state})) for name, d in problem.diffusion_coefficients]
 
 
 def _mol_residual(problem: DiscreteProblem) -> tuple[fem.Function, fem.Function, UflExpr]:
@@ -551,6 +579,7 @@ def integrate_discrete_problem_stride(
         t_start=t_start,
         names=problem.variable_name.split(","),
         scales=tolerance_scales,
+        diffusion=_diffusion_of(problem, state),
     )
     problem.previous.x.array[:] = state.x.array
     return steps

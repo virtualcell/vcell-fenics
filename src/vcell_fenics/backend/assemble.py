@@ -38,6 +38,7 @@ from mpi4py import MPI
 from numpy.typing import NDArray
 from petsc4py import PETSc
 from scipy.spatial import cKDTree
+from ufl.algorithms import extract_arguments
 
 from vcell_fenics.backend._typing import UflExpr
 from vcell_fenics.backend.boundary_normal import BoundaryNormal
@@ -230,10 +231,13 @@ def _build_problem(
     # backward Euler refuses it at composition (`NonlinearTermError`) and the method of lines takes it (its
     # residual replaces trial → unknown).
     species_ctx = CompileContext(mesh, {**ctx.symbols, **var_trials})
+    signed: list[tuple[str, UflExpr]] = []  # diffusions that read a species, checked for sign (ADR 021 decision 4)
     for (u, w), eq in zip(components, equations, strict=True):
         if "diffusion" in eq.terms:
             diffusion = compile_expression(parse(eq.terms["diffusion"]), species_ctx)
             terms.append(Term(TermKind.DIFFUSION, diffusion * ufl.dot(ufl.grad(u), ufl.grad(w))))
+            if extract_arguments(diffusion):  # it reads the trial, i.e. a species
+                signed.append((eq.variable, diffusion))
         if surface_driven and "advection" not in eq.terms:
             # Drift relative to a substrate at rest is the lab-frame velocity, so it takes the lab-frame
             # assembly; with no drift the carrier is 0 and the term is u w·∇q (decision 3).
@@ -305,6 +309,7 @@ def _build_problem(
         time=ctx.symbols["sim.t"],
         dirichlet_refreshers=tuple(dirichlet_refreshers),
         driving_surface=driving_surface,
+        diffusion_coefficients=tuple(signed),
     )
 
 
