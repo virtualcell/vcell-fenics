@@ -8,8 +8,10 @@ sizes lets a small species' error pass unchecked, and the 2-norm over all unknow
 
 1. **Each species' absolute tolerance from its own scale:** ``atol_s = min(atol, rtol·scale_s)``, with ``scale_s``
    the largest ``|u|`` of species ``s`` so far over the whole domain (its initial values to start with, raised
-   after every accepted step). A scale no larger than the machine epsilon times the largest species' scale keeps
-   ``atol``: the species cannot be resolved beside the larger one in a shared solve, and must not collapse the step.
+   after every accepted step). A scale no larger than ``floor`` times the largest species' scale keeps ``atol``:
+   by default ``floor`` is the machine epsilon, below which the species cannot be resolved beside the larger one in
+   a shared solve and must not collapse the step. ``floor`` is a solver option (``--tolerance-floor``): raising it
+   (say to 1e-6) stops a trace species, many decades below the largest, from setting the step size.
    The scales live in a `SpeciesScales` the integrator's caller owns, so they persist across strides, the
    persistent integrator and a restart after a remesh.
 2. **Balanced vector tolerances:** species ``s``'s entries are multiplied by ``√(n_s/n)`` (``n_s`` its counted
@@ -34,16 +36,22 @@ from petsc4py import PETSc
 ToleranceScaling = Literal["species", "scalar"]
 TOLERANCE_SCALINGS: tuple[str, ...] = get_args(ToleranceScaling)
 
-# Decision 1's floor: a species no larger than the round-off of the largest one keeps the scalar atol.
-_FLOOR = float(np.finfo(np.float64).eps)
+# Decision 1's default floor: a species no larger than the round-off of the largest one keeps the scalar atol.
+DEFAULT_TOLERANCE_FLOOR = float(np.finfo(np.float64).eps)
 
 
 @dataclass
 class SpeciesScales:
     """Each species' running maximum ``|u|`` over the whole domain, by name (ADR 022 decision 1 (b)). Owned by the
-    integrator's caller so it outlives one integrator: it never falls."""
+    integrator's caller so it outlives one integrator: it never falls. ``floor`` is the relative scale (to the largest
+    species') at or below which a species keeps the scalar ``atol``."""
 
     peak: dict[str, float] = field(default_factory=dict)
+    floor: float = DEFAULT_TOLERANCE_FLOOR
+
+    def __post_init__(self) -> None:
+        if not (np.isfinite(self.floor) and 0.0 <= self.floor < 1.0):
+            raise ValueError(f"tolerance floor must lie in [0, 1), got {self.floor!r}")
 
     def raise_to(self, values: Mapping[str, float]) -> None:
         for name, value in values.items():
@@ -52,10 +60,10 @@ class SpeciesScales:
 
     def species_atol(self, rtol: float, atol: float) -> dict[str, float]:
         """Each species' absolute tolerance: ``min(atol, rtol·scale)``, or ``atol`` for a scale at or below the
-        round-off floor (zero included)."""
+        floor (zero included)."""
         top = max(self.peak.values(), default=0.0)
         return {
-            name: (min(atol, rtol * scale) if scale > _FLOOR * top and scale > 0.0 else atol)
+            name: (min(atol, rtol * scale) if scale > self.floor * top and scale > 0.0 else atol)
             for name, scale in self.peak.items()
         }
 
@@ -168,6 +176,7 @@ def tolerance_summary(
         out["error_norm"] = "2-norm, balanced per species"
         if scales is not None:
             atols = scales.species_atol(rtol, atol)
+            out["tolerance_floor"] = scales.floor
             out["species_tolerances"] = {
                 name: {"scale": scales.peak[name], "atol": atols[name]} for name in sorted(scales.peak)
             }

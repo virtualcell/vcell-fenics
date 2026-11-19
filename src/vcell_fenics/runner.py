@@ -57,7 +57,12 @@ from vcell_fenics.backend.geometry import Geometry
 from vcell_fenics.backend.reaction_diffusion import integrate_discrete_problem
 from vcell_fenics.backend.realize import ImageGeometryWarning, realize
 from vcell_fenics.backend.remesh_3d import RemeshWarning
-from vcell_fenics.backend.tolerances import SpeciesScales, ToleranceScaling, tolerance_summary
+from vcell_fenics.backend.tolerances import (
+    DEFAULT_TOLERANCE_FLOOR,
+    SpeciesScales,
+    ToleranceScaling,
+    tolerance_summary,
+)
 from vcell_fenics.formalism import GeometryDescription, MathDescription, dump_geometry_yaml, dump_yaml
 from vcell_fenics.formalism.schema import REGION_SPACE, TemplateEquation
 from vcell_fenics.formalism.templates import CELL_FORCE_BALANCE
@@ -111,7 +116,8 @@ class RunOptions:
     `persistent_integrator` keeps one integrator across a cell force balance's strides (a solver option, off
     by default; `integrate_multi_compartment`). `tolerance_scaling` (ADR 022): `"species"` gives each species
     its own absolute tolerance from its scale, `atol` the ceiling; `"scalar"` keeps `rtol`/`atol` for every
-    unknown.
+    unknown. `tolerance_floor`: a species whose scale is at most this fraction of the largest species' keeps `atol`
+    (machine epsilon by default; raise it so a trace species cannot set the step).
     """
 
     h: float
@@ -124,11 +130,14 @@ class RunOptions:
     atol: float = 1.0e-8
     persistent_integrator: bool = False
     tolerance_scaling: ToleranceScaling = "species"
+    tolerance_floor: float = DEFAULT_TOLERANCE_FLOOR
 
     def __post_init__(self) -> None:
         times = self.output_times
         if not times or times[0] != 0.0 or times[-1] != self.t_final or any(b <= a for a, b in pairwise(times)):
             raise RunError(f"output times must rise strictly from 0 to t_final={self.t_final}, got {list(times)}")
+        if not (math.isfinite(self.tolerance_floor) and 0.0 <= self.tolerance_floor < 1.0):
+            raise RunError(f"tolerance floor must lie in [0, 1), got {self.tolerance_floor!r}")
 
 
 def uniform_output_times(t_final: float, output_dt: float) -> tuple[float, ...]:
@@ -201,7 +210,8 @@ def run_model(
         "mpi_ranks": comm.size,
         "backend": "ale" if moving else "multi_compartment" if multi else "single_mesh",
     }
-    scales = SpeciesScales()  # each species' running maximum, across strides and remeshes (ADR 022)
+    # each species' running maximum, across strides and remeshes (ADR 022)
+    scales = SpeciesScales(floor=options.tolerance_floor)
     try:
         if force_balance is not None:
             cells, steps, strides = _run_multi_compartment(

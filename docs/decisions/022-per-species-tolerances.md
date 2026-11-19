@@ -3,7 +3,9 @@
 **Date:** 2026-11-18
 **Status:** Accepted (Jim, 2026-11-18): decisions 1–6 as recommended — 1 (b), the running maximum with the floor;
 2 (c), balanced vector tolerances; 3, every method-of-lines integrator; 4 as written; 5, `species` by default
-unless the implementation PR's measurement shows a cost the accuracy does not justify; 6 as listed. Asked for by
+unless the implementation PR's measurement shows a cost the accuracy does not justify; 6 as listed. After the
+measurement (Jim, 2026-11-18): `species` stays the default, and decision 1's floor becomes a solver option,
+`--tolerance-floor`, machine epsilon by default ("Implementation and measurement" below). Asked for by
 Jim on 2026-11-18 ("start on per-species tolerances"), after he pointed out that a looser tolerance is unsafe
 because many models are not well scaled (ADR 021 decision 1's notes). Reviewed once (16 findings, 1 blocking;
 "Review" at the end).
@@ -205,6 +207,60 @@ way, less severely (*inferred*: fewer unknowns on a curve than in an area).
    - A Dirichlet-held unknown does not change the step count.
    - The matrix-free layout (membrane species as components) and the single mesh with several components.
    - MPI: the same steps and errors on 1 and 2 ranks.
+
+## Implementation and measurement (2026-11-18)
+
+**Where it lives.** `backend/tolerances.py`: `SpeciesScales` (each species' running maximum, and the floor),
+`ToleranceControl` (the vector tolerances of one state vector, refreshed in a TS post-step) and
+`tolerance_summary`. Every method-of-lines integrator takes `tolerance_scaling` and `tolerance_scales`: the
+single mesh (all four entry points), the multi-compartment solver, both two-compartment integrators and ALE with
+remeshing. The runner keeps one `SpeciesScales` per run, so the scales survive strides and remeshes. The CLI has
+`--tolerance-scaling species|scalar` (default `species`) and `--tolerance-floor` (default machine epsilon).
+
+**The floor is a solver option** (Jim, 2026-11-18). Decision 1 fixed it at machine epsilon. It is now a fraction
+of the largest species' scale that `RunOptions.tolerance_floor` and `--tolerance-floor` set, in [0, 1), recorded in
+the summary as `tolerance_floor`. Raising it (say to 1e-6) leaves a trace species to the scalar `atol`, so it
+cannot set the step; the default keeps decision 1 as accepted.
+
+**The coverage survey's runnable BioModels** (*measured*): the 193 simulations that ran in the coverage-8204
+survey, each run as the survey ran it (method of lines, its `h`, three output intervals, 900 s cap), once per
+mode, 6 at a time.
+
+| | `species` | `scalar` |
+|---|---|---|
+| Both modes ran | 189 | 189 |
+| Steps, median ratio to `scalar` | 1.19 | 1 |
+| Same number of steps | 42 | |
+| Steps, largest and smallest ratio | 9.5, 0.09 | |
+| Wall time, median ratio | 1.00 | 1 |
+| Wall time, total over the 189 | 9,724 s | 6,510 s |
+| Timed out (BioModel 109232682, two simulations) | 2 | 0 (198 s, 222 s) |
+
+Two of the worst cases, read from their `species_tolerances`:
+- **BioModel 100786955, "2D chombo"** (246 steps against 27). The simulation asks for `rtol` 1e-6 and `atol` 1e-8;
+  its four species peak between 2.6e-5 and 4.5e-4. Under `scalar`, `atol` is about 4e-4 of their size, 400 times
+  looser than the `rtol` asked for. The extra steps are the accuracy the simulation asks for: this note working
+  as intended.
+- **BioModel 165250864, "needle"** (1,660 against 177). The species span 200 (R) down to InA at 7.7e-7, about 4e-9
+  of the largest. With `--tolerance-floor 1e-6`, InA keeps `atol` and the run takes 450 steps and 38 s instead of
+  1,660 and 104 s, so InA was setting the step.
+
+Decision 5 also named the MMS suite, the cross-validation cases and the integration tests; their steps and wall
+time were not compared mode against mode here. The unit suite (1,168 tests) passes under the `species` default.
+
+Decision 5's outcome: `species` stays the default (Jim, 2026-11-18). A run that does not need a trace species
+resolved can raise the floor, or use `scalar`.
+
+**Measured in the tests** (`tests/test_species_tolerances.py`), and where they differ from decision 6:
+- **The scale table** holds within the factor of 3, not better. A decaying species is held to `rtol · peak`
+  absolute while an O(1) species meets the tighter ceiling `atol` (decision 1's limitation): relative error
+  1.5e-4 at scale 1 and 4.2e-4 at 1e-6 and 1e-12, equal to each other; `scalar` 1.8e-2 at 1e-12.
+- **The floor test compares 1e-30 against zero, not against `scalar`.** Balancing alone can make `species` take
+  more steps than `scalar`: with S species erring alike, each meets 1/√S of its tolerance, as decision 2 (c) says
+  of the shared budget (141 against 126 steps in the toy). Comparing against zero isolates the floor.
+- **The nucleus model's region variable** has the same error on `h` 0.12 and 0.06 within 1.2 (decision 6 asked
+  for 2); `scalar` is more than 3 times worse at 0.06.
+- **A raised floor** puts a species at 1e-9 of the largest back to `atol` and the steps it takes at zero.
 
 ## Not decided here
 

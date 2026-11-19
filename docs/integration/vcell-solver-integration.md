@@ -426,6 +426,18 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-18** — **ADR 022 implemented: per-species error tolerances on every method-of-lines path.**
+  - **What:** `backend/tolerances.py`; every method-of-lines integrator (single mesh, multi-compartment,
+    two-compartment, ALE with remeshing) takes `tolerance_scaling` and `tolerance_scales`; one `SpeciesScales`
+    per run in the runner; the summary records each species' scale and `atol`. CLI: `--tolerance-scaling
+    species|scalar` (default `species`) and `--tolerance-floor` (default machine epsilon).
+  - **Cost, on the 193 runnable survey BioModels:** median step ratio 1.19, median wall-time ratio 1.00, total
+    wall time +49 %, largest step ratio 9.5; BioModel 109232682 now exceeds 900 s (about 200 s under `scalar`).
+    The worst cases are either simulations whose small species `scalar` under-resolved (`atol` 400 times looser
+    than `rtol` on 100786955) or a trace species setting the step (165250864: 1,660 steps, 450 with
+    `--tolerance-floor 1e-6`, 177 under `scalar`). ADR 022, "Implementation and measurement".
+  - **Decided** (Jim): `species` stays the default; the floor is a solver option.
+
 - **2026-11-18** — **ADR 022 accepted: error tolerances that mean the same thing for every species.**
   - **Decided** (Jim, all as recommended): each species' absolute tolerance from its own running maximum, capped
     by the user's `atol` with a round-off floor; balanced vector tolerances `√(n_s/n)` so the 2-norm weighs every

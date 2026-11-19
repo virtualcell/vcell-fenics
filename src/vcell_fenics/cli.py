@@ -49,7 +49,7 @@ from mpi4py import MPI
 import vcell_fenics
 from vcell_fenics.backend.diagnostics import NonlinearTermError, SolveError
 from vcell_fenics.backend.realize import RealizationError
-from vcell_fenics.backend.tolerances import TOLERANCE_SCALINGS, ToleranceScaling
+from vcell_fenics.backend.tolerances import DEFAULT_TOLERANCE_FLOOR, TOLERANCE_SCALINGS, ToleranceScaling
 from vcell_fenics.formalism import (
     FormalismLoadError,
     GeometryDescription,
@@ -426,6 +426,7 @@ def _resolve(model: ModelInput, args: argparse.Namespace) -> tuple[RunOptions, d
         atol=float(model.suggested_atol) if model.suggested_atol is not None else 1.0e-8,
         persistent_integrator=bool(args.persistent_integrator),
         tolerance_scaling=cast(ToleranceScaling, args.tolerance_scaling),
+        tolerance_floor=float(args.tolerance_floor),
     )
     return options, overrides
 
@@ -500,6 +501,16 @@ def build_parser() -> argparse.ArgumentParser:
             "tolerance, min(atol, rtol x its largest |value| so far), and the error norm weighs every species "
             "equally whatever its number of unknowns, so a small or badly scaled species is controlled relative "
             "to its own size; atol is then a ceiling. scalar: one rtol and atol for every unknown"
+        ),
+    )
+    parser.add_argument(
+        "--tolerance-floor",
+        type=float,
+        default=DEFAULT_TOLERANCE_FLOOR,
+        help=(
+            "with --tolerance-scaling species: a species whose largest |value| is at most this fraction of the "
+            "largest species' keeps the scalar atol, so it cannot set the step size (default: machine epsilon; "
+            "e.g. 1e-6 leaves trace species to atol)"
         ),
     )
 

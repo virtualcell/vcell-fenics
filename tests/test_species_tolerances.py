@@ -188,6 +188,30 @@ def test_a_round_off_sized_species_does_not_collapse_the_step() -> None:
     assert steps_tiny == steps_zero
 
 
+def test_a_raised_floor_leaves_a_trace_species_to_the_scalar_atol() -> None:
+    """The floor is a solver option (``--tolerance-floor``). A trace species at 1e-9 of the largest is controlled to
+    its own scale by default, which costs steps; with the floor at 1e-6 it keeps ``atol`` and takes the steps it
+    would take at zero, while a species above the floor keeps its own tolerance."""
+    k = np.array([1.0, 2.0])
+    u0 = np.array([1.0, 1.0e-9])
+    _, steps_default, _ = _integrate(u0, _decay(k), _two(1, 1), 2.0, scaling="species")
+    raised = SpeciesScales(floor=1.0e-6)
+    _, steps_raised, _ = _integrate(u0, _decay(k), _two(1, 1), 2.0, scaling="species", scales=raised)
+    _, steps_zero, _ = _integrate(np.array([1.0, 0.0]), _decay(k), _two(1, 1), 2.0, scaling="species")
+    assert steps_default > steps_raised == steps_zero
+    assert raised.species_atol(1.0e-6, 1.0e-8)["b"] == 1.0e-8
+    assert SpeciesScales({"a": 1.0, "b": 1.0e-5}, floor=1.0e-6).species_atol(1.0e-6, 1.0e-8)["b"] == pytest.approx(
+        1.0e-11
+    )
+    assert tolerance_summary(1.0e-6, 1.0e-8, "species", raised)["tolerance_floor"] == 1.0e-6
+
+
+@pytest.mark.parametrize("floor", [-1.0e-6, 1.0, math.nan])
+def test_a_floor_outside_zero_to_one_is_refused(floor: float) -> None:
+    with pytest.raises(ValueError, match="tolerance floor"):
+        SpeciesScales(floor=floor)
+
+
 # --- decision 2: the norm weighs each species equally ------------------------------------------------------------
 
 
