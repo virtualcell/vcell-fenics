@@ -562,6 +562,9 @@ At `t = 10`:
        output time that is not a stride's end, and a `velocity_override` without T9.
      - **Parameters cannot read the species** on this path, since the solver validates the model (the Context).
        The T9 driver, which did not validate, compiled such a parameter; its test of that is not ported.
+   - *Recorded 2026-11-18:* `cell_force_balance_run.py` and its tests are deleted, with the agreement test that
+     compared it with the new path (its ratios are recorded in decision 7). Its test that a parameter may read the
+     species was not ported (above); the rest are in `tests/test_member_species.py`.
    - **The options:**
      - **(a) At 5a,** as above.
      - **(b) At 5b.**
