@@ -426,6 +426,17 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-19** — **ADR 023 proposed: stage 4a, one cell moving in 2D.**
+  - **Proposed:** the multi-compartment stride loop with no species; the front reads the solved `v` through
+    `trace(v)` (a material membrane moves with it); the motion is the explicit midpoint rule, `v` solved at the
+    stride's start and midpoint (second order, two solves per stride); the semi-implicit tension's `Δt` is each
+    half-move's length; the force balance's `region_size` re-measured; reassembly only on a remesh; routing, MPI
+    refusal and outputs for a species-free cell; E3 `zs`/`zv` (the transient for the time rate, the equilibrium at
+    `t = 1` for the space rate) and a material disk with an area-dependent pressure.
+  - **Found:** E3's ZV uses the ZS protrusion law, not UC-A's ZV law (to report to vcell-core); E3's areas settle
+    by `t ≈ 0.2`, so `t = 1` measures the equilibrium only.
+  - **Next:** Jim's decisions on ADR 023, then the implementation.
+
 - **2026-11-19** — **E4a meets vcell-core's criteria (ADR 021 decision 7; stage 5a, part 6). Stage 5a is done.**
   - **E4a** (`tests/test_e4a.py`): vcell-core's own document, through the CLI, h = 0.1, Δt = 0.05 to t = 10: the
     left-edge band holds 6.07 times its initial share of myosin (≥ 3), the peak is 13.3 (≤ 125), `min m / mean`
