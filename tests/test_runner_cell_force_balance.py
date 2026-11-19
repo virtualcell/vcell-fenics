@@ -157,10 +157,11 @@ def test_the_runner_writes_the_species_and_the_velocity_by_component(tmp_path: P
     assert np.abs(bundle.field("cell", "v_x", 0)).max() > 1e-3  # the gradient in m drives a flow
 
 
-def test_a_moving_cell_is_refused_before_a_bundle_starts(tmp_path: Path) -> None:
+def test_a_moving_cell_with_species_is_refused_before_a_bundle_starts(tmp_path: Path) -> None:
+    """A free membrane moves with the cell (stage 4a, ADR 023), but a cell carrying species moves only at 5b."""
     raw = _raw()
-    raw["math_description"]["boundary_conditions"] = []  # a free membrane: the cell would move (stage 5b)
-    with pytest.raises(RunError, match=r"ADR 021 decision 3's scope.*MovingSkeleton"):
+    raw["math_description"]["boundary_conditions"] = []  # a free membrane: the cell would move
+    with pytest.raises(RunError, match=r"MovingCellScope: species or region variables \['m'\].*stage 5b"):
         _run(raw, tmp_path)
     assert not (tmp_path / "results.fenics").exists()
 

@@ -117,16 +117,22 @@ class CellForceBalance:
     face_tags: dict[str, int]
     geometry: MultiCompartmentGeometry
     time: fem.Constant
+    # each `region_size(...)` Constant its slots read, by subdomain: a moving partition re-measures them after every
+    # move (ADR 023 decision 5)
+    size_constants: list[tuple[str, fem.Constant]] = field(default_factory=list)
     _checks: list[Callable[[], None]] = field(default_factory=list)
 
     @property
     def velocity(self) -> fem.Function:
         return self.problem.unknown
 
-    def solve(self, t: float = 0.0) -> fem.Function:
+    def solve(self, t: float = 0.0, *, semi_implicit_dt: float | None = None) -> fem.Function:
         """The velocity of the current configuration at time `t` (the coefficients' `sim.t`), after checking
-        the coefficients' signs."""
+        the coefficients' signs. `semi_implicit_dt` sets the semi-implicit tension's `Δt` for this solve, the length
+        of the move it drives (ADR 023 decision 4); the balance must have been assembled with one."""
 
+        if semi_implicit_dt is not None:
+            self.problem.dt.value = semi_implicit_dt
         self.problem.set_time(t)
         for check in self._checks:
             check()
@@ -261,6 +267,9 @@ def assemble_cell_force_balance(
         geometry=geometry,
         time=time,
     )
+    balance.size_constants = [
+        (name, symbols[region_size_symbol(name)]) for name in geometry.sizes if region_size_symbol(name) in symbols
+    ]
     balance._checks = _coefficient_checks(members_mesh, member_laws, surface_laws, member_tags, surface_tags, time)
     balance._checks += [_drag_check(members_mesh, member_laws, member_tags, group, time) for group in unheld]
     return balance
@@ -822,7 +831,8 @@ def _locking_check(mesh: Mesh, cells: NDArray[np.int32], law: MemberLaw, name: s
 class _CellMinimum:
     """The minimum of a scalar `expr` over the owned `cells`, at degree-2 quadrature points and the vertices. The
     expression is compiled once: building one every step costs a JIT-cache lookup each (~50 ms). Bound to the
-    mesh and its cells at construction, so a moving or remeshed mesh (stage 4) must rebuild it."""
+    mesh's topology and its cells at construction: a moved mesh keeps both, and `Expression.eval` reads the current
+    coordinates, so it holds after a move; a remeshed mesh must rebuild it (ADR 023 decision 6)."""
 
     def __init__(self, mesh: Mesh, expr: UflExpr, cells: NDArray[np.int32]) -> None:
         cell_type = mesh.basix_cell()

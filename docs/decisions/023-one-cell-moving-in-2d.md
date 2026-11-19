@@ -226,6 +226,46 @@ Jim on 2026-11-19 ("start on stage 4a"). Reviewed once (16 findings, 1 blocking;
      And the cost per stride of decision 3's two solves.
    - *Recommendation: yes.*
 
+## Implementation and measurement (2026-11-19)
+
+**Where it lives.** `backend/moving_cell.py`: `moving_cell_scope` (decision 7's scope, refused by name as
+`MovingCellScope`), `moving_membrane_of`, and `integrate_moving_cell` (the stride). `MovingPartition` gains
+`vector_traces` (the solved `v` read by `trace(v)`, copied node by node with all components), `velocity` (a material
+membrane's `trace(v)`) and `advance(..., midpoint_of=...)` (the second half-move, `2F − F(xⁿ)`). `CellForceBalance`
+gains `size_constants` (decision 5) and `solve(t, semi_implicit_dt=...)` (decision 4). The runner routes a T9 model
+with a moving membrane through `_prepare_moving_cell` and the moving partition's segments; the member's domain holds
+`v` by component with no species, and each new segment after a remesh carries them. The summary gives
+`moving_membrane`, `motion` and `solves`.
+
+**Where the implementation departs from the decisions:**
+- **Decision 1.** The species-free stride is a sibling of the species loop, `integrate_moving_cell`, which
+  `integrate_multi_compartment` dispatches to (the runner still calls the one entry point). The species loop builds
+  the species' state vector, forms and integrator before its first stride, none of which exists with no species.
+  5b, which puts species on the moving cell, merges the two.
+- **A remesh between a stride's halves.** The second half-move is made on the new mesh by forward Euler from a fresh
+  solve: the first half's velocity lives on the old mesh's nodes. Once per such remesh, first order locally.
+- **Decision 8's space rate** cannot be read. ZV's area at `t = 1` is exact to round-off at every `h` (its front
+  speed reads only the area, which the mesh measures exactly, so its equilibrium carries no spatial error); ZS's is
+  within 1.2e-4 at every `h`, without a monotone trend (6.5e-5, 1.2e-4, 4.5e-5 at `h` = 0.2, 0.1, 0.05). The tests
+  assert those bounds instead of a rate.
+- **MPI** is refused by name, but the single-process test suite does not exercise the refusal.
+
+**Measured** (`tests/test_moving_cell.py`):
+- **E3's transient, second order in `Δt`** (decision 3): the area at `t = 0.05`, `h = 0.1`, `Δt` = 0.0125, 0.00625,
+  0.003125; Richardson's ratio 4.87 for ZS and 4.81 for ZV (orders 2.28, 2.27).
+- **E3 at `t = 1`:** ZV 3.69234754 to 4e-13, ZS within 1.2e-4 of 3.36667386, at `h` = 0.2, 0.1, 0.05 (`Δt` = 0.01).
+- **The material disk** (`P = c/a`, `γ = 0.5`, stable radius 1): shrinking from 1.2 and growing from 0.8, its area
+  follows the exact ODE; first order in `Δt` (relative errors 3.0e-3, 1.4e-3, 6.4e-4 at `Δt` = 0.1, 0.05, 0.025,
+  `h` = 0.1), as decision 4 says. It stays as round as it was built (its radius ratio changes by 2e-6 over `t = 1`).
+- **A solve after moves equals a fresh assembly on the moved mesh** to 1e-10 relative (decision 6).
+- **Zero traction stays resolved** (ADR 019 decision 4): from an ellipse (1.2 × 0.8) to `t = 2` at `h = 0.1`,
+  `Δt = 0.02`, no remesh and no contact. ZS relaxes towards a circle (radius ratio 1.50, 1.38, 1.22 and 1.10 at
+  `t` = 0, 0.25, 1 and 2), its centroid fixed to 1e-4. ZV keeps its shape (1.44 from `t = 0.25`): a held edge moves
+  at a uniform normal speed `v_p(a)`, which preserves the shape and stops at the equilibrium area, so nothing
+  restores circularity there; that is the model's, not the scheme's (*inferred*).
+- **The cost:** two force-balance solves per stride, about 0.15 s per stride at `h = 0.1` (29 s for 96 strides,
+  setup included).
+
 ## Not decided here
 
 - **Species on the moving cell** (5b), and how their transport's mesh velocity fits decision 3 (c)'s second

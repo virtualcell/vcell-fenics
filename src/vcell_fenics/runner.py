@@ -215,18 +215,33 @@ def run_model(
     try:
         if force_balance is not None:
             cells, steps, strides = _run_multi_compartment(
-                model, options, recorder, reporter, scales, force_balance=force_balance
+                model,
+                options,
+                recorder,
+                reporter,
+                scales,
+                force_balance=force_balance,
+                motion_membrane=force_balance.moving_membrane,
             )
             run_info |= {
                 "dt": max(b - a for a, b in pairwise([0.0, *_stride_ends(options)])),  # the longest stride
                 "dt_requested": options.dt,
-                "time_integration": "method_of_lines",
-                "coupling": "staggered",
-                "steps": steps,
                 "strides": strides,
-                **_tolerances(options, scales),
-                "integrator": "persistent" if options.persistent_integrator else "fresh per stride",
             }
+            if force_balance.moving_membrane is not None:  # one cell moving, no species (ADR 023)
+                run_info |= {
+                    "moving_membrane": force_balance.moving_membrane,
+                    "motion": "explicit midpoint, two solves per stride",
+                    "solves": steps,
+                }
+            else:
+                run_info |= {
+                    "time_integration": "method_of_lines",
+                    "coupling": "staggered",
+                    "steps": steps,
+                    **_tolerances(options, scales),
+                    "integrator": "persistent" if options.persistent_integrator else "fresh per stride",
+                }
         elif moving:
             cells, steps, dt_used, remeshes, strides = _run_moving(model, moving, options, recorder, reporter, scales)
             run_info |= {
@@ -332,6 +347,8 @@ class _ForceBalanceRun:
     member: str
     velocity: str
     gdim: int
+    # the membrane a moving cell moves (stage 4a, ADR 023): material, or a growing front; None on a fixed skeleton
+    moving_membrane: str | None = None
 
     def components(self) -> list[str]:
         """The velocity's component names in the bundle (ADR 010 §3, "Vector fields")."""
@@ -368,19 +385,24 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
             f"a cell force balance runs with P1 species and a P1 velocity; the element degree is "
             f"{options.fe_degree} (set it to 1)"
         )
+    validate_or_raise(model.math)
+    eq = t9_equation(model.math)
+    from vcell_fenics.backend.moving_cell import moving_cell_scope, moving_membrane_of
+
+    moving_membrane = moving_membrane_of(model.math)
+    if moving_membrane is not None:  # one cell moving, no species (stage 4a, ADR 023)
+        return _prepare_moving_cell(model, options, status, eq.variable, moving_membrane, moving_cell_scope)
     if options.time_integration != "method_of_lines":
         log(
             "note: a cell force balance runs by method-of-lines strides, staggered (ADR 021 decision 1); "
             "--time-integration is ignored"
         )
-    validate_or_raise(model.math)
-    eq = t9_equation(model.math)
     moving = _moving_subdomains(model)  # a prescribed, non-zero velocity; a stationary front (zero) is not listed
     if moving:
         raise RunError(
             f"the {CELL_FORCE_BALANCE!r} template (T9) governing {eq.variable!r} runs here only on a fixed skeleton "
-            f"(ADR 021 decision 3), but {', '.join(map(repr, moving))} has a prescribed motion; moving cells and "
-            f"growing fronts are stage 5b"
+            f"(ADR 021 decision 3) or with one moving membrane (ADR 023), but {', '.join(map(repr, moving))} has a "
+            f"prescribed motion"
         )
     kinds = {sd.name: sd.kind for sd in model.math.subdomains}
     compartments = {e.subdomain for e in model.math.equations if kinds.get(e.subdomain) == "volume"}
@@ -415,6 +437,57 @@ def _prepare_cell_force_balance(model: ModelInput, options: RunOptions, status: 
         )
     return _ForceBalanceRun(
         geometry=geometry, compartments=compartments, member=member, velocity=eq.variable, gdim=gdim
+    )
+
+
+def _prepare_moving_cell(
+    model: ModelInput,
+    options: RunOptions,
+    status: _PhasedProgress,
+    velocity: str,
+    membrane: str,
+    scope: Callable[[Any, Any, str], Any],
+) -> _ForceBalanceRun:
+    """Realize and check one cell moving with no species (stage 4a, ADR 023 decision 7): its scope, and the force
+    balance assembled once, so a refusal writes nothing. The member is realized with its membrane's inside."""
+
+    from vcell_fenics.backend.cell_force_balance import (
+        ForceBalanceError,
+        assemble_cell_force_balance,
+        build_members_mesh,
+    )
+    from vcell_fenics.backend.multi_compartment import realize_multi_compartment
+
+    kinds = {sd.name: sd.kind for sd in model.math.subdomains}
+    compartments = {e.subdomain for e in model.math.equations if kinds.get(e.subdomain) == "volume"}
+    inside = next((s.inside for s in model.geometry.surfaces if s.name == membrane), None)
+    if inside is not None:
+        compartments.add(inside)
+    comm = MPI.COMM_WORLD
+    status.phase(MESHING)
+    log(f"realizing geometry {model.geometry.name!r} for the moving cell bounded by {membrane!r} at h = {options.h:g}")
+    with _logged_geometry_warnings():
+        geometry = realize_multi_compartment(model.geometry, h=options.h, compartments=compartments, comm=comm)
+    status.phase(COMPILING)
+    try:
+        found = scope(model.math, geometry, membrane)
+        assemble_cell_force_balance(model.math, geometry, prebuilt=build_members_mesh(model.math, geometry))
+    except ForceBalanceError as error:
+        raise RunError(f"the moving cell cannot run: {error}") from error
+    names = {v.name for v in model.math.variables}
+    gdim = geometry.parent_mesh.geometry.dim
+    clash = sorted(n for n in (f"{velocity}{s}" for s in VECTOR_SUFFIXES[:gdim]) if n in names)
+    if clash:
+        raise RunError(
+            f"the velocity {velocity!r} is written to the bundle as {', '.join(clash)}, which the model uses"
+        )
+    return _ForceBalanceRun(
+        geometry=geometry,
+        compartments=compartments,
+        member=found.member,
+        velocity=velocity,
+        gdim=gdim,
+        moving_membrane=membrane,
     )
 
 
@@ -765,6 +838,8 @@ def _run_multi_compartment(
     for eq in model.math.equations:
         if force_balance is None or eq.variable != force_balance.velocity:
             variables.setdefault(eq.subdomain, []).append(eq.variable)
+    if force_balance is not None:  # the member holds the velocity, species or not (ADR 023 decision 7)
+        variables.setdefault(force_balance.member, [])
     regions = {v.name for v in model.math.variables if v.space == REGION_SPACE}
 
     comm = MPI.COMM_WORLD
@@ -825,16 +900,23 @@ def _run_multi_compartment(
     recorder.open()
 
     cells = mesh_cell_count(geometry.parent_mesh)
-    log(
-        f"integrating to t = {options.t_final:g} (multi-compartment method of lines, {cells} cells; "
-        + "; ".join(f"{name}: {', '.join(names)}" for name, names in variables.items())
-        + (
-            f"; carried by {force_balance.velocity!r} on {force_balance.member!r}, solved before each stride"
-            if force_balance is not None
-            else ""
+    if force_balance is not None and force_balance.moving_membrane is not None:
+        log(
+            f"moving the cell {force_balance.member!r} to t = {options.t_final:g} ({cells} cells): "
+            f"{force_balance.velocity!r} solved at each stride's start and midpoint, "
+            f"{force_balance.moving_membrane!r} moved by the explicit midpoint rule (ADR 023)"
         )
-        + ")"
-    )
+    else:
+        log(
+            f"integrating to t = {options.t_final:g} (multi-compartment method of lines, {cells} cells; "
+            + "; ".join(f"{name}: {', '.join(names)}" for name, names in variables.items())
+            + (
+                f"; carried by {force_balance.velocity!r} on {force_balance.member!r}, solved before each stride"
+                if force_balance is not None
+                else ""
+            )
+            + ")"
+        )
 
     def source(variable: str, field: Any) -> Any:
         """A field as is; a region variable (one Real value, held by its owning rank) as a constant."""
@@ -867,13 +949,11 @@ def _run_multi_compartment(
             tolerance_scales=scales,
         )
         return cells, int(result.steps), int(result.strides)
-    return (
-        cells,
-        _run_moving_partition(
-            model, options, recorder, status, geometry, wanted, motion_membrane, variables, on_output, comm, scales
-        ),
-        0,
+    extra = {force_balance.member: len(components)} if force_balance is not None else {}
+    steps, strides = _run_moving_partition(
+        model, options, recorder, status, geometry, wanted, motion_membrane, variables, on_output, comm, scales, extra
     )
+    return cells, steps, strides
 
 
 def _run_moving_partition(
@@ -888,12 +968,14 @@ def _run_moving_partition(
     on_output: Callable[[float, dict[str, Any]], None],
     comm: MPI.Comm,
     scales: SpeciesScales,
-) -> int:
+    extra: Mapping[str, int] | None = None,
+) -> tuple[int, int]:
     """A moving partition in segments (vcell-fenics ADR 016 decision 4): integrate until the mesh needs a remesh
     (a cell shrunk below a quarter of its as-built area, or a move that would tangle it, undone), remesh the whole
     partition from its own skeleton, transfer every species with its total kept, start a new bundle segment and
     continue, carrying the step size and any half-move left undone. In 2D on one process; elsewhere (3D, MPI) a
-    tangle stops the run as before. Returns the integrator's steps."""
+    tangle stops the run as before. ``extra`` counts each domain's channels beyond its species (a moving cell's
+    velocity components), which every new segment carries too. Returns the integrator's steps and the strides."""
 
     from dolfinx import fem
 
@@ -909,7 +991,7 @@ def _run_moving_partition(
     can_remesh = model.geometry.dim == 2 and comm.size == 1
     domains = list(recorder.domain_names())
     stride_ends = _stride_ends(options)
-    t, steps, remeshes = 0.0, 0, 0
+    t, steps, strides, remeshes = 0.0, 0, 0, 0
     initial: dict[str, Any] | None = None
     pending: tuple[float, float] | None = None
     dt: float | None = None
@@ -937,14 +1019,17 @@ def _run_moving_partition(
         except MeshQualityError as error:
             raise RunError(f"the moving partition failed: {error}") from error
         steps += int(result.steps)
+        strides += int(result.strides)
         if not result.needs_remesh:
-            return steps
+            return steps, strides
         t, pending, dt = result.final_time, result.pending_move, result.last_dt
         try:
             new = remesh_partition(geometry, model.geometry, h=options.h, compartments=compartments, comm=comm)
             initial = {}
             kinds: dict[str, str] = {}
             for subdomain, names in variables.items():
+                if not names:  # a domain holding only a velocity, solved afresh on the new mesh
+                    continue
                 old_fields = {name: result.fields[name] for name in names}
                 if subdomain in new.compartments:
                     V = fem.functionspace(new.compartments[subdomain].mesh, ("Lagrange", 1))
@@ -963,7 +1048,12 @@ def _run_moving_partition(
             + (f"; lumped transfer for {', '.join(lumped)}" if lumped else "")
             + ("; the stride's second half-move follows on the new mesh" if pending is not None else "")
         )
-        recorder.start_segment({name: (new.mesh_of(name), [None] * len(variables.get(name, []))) for name in domains})
+        recorder.start_segment(
+            {
+                name: (new.mesh_of(name), [None] * (len(variables.get(name, [])) + (extra or {}).get(name, 0)))
+                for name in domains
+            }
+        )
         geometry = new
 
 

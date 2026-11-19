@@ -392,10 +392,32 @@ def integrate_multi_compartment(
     if t9 is not None:
         from vcell_fenics.backend.cell_force_balance import member_species
 
-        if motion_membrane is not None:
-            raise NotImplementedError(
-                f"a cell force balance ({t9.variable!r}) beside a moving membrane {motion_membrane!r}: species on a "
-                f"moving cell are stage 5b (ADR 021 decision 3)"
+        if motion_membrane is not None:  # one cell moving, with no species (stage 4a, ADR 023)
+            from vcell_fenics.backend.moving_cell import integrate_moving_cell
+
+            moving = integrate_moving_cell(
+                md,
+                geometry,
+                motion_membrane,
+                t_final=t_final,
+                stride_ends=stride_ends,
+                output_times=output_times,
+                on_output=on_output,
+                on_progress=on_progress,
+                t_start=t_start,
+                pending_move=pending_move,
+                stop_for_remesh=stop_for_remesh,
+                velocity_override=velocity_override,
+            )
+            return MultiCompartmentResult(
+                {},
+                {},
+                moving.solves,
+                moving.final_time,
+                needs_remesh=moving.needs_remesh,
+                pending_move=moving.pending_move,
+                velocity=_copy(moving.velocity),
+                strides=moving.strides,
             )
         member, _ = member_species(md, geometry)
         _check_stride_ends(stride_ends, t_final)
