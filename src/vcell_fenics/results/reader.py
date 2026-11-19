@@ -87,6 +87,26 @@ class Bundle:
             points = np.pad(points, ((0, 0), (0, 3 - points.shape[1])))
         return points
 
+    def centroid(self, domain: str) -> NDArray[np.float64] | None:
+        """A moving volume's centroid ``∫x dx / |Ω|`` at every written row, (len(times), gdim), across segments
+        (ADR 021 decision 6). ``None`` when the bundle records none: a fixed or membrane domain, or an older
+        writer."""
+
+        path = self.manifest.domains[domain].centroid
+        if path is None:
+            return None
+        parts = []
+        remaining = len(self.times)
+        for segment in self.manifest.segments:
+            count = min(segment.count, remaining)
+            if count > 0:
+                parts.append(np.asarray(self._array(segment.prefix + path)[:count, :]))
+            remaining -= count
+        if not parts:
+            return np.empty((0, self.manifest.domains[domain].gdim))
+        values: NDArray[np.float64] = np.concatenate(parts)
+        return values
+
     def adjacent(self, membrane: str, compartment: str, row: int | None = None) -> NDArray[np.int32] | None:
         """The membrane's point map onto an adjacent ``compartment``, for the segment holding ``row``
         (default: the first): point ``i`` of the membrane is point ``map[i]`` of the compartment's mesh, or

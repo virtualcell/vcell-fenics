@@ -426,6 +426,13 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-19** — **The bundle carries a moving volume's centroid (ADR 021 decision 6; stage 5a, part 5).**
+  - **What:** every moving volume domain records `∫x dx / |Ω|` at each row in `<prefix>centroid/<domain>`
+    `(T_seg, gdim)`, named in its manifest entry (`centroid`); `Bundle.centroid(domain)` reads it across segments.
+    Additive: still schema 1 (ADR 010 §3). `docs/results-bundle.schema.json` regenerated.
+  - **Verified:** under an affine motion the centroid maps exactly, across a remesh too; a fixed domain records
+    none; the prescribed translating cell's centroid moves by the front's displacement to 1e-12.
+
 - **2026-11-19** — **A diffusion that loses its sign stops the run (ADR 021 decision 4; stage 5a, part 4).**
   - **What:** `backend/diffusion_check.py`. Every species' diffusion that reads a species is checked at the
     vertices after each accepted step, on the single mesh (fixed, moving, ALE strides) and in the

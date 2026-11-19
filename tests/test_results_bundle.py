@@ -341,6 +341,36 @@ def test_a_remesh_starts_a_segment_with_its_own_mesh(tmp_path: Path) -> None:
         bundle.series("cyto", "u")
 
 
+@pytest.mark.parametrize("remesh_after", [None, 1])
+def test_a_moving_volume_records_its_centroid_every_row(tmp_path: Path, remesh_after: int | None) -> None:
+    """ADR 021 decision 6. The mesh moves by x ↦ (1 + t)·x₀ + (t, 0), an affine map, so the centroid of the mesh's
+    own geometry maps the same way: from a segment's first row at t₀, c(t) = (c(t₀) − (t₀, 0))·(1 + t)/(1 + t₀)
+    + (t, 0), exactly, across a remesh too."""
+    path = tmp_path / "centroid.fenics"
+    times = [0.0, 0.25, 0.5, 0.75]
+    _write_moving_bundle(path, times, remesh_after=remesh_after)
+    bundle = Bundle.open(path)
+    assert bundle.manifest.domains["cyto"].centroid == "centroid/cyto"
+    centroid = bundle.centroid("cyto")
+    assert centroid is not None and centroid.shape == (4, 2)
+    first = 0
+    for row, t in enumerate(times):
+        if remesh_after is not None and row == remesh_after + 1:
+            first = row  # a new mesh, with its own centroid
+        t0 = times[first]
+        expected = (centroid[first] - [t0, 0.0]) * (1.0 + t) / (1.0 + t0) + [t, 0.0]
+        assert np.allclose(centroid[row], expected, atol=1e-12)
+    assert np.abs(centroid[0]).max() < 1e-2  # the disk's mesh is centred near the origin
+
+
+def test_a_fixed_domain_records_no_centroid(tmp_path: Path) -> None:
+    path = tmp_path / "fixed.fenics"
+    _write_disk_bundle(path, [0.0, 1.0])
+    bundle = Bundle.open(path)
+    assert all(info.centroid is None for info in bundle.manifest.domains.values())
+    assert bundle.centroid("cyto") is None
+
+
 def test_pvd_export_follows_the_moving_mesh(tmp_path: Path) -> None:
     from vcell_fenics.results.export import export_bundle
 
@@ -365,3 +395,5 @@ def test_reserved_bundle_names(tmp_path: Path) -> None:
     for bad in ("_coords", "_adjacent", "seg0001"):
         with pytest.raises(ValueError, match="cannot name"):
             writer.add_variable("cyto", bad)
+    with pytest.raises(ValueError, match="cannot name a bundle domain"):
+        writer.add_domain("centroid", "volume", fem.functionspace(mesh, ("Lagrange", 1)))

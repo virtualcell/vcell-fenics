@@ -47,6 +47,18 @@
           "title": "Cell Type",
           "type": "integer"
         },
+        "centroid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Centroid"
+        },
         "dim": {
           "title": "Dim",
           "type": "integer"

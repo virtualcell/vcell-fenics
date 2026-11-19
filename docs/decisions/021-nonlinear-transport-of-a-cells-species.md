@@ -459,6 +459,10 @@ At `t = 10`:
      - ADR 010's statistics are per variable, so the centroid gets an array of its own per moving volume
        domain: `<prefix>centroid/<domain>`, of shape `(T_seg, gdim)`, listed in the manifest's domain entry.
      - It is an additive minor version of the manifest. A reader that does not know the array ignores it.
+   - *Recorded in the implementation, 2026-11-19:* `<prefix>centroid/<domain>` as written above, and
+     `domains[<domain>].centroid` in the manifest (ADR 010 §3, "The centroid of a moving volume");
+     `Bundle.centroid(domain)` reads it across segments. `v` at an output was already the one solved from that
+     output's species (#260).
    - **The options:**
      - **(a) The bundle carries the centroid.**
      - **(b) Readers compute it from the coordinates.** Then every reader (VCell's, vcell-core's tests, ours)

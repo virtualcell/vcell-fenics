@@ -82,6 +82,11 @@ def test_the_cell_translates_with_its_front_and_keeps_its_mass(
     expected = dt * np.array([sum(math.sin(dt * k) for k in range(1, 11)), sum(math.cos(dt * k) for k in range(1, 11))])
     assert np.allclose(shift, expected, atol=1e-12)
     _assert_mass_conserved(bundle)
+    # the bundle carries the cell's centroid at every row (ADR 021 decision 6): a rigid translation moves it
+    # by the same vector
+    centroid = bundle.centroid("cell")
+    assert centroid is not None and centroid.shape == (11, 2)
+    assert np.allclose(centroid[-1] - centroid[0], shift, atol=1e-12)
 
     # stdout carries status markers only (VCell's scanner), one data marker per row; the CLI writes them
     # to a duplicate of file descriptor 1, so capture at that level

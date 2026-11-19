@@ -16,6 +16,8 @@ in place under a fixed topology, and each row also records the domain's point co
 ``<prefix><domain>/_coords`` ``(T_seg, N, 3)``. Such a bundle is ``profile: segmented`` with segments of
 ``motion: ale``. A remesh changes the topology: :meth:`BundleWriter.new_segment` starts a segment under
 ``seg000N/`` with its own meshes and arrays, and arrays are indexed by the row *within* their segment.
+A moving **volume** domain also records its centroid ``∫x dx / |Ω|`` per row in ``<prefix>centroid/<domain>``
+``(T_seg, gdim)``, named by its manifest entry's ``centroid`` (ADR 021 decision 6).
 """
 
 from __future__ import annotations
@@ -71,6 +73,11 @@ class _Domain:
 
 
 COORDS = "_coords"  # a moving domain's per-row point coordinates, (T_seg, N, 3)
+CENTROID = "centroid"  # a moving volume's per-row centroid: <prefix>centroid/<domain>, (T_seg, gdim)
+
+
+def _centroid_path(domain: str) -> str:
+    return f"{CENTROID}/{domain}"
 
 
 class BundleWriter:
@@ -96,6 +103,7 @@ class BundleWriter:
         self._arrays: dict[tuple[str, str], Any] = {}
         self._stats: dict[tuple[str, str], Any] = {}
         self._coords: dict[str, Any] = {}
+        self._centroids: dict[str, Any] = {}
         self._manifest: Manifest | None = None
         self._segment_row0 = 0  # the global row at which the current segment starts
 
@@ -119,6 +127,8 @@ class BundleWriter:
         if name in self._domains:
             raise ValueError(f"domain {name!r} added twice")
         _check_name(name)
+        if name == CENTROID:  # a segment's centroid arrays live at <prefix>centroid/ (a variable may use it)
+            raise ValueError(f"{name!r} cannot name a bundle domain")
         if sides is not None and kind != "membrane":
             raise ValueError(f"only a membrane has sides; {name!r} is a {kind}")
         layout = P1Layout(space)
@@ -189,6 +199,7 @@ class BundleWriter:
             self._arrays.clear()
             self._stats.clear()
             self._coords.clear()
+            self._centroids.clear()
             self._bind_arrays(zarr.open_group(str(self.path), mode="r+", zarr_format=2), array_paths)
             motion: Motion = "ale" if self.moving else "none"
             # t0 is the segment's first written time; until then, the next planned one (JSON has no NaN)
@@ -217,6 +228,10 @@ class BundleWriter:
             if domain.moving:
                 _create(group, f"{prefix}{name}/{COORDS}", (n_rows, n_points, 3), ("time", "point", "xyz"), numcodecs)
                 array_paths[(name, COORDS)] = (f"{prefix}{name}/{COORDS}", "")
+            if self._has_centroid(name):
+                path = f"{prefix}{_centroid_path(name)}"
+                _create(group, path, (n_rows, domain.layout.gdim), ("time", "xyz"), numcodecs)
+                array_paths[(name, CENTROID)] = (path, "")
             for variable in domain.variables:
                 field_path = f"{prefix}{name}/{variable}" if self._write_fields else None
                 stats_path = f"{prefix}stats/{name}/{variable}"
@@ -259,6 +274,10 @@ class BundleWriter:
                 assert field_path is not None
                 self._coords[domain] = group[field_path]
                 continue
+            if variable == CENTROID:
+                assert field_path is not None
+                self._centroids[domain] = group[field_path]
+                continue
             if field_path is not None:
                 self._arrays[(domain, variable)] = group[field_path]
             self._stats[(domain, variable)] = group[stats_path]
@@ -272,9 +291,11 @@ class BundleWriter:
         stats: Mapping[tuple[str, str], Stats],
         *,
         progress: float | None = None,
+        centroids: Mapping[str, Sequence[float]] | None = None,
     ) -> int:
         """Write one output row: each ``(domain, variable)``'s owned P1 values and its statistics
-        (already MPI-reduced). Collective. Returns the row index."""
+        (already MPI-reduced), and each moving volume's centroid (already reduced; a row without one reads as
+        NaN). Collective. Returns the row index."""
 
         expected = {(d, v) for d, domain in self._domains.items() for v in domain.variables}
         if set(stats) != expected or (self._write_fields and set(fields) != expected):
@@ -297,6 +318,10 @@ class BundleWriter:
         for name, points in coords.items():
             assert points is not None
             self._coords[name][local, :, :] = points
+        for name, centroid in (centroids or {}).items():
+            if name not in self._centroids:
+                raise ValueError(f"domain {name!r} is not a moving volume: it records no centroid")
+            self._centroids[name][local, :] = np.asarray(centroid, dtype=np.float64)
         # Data first, then the manifest that makes the row visible.
         current = manifest.segments[-1]
         segment = replace(current, count=local + 1, t0=float(t) if local == 0 else current.t0)
@@ -351,6 +376,7 @@ class BundleWriter:
                 n_cells=domain.layout.n_cells,
                 cell_type=domain.layout.vtk_type,
                 adjacent=self._adjacency(name),
+                centroid=_centroid_path(name) if self._has_centroid(name) else None,
             )
             for name, domain in self._domains.items()
         }
@@ -374,6 +400,10 @@ class BundleWriter:
             updated=_now(),
         )
 
+    def _has_centroid(self, name: str) -> bool:
+        domain = self._domains[name]
+        return domain.moving and domain.kind == "volume"
+
     def _adjacency(self, name: str) -> Adjacency | None:
         sides = self._domains[name].sides
         if sides is None:
@@ -392,7 +422,7 @@ class BundleWriter:
     def _grow(self, rows: int) -> None:
         """More rows than planned (should not happen for a VCell schedule): extend every array."""
 
-        for arrays in (self._arrays, self._stats, self._coords):
+        for arrays in (self._arrays, self._stats, self._coords, self._centroids):
             for array in arrays.values():
                 array.resize((rows, *array.shape[1:]))
 
