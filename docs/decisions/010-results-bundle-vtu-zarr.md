@@ -160,6 +160,16 @@ Why this over VTKHDF, the strongest standard:
     `vector: null`, and a bundle from an older writer has no key. A reader assembles a vector from the tagged
     variables of one domain, ordered by `component`.
   - **Names:** the runner refuses a model whose variables already use a component's name.
+- **The centroid of a moving volume** (added 2026-11-19 for ADR 021 decision 6, additive: still schema 1; older
+  readers ignore it).
+  - **Which domains.** Every volume domain whose mesh moves (`motion: ale` segments), on any route. A fixed
+    domain or a membrane has none.
+  - **The array.** `<prefix>centroid/<domain>`, float64 `(T_seg, gdim)`, one per segment like the fields. Each row
+    is `∫x dx / |Ω|` over the domain's mesh as it was at that row: exact for the mesh's own geometry. The
+    recorder assembles it where it already re-assembles the moving domain's measure.
+  - **The manifest** names it in the domain's entry: `domains[<domain>].centroid` is the segment-relative path, or
+    `null` (no key from an older writer).
+  - **Reserved name:** `centroid` at the top of a segment.
 - **Reader rules:**
   - Refuse a `schema` newer than you know.
   - Ignore unknown keys.

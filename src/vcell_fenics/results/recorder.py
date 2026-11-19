@@ -10,7 +10,8 @@ may pass other sources instead — the method-of-lines integrators hand over int
 each output time rather than the live unknown.
 
 A **moving** domain (``moving=True``, ALE) has its measure re-assembled at every capture, since the
-domain changes size as it moves, and the writer records its point coordinates per row. After a remesh,
+domain changes size as it moves, and the writer records its point coordinates per row; a moving **volume** also
+records its centroid ``∫x dx / |Ω|`` per row, exact for the mesh's own geometry (ADR 021 decision 6). After a remesh,
 :meth:`BundleRecorder.start_segment` moves a domain's output onto the new mesh and opens a new bundle
 segment.
 """
@@ -42,6 +43,8 @@ class _DomainChannels:
     space: fem.FunctionSpace
     measure_form: fem.Form
     moving: bool = False
+    kind: DomainKind = "volume"
+    first_moments: list[fem.Form] | None = None  # ∫x_i dx, for a moving volume's centroid
 
 
 class BundleRecorder:
@@ -76,15 +79,26 @@ class BundleRecorder:
         self._writer.add_domain(name, kind, space, moving=moving, sides=sides)
         for variable, _ in channels:
             self._writer.add_variable(name, variable, vector=(vectors or {}).get(variable))
-        self._domains.append(self._channels(name, space, [v for v, _ in channels], [s for _, s in channels], moving))
+        self._domains.append(
+            self._channels(name, space, [v for v, _ in channels], [s for _, s in channels], moving, kind=kind)
+        )
 
     def _channels(
-        self, name: str, space: fem.FunctionSpace, names: list[str], sources: list[Any], moving: bool
+        self,
+        name: str,
+        space: fem.FunctionSpace,
+        names: list[str],
+        sources: list[Any],
+        moving: bool,
+        *,
+        kind: DomainKind,
     ) -> _DomainChannels:
         mesh = space.mesh
         fields = [fem.Function(space, name=variable) for variable in names]
         dx = ufl.Measure("dx", domain=mesh)
         measure_form = fem.form(1.0 * dx)
+        x = ufl.SpatialCoordinate(mesh)
+        first_moments = [fem.form(x[i] * dx) for i in range(mesh.geometry.dim)] if moving and kind == "volume" else None
         return _DomainChannels(
             name=name,
             names=names,
@@ -95,6 +109,8 @@ class BundleRecorder:
             space=space,
             measure_form=measure_form,
             moving=moving,
+            kind=kind,
+            first_moments=first_moments,
         )
 
     def start_segment(self, remeshed: Mapping[str, tuple[Mesh, Sequence[Any]]]) -> int:
@@ -105,7 +121,14 @@ class BundleRecorder:
             if domain.name in remeshed:
                 mesh, sources = remeshed[domain.name]
                 space = fem.functionspace(mesh, ("Lagrange", 1))
-                self._domains[index] = self._channels(domain.name, space, domain.names, list(sources), domain.moving)
+                self._domains[index] = self._channels(
+                    domain.name,
+                    space,
+                    domain.names,
+                    list(sources),
+                    domain.moving,
+                    kind=domain.kind,
+                )
         return self._writer.new_segment({domain.name: domain.space for domain in self._domains})
 
     def domain_names(self) -> list[str]:
@@ -131,9 +154,15 @@ class BundleRecorder:
         owned: dict[tuple[str, str], np.typing.NDArray[np.float64]] = {}
         stats: dict[tuple[str, str], Stats] = {}
         summary: dict[str, Any] = {}
+        centroids: dict[str, list[float]] = {}
         for domain in self._domains:
             if domain.moving:  # the domain's size changes as its mesh moves
                 domain.measure = self._reduce(float(fem.assemble_scalar(domain.measure_form).real), MPI.SUM)
+            if domain.first_moments is not None:
+                centroids[domain.name] = [
+                    self._reduce(float(fem.assemble_scalar(moment).real), MPI.SUM) / domain.measure
+                    for moment in domain.first_moments
+                ]
             live = sources.get(domain.name, domain.sources) if sources is not None else domain.sources
             if len(live) != len(domain.fields):
                 raise ValueError(f"domain {domain.name!r} expects {len(domain.fields)} sources, got {len(live)}")
@@ -150,7 +179,7 @@ class BundleRecorder:
                 owned[(domain.name, variable)] = values
                 stats[(domain.name, variable)] = (mean, total, low, high)
                 summary[variable] = {"domain": domain.name, "total": total, "mean": mean, "min": low, "max": high}
-        row = self._writer.write(t, owned, stats, progress=progress)
+        row = self._writer.write(t, owned, stats, progress=progress, centroids=centroids)
         self._records.append({"t": t, "species": summary})
         for callback in self._on_row:
             callback(t, row)

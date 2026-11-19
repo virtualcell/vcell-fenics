@@ -67,6 +67,10 @@ class DomainInfo:
     n_cells: int
     cell_type: int  # VTK cell type: 3 line, 5 triangle, 10 tetra
     adjacent: Adjacency | None = None  # a membrane's sides and its point maps onto them
+    # A moving volume's centroid ∫x dx / |Ω| at every row (ADR 021 decision 6; optional, added after schema 1
+    # shipped — absent from older bundles and from every fixed or membrane domain): the segment-relative path of
+    # a float64 array (T_seg, gdim), under each segment's prefix.
+    centroid: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
