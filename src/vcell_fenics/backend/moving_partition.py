@@ -181,7 +181,12 @@ def _matching(points: np.ndarray, onto: np.ndarray, what: str) -> np.ndarray:
 class MovingPartition:
     """Moves a `MultiCompartmentGeometry` under the prescribed velocity of its membrane `membrane` (the module
     docstring). `traces` maps each bulk species the velocity may read to its P1 field on its compartment's
-    submesh (the solver's per-species views, refreshed before each move)."""
+    submesh (the solver's per-species views, refreshed before each move).
+
+    A cell force balance's solved velocity (ADR 023 decision 2): `vector_traces` maps it by name to its vector P1
+    field on the member's submesh, so the front law's `trace(v)` reads its values at the membrane's nodes, copied
+    before each move as a species' trace is. `velocity` replaces the membrane's prescribed velocity: a material
+    membrane, which moves with the member's material, is given `"trace(v)"`."""
 
     def __init__(
         self,
@@ -190,13 +195,15 @@ class MovingPartition:
         membrane: str,
         *,
         traces: Mapping[str, fem.Function],
+        vector_traces: Mapping[str, fem.Function] | None = None,
+        velocity: str | None = None,
     ) -> None:
         from vcell_fenics.backend.multi_compartment import MultiCompartmentGeometry
 
         assert isinstance(geometry, MultiCompartmentGeometry)
         self._geometry = geometry
         sub = next(s for s in md.subdomains if s.name == membrane)
-        velocity = prescribed_velocity(sub)
+        velocity = velocity if velocity is not None else prescribed_velocity(sub)
         if velocity is None:
             raise ValueError(f"membrane {membrane!r} has no prescribed, non-zero velocity")
         part = geometry.membranes[membrane]
@@ -222,6 +229,13 @@ class MovingPartition:
             on_membrane = fem.Function(S_m, name=name)
             source_xyz = source.function_space.tabulate_dof_coordinates()[:, :gdim]
             self._traces.append((source, on_membrane, _matching(mem_xyz, source_xyz, f"trace of {name!r}")))
+            trace_symbols[name] = on_membrane
+        for name, source in (vector_traces or {}).items():  # a solved velocity, node by node, all components
+            on_membrane = fem.Function(V_m, name=name)
+            source_nodes = source.function_space.tabulate_dof_coordinates()[:, :gdim]
+            nodes = _matching(mem_xyz, source_nodes, f"trace of {name!r}")
+            index = (gdim * nodes[:, None] + np.arange(gdim)[None, :]).ravel()  # blocked: node-major components
+            self._traces.append((source, on_membrane, index))
             trace_symbols[name] = on_membrane
         inside = geometry.compartments[part.inside].mesh
         inside.topology.create_connectivity(tdim - 1, tdim)
@@ -338,16 +352,20 @@ class MovingPartition:
 
         return bool(self._geometry.parent_mesh.comm.allreduce(local, op=MPI.MIN) < REMESH_SHRINK)
 
-    def advance(self, t_end: float, h: float) -> None:
+    def advance(self, t_end: float, h: float, *, midpoint_of: np.ndarray | None = None) -> None:
         """Move every mesh by `h` times the front's velocity read at `t_end` (the module docstring): a whole stride,
         or half of one (ADR 015).
+
+        `midpoint_of`, the front's velocity of the stride's first half-move (`membrane_velocity` then), makes this
+        the second half-move of the explicit midpoint rule (ADR 023 decision 3): the move is `h·(2F − midpoint_of)`
+        with `F` the velocity read now, so the stride moves by `2h·F` read on the midpoint mesh.
 
         A move that would invert a cell, or distort the mesh past the hard limit, is undone, every mesh restored
         to its stored coordinates (not `x + d - d`, which is not bitwise `x`), and raises `MeshTangled`: a driver
         that can remesh does so and redoes the move (ADR 016 decision 2). Contact (`FrontContact`) is a stop."""
         saved = [mesh.geometry.x.copy() for mesh, _ in self._moves]
         try:
-            self._advance(t_end, h)
+            self._advance(t_end, h, midpoint_of)
         except FrontContact:
             raise
         except MeshQualityError as error:
@@ -355,7 +373,7 @@ class MovingPartition:
                 mesh.geometry.x[:] = x
             raise MeshTangled(str(error)) from error
 
-    def _advance(self, t_end: float, h: float) -> None:
+    def _advance(self, t_end: float, h: float, midpoint_of: np.ndarray | None = None) -> None:
         gdim = self._gdim
         self.time.value = t_end
         for source, on_membrane, index in self._traces:
@@ -364,6 +382,8 @@ class MovingPartition:
         normal = self._inside_normal.function.x.array.reshape((-1, gdim))
         self.normal.x.array[:] = normal[self._normal_from_inside].ravel()
         self.membrane_velocity.interpolate(self._velocity)
+        if midpoint_of is not None:
+            self.membrane_velocity.x.array[:] = 2.0 * self.membrane_velocity.x.array - midpoint_of
 
         here = self.membrane_velocity.function_space.tabulate_dof_coordinates()[:, :gdim]
         displacement = h * self.membrane_velocity.x.array.reshape((-1, gdim))

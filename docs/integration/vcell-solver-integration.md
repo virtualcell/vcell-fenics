@@ -426,6 +426,19 @@ subvolumes meet. Design: [ADR 012](../decisions/012-image-geometry-realization.m
 
 Newest first. One entry per landed step or notable finding.
 
+- **2026-11-19** — **Stage 4a: one cell moving in 2D (ADR 023).**
+  - **What:** a T9 model whose one membrane moves (material, with a tension or a traction, or a growing front)
+    runs on the moving partition with no species: `backend/moving_cell.py`, the explicit midpoint rule with `v`
+    solved at each stride's start and midpoint; `trace(v)` drives the front; the tension's `Δt` is each
+    half-move's length; `region_size` re-measured for the front and the force balance; the runner routes it and
+    writes `v` by component, the coordinates and the centroid. Refused by name: species (5b), 3D, MPI, several
+    members or membranes, a cell touching the box.
+  - **Verified:** vcell-core's E3 second order in `Δt` over its transient (ZS 2.28, ZV 2.27); its areas at `t = 1`
+    (ZV exact to 4e-13, ZS within 1.2e-4); a material disk with a tension on its exact area ODE, first order in
+    `Δt`; a solve after moves equal to a fresh assembly; an ellipse under ZS rounds off and under ZV keeps its
+    shape, to `t = 2`, with no remesh.
+  - **Next:** stage 5b (species on the moving cell: E4's `e4_zv`, `e4_zs`, `e4_zs0`).
+
 - **2026-11-19** — **ADR 023 accepted: stage 4a, one cell moving in 2D.**
   - **Decided** (Jim, all as recommended): the multi-compartment stride loop with no species; the front reads the solved `v` through
     `trace(v)` (a material membrane moves with it); the motion is the explicit midpoint rule, `v` solved at the
